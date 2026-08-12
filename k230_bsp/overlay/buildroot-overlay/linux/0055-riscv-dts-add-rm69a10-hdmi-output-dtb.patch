@@ -1,0 +1,234 @@
+diff --git a/arch/riscv/boot/dts/canaan/Makefile b/arch/riscv/boot/dts/canaan/Makefile
+index abcc2e2..3552ee8 100644
+--- a/arch/riscv/boot/dts/canaan/Makefile
++++ b/arch/riscv/boot/dts/canaan/Makefile
+@@ -11,3 +11,4 @@ dtb-$(CONFIG_ARCH_CANAAN) += sipeed_maixduino.dtb
+ 
+ obj-$(CONFIG_ARCH_CANAAN_K210_DTB_BUILTIN) += $(addsuffix .dtb.o, $(CONFIG_ARCH_CANAAN_K210_DTB_SOURCE))
+ dtb-$(CONFIG_ARCH_CANAAN) += k230-canmv-rm69a10.dtb
++dtb-$(CONFIG_ARCH_CANAAN) += k230-canmv-rm69a10-hdmi.dtb
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10-hdmi.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10-hdmi.dts
+new file mode 100644
+index 0000000..9b152b3
+--- /dev/null
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10-hdmi.dts
+@@ -0,0 +1,219 @@
++// SPDX-License-Identifier: GPL-2.0 OR MIT
++#include "k230.dtsi"
++
++/ {
++	model = "LILYGO T-Display-K230 HDMI";
++	compatible = "lilygo,t-display-k230-hdmi",
++		     "canaan,canmv-k230", "canaan,kendryte-k230";
++
++	aliases {
++		serial3 = &uart3;
++		i2c0 = &i2c4;
++		i2c1 = &i2c3;
++		mmc0 = &mmc_sd0;
++		mmc1 = &mmc_sd1;
++	};
++
++	chosen {
++		stdout-path = "serial0:115200n8";
++	};
++
++	ddr: memory@0 {
++		device_type = "memory";
++		reg = <0x0 0x0 0x0 0x20000000>;
++	};
++
++	sound {
++		status                      = "okay";
++		compatible                  = "canaan,k230-audio-inno";
++		canaan,model                = "K230_I2S_INNO";
++		canaan,k230-i2s-controller  = <&i2s>;
++		canaan,k230-audio-codec     = <&inno_codec>;
++	};
++
++	hdmi: connector {
++		compatible = "hdmi-connector";
++		label = "hdmi";
++		type = "a";
++
++		port {
++			hdmi_connector_in: endpoint {
++				remote-endpoint = <&lt9611_out>;
++			};
++		};
++	};
++};
++
++&uart0 {
++	status = "okay";
++};
++
++&uart3 {
++	status = "okay";
++};
++
++&usb0 {
++	status = "okay";
++};
++
++&usb1 {
++	status = "okay";
++};
++
++&vo {
++	vth_line = <10>;
++};
++
++&iomux {
++	hdmi_i2c3_pins: hdmi_i2c3_pins {
++		pins = K230_IO36, K230_IO37;
++		function = "alt1";
++		bias-pull-up;
++		input-enable;
++		drive-strength = <7>;
++	};
++
++	lora_ospi_pins: lora_ospi_pins {
++		pin_clk_mo_mi {
++			pins = K230_IO15, K230_IO16, K230_IO17;
++			function = "alt1";
++		};
++
++		pin_cs {
++			pins = K230_IO14;
++			function = "alt1";
++			bias-pull-up;
++		};
++	};
++
++	cam_i2c4_pins: cam_i2c4_pins {
++		pins = K230_IO7, K230_IO8;
++		function = K230_IO7_I2C4_SCL;
++		bias-pull-up;
++		input-enable;
++		drive-strength = <8>;
++	};
++
++	cam_mclk1_pins: cam_mclk1_pins {
++		pins = K230_IO13;
++		function = K230_IO13_M_CLK1;
++		output-enable;
++		drive-strength = <8>;
++	};
++};
++
++&i2c3 {
++	status = "okay";
++	clock-frequency = <400000>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&hdmi_i2c3_pins>;
++
++	lt9611: hdmi-bridge@3b {
++		compatible = "lontium,lt9611";
++		reg = <0x3b>;
++		reset-gpios = <&gpio0_ports 24 GPIO_ACTIVE_HIGH>;
++		interrupt-parent = <&gpio0_ports>;
++		interrupts = <22 IRQ_TYPE_EDGE_FALLING>;
++
++		ports {
++			#address-cells  = <1>;
++			#size-cells     = <0>;
++			port@1 {
++				reg = <1>;
++				lt9611_in: endpoint {
++					remote-endpoint = <&dsi_out_lt9611>;
++				};
++			};
++
++			port@2 {
++				reg = <2>;
++				lt9611_out: endpoint {
++					remote-endpoint = <&hdmi_connector_in>;
++				};
++			};
++		};
++	};
++};
++
++&dsi {
++	ports {
++		port@1 {
++			reg = <1>;
++			dsi_out_lt9611: endpoint {
++				remote-endpoint = <&lt9611_in>;
++			};
++		};
++	};
++};
++
++&mmc_sd0 {
++	status = "okay";
++	bus-width = <4>;
++	no-1-8-v;
++	cap-sd-highspeed;
++	cap-sdio-irq;
++	keep-power-in-suspend;
++	wakeup-source;
++};
++
++&mmc_sd1 {
++	status = "okay";
++	no-1-8-v;
++	cap-sd-highspeed;
++	mshc_ctrl_r = <0x00>;
++};
++
++&spi0 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&lora_ospi_pins>;
++
++	spidev0: spidev@0 {
++		compatible = "rohm,dh2228fv";
++		reg = <0>;
++		spi-max-frequency = <4000000>;
++		status = "okay";
++	};
++};
++
++&i2c4 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&cam_i2c4_pins>;
++
++	gc2093@37 {
++		compatible = "galaxycore,gc2093";
++		reg = <0x37>;
++	};
++};
++
++&mipi0 {
++	status = "okay";
++	/* set to CSI2 */
++	id = <2>;
++	reg = <0x0 0x9000a800 0x0 0x800>;
++	interrupts = <121 IRQ_TYPE_LEVEL_HIGH>;
++	resets = <&sysctl_reset
++		  K230_RESET_CSI2_REG_OFFSET
++		  K230_RESET_CSI2_TYPE
++		  K230_RESET_CSI2_DONE_BIT
++		  K230_RESET_CSI2_ASSERT_BIT>,
++		 <&sysctl_reset
++		  K230_RESET_M2_REG_OFFSET
++		  K230_RESET_M2_TYPE
++		  K230_RESET_M2_DONE_BIT
++		  K230_RESET_M2_ASSERT_BIT>;
++	reset-names = "csi", "sensor";
++	reset-gpios = <&gpio0_ports 21 GPIO_ACTIVE_HIGH>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&cam_mclk1_pins>;
++	canaan,sensor-mclk-id = <1>;
++	canaan,sensor-mclk-parent = <9>;
++	canaan,sensor-mclk-div = <25>;
++};
++
++&v4l2isp {
++	dev0-sensor-name = "gc2093";
++	dev0-sensor-mode = <0>;
++	dev0-sensor-i2c-bus = <0>; /* alias i2c0 = &i2c4 */
++};

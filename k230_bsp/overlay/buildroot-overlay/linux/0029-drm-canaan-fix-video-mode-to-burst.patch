@@ -1,0 +1,17 @@
+diff --git a/drivers/gpu/drm/canaan/canaan_dsi.c b/drivers/gpu/drm/canaan/canaan_dsi.c
+--- a/drivers/gpu/drm/canaan/canaan_dsi.c
++++ b/drivers/gpu/drm/canaan/canaan_dsi.c
+@@ -277,7 +277,12 @@ static void canaan_dsi_lpdt_init(struct canaan_dsi *dsi,
+ 	// dsi_write(dsi, DSI_BTA_TO_CNT, 0xd00);
+
+ 	dsi_write(dsi, MODE_CFG, 0x1);
+-	dsi_write(dsi, VID_MODE_CFG, 0xbf02);
++	/*
++	 * VID_MODE_CFG: bits[13:8]=0x3f (all LP transitions enabled)
++	 *               bits[1:0]=0x2 (burst mode, matches RT-Smart)
++	 * 0x3f02 = burst mode with LP transitions
++	 */
++	dsi_write(dsi, VID_MODE_CFG, 0x3f02);
+ 	dsi_write(dsi, CMD_MODE_CFG, 0x10f7f01);
+ 	dsi_write(dsi, PCKHDL_CFG, 0x1c);
+ 	dsi_write(dsi, 0x4, 0x1);

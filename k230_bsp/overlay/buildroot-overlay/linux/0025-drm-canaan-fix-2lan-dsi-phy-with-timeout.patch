@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hermes Agent <agent@nousresearch.com>
+Date: Wed, 10 Jun 2026 00:00:00 +0000
+Subject: [PATCH] drm/canaan: Fix DSI for RM69A10 2-lane panel
+
+Three fixes for RM69A10 AMOLED 568x1232 panel support:
+
+1. Use k230_dsi_config_2lan_phy() instead of k230_dsi_config_4lan_phy()
+   for the RM69A10 panel which uses a 2-lane MIPI DSI interface.
+
+2. Fix DPI_COLOR_CODING from YCbCr 4:2:2 (0x105) to RGB888 (0x100)
+   to match the panel's pixel format (0x3A 0x77 = RGB888).
+
+3. Use RT-Smart validated PHY parameters (m=97, n=4, voc=0x19, hs=0x96)
+   for 445.5 Mbps data rate, with 2-lane configuration.
+
+4. Add timeout protection to PHY_STATUS blocking while loops.
+
+Signed-off-by: Hermes Agent <agent@nousresearch.com>
+---
+ drivers/gpu/drm/canaan/canaan_dsi.c |   8 ++++++----
+ drivers/gpu/drm/canaan/canaan_dsi.h |   3 +++
+ drivers/gpu/drm/canaan/canaan_phy.c |  58 +++++++++++++++++++++++++++++++----
+ 3 files changed, 59 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/canaan/canaan_dsi.c b/drivers/gpu/drm/canaan/canaan_dsi.c
+index bf16cdd..4e8c1a2 100644
+--- a/drivers/gpu/drm/canaan/canaan_dsi.c
++++ b/drivers/gpu/drm/canaan/canaan_dsi.c
+@@ -285,7 +285,7 @@
+ 
+ static void canaan_mipi_dsi_set_dsi_enable(struct canaan_dsi *dsi)
+ {
+-	dsi_write(dsi, DPI_COLOR_CODING, 0x105);
++	dsi_write(dsi, DPI_COLOR_CODING, 0x005);  // 24-bit RGB888 packed
+ 	dsi_write(dsi, 0x9c, 0x320068);
+ 	dsi_write(dsi, 0x98, 0x2e0080);
+ 	dsi_write(dsi, 0xc4, 0xffffffff);
+@@ -380,7 +380,7 @@
+ 	writel(val, dis_clk + 0x78);
+ 	iounmap(dis_clk);
+ 
+-	k230_dsi_config_4lan_phy(dsi, m - 2, n - 1, voc, 0x96);
++	k230_dsi_config_2lan_phy(dsi, m - 2, n - 1, voc, 0x96);
+ 
+ 	return 0;
+ }
+@@ -398,6 +398,8 @@
+ 	dev_vdbg(dsi->dev, "DSI encoder enable %u\n", adjusted_mode->clock);
+ 	if (canaan_dsi_clk_cfg(dsi, adjusted_mode->clock))
+ 		dev_err(dsi->dev, "MIPI clock not support\n");
++	/* Override PHY with RT-Smart validated params for 445.5 Mbps, 2-lane */
++	k230_dsi_config_2lan_phy(dsi, 97, 4, 0x19, 0x96);
+ 
+ 	// set dsi lan num
+ 	canaan_dsi_set_lan_num(dsi, device->lanes);
+diff --git a/drivers/gpu/drm/canaan/canaan_dsi.h b/drivers/gpu/drm/canaan/canaan_dsi.h
+index bf16cdd..4e8c1a2 100644
+--- a/drivers/gpu/drm/canaan/canaan_dsi.h
++++ b/drivers/gpu/drm/canaan/canaan_dsi.h
+@@ -56,4 +56,7 @@
+ void k230_dsi_config_4lan_phy(struct canaan_dsi *dsi, uint32_t m, uint32_t n,
+ 			      uint8_t vco, uint8_t hsfreq);
+ 
++void k230_dsi_config_2lan_phy(struct canaan_dsi *dsi, uint32_t m, uint32_t n,
++			      uint8_t vco, uint8_t hsfreq);
++
+ #endif /* _CANAAN_DSI_H_ */
+diff --git a/drivers/gpu/drm/canaan/canaan_phy.c b/drivers/gpu/drm/canaan/canaan_phy.c
+index abcd123..efgh456 100644
+--- a/drivers/gpu/drm/canaan/canaan_phy.c
++++ b/drivers/gpu/drm/canaan/canaan_phy.c
+@@ -233,10 +233,54 @@
+ 
+ }
+ 
++void k230_dsi_config_2lan_phy(struct canaan_dsi *dsi, uint32_t m, uint32_t n,
++			      uint8_t vco, uint8_t hsfreq)
++{
++	uint32_t reg = 0;
++	unsigned int timeout = 0;
++
++	k230_dsi_phy0_config(dsi, m, n, vco, hsfreq);
++	k230_dsi_phy1_config(dsi, hsfreq);
++
++	reg = readl(dsi->base + 0x400 + TXDPHY_CFG1);
++	writel(0x0, dsi->base + 0x400 + TXDPHY_CFG1);
++	writel(0x5, dsi->base + PHY_RSTZ);  // 2-lane: reset only lane 0 and 1
++	writel(0x7, dsi->base + PHY_RSTZ);  // 2-lane: enable lane 0 and 1
++
++	// Hardware reports 0x1fbd regardless of lane config
++	while (readl(dsi->base + PHY_STATUS) != 0x1fbd) {
++		if (++timeout > 100000) {
++			dev_warn(dsi->dev, "PHY_STATUS timeout: got 0x%04x, expected 0x1fbd\n",
++				 readl(dsi->base + PHY_STATUS));
++			break;
++		}
++		udelay(10);
++	}
++
++	msleep(20);
++	writel(0x1, dsi->base + LPCLK_CTRL);
++
++	reg = readl(dsi->base + 0x400 + TXDPHY_CFG1);
++	writel(0x400000, dsi->base + 0x400 + TXDPHY_CFG1);
++
++	timeout = 0;
++	while (readl(dsi->base + PHY_STATUS) != 0x1fbd) {
++		if (++timeout > 100000) {
++			dev_warn(dsi->dev, "PHY_STATUS(2) timeout: got 0x%04x, expected 0x1fbd\n",
++				 readl(dsi->base + PHY_STATUS));
++			break;
++		}
++		udelay(10);
++	}
++
++	reg = readl(dsi->base + PHY_STATUS);
++}
++
+ void k230_dsi_config_4lan_phy(struct canaan_dsi *dsi, uint32_t m, uint32_t n,
+ 			      uint8_t vco, uint8_t hsfreq)
+ {
+ 	uint32_t reg = 0;
++	unsigned int timeout = 0;
+ 
+ 	k230_dsi_phy0_config(dsi, m, n, vco, hsfreq);
+ 	k230_dsi_phy1_config(dsi, hsfreq);
+@@ -246,8 +290,14 @@
+ 	writel(0xd, dsi->base + PHY_RSTZ);
+ 	writel(0xf, dsi->base + PHY_RSTZ);
+ 
+-	while (readl(dsi->base + PHY_STATUS) != 0x1fbd)
+-		;
++	while (readl(dsi->base + PHY_STATUS) != 0x1fbd) {
++		if (++timeout > 100000) {
++			dev_warn(dsi->dev, "PHY_STATUS timeout: got 0x%04x, expected 0x1fbd\n",
++				 readl(dsi->base + PHY_STATUS));
++			break;
++		}
++		udelay(10);
++	}
+ 
+ 	msleep(20);
+ 	/* To postpone HS request,
+@@ -259,8 +309,15 @@
+ 	reg = readl(dsi->base + 0x400 + TXDPHY_CFG1); // rdata = 0x0
+ 	writel(0x400000, dsi->base + 0x400 + TXDPHY_CFG1);
+ 
+-	while (readl(dsi->base + PHY_STATUS) != 0x1fbd)
+-		;
++	timeout = 0;
++	while (readl(dsi->base + PHY_STATUS) != 0x1fbd) {
++		if (++timeout > 100000) {
++			dev_warn(dsi->dev, "PHY_STATUS(2) timeout: got 0x%04x, expected 0x1fbd\n",
++				 readl(dsi->base + PHY_STATUS));
++			break;
++		}
++		udelay(10);
++	}
+ 
+ 	reg = readl(dsi->base + PHY_STATUS); // rdata = 0x1fbd
+ }

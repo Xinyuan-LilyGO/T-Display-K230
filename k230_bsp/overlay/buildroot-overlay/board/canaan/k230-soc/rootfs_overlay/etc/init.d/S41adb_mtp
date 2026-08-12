@@ -1,0 +1,127 @@
+#!/bin/sh
+#set -x
+#adb.exe device
+#adb.exe shell
+g1="/sys/kernel/config/usb_gadget/g1"
+
+start_manual()
+{
+    if [ -e /run/k230_usb_storage.active ]; then
+      echo "USB mass-storage active; skip ADB/MTP gadget"
+      exit 0
+    fi
+
+    modprobe libcomposite
+    modprobe usb_f_fs
+    #modprobe usb_f_acm.ko  usb_f_rndis.ko
+
+    test -d /sys/kernel/config || mkdir /sys/kernel/config
+    mount -t configfs none /sys/kernel/config
+    if [ -d "${g1}" ]; then
+      "$0" stop >/dev/null 2>&1 || true
+    fi
+    mkdir "${g1}" && cd "${g1}"
+
+
+    echo 0x29F1 > idVendor  #canaan
+    echo 0x0105 > idProduct
+    echo 0x0100 > bcdDevice
+    echo 0x0200 > bcdUSB
+
+    mkdir strings/0x409
+    echo 0123456789ABCDEF > strings/0x409/serialnumber
+    echo "canaan" > strings/0x409/manufacturer
+    echo "k230_linux" > strings/0x409/product
+
+    mkdir configs/c.1
+    mkdir configs/c.1/strings/0x409
+    echo "Conf 1" > configs/c.1/strings/0x409/configuration
+    #echo 120 > configs/c.1/MaxPower
+
+
+
+    # mkdir -p ${g1}'/functions/rndis.usb0'
+    # ln -s ${g1}/functions/rndis.usb0 ${g1}/configs/c.1/rndis.usb0
+
+    # mkdir -p ${g1}'/functions/acm.0'
+    # ln -s ${g1}/functions/acm.0  ${g1}/configs/c.1/acm.0
+
+
+    mkdir -p ${g1}'/functions/ffs.mtp'
+    ln -s ${g1}/functions/ffs.mtp ${g1}/configs/c.1/ffs.mtp
+    mkdir -p  /dev/usb-ffs/mtp
+    mount -t functionfs mtp  /dev/usb-ffs/mtp
+
+
+    mkdir -p ${g1}'/functions/ffs.adb'
+    ln -s ${g1}/functions/ffs.adb ${g1}/configs/c.1/ffs.adb
+    mkdir -p /dev/usb-ffs/adb
+    mount -o uid=2000,gid=2000 -t functionfs adb /dev/usb-ffs/adb
+    cd /root/ && adbd &
+
+    umtprd &
+    cd / && sleep 1 && echo "91500000.usb" > ${g1}/UDC &
+}
+
+case "$1" in
+  start)
+    if [ "${K230_ADB_MTP_AUTO_START:-0}" != "1" ]; then
+      echo "ADB/MTP disabled by default; use '$0 start-manual' from the MTP app"
+      exit 0
+    fi
+    start_manual
+    ;;
+  start-manual|start-force)
+    start_manual
+    ;;
+  stop)
+    # 1. 先停止进程
+    killall adbd 2>/dev/null
+    killall umtprd 2>/dev/null
+
+    # 2. 解绑 UDC（最先清理硬件绑定）
+    if [ -e "${g1}/UDC" ]; then
+      echo "" > "${g1}/UDC" 2>/dev/null
+    fi
+
+    # 3. 删除 function 链接
+    rm -f "${g1}/configs/c.1/ffs.adb" 2>/dev/null
+    rm -f "${g1}/configs/c.1/ffs.mtp" 2>/dev/null
+
+    # 4. 卸载 functionfs
+    umount /dev/usb-ffs/adb 2>/dev/null
+    umount /dev/usb-ffs/mtp 2>/dev/null
+
+    # 5. 删除 function
+    rmdir "${g1}/functions/ffs.adb" 2>/dev/null
+    rmdir "${g1}/functions/ffs.mtp" 2>/dev/null
+
+    # 6. 删除 config/strings 目录
+    rmdir "${g1}/configs/c.1/strings/0x409" 2>/dev/null
+    rmdir "${g1}/configs/c.1" 2>/dev/null
+    rmdir "${g1}/strings/0x409" 2>/dev/null
+
+    # 7. 删除 gadget
+    cd / && rmdir "${g1}" 2>/dev/null
+
+    # 8. 等待 USB 连接完全断开
+    sleep 1
+
+    # 9. 卸载模块（先卸载功能模块，再卸载 composite）
+    rmmod usb_f_fs 2>/dev/null
+    rmmod libcomposite 2>/dev/null
+
+    # 10. 卸载 configfs
+    umount /sys/kernel/config 2>/dev/null
+
+    echo "USB gadget stopped"
+    ;;
+  restart|reload|force-reload)
+    echo "Error: argument '$1' not supported" >&2
+    exit 3
+    ;;
+  *)
+    echo "Usage: adbd start|start-manual|start-force|stop" >&2
+    exit 3
+    ;;
+esac

@@ -1,0 +1,73 @@
+From 5673af5b81ddda00000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 3 Aug 2026 18:10:00 +0000
+Subject: [PATCH] riscv: dts: rm69a10: enable uart3 pins for nrf9151 base
+
+Route UART3 to the optional nRF9151 base-board pins:
+
+- K230 UART3 TX: GPIO28 / IO28
+- K230 UART3 RX: GPIO29 / IO29
+
+IO50/IO51 are another UART3 mux group on K230. They must be forced back to
+GPIO mode on this board, otherwise the UART3 RX path conflicts with IO29 and
+the K230 side cannot receive any data from the keyboard/LTE base.
+
+Userspace talks to the nRF9151 modem through /dev/ttyS3 at 115200 baud.
+GPIO2 is muxed to GPIO output mode and kept as a userspace-controlled
+modem enable pin.
+---
+ arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts | 46 +++++++++++++++++++++-
+ 1 file changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+index b0d57d9..a62b9c1 100644
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -43 +43,5 @@
+-&uart3 { status = "okay"; };
++&uart3 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart3_nrf9151_pins &uart3_conflict_gpio_pins>;
++};
+@@ -56,0 +61,40 @@
++	uart3_nrf9151_pins: uart3_nrf9151_pins {
++		tx {
++			pins = K230_IO28;
++			function = K230_IO28_UART3_TXD;
++			output-enable;
++			drive-strength = <8>;
++		};
++
++		rx {
++			pins = K230_IO29;
++			function = K230_IO29_UART3_RXD;
++			input-enable;
++			drive-strength = <8>;
++		};
++
++		modem_en {
++			pins = K230_IO2;
++			function = K230_IO2_GPIO2;
++			output-enable;
++			bias-disable;
++			drive-strength = <8>;
++		};
++	};
++
++	uart3_conflict_gpio_pins: uart3_conflict_gpio_pins {
++		io50 {
++			pins = K230_IO50;
++			function = K230_IO50_GPIO50;
++			bias-disable;
++			drive-strength = <8>;
++		};
++
++		io51 {
++			pins = K230_IO51;
++			function = K230_IO51_GPIO51;
++			bias-disable;
++			drive-strength = <8>;
++		};
++	};
++

@@ -1,0 +1,243 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 3 Aug 2026 03:35:00 +0000
+Subject: [PATCH] bluetooth: add experimental CSR8510 0x8891 HCI init workarounds
+
+The tested CSR8510 A10 clone exposes USB 0a12:0001 bcdDevice 0x8891 and reports CSR HCI/LMP subversion 0x22bb. Its HCI command path times out on several standard initialization commands.
+
+Add an experimental cached-init path for this clone so hci0 can be created and brought UP for diagnostics. BLE scan still fails on the tested adapter because LE scan commands such as 0x200b/0x200c time out, so this patch is recorded as debug state rather than a completed BLE fix.
+---
+--- a/include/net/bluetooth/hci.h	2025-02-12 09:31:32.000000000 +0000
++++ b/include/net/bluetooth/hci.h	2026-08-03 02:36:23.133532753 +0000
+@@ -426,7 +426,7 @@
+ #define HCI_DISCONN_TIMEOUT	msecs_to_jiffies(2000)	/* 2 seconds */
+ #define HCI_PAIRING_TIMEOUT	msecs_to_jiffies(60000)	/* 60 seconds */
+ #define HCI_INIT_TIMEOUT	msecs_to_jiffies(10000)	/* 10 seconds */
+-#define HCI_CMD_TIMEOUT		msecs_to_jiffies(2000)	/* 2 seconds */
++#define HCI_CMD_TIMEOUT		msecs_to_jiffies(10000)	/* 10 seconds */
+ #define HCI_NCMD_TIMEOUT	msecs_to_jiffies(4000)	/* 4 seconds */
+ #define HCI_ACL_TX_TIMEOUT	msecs_to_jiffies(45000)	/* 45 seconds */
+ #define HCI_AUTO_OFF_TIMEOUT	msecs_to_jiffies(2000)	/* 2 seconds */
+--- a/net/bluetooth/hci_sync.c	2025-02-12 09:31:32.000000000 +0000
++++ b/net/bluetooth/hci_sync.c	2026-08-03 03:27:24.897447026 +0000
+@@ -3116,10 +3116,15 @@
+ 	return 0;
+ }
+ 
++static bool hci_csr_22bb_clone(struct hci_dev *hdev);
++
+ static int hci_write_auth_enable_sync(struct hci_dev *hdev)
+ {
+ 	u8 link_sec;
+ 
++	if (hci_csr_22bb_clone(hdev))
++		return 0;
++
+ 	link_sec = hci_dev_test_flag(hdev, HCI_LINK_SECURITY);
+ 	if (link_sec == test_bit(HCI_AUTH, &hdev->flags))
+ 		return 0;
+@@ -3363,18 +3368,38 @@
+ 	return 0;
+ }
+ 
++static bool hci_csr_22bb_clone(struct hci_dev *hdev)
++{
++	return hdev->manufacturer == 10 && hdev->hci_rev == 0x22bb &&
++	       hdev->lmp_subver == 0x22bb;
++}
++
+ /* Read Local Version */
+ static int hci_read_local_version_sync(struct hci_dev *hdev)
+ {
++	if (hci_csr_22bb_clone(hdev)) {
++		bt_dev_warn(hdev, "CSR: using cached local version for 0x22bb clone");
++		return 0;
++	}
++
+ 	return __hci_cmd_sync_status(hdev, HCI_OP_READ_LOCAL_VERSION,
+-				     0, NULL, HCI_CMD_TIMEOUT);
++				     0, NULL, HCI_INIT_TIMEOUT);
+ }
+ 
+ /* Read BD Address */
+ static int hci_read_bd_addr_sync(struct hci_dev *hdev)
+ {
++	if (hci_csr_22bb_clone(hdev)) {
++		static const bdaddr_t csr_22bb_bdaddr =
++			{{ 0x91, 0x88, 0x22, 0xbb, 0x51, 0xc0 }};
++
++		bacpy(&hdev->bdaddr, &csr_22bb_bdaddr);
++		bt_dev_warn(hdev, "CSR: skipping BD_ADDR read and using local address for 0x22bb clone");
++		return 0;
++	}
++
+ 	return __hci_cmd_sync_status(hdev, HCI_OP_READ_BD_ADDR,
+-				     0, NULL, HCI_CMD_TIMEOUT);
++				     0, NULL, HCI_INIT_TIMEOUT);
+ }
+ 
+ #define HCI_INIT(_func) \
+@@ -3440,8 +3465,26 @@
+ /* Read Local Supported Features. */
+ static int hci_read_local_features_sync(struct hci_dev *hdev)
+ {
+-	return __hci_cmd_sync_status(hdev, HCI_OP_READ_LOCAL_FEATURES,
+-				     0, NULL, HCI_CMD_TIMEOUT);
++	static const u8 csr_22bb_features[8] = {
++		0xff, 0xff, 0x8f, 0xfe, 0xfb, 0xff, 0x51, 0x87
++	};
++	int err;
++
++	if (hci_csr_22bb_clone(hdev)) {
++		memcpy(hdev->features[0], csr_22bb_features,
++		       sizeof(csr_22bb_features));
++		bt_dev_warn(hdev, "CSR: using BLE-only cached local features for 0x22bb clone");
++		return 0;
++	}
++
++	err = __hci_cmd_sync_status(hdev, HCI_OP_READ_LOCAL_FEATURES,
++				    0, NULL, HCI_INIT_TIMEOUT);
++	if (err == -ETIMEDOUT && hci_csr_22bb_clone(hdev)) {
++		bt_dev_warn(hdev, "CSR: ignoring local features timeout for 0x22bb clone");
++		return 0;
++	}
++
++	return err;
+ }
+ 
+ /* BR Controller init stage 1 command sequence */
+@@ -3458,6 +3501,13 @@
+ /* Read Local Commands */
+ static int hci_read_local_cmds_sync(struct hci_dev *hdev)
+ {
++	if (hci_csr_22bb_clone(hdev)) {
++		memset(hdev->commands, 0, sizeof(hdev->commands));
++		hdev->commands[26] |= 0x08; /* LE Set Scan Enable */
++		bt_dev_warn(hdev, "CSR: using cached LE scan commands for 0x22bb clone");
++		return 0;
++	}
++
+ 	/* All Bluetooth 1.2 and later controllers should support the
+ 	 * HCI command for reading the local supported commands.
+ 	 *
+@@ -3609,6 +3659,9 @@
+ {
+ 	u8 mode = 0x01;
+ 
++	if (hci_csr_22bb_clone(hdev))
++		return 0;
++
+ 	if (!lmp_ssp_capable(hdev) || !hci_dev_test_flag(hdev, HCI_SSP_ENABLED))
+ 		return 0;
+ 
+@@ -3628,6 +3681,9 @@
+ {
+ 	struct hci_cp_write_eir cp;
+ 
++	if (hci_csr_22bb_clone(hdev))
++		return 0;
++
+ 	if (!lmp_ssp_capable(hdev) || hci_dev_test_flag(hdev, HCI_SSP_ENABLED))
+ 		return 0;
+ 
+@@ -3642,6 +3698,9 @@
+ {
+ 	u8 mode;
+ 
++	if (hci_csr_22bb_clone(hdev))
++		return 0;
++
+ 	if (!lmp_inq_rssi_capable(hdev) &&
+ 	    !test_bit(HCI_QUIRK_FIXUP_INQUIRY_MODE, &hdev->quirks))
+ 		return 0;
+@@ -3658,6 +3717,9 @@
+ 
+ static int hci_read_inq_rsp_tx_power_sync(struct hci_dev *hdev)
+ {
++	if (hci_csr_22bb_clone(hdev))
++		return 0;
++
+ 	if (!lmp_inq_tx_pwr_capable(hdev))
+ 		return 0;
+ 
+@@ -3669,6 +3731,9 @@
+ {
+ 	struct hci_cp_read_local_ext_features cp;
+ 
++	if (hci_csr_22bb_clone(hdev))
++		return 0;
++
+ 	if (!lmp_ext_feat_capable(hdev))
+ 		return 0;
+ 
+@@ -3706,6 +3771,14 @@
+ /* Read LE Buffer Size */
+ static int hci_le_read_buffer_size_sync(struct hci_dev *hdev)
+ {
++	if (hci_csr_22bb_clone(hdev)) {
++		hdev->le_mtu = 27;
++		hdev->le_pkts = 1;
++		hdev->le_cnt = hdev->le_pkts;
++		bt_dev_warn(hdev, "CSR: using cached LE buffer size for 0x22bb clone");
++		return 0;
++	}
++
+ 	/* Use Read LE Buffer Size V2 if supported */
+ 	if (iso_capable(hdev) && hdev->commands[41] & 0x20)
+ 		return __hci_cmd_sync_status(hdev,
+@@ -3719,6 +3792,18 @@
+ /* Read LE Local Supported Features */
+ static int hci_le_read_local_features_sync(struct hci_dev *hdev)
+ {
++	static const u8 csr_22bb_le_features[8] = {
++		HCI_LE_ENCRYPTION, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00
++	};
++
++	if (hci_csr_22bb_clone(hdev)) {
++		memcpy(hdev->le_features, csr_22bb_le_features,
++		       sizeof(csr_22bb_le_features));
++		bt_dev_warn(hdev, "CSR: using cached LE local features for 0x22bb clone");
++		return 0;
++	}
++
+ 	return __hci_cmd_sync_status(hdev, HCI_OP_LE_READ_LOCAL_FEATURES,
+ 				     0, NULL, HCI_CMD_TIMEOUT);
+ }
+@@ -3726,6 +3811,12 @@
+ /* Read LE Supported States */
+ static int hci_le_read_supported_states_sync(struct hci_dev *hdev)
+ {
++	if (hci_csr_22bb_clone(hdev)) {
++		memset(hdev->le_states, 0xff, sizeof(hdev->le_states));
++		bt_dev_warn(hdev, "CSR: using cached LE supported states for 0x22bb clone");
++		return 0;
++	}
++
+ 	return __hci_cmd_sync_status(hdev, HCI_OP_LE_READ_SUPPORTED_STATES,
+ 				     0, NULL, HCI_CMD_TIMEOUT);
+ }
+@@ -3779,6 +3870,11 @@
+ 	 */
+ 	u8 events[8] = { 0xff, 0xff, 0xfb, 0xff, 0x00, 0x00, 0x00, 0x00 };
+ 
++	if (hci_csr_22bb_clone(hdev)) {
++		bt_dev_warn(hdev, "CSR: skipping classic event mask for 0x22bb clone");
++		return 0;
++	}
++
+ 	/* CSR 1.1 dongles does not accept any bitfield so don't try to set
+ 	 * any event mask for pre 1.2 devices.
+ 	 */
+@@ -3999,6 +4095,11 @@
+ 	if (!lmp_le_capable(hdev))
+ 		return 0;
+ 
++	if (hci_csr_22bb_clone(hdev)) {
++		bt_dev_warn(hdev, "CSR: skipping LE event mask for 0x22bb clone");
++		return 0;
++	}
++
+ 	memset(events, 0, sizeof(events));
+ 
+ 	if (hdev->le_features[0] & HCI_LE_ENCRYPTION)

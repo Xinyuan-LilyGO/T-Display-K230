@@ -1,0 +1,116 @@
+diff --git a/drivers/thermal/canaan_thermal.c b/drivers/thermal/canaan_thermal.c
+index 7dd9940..b9d87c6 100644
+--- a/drivers/thermal/canaan_thermal.c
++++ b/drivers/thermal/canaan_thermal.c
+@@ -14,6 +14,9 @@
++#include <linux/bits.h>
+ #include <linux/init.h>
+ #include <linux/io.h>
+ #include <linux/kernel.h>
++#include <linux/iopoll.h>
++#include <linux/math64.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -25,32 +28,77 @@
+ 
+ #define TS_CONFIG 0x00
+ #define TS_DATA 0x04
+-#define TS_POWERDOWN 0x22
+-#define TS_POWERON 0x23
++#define TS_DATA_VALID BIT(12)
++#define TS_DATA_MASK GENMASK(11, 0)
++#define TS_CONFIG_TRIM_SHIFT 2
++#define TS_CONFIG_CONV_MODE BIT(1)
++#define TS_CONFIG_ENABLE BIT(0)
++#define TS_DEFAULT_TRIM 8
++#define TS_POLL_US 1000
++#define TS_TIMEOUT_US 50000
++
++/*
++ * RT-Thread uses:
++ * T(C) = 1.01472e-10*x^4 - 1.10063e-6*x^3 + 4.36150e-3*x^2
++ *        - 7.10128*x + 3565.87
++ *
++ * Thermal core expects millicelsius and kernel code cannot use floating
++ * point, so evaluate the same polynomial in Q48 fixed point.
++ */
++#define TS_TEMP_Q48_A 28562LL
++#define TS_TEMP_Q48_B -309799804LL
++#define TS_TEMP_Q48_C 1227653110924LL
++#define TS_TEMP_Q48_D -1998832622615847LL
++#define TS_TEMP_Q48_E 1003703175203226880LL
++#define TS_Q48_PER_MC ((1LL << 48) / 1000)
+ 
+ struct canaan_thermal_data {
+ 	struct thermal_zone_device *tz;
+ 	void __iomem *base;
+ };
+ 
++static void canaan_tsensor_enable(struct canaan_thermal_data *data)
++{
++	u32 cfg;
++
++	cfg = (TS_DEFAULT_TRIM << TS_CONFIG_TRIM_SHIFT) |
++	      TS_CONFIG_CONV_MODE | TS_CONFIG_ENABLE;
++	iowrite32(cfg, data->base + TS_CONFIG);
++}
++
++static int canaan_tsensor_raw_to_mc(u32 raw)
++{
++	s64 temp_q48;
++
++	temp_q48 = TS_TEMP_Q48_A;
++	temp_q48 = temp_q48 * raw + TS_TEMP_Q48_B;
++	temp_q48 = temp_q48 * raw + TS_TEMP_Q48_C;
++	temp_q48 = temp_q48 * raw + TS_TEMP_Q48_D;
++	temp_q48 = temp_q48 * raw + TS_TEMP_Q48_E;
++
++	if (temp_q48 >= 0)
++		temp_q48 += TS_Q48_PER_MC / 2;
++	else
++		temp_q48 -= TS_Q48_PER_MC / 2;
++
++	return div64_s64(temp_q48, TS_Q48_PER_MC);
++}
++
+ static int canaan_get_temp(struct thermal_zone_device *tz, int *temp)
+ {
+ 	struct canaan_thermal_data *data = tz->devdata;
+ 	u32 val = 0;
++	int ret;
+ 
+-	iowrite32(TS_POWERDOWN, data->base + TS_CONFIG);
+-	iowrite32(TS_POWERON, data->base + TS_CONFIG);
+-	msleep(20);
++	canaan_tsensor_enable(data);
+ 
+-	while (1) {
+-		val = ioread32(data->base + TS_DATA);
+-		// msleep(2600);
++	ret = readl_poll_timeout(data->base + TS_DATA, val,
++				 val & TS_DATA_VALID,
++				 TS_POLL_US, TS_TIMEOUT_US);
++	if (ret)
++		return ret;
+ 
+-		if (val >> 12) {
+-			*temp = val;
+-			break;
+-		}
+-	}
++	*temp = canaan_tsensor_raw_to_mc(val & TS_DATA_MASK);
+ 
+ 	return 0;
+ }
+@@ -87,9 +135,7 @@ static int canaan_thermal_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
+-	iowrite32(TS_POWERDOWN, data->base + TS_CONFIG);
+-	iowrite32(TS_POWERON, data->base + TS_CONFIG);
+-	msleep(20);
++	canaan_tsensor_enable(data);
+ 
+ 	dev_vdbg(&pdev->dev, "[TS]: %s %d\n", __func__, __LINE__);
+ 

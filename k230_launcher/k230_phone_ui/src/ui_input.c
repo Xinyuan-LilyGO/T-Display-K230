@@ -1,0 +1,820 @@
+#include "ui_input.h"
+
+#include "ui_hardware.h"
+#include "ui_i18n.h"
+
+#include <ctype.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdarg.h>
+
+#define UI_INPUT_LOG_PATH "/tmp/k230_input_dialog.log"
+
+typedef enum {
+    UI_INPUT_KBD_LOWER = 0,
+    UI_INPUT_KBD_UPPER,
+    UI_INPUT_KBD_NUM,
+    UI_INPUT_KBD_SYMBOL,
+    UI_INPUT_KBD_PINYIN,
+} ui_input_keyboard_mode_t;
+
+typedef struct {
+    lv_obj_t *overlay;
+    lv_obj_t *dialog;
+    lv_obj_t *textarea;
+    lv_obj_t *eye_button;
+    lv_obj_t *eye_label;
+    lv_obj_t *error_label;
+    lv_obj_t *keyboard;
+    lv_obj_t *candidate_bar;
+    int password_visible;
+    int hardware_keyboard;
+    ui_input_keyboard_mode_t keyboard_mode;
+    char pinyin_comp[32];
+    const char *candidate_map[10];
+    char candidate_text[8][24];
+    size_t min_length;
+    const char *min_length_text;
+    ui_input_submit_cb_t submit_cb;
+    void *user_data;
+} ui_input_dialog_state_t;
+
+static ui_input_dialog_state_t *active_dialog;
+static int soft_keyboard_enabled = 1;
+
+static const char *const ui_input_kbd_lower_map[] = {
+    "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "\n",
+    "a", "s", "d", "f", "g", "h", "j", "k", "l", "\n",
+    "Shift", "123", "PY", "z", "x", "c", "v", "b", "n", "m", "Del", "\n",
+    "Cancel", "Space", "Enter", ""
+};
+
+static const char *const ui_input_kbd_upper_map[] = {
+    "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "\n",
+    "A", "S", "D", "F", "G", "H", "J", "K", "L", "\n",
+    "abc", "123", "PY", "Z", "X", "C", "V", "B", "N", "M", "Del", "\n",
+    "Cancel", "Space", "Enter", ""
+};
+
+static const char *const ui_input_kbd_num_map[] = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "\n",
+    "-", "/", ":", ";", "(", ")", "$", "&", "@", "\"", "\n",
+    "abc", "#+=", ".", ",", "?", "!", "'", "Del", "\n",
+    "Cancel", "Space", "Enter", ""
+};
+
+static const char *const ui_input_kbd_symbol_map[] = {
+    "[", "]", "{", "}", "#", "%", "^", "*", "+", "=", "\n",
+    "_", "\\", "|", "~", "<", ">", "`", ".", ",", "?", "\n",
+    "abc", "123", "-", "/", ":", ";", "!", "Del", "\n",
+    "Cancel", "Space", "Enter", ""
+};
+
+static const char *const ui_input_kbd_pinyin_map[] = {
+    "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "\n",
+    "a", "s", "d", "f", "g", "h", "j", "k", "l", "\n",
+    "abc", "123", "z", "x", "c", "v", "b", "n", "m", "Del", "\n",
+    "Cancel", "Space", "Enter", ""
+};
+
+typedef struct {
+    const char *key;
+    const char *candidates[6];
+} ui_input_pinyin_entry_t;
+
+static const ui_input_pinyin_entry_t ui_input_pinyin_table[] = {
+    { "ai", { "爱", "矮", "哎", NULL } },
+    { "ba", { "吧", "八", "把", "爸", NULL } },
+    { "bu", { "不", "部", "步", NULL } },
+    { "de", { "的", "得", "地", NULL } },
+    { "hao", { "好", "号", "浩", NULL } },
+    { "he", { "和", "喝", "河", NULL } },
+    { "le", { "了", "乐", NULL } },
+    { "ma", { "吗", "妈", "马", NULL } },
+    { "mei", { "没", "美", "每", NULL } },
+    { "men", { "们", "门", NULL } },
+    { "ni", { "你", "呢", "尼", NULL } },
+    { "shi", { "是", "时", "使", "市", NULL } },
+    { "wo", { "我", "握", "窝", NULL } },
+    { "xie", { "谢", "写", "些", NULL } },
+    { "you", { "有", "又", "右", NULL } },
+    { "zhong", { "中", "种", "重", NULL } },
+    { "guo", { "国", "过", "果", NULL } },
+};
+
+static void ui_input_log(const char *fmt, ...)
+{
+    FILE *fp = fopen(UI_INPUT_LOG_PATH, "a");
+    va_list ap;
+
+    if(!fp) {
+        return;
+    }
+    fprintf(fp, "%llu ", (unsigned long long)ui_monotonic_us());
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fprintf(fp, "\n");
+    fclose(fp);
+}
+
+void ui_input_set_soft_keyboard_enabled(int enabled)
+{
+    soft_keyboard_enabled = enabled ? 1 : 0;
+}
+
+int ui_input_soft_keyboard_enabled(void)
+{
+    return soft_keyboard_enabled;
+}
+
+void ui_input_dialog_close_active(void)
+{
+    ui_input_dialog_state_t *state = active_dialog;
+
+    if(!state) {
+        return;
+    }
+
+    active_dialog = NULL;
+    if(state->hardware_keyboard) {
+        ui_extension_keyboard_set_key_cb(NULL, NULL);
+        state->hardware_keyboard = 0;
+    }
+    if(state->overlay && lv_obj_is_valid(state->overlay)) {
+        lv_obj_delete(state->overlay);
+    }
+    free(state);
+    app_request_fast_refresh();
+}
+
+static void ui_input_align_dialog(ui_input_dialog_state_t *state)
+{
+    int32_t keyboard_h;
+    int32_t reserved_h;
+
+    if(!state || !state->dialog) {
+        return;
+    }
+
+    if(!state->keyboard) {
+        lv_obj_align(state->dialog, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_move_foreground(state->dialog);
+        return;
+    }
+
+    lv_obj_update_layout(state->keyboard);
+    keyboard_h = lv_obj_get_height(state->keyboard);
+    reserved_h = keyboard_h;
+    if(state->candidate_bar &&
+       state->keyboard_mode == UI_INPUT_KBD_PINYIN) {
+        lv_obj_update_layout(state->candidate_bar);
+        reserved_h += lv_obj_get_height(state->candidate_bar) + 6;
+    }
+    lv_obj_align(state->dialog, LV_ALIGN_BOTTOM_MID, 0, -reserved_h - 12);
+    lv_obj_move_foreground(state->dialog);
+    if(state->candidate_bar) {
+        lv_obj_move_foreground(state->candidate_bar);
+    }
+    lv_obj_move_foreground(state->keyboard);
+}
+
+static void ui_input_submit(ui_input_dialog_state_t *state)
+{
+    char text[NET_PASS_MAX];
+    const char *src;
+    size_t len;
+
+    if(!state) {
+        return;
+    }
+
+    src = state->textarea ? lv_textarea_get_text(state->textarea) : "";
+    snprintf(text, sizeof(text), "%s", src ? src : "");
+    len = strlen(text);
+
+    if(state->min_length > 0U && len < state->min_length) {
+        const char *message = state->min_length_text ?
+                              state->min_length_text :
+                              "Input is too short";
+
+        if(state->error_label) {
+            lv_label_set_text(state->error_label, ui_tr(message));
+            lv_obj_clear_flag(state->error_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        if(state->textarea) {
+            lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
+        }
+        ui_input_log("reject title-textarea min_len=%u actual=%u",
+                     (unsigned)state->min_length, (unsigned)len);
+        app_request_fast_refresh();
+        return;
+    }
+
+    if(state->submit_cb) {
+        state->submit_cb(text, state->user_data);
+    }
+    ui_input_dialog_close_active();
+}
+
+static void ui_input_submit_async(void *user_data)
+{
+    ui_input_dialog_state_t *state =
+        (ui_input_dialog_state_t *)user_data;
+
+    if(state && state == active_dialog) {
+        ui_input_submit(state);
+    }
+}
+
+static void ui_input_cancel_async(void *user_data)
+{
+    ui_input_dialog_state_t *state =
+        (ui_input_dialog_state_t *)user_data;
+
+    if(state && state == active_dialog) {
+        ui_input_dialog_close_active();
+    }
+}
+
+static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
+                                     void *user_data)
+{
+    ui_input_dialog_state_t *state =
+        (ui_input_dialog_state_t *)user_data;
+
+    if(!pressed || !state || state != active_dialog || !state->textarea ||
+       !lv_obj_is_valid(state->textarea)) {
+        return;
+    }
+
+    ui_input_log("hardware-key title-textarea code=%d key=0x%08X", code, key);
+
+    switch(key) {
+    case LV_KEY_ENTER:
+        lv_async_call(ui_input_submit_async, state);
+        return;
+    case LV_KEY_ESC:
+        lv_async_call(ui_input_cancel_async, state);
+        return;
+    case LV_KEY_BACKSPACE:
+    case LV_KEY_DEL:
+        lv_textarea_delete_char(state->textarea);
+        app_request_fast_refresh();
+        return;
+    default:
+        break;
+    }
+
+    if(key >= 32U && key <= 126U) {
+        lv_textarea_add_char(state->textarea, key);
+        app_request_fast_refresh();
+    }
+}
+
+static int ui_input_is_keyboard_mode_key(const char *text)
+{
+    return text &&
+           (strcmp(text, "123") == 0 || strcmp(text, "abc") == 0 ||
+            strcmp(text, "Shift") == 0 || strcmp(text, "ABC") == 0 ||
+            strcmp(text, "#+=") == 0 || strcmp(text, "PY") == 0);
+}
+
+static const ui_input_pinyin_entry_t *ui_input_pinyin_find(const char *key)
+{
+    if(!key || !key[0]) {
+        return NULL;
+    }
+    for(size_t i = 0; i < sizeof(ui_input_pinyin_table) /
+                       sizeof(ui_input_pinyin_table[0]); i++) {
+        if(strcmp(ui_input_pinyin_table[i].key, key) == 0) {
+            return &ui_input_pinyin_table[i];
+        }
+    }
+    return NULL;
+}
+
+static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
+{
+    const ui_input_pinyin_entry_t *entry;
+    size_t map_i = 0;
+    size_t text_i = 0;
+
+    if(!state || !state->candidate_bar) {
+        return;
+    }
+
+    if(state->keyboard_mode != UI_INPUT_KBD_PINYIN) {
+        lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    lv_obj_clear_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+    snprintf(state->candidate_text[text_i], sizeof(state->candidate_text[text_i]),
+             "%s", state->pinyin_comp[0] ? state->pinyin_comp : "Pinyin");
+    state->candidate_map[map_i++] = state->candidate_text[text_i++];
+
+    entry = ui_input_pinyin_find(state->pinyin_comp);
+    if(entry) {
+        for(size_t i = 0; entry->candidates[i] && map_i < 7; i++) {
+            snprintf(state->candidate_text[text_i],
+                     sizeof(state->candidate_text[text_i]), "%s",
+                     entry->candidates[i]);
+            state->candidate_map[map_i++] = state->candidate_text[text_i++];
+        }
+    } else if(state->pinyin_comp[0] && map_i < 7) {
+        snprintf(state->candidate_text[text_i],
+                 sizeof(state->candidate_text[text_i]), "%s",
+                 state->pinyin_comp);
+        state->candidate_map[map_i++] = state->candidate_text[text_i++];
+    }
+
+    state->candidate_map[map_i++] = "Clear";
+    state->candidate_map[map_i++] = "Input";
+    state->candidate_map[map_i] = "";
+    lv_buttonmatrix_set_map(state->candidate_bar, state->candidate_map);
+}
+
+static void ui_input_keyboard_set_mode(ui_input_dialog_state_t *state,
+                                       ui_input_keyboard_mode_t mode)
+{
+    if(!state || !state->keyboard) {
+        return;
+    }
+
+    state->keyboard_mode = mode;
+    switch(mode) {
+    case UI_INPUT_KBD_UPPER:
+        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_upper_map);
+        break;
+    case UI_INPUT_KBD_NUM:
+        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_num_map);
+        break;
+    case UI_INPUT_KBD_SYMBOL:
+        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_symbol_map);
+        break;
+    case UI_INPUT_KBD_PINYIN:
+        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_pinyin_map);
+        break;
+    case UI_INPUT_KBD_LOWER:
+    default:
+        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_lower_map);
+        break;
+    }
+    ui_input_pinyin_update_candidates(state);
+    ui_input_align_dialog(state);
+    app_request_fast_refresh();
+}
+
+static void ui_input_pinyin_clear(ui_input_dialog_state_t *state)
+{
+    if(!state) {
+        return;
+    }
+    state->pinyin_comp[0] = '\0';
+    ui_input_pinyin_update_candidates(state);
+    app_request_fast_refresh();
+}
+
+static void ui_input_pinyin_insert(ui_input_dialog_state_t *state,
+                                   const char *text)
+{
+    if(!state || !state->textarea || !text || !text[0]) {
+        return;
+    }
+    lv_textarea_add_text(state->textarea, text);
+    state->pinyin_comp[0] = '\0';
+    if(state->keyboard_mode == UI_INPUT_KBD_PINYIN && state->keyboard) {
+        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_pinyin_map);
+    }
+    ui_input_pinyin_update_candidates(state);
+    ui_input_align_dialog(state);
+    app_request_fast_refresh();
+}
+
+static void ui_input_pinyin_commit_best(ui_input_dialog_state_t *state)
+{
+    const ui_input_pinyin_entry_t *entry;
+
+    if(!state || !state->pinyin_comp[0]) {
+        return;
+    }
+    entry = ui_input_pinyin_find(state->pinyin_comp);
+    if(entry && entry->candidates[0]) {
+        ui_input_pinyin_insert(state, entry->candidates[0]);
+    } else {
+        ui_input_pinyin_insert(state, state->pinyin_comp);
+    }
+}
+
+static void ui_input_keyboard_send_button(ui_input_dialog_state_t *state,
+                                          const char *text)
+{
+    if(!state || !text || !text[0]) {
+        return;
+    }
+
+    if(strcmp(text, "123") == 0) {
+        ui_input_keyboard_set_mode(state, UI_INPUT_KBD_NUM);
+    } else if(strcmp(text, "abc") == 0) {
+        ui_input_keyboard_set_mode(state, UI_INPUT_KBD_LOWER);
+    } else if(strcmp(text, "ABC") == 0 ||
+              strcmp(text, "Shift") == 0) {
+        ui_input_keyboard_set_mode(state, UI_INPUT_KBD_UPPER);
+    } else if(strcmp(text, "#+=") == 0) {
+        ui_input_keyboard_set_mode(state, UI_INPUT_KBD_SYMBOL);
+    } else if(strcmp(text, "PY") == 0) {
+        ui_input_keyboard_set_mode(state, UI_INPUT_KBD_PINYIN);
+    } else if(strcmp(text, "Cancel") == 0) {
+        ui_input_dialog_close_active();
+    } else if(strcmp(text, "Enter") == 0) {
+        ui_input_submit(state);
+    } else if(strcmp(text, "Del") == 0) {
+        size_t len = strlen(state->pinyin_comp);
+
+        if(state->keyboard_mode == UI_INPUT_KBD_PINYIN && len > 0U) {
+            state->pinyin_comp[len - 1U] = '\0';
+            ui_input_pinyin_update_candidates(state);
+        } else if(state->textarea) {
+            lv_textarea_delete_char(state->textarea);
+        }
+        app_request_fast_refresh();
+    } else if(strcmp(text, "Space") == 0) {
+        if(state->keyboard_mode == UI_INPUT_KBD_PINYIN &&
+           state->pinyin_comp[0]) {
+            ui_input_pinyin_commit_best(state);
+        } else if(state->textarea) {
+            lv_textarea_add_char(state->textarea, ' ');
+            app_request_fast_refresh();
+        }
+    } else if(state->keyboard_mode == UI_INPUT_KBD_PINYIN &&
+              strlen(text) == 1U &&
+              isalpha((unsigned char)text[0])) {
+        size_t len = strlen(state->pinyin_comp);
+
+        if(len + 1U < sizeof(state->pinyin_comp)) {
+            state->pinyin_comp[len] =
+                (char)tolower((unsigned char)text[0]);
+            state->pinyin_comp[len + 1U] = '\0';
+            ui_input_pinyin_update_candidates(state);
+            app_request_fast_refresh();
+        }
+    } else if(!ui_input_is_keyboard_mode_key(text) && state->textarea) {
+        lv_textarea_add_text(state->textarea, text);
+        app_request_fast_refresh();
+    }
+}
+
+static void ui_input_keyboard_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_state_t *state =
+        (ui_input_dialog_state_t *)lv_event_get_user_data(event);
+    lv_event_code_t code = lv_event_get_code(event);
+
+    if(code == LV_EVENT_VALUE_CHANGED && state && state->keyboard) {
+        uint32_t btn_id = lv_buttonmatrix_get_selected_button(state->keyboard);
+        const char *text;
+
+        if(btn_id == LV_BUTTONMATRIX_BUTTON_NONE) {
+            return;
+        }
+        text = lv_buttonmatrix_get_button_text(state->keyboard, btn_id);
+        ui_input_keyboard_send_button(state, text);
+    }
+}
+
+static void ui_input_candidate_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_state_t *state =
+        (ui_input_dialog_state_t *)lv_event_get_user_data(event);
+    lv_event_code_t code = lv_event_get_code(event);
+    uint32_t btn_id;
+    const char *text;
+
+    if(code != LV_EVENT_VALUE_CHANGED || !state || !state->candidate_bar) {
+        return;
+    }
+
+    btn_id = lv_buttonmatrix_get_selected_button(state->candidate_bar);
+    if(btn_id == LV_BUTTONMATRIX_BUTTON_NONE) {
+        return;
+    }
+    text = lv_buttonmatrix_get_button_text(state->candidate_bar, btn_id);
+    if(!text || !text[0] || strcmp(text, "Pinyin") == 0) {
+        return;
+    }
+    if(strcmp(text, "Clear") == 0) {
+        ui_input_pinyin_clear(state);
+    } else if(strcmp(text, "Input") == 0) {
+        if(state->pinyin_comp[0]) {
+            ui_input_pinyin_insert(state, state->pinyin_comp);
+        }
+    } else if(strcmp(text, state->pinyin_comp) != 0) {
+        ui_input_pinyin_insert(state, text);
+    }
+}
+
+static void ui_input_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_state_t *state =
+        (ui_input_dialog_state_t *)lv_event_get_user_data(event);
+    lv_event_code_t code = lv_event_get_code(event);
+
+    if(!state) {
+        return;
+    }
+
+    if(code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+        if(state->keyboard && state->textarea) {
+            lv_obj_clear_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
+            ui_input_align_dialog(state);
+        } else if(state->hardware_keyboard && state->textarea) {
+            lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
+        }
+    } else if(code == LV_EVENT_READY) {
+        ui_input_submit(state);
+    } else if(code == LV_EVENT_CANCEL) {
+        ui_input_dialog_close_active();
+    }
+}
+
+static void ui_input_button_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_state_t *state =
+        (ui_input_dialog_state_t *)lv_event_get_user_data(event);
+    const char *action = (const char *)lv_event_get_param(event);
+
+    (void)action;
+    ui_input_submit(state);
+}
+
+static void ui_input_cancel_button_event_cb(lv_event_t *event)
+{
+    (void)event;
+    ui_input_dialog_close_active();
+}
+
+static void ui_input_password_toggle_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_state_t *state =
+        (ui_input_dialog_state_t *)lv_event_get_user_data(event);
+
+    if(!state || !state->textarea || !state->eye_label) {
+        return;
+    }
+
+    state->password_visible = !state->password_visible;
+    lv_textarea_set_password_mode(state->textarea,
+                                  state->password_visible ? false : true);
+    lv_label_set_text(state->eye_label,
+                      state->password_visible ? LV_SYMBOL_EYE_CLOSE :
+                      LV_SYMBOL_EYE_OPEN);
+    lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
+    if(state->hardware_keyboard) {
+        lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
+    }
+    app_request_fast_refresh();
+}
+
+static void ui_input_style_keyboard(lv_obj_t *obj, int landscape)
+{
+    lv_obj_set_style_text_font(obj,
+                               ui_font_for_text("keyboard",
+                                                landscape ?
+                                                &lv_font_montserrat_14 :
+                                                &lv_font_montserrat_16),
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_font(obj,
+                               ui_font_for_text("keyboard",
+                                                landscape ?
+                                                &lv_font_montserrat_14 :
+                                                &lv_font_montserrat_16),
+                               LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(obj, landscape ? 4 : 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(obj, landscape ? 4 : 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(obj, landscape ? 4 : 8, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x1C2530), LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x2F3C4A),
+                              LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(obj, lv_color_hex(0xF2F5F8), LV_PART_ITEMS);
+    lv_obj_set_style_border_width(obj, 0, LV_PART_ITEMS);
+    lv_obj_set_style_radius(obj, 8, LV_PART_ITEMS);
+}
+
+void ui_input_dialog_open(const ui_input_dialog_config_t *config)
+{
+    ui_input_dialog_state_t *state;
+    lv_obj_t *title;
+    lv_obj_t *btn;
+    int landscape = ui_is_landscape();
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int keyboard_h = landscape ? 156 : 330;
+    int candidate_h = landscape ? 42 : 52;
+    int dialog_w = landscape ? screen_w - 240 : 520;
+    int dialog_h;
+    int content_w;
+    int textarea_w;
+    int button_w;
+    int button_gap = 16;
+    int pad = landscape ? 20 : 22;
+    int textarea_y;
+    int textarea_h = 46;
+    int error_y;
+    int button_y;
+    int button_h = 52;
+    int use_soft_keyboard;
+
+    if(!config) {
+        return;
+    }
+    if(dialog_w > 880) {
+        dialog_w = 880;
+    }
+    if(dialog_w < 500) {
+        dialog_w = 500;
+    }
+    if(!landscape && dialog_w > screen_w - 48) {
+        dialog_w = screen_w - 48;
+    }
+    if(keyboard_h > screen_h / 2) {
+        keyboard_h = screen_h / 2;
+    }
+    content_w = dialog_w - pad * 2;
+    textarea_w = content_w - (config->password_mode ? 70 : 0);
+    button_w = (content_w - button_gap) / 2;
+    textarea_y = pad + 50;
+    error_y = textarea_y + textarea_h + 8;
+    button_y = error_y + 32;
+    dialog_h = button_y + button_h + pad;
+
+    ui_input_dialog_close_active();
+    use_soft_keyboard = ui_input_soft_keyboard_enabled() ||
+                        !ui_extension_keyboard_active();
+    ui_input_log("open title=%s password=%d soft_pref=%d hw_active=%d use_soft=%d",
+                 config->title ? config->title : "Input",
+                 config->password_mode ? 1 : 0,
+                 ui_input_soft_keyboard_enabled(),
+                 ui_extension_keyboard_active(),
+                 use_soft_keyboard);
+
+    state = calloc(1, sizeof(*state));
+    if(!state) {
+        return;
+    }
+    active_dialog = state;
+    state->submit_cb = config->submit_cb;
+    state->user_data = config->user_data;
+    state->min_length = config->min_length;
+    state->min_length_text = config->min_length_text;
+
+    state->overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(state->overlay);
+    lv_obj_align(state->overlay, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(state->overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(state->overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(state->overlay, 0, 0);
+    lv_obj_set_style_pad_all(state->overlay, 0, 0);
+    lv_obj_clear_flag(state->overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    state->dialog = ui_panel(state->overlay, 0, 0, dialog_w, dialog_h);
+    lv_obj_set_style_bg_color(state->dialog, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(state->dialog, 16, 0);
+    lv_obj_set_style_border_width(state->dialog, 1, 0);
+    lv_obj_set_style_border_color(state->dialog, lv_color_hex(0x293644), 0);
+    lv_obj_set_style_shadow_width(state->dialog, 18, 0);
+    lv_obj_set_style_shadow_opa(state->dialog, LV_OPA_30, 0);
+    lv_obj_set_style_shadow_color(state->dialog, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_pad_all(state->dialog, 0, 0);
+
+    title = ui_label(state->dialog, config->title ? config->title : "Input",
+                     &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_width(title, content_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(title, pad, pad);
+
+    state->textarea = lv_textarea_create(state->dialog);
+    lv_obj_set_pos(state->textarea, pad, textarea_y);
+    lv_obj_set_size(state->textarea, textarea_w, textarea_h);
+    lv_textarea_set_one_line(state->textarea, true);
+    lv_textarea_set_password_mode(state->textarea, config->password_mode ? true : false);
+    lv_textarea_set_text(state->textarea,
+                         config->initial_text ? config->initial_text : "");
+    lv_textarea_set_max_length(state->textarea,
+                               config->max_length ? (uint32_t)config->max_length :
+                               NET_PASS_MAX - 1U);
+    lv_textarea_set_placeholder_text(state->textarea,
+                                     ui_tr(config->placeholder ?
+                                           config->placeholder : ""));
+    lv_obj_set_style_text_font(state->textarea,
+                               ui_font_for_text("input", &lv_font_montserrat_18),
+                               0);
+    lv_obj_set_style_bg_color(state->textarea, lv_color_hex(0x1A222C), 0);
+    lv_obj_set_style_text_color(state->textarea, lv_color_hex(0xF2F5F8), 0);
+    lv_obj_set_style_radius(state->textarea, 12, 0);
+    lv_obj_set_style_pad_left(state->textarea, 14, 0);
+    lv_obj_set_style_pad_right(state->textarea, 14, 0);
+    lv_obj_set_style_pad_top(state->textarea, 8, 0);
+    lv_obj_set_style_pad_bottom(state->textarea, 8, 0);
+    lv_obj_set_style_border_color(state->textarea, lv_color_hex(0x3DA5FF),
+                                  LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(state->textarea, 1, 0);
+    lv_obj_add_event_cb(state->textarea, ui_input_event_cb, LV_EVENT_FOCUSED, state);
+    lv_obj_add_event_cb(state->textarea, ui_input_event_cb, LV_EVENT_CLICKED, state);
+    lv_obj_add_event_cb(state->textarea, ui_input_event_cb, LV_EVENT_READY, state);
+    lv_obj_add_event_cb(state->textarea, ui_input_event_cb, LV_EVENT_CANCEL, state);
+
+    if(config->password_mode) {
+        state->eye_button = lv_obj_create(state->dialog);
+        lv_obj_set_pos(state->eye_button, pad + textarea_w + 12, textarea_y);
+        lv_obj_set_size(state->eye_button, textarea_h, textarea_h);
+        lv_obj_set_style_bg_color(state->eye_button, lv_color_hex(0x1A222C), 0);
+        lv_obj_set_style_bg_color(state->eye_button, lv_color_hex(0x263241),
+                                  LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(state->eye_button, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(state->eye_button, 12, 0);
+        lv_obj_set_style_border_width(state->eye_button, 1, 0);
+        lv_obj_set_style_border_color(state->eye_button, lv_color_hex(0x2A3A4A), 0);
+        lv_obj_clear_flag(state->eye_button, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(state->eye_button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(state->eye_button, 8);
+        lv_obj_add_event_cb(state->eye_button,
+                            ui_input_password_toggle_event_cb,
+                            LV_EVENT_CLICKED, state);
+
+        state->eye_label = ui_label(state->eye_button, LV_SYMBOL_EYE_OPEN,
+                                    &lv_font_montserrat_22, 0xF2F5F8);
+        lv_obj_center(state->eye_label);
+        ui_make_click_forwarder(state->eye_label);
+    }
+
+    state->error_label = ui_label(state->dialog, "", &lv_font_montserrat_14,
+                                  0xEF4D5A);
+    lv_obj_set_pos(state->error_label, pad, textarea_y + textarea_h + 8);
+    lv_obj_set_width(state->error_label, content_w);
+    lv_label_set_long_mode(state->error_label, LV_LABEL_LONG_DOT);
+    lv_obj_add_flag(state->error_label, LV_OBJ_FLAG_HIDDEN);
+
+    btn = ui_command_button(state->dialog, pad, button_y, button_w,
+                            config->cancel_text ? config->cancel_text : "Cancel",
+                            0x9AA4AF);
+    lv_obj_set_height(btn, button_h);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A222C), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x2A3644), 0);
+    lv_obj_add_event_cb(btn, ui_input_cancel_button_event_cb, LV_EVENT_CLICKED,
+                        state);
+
+    btn = ui_command_button(state->dialog, pad + button_w + button_gap,
+                            button_y, button_w,
+                            config->submit_text ? config->submit_text : "Connect",
+                            0x25C281);
+    lv_obj_set_height(btn, button_h);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x123326), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x25C281), 0);
+    lv_obj_add_event_cb(btn, ui_input_button_event_cb, LV_EVENT_CLICKED, state);
+
+    if(use_soft_keyboard) {
+        state->candidate_bar = lv_buttonmatrix_create(state->overlay);
+        lv_obj_set_size(state->candidate_bar, ui_screen_width(), candidate_h);
+        lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, -keyboard_h);
+        ui_input_style_keyboard(state->candidate_bar, landscape);
+        lv_obj_set_style_text_font(state->candidate_bar,
+                                   ui_font_for_text("中文",
+                                                    &lv_font_montserrat_16),
+                                   LV_PART_MAIN);
+        lv_obj_set_style_text_font(state->candidate_bar,
+                                   ui_font_for_text("中文",
+                                                    &lv_font_montserrat_16),
+                                   LV_PART_ITEMS);
+        lv_obj_add_event_cb(state->candidate_bar,
+                            ui_input_candidate_event_cb,
+                            LV_EVENT_VALUE_CHANGED, state);
+        lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+
+        state->keyboard = lv_buttonmatrix_create(state->overlay);
+        lv_obj_set_size(state->keyboard, ui_screen_width(), keyboard_h);
+        lv_obj_align(state->keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+        ui_input_style_keyboard(state->keyboard, landscape);
+        lv_obj_add_event_cb(state->keyboard, ui_input_keyboard_event_cb,
+                            LV_EVENT_VALUE_CHANGED,
+                            state);
+        ui_input_keyboard_set_mode(state, UI_INPUT_KBD_LOWER);
+    } else {
+        state->hardware_keyboard = 1;
+        ui_extension_keyboard_set_key_cb(ui_input_hardware_key_cb, state);
+        lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
+    }
+
+    ui_input_align_dialog(state);
+    lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
+    if(state->keyboard) {
+        lv_obj_send_event(state->textarea, LV_EVENT_FOCUSED, NULL);
+    }
+    app_request_fast_refresh();
+}

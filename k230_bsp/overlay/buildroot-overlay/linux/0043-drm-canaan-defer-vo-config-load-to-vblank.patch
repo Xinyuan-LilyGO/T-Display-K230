@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Fri, 31 Jul 2026 15:10:00 +0000
+Subject: [PATCH] drm/canaan: Defer VO config load to vblank
+
+The RM69A10 panel is sensitive to mid-scan OSD address and VO config
+updates. Loading a new OSD framebuffer immediately can show as a short
+tearing or shearing artifact during full-page UI transitions, even when
+steady-state animation is smooth.
+
+When vblank is enabled, queue the OSD address update and trigger
+VO_REG_LOAD_CTL from the VO vblank IRQ. Keep the standard DRM vblank
+event path; do not delay or manually send page-flip events from the IRQ.
+
+This was validated on the LILYGO T-Display K230 RM69A10 panel together
+with the 49.5 MHz RGB888 timing and auto-PHY DSI setup. LVGL Motion was
+stable at about 52 fps without the previous transition tearing.
+
+Signed-off-by: Codex <codex@local>
+---
+ drivers/gpu/drm/canaan/canaan_vo.c | 71 +++++++++++++++++++++++++++--
+ drivers/gpu/drm/canaan/canaan_vo.h | 11 +++++
+ 2 files changed, 78 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/canaan/canaan_vo.c b/drivers/gpu/drm/canaan/canaan_vo.c
+--- a/drivers/gpu/drm/canaan/canaan_vo.c
++++ b/drivers/gpu/drm/canaan/canaan_vo.c
+@@ -93,6 +93,58 @@ static inline u32 canaan_vo_read(struct canaan_vo *vo, u32 reg)
+ 	return readl(vo->reg_base + reg);
+ }
+ 
++static void canaan_vo_write_osd_addr(struct canaan_vo *vo,
++				     u32 plane_offset, u32 paddr)
++{
++	writel(paddr,
++	       vo->reg_base + plane_offset + VO_OSD0_7_VLU_ADDR0_REG_OFFSET);
++	writel(paddr,
++	       vo->reg_base + plane_offset + VO_OSD0_7_ALP_ADDR0_REG_OFFSET);
++	writel(paddr,
++	       vo->reg_base + plane_offset + VO_OSD0_7_VLU_ADDR1_REG_OFFSET);
++	writel(paddr,
++	       vo->reg_base + plane_offset + VO_OSD0_7_ALP_ADDR1_REG_OFFSET);
++}
++
++static void canaan_vo_queue_osd_addr(struct canaan_vo *vo,
++				     struct canaan_plane *canaan_plane,
++				     u32 plane_offset, dma_addr_t paddr)
++{
++	unsigned long flags;
++	u32 id = canaan_plane->id;
++
++	if (!atomic_read(&vo->vsync_enabled) || id >= CANAAN_PLANE_NUMBER) {
++		canaan_vo_write_osd_addr(vo, plane_offset, (u32)paddr);
++		return;
++	}
++
++	spin_lock_irqsave(&vo->pending_osd_lock, flags);
++	vo->pending_osd_addr[id].valid = true;
++	vo->pending_osd_addr[id].plane_offset = plane_offset;
++	vo->pending_osd_addr[id].paddr = (u32)paddr;
++	spin_unlock_irqrestore(&vo->pending_osd_lock, flags);
++}
++
++static void canaan_vo_apply_pending_osd_addr(struct canaan_vo *vo)
++{
++	unsigned long flags;
++	int i;
++
++	spin_lock_irqsave(&vo->pending_osd_lock, flags);
++	for (i = 0; i < CANAAN_PLANE_NUMBER; i++) {
++		struct canaan_vo_pending_osd_addr *pending =
++			&vo->pending_osd_addr[i];
++
++		if (!pending->valid)
++			continue;
++
++		canaan_vo_write_osd_addr(vo, pending->plane_offset,
++					 pending->paddr);
++		pending->valid = false;
++	}
++	spin_unlock_irqrestore(&vo->pending_osd_lock, flags);
++}
++
+ static void canaan_vo_update_video(struct canaan_vo *vo,
+ 				   struct canaan_plane *canaan_plane,
+ 				   struct drm_display_mode *adj_mode)
+@@ -273,14 +325,7 @@ static void canaan_vo_update_osd(struct canaan_vo *vo,
+ 	writel(reg_val, vo->reg_base + yctl_reg_offset);
+ 
+ 	paddr = scanout_addr[0];
+-	writel(paddr,
+-	       vo->reg_base + plane_offset + VO_OSD0_7_VLU_ADDR0_REG_OFFSET);
+-	writel(paddr,
+-	       vo->reg_base + plane_offset + VO_OSD0_7_ALP_ADDR0_REG_OFFSET);
+-	writel(paddr,
+-	       vo->reg_base + plane_offset + VO_OSD0_7_VLU_ADDR1_REG_OFFSET);
+-	writel(paddr,
+-	       vo->reg_base + plane_offset + VO_OSD0_7_ALP_ADDR1_REG_OFFSET);
++	canaan_vo_queue_osd_addr(vo, canaan_plane, plane_offset, paddr);
+ 
+ 	stride = scanout_pitch[0] / 8;
+ 	writel(stride,
+@@ -288,8 +333,8 @@ static void canaan_vo_update_osd(struct canaan_vo *vo,
+ 
+ 	writel(rb_swap, vo->reg_base + plane_offset + VO_OSD0_7_DMA_CTRL_REG_OFFSET);
+ 
+-	writel(0x100, vo->reg_base + plane_offset +
+-			      VO_OSD0_7_ADDR_SEL_MODE_REG_OFFSET);
++	writel(0x1100, vo->reg_base + plane_offset +
++				      VO_OSD0_7_ADDR_SEL_MODE_REG_OFFSET);
+ 
+ 	disp_en = readl(vo->reg_base + VO_DISP_ENABLE);
+ 	disp_en |= 1 << plane_enable_bit;
+@@ -487,7 +532,12 @@ static irqreturn_t canaan_vo_irq_handler(int irq, void *dev_id)
+ 	canaan_vo_write(vo, VO_DISP_IRQ_STATUS, 0xffffffff);
+ 
+ 	// printk("canaan_vo_irq_handler---------------\n");
+-	if (atomic_read(&vo->vsync_enabled))
++	if (atomic_xchg(&vo->pending_config_flush, 0)) {
++		canaan_vo_apply_pending_osd_addr(vo);
++		canaan_vo_write(vo, VO_REG_LOAD_CTL, 0x11);
++	}
++
++	if (canaan_crtc && atomic_read(&vo->vsync_enabled))
+ 		drm_crtc_handle_vblank(&canaan_crtc->base);
+ 
+ 	return IRQ_HANDLED;
+@@ -707,7 +757,10 @@ void canaan_vo_disable_crtc(struct canaan_vo *vo,
+ 
+ void canaan_vo_flush_config(struct canaan_vo *vo)
+ {
+-	writel(0x11, vo->reg_base + VO_REG_LOAD_CTL);
++	if (atomic_read(&vo->vsync_enabled))
++		atomic_set(&vo->pending_config_flush, 1);
++	else
++		canaan_vo_write(vo, VO_REG_LOAD_CTL, 0x11);
+ }
+ 
+ static const uint32_t video_plane_formats[] = {
+@@ -845,6 +898,10 @@ static int canaan_vo_bind(struct device *dev, struct device *master, void *data)
+ 	dev_info(vo->dev, "background color is %x\n", vo->background);
+ 
+ 	atomic_set(&vo->vsync_enabled, 0);
++	atomic_set(&vo->pending_config_flush, 0);
++	spin_lock_init(&vo->pending_osd_lock);
++	dev_info(vo->dev, "defer VO config load to vblank IRQ, OSD addr_sel=0x1100\n");
++
+ 	vo->irq = platform_get_irq(pdev, 0);
+ 	if (vo->irq < 0) {
+ 		DRM_DEV_ERROR(dev, "Failed to get vsync irq\n");
+diff --git a/drivers/gpu/drm/canaan/canaan_vo.h b/drivers/gpu/drm/canaan/canaan_vo.h
+--- a/drivers/gpu/drm/canaan/canaan_vo.h
++++ b/drivers/gpu/drm/canaan/canaan_vo.h
+@@ -9,8 +9,17 @@
+ #ifndef __CANAAN_VO_H__
+ #define __CANAAN_VO_H__
+ 
++#include <linux/spinlock.h>
++#include <linux/types.h>
++
+ #define CANAAN_PLANE_NUMBER 7
+ 
++struct canaan_vo_pending_osd_addr {
++	bool valid;
++	u32 plane_offset;
++	u32 paddr;
++};
++
+ struct canaan_vo {
+ 	struct device *dev;
+ 	struct drm_device *drm_dev;
+@@ -18,6 +27,9 @@ struct canaan_vo {
+ 	void __iomem *reg_base;
+ 	int irq;
+ 	atomic_t vsync_enabled;
++	atomic_t pending_config_flush;
++	spinlock_t pending_osd_lock;
++	struct canaan_vo_pending_osd_addr pending_osd_addr[CANAAN_PLANE_NUMBER];
+ 
+ 	struct canaan_crtc *canaan_crtc;
+ 	struct canaan_plane *canaan_plane[CANAAN_PLANE_NUMBER];
+-- 
+2.39.2

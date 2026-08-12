@@ -1,0 +1,11 @@
+#!/bin/sh
+
+for i in $(seq 1 50); do
+    if [ -e /sys/class/graphics/fbcon/cursor_blink ]; then
+        echo 0 > /sys/class/graphics/fbcon/cursor_blink 2>/dev/null || true
+        break
+    fi
+    sleep 0.1
+done
+
+exec /sbin/getty -i -L tty1 0 vt100

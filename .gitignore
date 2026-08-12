@@ -1,0 +1,5 @@
+*.log
+*.tmp
+
+k230_bsp/images/*
+!k230_bsp/images/.gitkeep

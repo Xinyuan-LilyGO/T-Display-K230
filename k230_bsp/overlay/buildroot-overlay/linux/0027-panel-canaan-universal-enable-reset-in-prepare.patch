@@ -1,0 +1,41 @@
+--- a/drivers/gpu/drm/panel/panel-canaan-universal.c	2026-06-16 12:32:07.148309370 +0000
++++ b/drivers/gpu/drm/panel/panel-canaan-universal.c	2026-06-16 12:32:53.751120119 +0000
+@@ -125,26 +125,25 @@
+ {
+ 	struct canaan_panel *p = panel_to_canaan_panel(panel);
+ 
+-	// set power on
+ 	if (p->power_on) {
+-		// gpiod_direction_output(p->power_on, 1);
+-		// gpiod_set_value_cansleep(p->power_on, 1);
++		gpiod_set_value_cansleep(p->power_on, 1);
++		panel_simple_sleep(10);
+ 	}
+-	// set rst
+ 	if (p->reset) {
+-		// gpiod_direction_output(p->reset, 1);
+-
+-		// gpiod_set_value_cansleep(p->reset, 1);
+-		// panel_simple_sleep(200);
+-		// gpiod_set_value_cansleep(p->reset, 0);
+-		// panel_simple_sleep(200);
+-		// gpiod_set_value_cansleep(p->reset, 1);
+-		// panel_simple_sleep(200);
++		gpiod_set_value_cansleep(p->reset, 1);
++		panel_simple_sleep(10);
++		gpiod_set_value_cansleep(p->reset, 0);
++		panel_simple_sleep(20);
++		gpiod_set_value_cansleep(p->reset, 1);
++		panel_simple_sleep(20);
+ 	}
+ 
++	msleep(200);
++
+ 	if (p->init_set_v1_flag) {
+-		// config screen
++		dev_info(panel->dev, "prepare: sending init commands\n");
+ 		panel_simple_xfer_dsi_cmd_seq(p, p->init_seq_v1);
++		dev_info(panel->dev, "prepare: init commands sent\n");
+ 	}
+ 	return 0;
+ }

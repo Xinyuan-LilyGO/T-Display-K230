@@ -1,0 +1,70 @@
+From 9b45b83eafdf9c7d8f5a21779b6b7eb7df0cb0e1 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 3 Aug 2026 15:30:00 +0000
+Subject: [PATCH] riscv: dts: rm69a10: enable uart1 for nrf52840 base
+
+Enable the UART1 pins used by the optional nRF52840 base board.
+
+Hardware mapping:
+
+- K230 UART1 TX: GPIO3 / IO3 -> nRF52840 P0.11 RX.
+- K230 UART1 RX: GPIO4 / IO4 -> nRF52840 P0.12 TX.
+
+The userspace BLE page talks to the nRF52840 AT firmware through
+/dev/ttyS1 at 115200 baud.
+---
+ arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts | 23 ++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+index c4a6db0..b0d57d9 100644
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -6,8 +6,9 @@
+ 	compatible = "canaan,canmv-k230", "canaan,kendryte-k230";
+ 	aliases {
+ 		serial3 = &uart3;
++		serial1 = &uart1;
+ 		i2c0 = &i2c4;
+ 		i2c1 = &i2c3;
+ 		mmc0 = &mmc_sd0;
+ 		mmc1 = &mmc_sd1;
+ 	};
+@@ -53,6 +54,22 @@
+ 	backlight_gpio-gpios = <&gpio0_ports 25 GPIO_ACTIVE_HIGH>;
+ };
+ &iomux {
++	uart1_nrf52840_pins: uart1_nrf52840_pins {
++		tx {
++			pins = K230_IO3;
++			function = K230_IO3_UART1_TXD;
++			output-enable;
++			drive-strength = <8>;
++		};
++
++		rx {
++			pins = K230_IO4;
++			function = K230_IO4_UART1_RXD;
++			input-enable;
++			drive-strength = <8>;
++		};
++	};
++
+ 	lora_ospi_pins: lora_ospi_pins {
+ 		pin_clk_mo_mi {
+ 			pins = K230_IO15, K230_IO16, K230_IO17;
+@@ -139,6 +156,12 @@
+ 	};
+ };
+ 
++&uart1 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart1_nrf52840_pins>;
++};
++
+ &spi0 {
+ 	status = "okay";
+ 	pinctrl-names = "default";
+-- 
+2.43.0

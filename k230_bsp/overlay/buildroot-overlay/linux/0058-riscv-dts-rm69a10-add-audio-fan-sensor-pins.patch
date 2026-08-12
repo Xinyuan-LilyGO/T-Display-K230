@@ -1,0 +1,143 @@
+From 6b5d4c3a2f1e0d9c8b7a6958473625140fefc3b2 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 3 Aug 2026 06:30:00 +0000
+Subject: [PATCH] riscv: dts: rm69a10: add audio keyboard and sensor pins
+
+Add the T-Display K230 expansion pins used by the current phone UI
+hardware-control stage:
+
+- MAX98357A external amp I2S: BCLK IO32, LRCK IO33, DATA IO35.
+- MAX98357A shutdown control: GPIO34, high level enables the amp and low level
+  shuts it down.
+- TCA8418 keyboard interrupt: IO42 GPIO input.
+- Keyboard backlight: IO52 PWM4, with userspace falling back to GPIO52 on/off
+  if PWM is not available.
+- AHT20 sensor: I2C4 alternate pins IO46/IO47 while keeping the existing
+  camera I2C4 pins IO7/IO8 active.
+
+The MAX98357A is intentionally not registered as a second ALSA sound card in
+this stage. The board already uses the K230_I2S_INNO card; the external amp
+listens to the same I2S stream and is gated by GPIO34 from userspace.
+---
+ arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts | 86 +++++++++++++++++++++-
+ 1 file changed, 85 insertions(+), 1 deletion(-)
+
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+index 1f12341..c4a6db0 100644
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -65,6 +65,51 @@
+ 		};
+ 	};
+ 
++	amp_i2s_pins: amp_i2s_pins {
++		bclk {
++			pins = K230_IO32;
++			function = K230_IO32_IIS_CLK;
++			output-enable;
++			drive-strength = <8>;
++		};
++
++		lrck {
++			pins = K230_IO33;
++			function = K230_IO33_IIS_WS;
++			output-enable;
++			drive-strength = <8>;
++		};
++
++		data {
++			pins = K230_IO35;
++			function = K230_IO35_IIS_D_OUT0_PDM_IN1;
++			output-enable;
++			drive-strength = <8>;
++		};
++
++		amp_shutdown {
++			pins = K230_IO34;
++			function = K230_IO34_GPIO34;
++			output-enable;
++			drive-strength = <8>;
++		};
++	};
++
++	keyboard_irq_gpio42_pins: keyboard_irq_gpio42_pins {
++		pins = K230_IO42;
++		function = K230_IO42_GPIO42;
++		input-enable;
++		bias-pull-up;
++		drive-strength = <8>;
++	};
++
++	keyboard_backlight_pwm4_pins: keyboard_backlight_pwm4_pins {
++		pins = K230_IO52;
++		function = K230_IO52_PWM4;
++		output-enable;
++		drive-strength = <8>;
++	};
++
+ 	cam_i2c4_pins: cam_i2c4_pins {
+ 		pins = K230_IO7, K230_IO8;
+ 		function = K230_IO7_I2C4_SCL;
+@@ -73,6 +117,24 @@
+ 		input-enable;
+ 		drive-strength = <8>;
+ 	};
++
++	aht20_i2c4_pins: aht20_i2c4_pins {
++		scl {
++			pins = K230_IO46;
++			function = K230_IO46_I2C4_SCL;
++			bias-pull-up;
++			input-enable;
++			drive-strength = <8>;
++		};
++
++		sda {
++			pins = K230_IO47;
++			function = K230_IO47_I2C4_SDA;
++			bias-pull-up;
++			input-enable;
++			drive-strength = <8>;
++		};
++	};
+ 
+ 	cam_mclk1_pins: cam_mclk1_pins {
+ 		pins = K230_IO13;
+@@ -94,15 +157,34 @@
+ 	};
+ };
+ 
++&i2s {
++	pinctrl-names = "default";
++	pinctrl-0 = <&amp_i2s_pins>;
++};
++
++&gpio0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&keyboard_irq_gpio42_pins>;
++};
++
++&pwm3_5 {
++	status = "okay";
++};
++
+ &i2c4 {
+ 	status = "okay";
+ 	pinctrl-names = "default";
+-	pinctrl-0 = <&cam_i2c4_pins>;
++	pinctrl-0 = <&cam_i2c4_pins &aht20_i2c4_pins>;
+ 
+ 	gc2093@37 {
+ 		compatible = "galaxycore,gc2093";
+ 		reg = <0x37>;
+ 	};
++
++	aht20@38 {
++		compatible = "aosong,aht20", "aht20";
++		reg = <0x38>;
++	};
+ };
+ 
+ &mipi0 {
+-- 
+2.25.1

@@ -1,0 +1,34 @@
+--- a/drivers/gpu/drm/canaan/canaan_drv.c
++++ b/drivers/gpu/drm/canaan/canaan_drv.c
+@@ -40,30 +40,8 @@ static int canaan_drm_release(struct inode *inode, struct file *filp);
+ 
+ int canaan_drm_gem_dma_mmap(struct drm_gem_dma_object *dma_obj, struct vm_area_struct *vma)
+ {
+-	struct drm_gem_object *obj = &dma_obj->base;
+-	int ret;
+-
+-	/*
+-	 * Clear the VM_PFNMAP flag that was set by drm_gem_mmap(), and set the
+-	 * vm_pgoff (used as a fake buffer offset by DRM) to 0 as we want to map
+-	 * the whole buffer.
+-	 */
+-	vma->vm_pgoff -= drm_vma_node_start(&obj->vma_node);
+-	vm_flags_mod(vma, VM_DONTEXPAND, VM_PFNMAP);
+-
+-	ret = remap_pfn_range(
+-		vma,
+-		vma->vm_start,
+-		dma_obj->dma_addr >> PAGE_SHIFT,
+-		vma->vm_end - vma->vm_start,
+-		vma->vm_page_prot
+-	);
+-
+-	if (ret)
+-		drm_gem_vm_close(vma);
+-
+-	return ret;
++	return drm_gem_dma_mmap(dma_obj, vma);
+ }
+ 
+ static int canaan_drm_gem_dma_object_mmap(struct drm_gem_object *obj,
+				struct vm_area_struct *vma)

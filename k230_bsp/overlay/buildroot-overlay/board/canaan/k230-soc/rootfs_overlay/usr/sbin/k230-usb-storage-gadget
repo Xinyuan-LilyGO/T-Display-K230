@@ -1,0 +1,215 @@
+#!/bin/sh
+
+CONFIG=/etc/default/k230_usb_storage
+G=/sys/kernel/config/usb_gadget/k230_storage
+
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+: "${K230_USB_STORAGE_ENABLE:=1}"
+: "${K230_USB_STORAGE_IMAGE:=/root/usb_share.img}"
+: "${K230_USB_STORAGE_SIZE_MB:=128}"
+: "${K230_USB_STORAGE_LABEL:=K230_SHARE}"
+: "${K230_USB_STORAGE_MOUNTPOINT:=/root/usb_share}"
+: "${K230_USB_STORAGE_UDC:=91500000.usb}"
+: "${K230_USB_STORAGE_RO:=0}"
+: "${K230_USB_STORAGE_REMOVABLE:=1}"
+: "${K230_USB_STORAGE_MOUNT_ON_STOP:=1}"
+: "${K230_USB_STORAGE_RESTORE_ADB_MTP:=0}"
+
+log()
+{
+    echo "[usb-storage] $*"
+}
+
+is_mounted()
+{
+    grep -qs " $1 " /proc/mounts
+}
+
+mounted_from_image()
+{
+    grep -qs "^$K230_USB_STORAGE_IMAGE " /proc/mounts
+}
+
+load_modules()
+{
+    modprobe configfs 2>/dev/null || true
+    modprobe libcomposite 2>/dev/null || modprobe libcomposite.ko
+    modprobe usb_f_mass_storage 2>/dev/null || modprobe usb_f_mass_storage.ko
+}
+
+mount_configfs()
+{
+    mkdir -p /sys/kernel/config
+    mount -t configfs none /sys/kernel/config 2>/dev/null || true
+}
+
+cleanup_gadget()
+{
+    if [ -e "$G/UDC" ]; then
+        echo "" > "$G/UDC" 2>/dev/null || true
+    fi
+
+    rm -f "$G/configs/c.1/mass_storage.0" 2>/dev/null || true
+    rmdir "$G/functions/mass_storage.0" 2>/dev/null || true
+    rmdir "$G/configs/c.1/strings/0x409" 2>/dev/null || true
+    rmdir "$G/configs/c.1" 2>/dev/null || true
+    rmdir "$G/strings/0x409" 2>/dev/null || true
+    rmdir "$G" 2>/dev/null || true
+}
+
+cleanup_legacy_g1()
+{
+    local_g=/sys/kernel/config/usb_gadget/g1
+
+    [ -d "$local_g" ] || return 0
+    if [ -x /etc/init.d/S41adb_mtp ]; then
+        /etc/init.d/S41adb_mtp stop 2>/dev/null || true
+    fi
+
+    if [ -e "$local_g/UDC" ]; then
+        echo "" > "$local_g/UDC" 2>/dev/null || true
+    fi
+}
+
+ensure_backing_file()
+{
+    image_dir=$(dirname "$K230_USB_STORAGE_IMAGE")
+
+    mkdir -p "$image_dir"
+    if [ -f "$K230_USB_STORAGE_IMAGE" ]; then
+        return 0
+    fi
+
+    log "create backing image $K230_USB_STORAGE_IMAGE (${K230_USB_STORAGE_SIZE_MB}MiB)"
+    if command -v truncate >/dev/null 2>&1; then
+        truncate -s "${K230_USB_STORAGE_SIZE_MB}M" "$K230_USB_STORAGE_IMAGE"
+    else
+        dd if=/dev/zero of="$K230_USB_STORAGE_IMAGE" bs=1M \
+            count="$K230_USB_STORAGE_SIZE_MB" conv=fsync
+    fi
+
+    if command -v mkfs.fat >/dev/null 2>&1; then
+        mkfs.fat -F 32 -n "$K230_USB_STORAGE_LABEL" "$K230_USB_STORAGE_IMAGE"
+    elif command -v mkfs.vfat >/dev/null 2>&1; then
+        mkfs.vfat -F 32 -n "$K230_USB_STORAGE_LABEL" "$K230_USB_STORAGE_IMAGE"
+    else
+        log "mkfs.fat missing, fallback to ext4 image"
+        mkfs.ext4 -F -L "$K230_USB_STORAGE_LABEL" "$K230_USB_STORAGE_IMAGE"
+    fi
+    sync
+}
+
+choose_udc()
+{
+    if [ -e "/sys/class/udc/$K230_USB_STORAGE_UDC" ]; then
+        echo "$K230_USB_STORAGE_UDC"
+        return 0
+    fi
+
+    ls /sys/class/udc 2>/dev/null | head -n 1
+}
+
+mount_local_share()
+{
+    [ "$K230_USB_STORAGE_MOUNT_ON_STOP" = "1" ] || return 0
+    mkdir -p "$K230_USB_STORAGE_MOUNTPOINT"
+    mounted_from_image && return 0
+    mount -o loop,rw "$K230_USB_STORAGE_IMAGE" "$K230_USB_STORAGE_MOUNTPOINT" \
+        2>/dev/null || true
+}
+
+start_gadget()
+{
+    ensure_backing_file
+    if is_mounted "$K230_USB_STORAGE_MOUNTPOINT" || mounted_from_image; then
+        sync
+        umount "$K230_USB_STORAGE_MOUNTPOINT" 2>/dev/null || {
+            log "cannot unmount $K230_USB_STORAGE_MOUNTPOINT; stop using it first"
+            exit 1
+        }
+    fi
+
+    load_modules
+    mount_configfs
+    cleanup_legacy_g1
+    cleanup_gadget
+
+    udc=$(choose_udc)
+    if [ -z "$udc" ]; then
+        log "no UDC found"
+        exit 1
+    fi
+
+    mkdir -p "$G"
+    cd "$G" || exit 1
+
+    echo 0x29F1 > idVendor
+    echo 0x0110 > idProduct
+    echo 0x0100 > bcdDevice
+    echo 0x0200 > bcdUSB
+    echo 0x00 > bDeviceClass
+    echo 0x00 > bDeviceSubClass
+    echo 0x00 > bDeviceProtocol
+
+    mkdir -p strings/0x409
+    echo 0123456789ABCDEF > strings/0x409/serialnumber
+    echo "LILYGO" > strings/0x409/manufacturer
+    echo "T-Display K230 USB Disk" > strings/0x409/product
+
+    mkdir -p configs/c.1/strings/0x409
+    echo "Mass Storage" > configs/c.1/strings/0x409/configuration
+    echo 250 > configs/c.1/MaxPower
+
+    mkdir -p functions/mass_storage.0
+    echo "$K230_USB_STORAGE_RO" > functions/mass_storage.0/lun.0/ro
+    echo "$K230_USB_STORAGE_REMOVABLE" > functions/mass_storage.0/lun.0/removable
+    echo 0 > functions/mass_storage.0/lun.0/cdrom
+    echo 0 > functions/mass_storage.0/lun.0/nofua 2>/dev/null || true
+    echo "$K230_USB_STORAGE_IMAGE" > functions/mass_storage.0/lun.0/file
+    ln -s "$G/functions/mass_storage.0" "$G/configs/c.1/mass_storage.0"
+
+    echo "$udc" > UDC
+    mkdir -p /run
+    touch /run/k230_usb_storage.active
+    log "started on $udc with $K230_USB_STORAGE_IMAGE"
+}
+
+stop_gadget()
+{
+    if [ -d /sys/kernel/config/usb_gadget ]; then
+        cleanup_gadget
+    fi
+    rm -f /run/k230_usb_storage.active
+    mount_local_share
+    if [ "$K230_USB_STORAGE_RESTORE_ADB_MTP" = "1" ] &&
+       [ -x /etc/init.d/S41adb_mtp ]; then
+        /etc/init.d/S41adb_mtp start-manual 2>/dev/null || true
+    fi
+    log "stopped"
+}
+
+case "$1" in
+    start)
+        start_gadget
+        ;;
+    stop)
+        stop_gadget
+        ;;
+    restart)
+        stop_gadget
+        sleep 1
+        start_gadget
+        ;;
+    status)
+        if [ -e "$G/UDC" ] && [ -s "$G/UDC" ]; then
+            log "running: $(cat "$G/UDC")"
+        else
+            log "stopped"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 3
+        ;;
+esac

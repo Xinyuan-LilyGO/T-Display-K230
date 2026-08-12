@@ -1,0 +1,23 @@
+--- a/drivers/gpu/drm/canaan/canaan_drv.c
++++ b/drivers/gpu/drm/canaan/canaan_drv.c
+@@ -110,9 +110,9 @@ static struct drm_gem_dma_object *canaan_drm_gem_dma_create(struct drm_device *d
+ 	if (IS_ERR(dma_obj))
+ 		return dma_obj;
+ 
+-	dma_obj->vaddr = dma_alloc_coherent(drm->dev, size,
+-						&dma_obj->dma_addr,
+-						GFP_KERNEL | __GFP_NOWARN);
++	dma_obj->vaddr = dma_alloc_wc(drm->dev, size,
++				       &dma_obj->dma_addr,
++				       GFP_KERNEL | __GFP_NOWARN);
+ 	if (!dma_obj->vaddr) {
+ 		drm_dbg(drm, "failed to allocate buffer with size %zu\n",
+ 			 size);
+@@ -247,6 +247,7 @@ static int canaan_drm_bind(struct device *dev)
+ 	}
+ 
+ 	drm_fbdev_generic_setup(drm_dev, 32);
++	DRM_DEV_INFO(dev, "RM69A10 R44 dumb buffers use dma_alloc_wc\n");
+ 	DRM_DEV_INFO(dev, "Canaan K230 DRM driver register successfully\n");
+ 
+ 	return 0;

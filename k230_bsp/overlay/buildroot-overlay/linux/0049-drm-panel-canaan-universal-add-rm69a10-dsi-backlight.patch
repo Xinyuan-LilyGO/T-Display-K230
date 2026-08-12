@@ -1,0 +1,155 @@
+diff --git a/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi b/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
+index 1b700fe..67caa9e 100644
+--- a/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
++++ b/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
+@@ -17,6 +17,9 @@
+ 		panel-width-mm = <65>;
+ 		panel-height-mm = <145>;
+ 		panel-dsi-lane = <2>;
++		canaan,dsi-command-backlight;
++		default-brightness = <254>;
++		max-brightness = <255>;
+ 		panel-init-sequence = [
+ 			39 00 02 FE FD
+ 			39 00 02 80 FC
+diff --git a/drivers/gpu/drm/panel/panel-canaan-universal.c b/drivers/gpu/drm/panel/panel-canaan-universal.c
+index 449eceb..ab98acc 100644
+--- a/drivers/gpu/drm/panel/panel-canaan-universal.c
++++ b/drivers/gpu/drm/panel/panel-canaan-universal.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include <linux/delay.h>
++#include <linux/backlight.h>
+ #include <linux/device.h>
+ #include <linux/err.h>
+ #include <linux/errno.h>
+@@ -61,11 +62,16 @@ struct canaan_panel {
+ 	struct regulator *power;
+ 	struct gpio_desc *reset;
+ 	struct gpio_desc *power_on;
++	struct backlight_device *backlight;
+ 	struct videomode vm;
+ 	u32 width_mm;
+ 	u32 height_mm;
+ 	u32 lan_num;
+ 	u32 init_set_v1_flag;
++	u32 default_brightness;
++	u32 max_brightness;
++	bool dsi_command_backlight;
++	bool prepared;
+ 
+ 	struct panel_cmd_seq *init_seq_v1;
+ };
+@@ -76,6 +82,40 @@ panel_to_canaan_panel(struct drm_panel *panel)
+ 	return container_of(panel, struct canaan_panel, panel);
+ }
+ 
++static int canaan_panel_bl_update_status(struct backlight_device *bl)
++{
++	struct canaan_panel *ctx = bl_get_data(bl);
++	int brightness;
++	u8 level;
++	int ret;
++
++	if (!ctx || !ctx->dsi_command_backlight)
++		return 0;
++
++	brightness = backlight_get_brightness(bl);
++	if (brightness < 0)
++		brightness = 0;
++	if (brightness > ctx->max_brightness)
++		brightness = ctx->max_brightness;
++	if (brightness > 255)
++		brightness = 255;
++	level = brightness;
++
++	if (!ctx->prepared)
++		return 0;
++
++	ret = mipi_dsi_dcs_write(ctx->dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
++				 &level, 1);
++	if (ret < 0)
++		dev_err(ctx->panel.dev, "failed to set DSI brightness: %d\n", ret);
++
++	return ret < 0 ? ret : 0;
++}
++
++static const struct backlight_ops canaan_panel_bl_ops = {
++	.update_status = canaan_panel_bl_update_status,
++};
++
+ static void panel_simple_sleep(unsigned int msec)
+ {
+ 	if (msec > 20)
+@@ -145,6 +185,10 @@ static int canaan_panel_prepare(struct drm_panel *panel)
+ 		panel_simple_xfer_dsi_cmd_seq(p, p->init_seq_v1);
+ 		dev_info(panel->dev, "prepare: init commands sent\n");
+ 	}
++	p->prepared = true;
++	if (p->backlight)
++		backlight_update_status(p->backlight);
++
+ 	return 0;
+ }
+ 
+@@ -163,6 +207,8 @@ static int canaan_panel_unprepare(struct drm_panel *panel)
+ 	struct canaan_panel *p = panel_to_canaan_panel(panel);
+ 	// int err = 0;
+ 
++	p->prepared = false;
++
+ 	if (p->power_on)
+ 		gpiod_set_value_cansleep(p->power_on, 0);
+ 	if (p->reset)
+@@ -281,6 +327,19 @@ static int canaan_panel_parse_dt(struct canaan_panel *ctx)
+ 	of_property_read_u32(np, "panel-height-mm", &ctx->height_mm);
+ 	of_property_read_u32(np, "panel-dsi-lane", &ctx->lan_num);
+ 
++	ctx->dsi_command_backlight =
++		of_property_read_bool(np, "canaan,dsi-command-backlight");
++	ctx->default_brightness = 254;
++	ctx->max_brightness = 255;
++	of_property_read_u32(np, "default-brightness", &ctx->default_brightness);
++	of_property_read_u32(np, "max-brightness", &ctx->max_brightness);
++	if (ctx->max_brightness == 0 || ctx->max_brightness > 255)
++		ctx->max_brightness = 255;
++	if (ctx->default_brightness > ctx->max_brightness)
++		ctx->default_brightness = ctx->max_brightness;
++	if (ctx->default_brightness > 255)
++		ctx->default_brightness = 255;
++
+ 	// get screen data
+ 	data = of_get_property(np, "panel-init-sequence", &len);
+ 	if (data) {
+@@ -354,6 +413,30 @@ static int canaan_panel_dsi_probe(struct mipi_dsi_device *dsi)
+ 	drm_panel_init(&ctx->panel, &dsi->dev, &canaan_panel_funcs,
+ 		       DRM_MODE_CONNECTOR_DSI);
+ 
++	if (ctx->dsi_command_backlight) {
++		struct backlight_properties props = { 0 };
++
++		props.type = BACKLIGHT_RAW;
++		props.max_brightness = ctx->max_brightness;
++		props.brightness = ctx->default_brightness;
++
++		ctx->backlight =
++			devm_backlight_device_register(&dsi->dev,
++						       "rm69a10",
++						       &dsi->dev,
++						       ctx,
++						       &canaan_panel_bl_ops,
++						       &props);
++		if (IS_ERR(ctx->backlight)) {
++			ret = PTR_ERR(ctx->backlight);
++			dev_err(&dsi->dev, "failed to register backlight: %d\n",
++				ret);
++			return ret;
++		}
++
++		ctx->panel.backlight = ctx->backlight;
++	}
++
+ 	drm_panel_add(&ctx->panel);
+ 
+ 	ret = mipi_dsi_attach(dsi);

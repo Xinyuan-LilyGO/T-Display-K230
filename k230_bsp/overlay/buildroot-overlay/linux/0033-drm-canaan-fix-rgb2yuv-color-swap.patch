@@ -1,0 +1,15 @@
+--- a/drivers/gpu/drm/canaan/canaan_vo.c	2026-06-18 01:15:27.890815858 +0000
++++ b/drivers/gpu/drm/canaan/canaan_vo.c	2026-06-18 01:15:27.892334091 +0000
+@@ -562,10 +562,10 @@
+ 	      (9UL << 20) + (10UL << 24) + (11UL << 28);
+ 	canaan_vo_write(vo, 0x950, reg);
+ 
+-	canaan_vo_write(vo, VO_DISP_YUV2RGB_CTL, 0x1);
++	canaan_vo_write(vo, VO_DISP_YUV2RGB_CTL, 0x0);
+ 	canaan_vo_write(vo, VO_DISP_CLUT_CTL, 0x0);
+ 	canaan_vo_write(vo, VO_DISP_DITH_CTL, 0x1);
+-	canaan_vo_write(vo, VO_OSD_RGB2YUV_CTL, 0x11111111);
++	canaan_vo_write(vo, VO_OSD_RGB2YUV_CTL, 0x00000000);
+ 	canaan_vo_write(vo, VO_DISP_MIX_LAYER_GLB_EN, 0xff);
+ 
+ 	//close vo irq

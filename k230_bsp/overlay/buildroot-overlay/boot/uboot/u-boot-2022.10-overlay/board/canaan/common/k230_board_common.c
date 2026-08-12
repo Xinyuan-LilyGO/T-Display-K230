@@ -1,0 +1,578 @@
+/* Copyright (c) 2023, Canaan Bright Sight Co., Ltd
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+ * CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+ * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+#include <asm/asm.h>
+#include <asm/io.h>
+#include <asm/types.h>
+#include <lmb.h>
+#include <cpu_func.h>
+#include <stdio.h>
+#include <common.h>
+#include <command.h>
+#include <image.h>
+#include <gzip.h>
+#include <asm/spl.h>
+#include "sysctl.h"
+
+#include <pufs_hmac.h>
+#include <pufs_ecp.h>
+#include <pufs_rt.h>
+#include "pufs_sm2.h"
+#include <pufs_sp38a.h>
+#include <pufs_sp38d.h>
+#include <linux/kernel.h>
+#include "sdk_autoconf.h"
+#include "k230_board_common.h"
+#include <env_internal.h>
+#include <malloc.h>
+#include <memalign.h>
+#include <u-boot/crc.h>
+#include <linux/delay.h>
+#include <mmc.h>
+#include <dm.h>
+#include <i2c.h>
+//weak
+int mmc_get_env_dev(void)
+{
+    int ret = 0;
+    if(g_bootmod ==  SYSCTL_BOOT_SDIO1)
+        ret = 1;
+    return ret;
+}
+//weak
+enum env_location arch_env_get_location(enum env_operation op, int prio)
+{
+    if(0 != prio){
+        return ENVL_UNKNOWN;
+    }
+#ifdef CONFIG_ENV_IS_NOWHERE
+	return ENVL_NOWHERE;
+#endif
+    if(g_bootmod ==  SYSCTL_BOOT_NORFLASH){
+        return ENVL_SPI_FLASH;
+    }
+    if(g_bootmod ==  SYSCTL_BOOT_NANDFLASH){
+        return ENVL_SPINAND;
+    }
+	return ENVL_MMC;
+}
+#ifndef CONFIG_SPL_BUILD
+int board_early_init_f(void)
+{
+    g_bootmod = sysctl_boot_get_boot_mode(); //init  g_bootmod
+    return 0;
+}
+
+__weak int board_init(void)
+{
+	return 0;
+}
+
+static int k230_boot_prepare_args(int argc, char *const argv[], ulong buff,
+                            en_boot_sys_t *sys, sysctl_boot_mode_e *bootmod)
+{
+    ulong add_tmp ,len;
+
+    if(argc < 3)
+        return CMD_RET_USAGE;
+
+    if(!strcmp(argv[1], "mem")) {
+        if(argc < 4)
+            return CMD_RET_USAGE;
+        add_tmp = simple_strtoul(argv[2],NULL, 0);
+        len = simple_strtoul(argv[3],NULL, 0);
+        if(add_tmp != buff){
+            memmove((void *)buff, (void *)add_tmp, len);
+        }
+        *sys = BOOT_SYS_ADDR;
+        return 0;
+    }else  if (!strcmp(argv[1], "sdio1"))
+        *bootmod=SYSCTL_BOOT_SDIO1;
+    else if (!strcmp(argv[1], "sdio0"))
+        *bootmod=SYSCTL_BOOT_SDIO0;
+    else if (!strcmp(argv[1], "spinor"))
+        *bootmod=SYSCTL_BOOT_NORFLASH;
+    else if (!strcmp(argv[1], "spinand"))
+        *bootmod=SYSCTL_BOOT_NANDFLASH;
+    else if (!strcmp(argv[1], "auto"))
+        *bootmod=sysctl_boot_get_boot_mode();
+
+
+    if(!strcmp(argv[2], "rtt"))
+        *sys = BOOT_SYS_RTT;
+    else if (!strcmp(argv[2], "linux"))
+        *sys=BOOT_SYS_LINUX;
+    else if (!strcmp(argv[2], "qbc"))
+        *sys=BOOT_QUICK_BOOT_CFG;
+    else if (!strcmp(argv[2], "fdb"))
+        *sys=BOOT_FACE_DB;
+    else if (!strcmp(argv[2], "sensor"))
+        *sys=BOOT_SENSOR_CFG;
+    else if (!strcmp(argv[2], "ai"))
+        *sys=BOOT_AI_MODE;
+    else if (!strcmp(argv[2], "speckle"))
+        *sys=BOOT_SPECKLE;
+    else if (!strcmp(argv[2], "rtapp"))
+        *sys=BOOT_RTAPP;
+    else if (!strcmp(argv[2], "uboot"))
+        *sys=BOOT_SYS_UBOOT;
+    else if (!strcmp(argv[2], "auto_boot"))
+        *sys=BOOT_SYS_AUTO;
+
+
+    return 0;
+
+}
+
+
+/**
+ * @brief
+ *
+ * @param cmdtp
+ * @param flag
+ * @param argc
+ * @param argv
+ * @return int
+ */
+static int do_k230_boot(struct cmd_tbl *cmdtp, int flag, int argc,
+		  char *const argv[])
+{
+    int ret = 0;
+    ulong cipher_addr = CONFIG_CIPHER_ADDR; //加载地址、密文
+    en_boot_sys_t sys;
+    sysctl_boot_mode_e bootmod = g_bootmod;
+
+    ret = k230_boot_prepare_args(argc, argv, cipher_addr,&sys, &bootmod);
+    if(ret)
+        return ret;
+    g_bootmod = bootmod;
+    if(sys == BOOT_SYS_ADDR)
+        ret = k230_img_boot_sys_bin((firmware_head_s *) cipher_addr);
+    else
+        ret = k230_img_load_boot_sys(sys);
+    return ret;
+}
+
+#define K230_BOOT_HELP  " <auto|sdio1|sdio0|spinor|spinand|mem> <auto_boot|rtt|linux|qbc|fdb|sensor|ai|speckle|rtapp|uboot|addr> [len]\n" \
+                        "qbc---quick boot cfg\n" \
+                        "fdb---face database\n" \
+                        "sensor---sensor cfg\n" \
+                        "ai---ai mode cfg\n" \
+                        "speckle---speckle cfg\n" \
+                        "rtapp---rtt app\n" \
+                        "auto_boot---auto boot\n" \
+                        "uboot---boot uboot\n"
+/*
+boot sdio1/sdio0/spinor/spinand/mem  add
+k230_boot auto rtt ;k230_boot auto linux;
+先实现从sd启动吧；
+*/
+U_BOOT_CMD_COMPLETE(
+	k230_boot, 6, 0, do_k230_boot,
+	NULL,
+	K230_BOOT_HELP, NULL
+);
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+typedef enum kburnUsbIspCommandTaget
+{
+	KBURN_USB_ISP_SDIO0 = 0x00,
+	KBURN_USB_ISP_SDIO1 = 0x01,
+	KBURN_USB_ISP_NAND = 0x02,
+	KBURN_USB_ISP_NOR = 0x03,
+} kburnUsbIspCommandTaget;
+
+struct BurnImageConfigItem {
+	uint32_t    address;
+	uint32_t    size;
+	char        altName[32];
+};
+
+struct BurnImageConfig {
+	uint32_t cfgMagic;
+	uint32_t cfgTarget;
+	uint32_t cfgCount;
+	uint32_t cfgCrc32;
+	struct BurnImageConfigItem cfgs[0];
+};
+
+static int do_k230_dfu(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+    char alt_info[1024];
+    int alt_info_len = 0;
+
+    struct BurnImageConfig *cfg = NULL;
+    struct BurnImageConfig *cfgOrig = (struct BurnImageConfig *)0x80250000;
+
+    uint32_t cfgMagic   = readl((volatile void *)&cfgOrig->cfgMagic);
+	uint32_t cfgCount   = readl((volatile void *)&cfgOrig->cfgCount);
+
+    if(MAGIC_NUM == cfgMagic && (20 > cfgCount)) {
+        uint32_t size = sizeof(struct BurnImageConfig) + cfgCount * sizeof(struct BurnImageConfigItem);
+
+        cfg = (struct BurnImageConfig *)malloc(size);
+        if(NULL == cfg) {
+            free(cfg);
+            printf("malloc failed\n");
+            return -1;
+        }
+
+        uint32_t *pDst = (uint32_t *)cfg;
+        uint32_t *pSrc = (uint32_t *)0x80250000;
+
+        for(int i = 0; i < (size / 4); i++) {
+            pDst[i] = readl((volatile void *)(pSrc + i));
+        }
+
+        uint32_t crc = crc32(0, (const unsigned char *)&cfg->cfgs[0], cfg->cfgCount * sizeof(struct BurnImageConfigItem));
+        if(cfg->cfgCrc32 != crc) {
+            free(cfg);
+            printf("invaild cfg crc32 %x != %x\n", cfg->cfgCrc32, crc);
+            return -1;
+        }
+
+        /*
+        	"#dfu_alt_info=mmc raw 0 2097152 \0" \
+            "#bootcmd=dfu 0 mmc 0 \0" \
+            "#dfu_alt_info=sf raw 0 2000000 \0" \
+            "#bootcmd=dfu 0 sf 0:0 \0" \
+        */
+        int sector = 1;
+
+       char *pInfo = &alt_info[0];
+
+        switch (cfg->cfgTarget)
+        {
+        case KBURN_USB_ISP_SDIO0:
+            sector = 512;
+            alt_info_len = sprintf(pInfo, "%s", "mmc 0=");
+            pInfo += alt_info_len;
+            break;
+        case KBURN_USB_ISP_SDIO1:
+            sector = 512;
+            alt_info_len = sprintf(pInfo, "%s", "mmc 1=");
+            pInfo += alt_info_len;
+            break;
+        case KBURN_USB_ISP_NAND:
+            alt_info_len = sprintf(pInfo, "%s", "mtd spi-nand0=");
+            pInfo += alt_info_len;
+            break;
+        case KBURN_USB_ISP_NOR:
+            alt_info_len = sprintf(pInfo, "%s", "sf 0:0:50000000:0=");
+            pInfo += alt_info_len;
+            break;
+        default:
+            break;
+        }
+        bool has_firmware = false;
+        for(int i = 0; i < cfg->cfgCount; i++) {
+            struct BurnImageConfigItem *item = (struct BurnImageConfigItem *)&cfg->cfgs[i];
+
+            printf("item %d, address %x, size %x, altName %s\n", i, item->address, item->size, item->altName);
+            if(!strcmp(item->altName, "otp")) continue;
+            if(!strcmp(item->altName, "otp_lock")) continue;
+            if(!strcmp(item->altName, "cde")) continue;
+            if(!strcmp(item->altName, "cde_lock")) continue;
+            has_firmware = true;
+            alt_info_len = sprintf(pInfo, "%s raw 0x%x 0x%x", item->altName, item->address / sector, (item->size+sector-1) / sector);
+            pInfo += alt_info_len;
+            // if(i != (cfg->cfgCount - 1))
+            {
+                pInfo[0] = ';';
+                pInfo ++;
+            }
+        }
+        if(has_firmware)
+        {
+            pInfo[-1] = '&';
+        }
+        else {
+            pInfo = &alt_info[0];
+        }
+        sprintf(pInfo, "%s", "virt 0=otp&virt 1=otp_lock&virt 2=cde&virt 3=cde_lock");
+
+        printf("alt_info \'%s\'\n", alt_info);
+
+        env_set("dfu_alt_info", alt_info);
+
+        switch (cfg->cfgTarget)
+        {
+        case KBURN_USB_ISP_NAND:
+            run_command("mtd list;dfu 0", 0);
+            break;
+        case KBURN_USB_ISP_SDIO0:
+        case KBURN_USB_ISP_SDIO1:
+        case KBURN_USB_ISP_NOR:
+            run_command("dfu 0", 0);
+            break;
+        default:
+            break;
+        }
+    } else {
+        printf("invaild cfg maigc %x != %x, or cfgCount %d > 20\n", cfgMagic, MAGIC_NUM, cfgCount);
+        return -1;
+    }
+
+    return 0;
+}
+
+U_BOOT_CMD(
+	k230_dfu, CONFIG_SYS_MAXARGS, 0, do_k230_dfu,
+	"k230 burntool enter dfu",
+	"k230 burntool enter dfu"
+);
+#define K230_SET_BIT(val, bit) ((val) | (1 << (bit)))
+#define K230_CLER_BIT(val, bit) ((val) & ~(1 << (bit)))
+#define K230_GET_BIT(val, bit) (((val) >> (bit)) & 1)
+#define GPIO_EXT_PORTA 0x50
+
+int k230_gpio(char opt, int pin, char *value)
+{
+    int ret = 0;
+
+    volatile u32 * gpio_dr = (volatile u32 *)(u64)(GPIO_BASE_ADDR0 + pin/32*0x1000); //data register --data out to pin
+    volatile u32 * gpio_ddr = (volatile u32 *)(u64)(gpio_dr+1); // Data Direction Register 1:out ,1:in
+    //volatile u32 * gpio_ctrl = (volatile u32 *)(u64)(gpio_dr+2); // data source register
+    volatile u32 * gpio_value_in = (volatile u32 *)(u64)(GPIO_BASE_ADDR0+GPIO_EXT_PORTA + pin/32*4);
+    //This register always reflects the signals value on the External Port
+    u32 reg_org ;
+
+    //printf("pin=%d  org reg gpio_dr%x=%x gpio_ddr=%x %x\n", pin,  gpio_dr,*gpio_dr, *gpio_ddr, *gpio_ctrl);
+
+    if(pin > 71)
+        return -1;
+
+    if(opt == 's') {
+        if(value == NULL) {
+            printf("value is NULL\n");
+            return -1;
+        }
+        reg_org =  *gpio_dr;
+        if(*value == 0) {
+            *gpio_dr = K230_CLER_BIT(reg_org, pin % 32);
+        } else{
+            *gpio_dr = K230_SET_BIT(reg_org, pin % 32);
+        }
+    } else if(opt == 'g') {
+        reg_org = *gpio_value_in;
+        *value = K230_GET_BIT(reg_org, pin % 32);
+    } else if(opt == 'i') { //set 0;
+        reg_org = *gpio_ddr;
+        *gpio_ddr = K230_CLER_BIT(reg_org, pin % 32);
+    } else if(opt == 'o') {
+        reg_org = *gpio_ddr;
+        *gpio_ddr = K230_SET_BIT(reg_org, pin % 32);
+        if( value && (*value) ) {
+            *gpio_dr = K230_SET_BIT(reg_org, pin % 32);
+        } else  if( value && (*value == 0)) {
+            *gpio_dr = K230_CLER_BIT(reg_org, pin % 32);
+        }
+    } else {
+        printf("opt %c is invalid\n", opt);
+        return -1;
+    }
+    //printf("pin=%d %c  after reg gpio_dr=%x gpio_ddr=%x ctl%x\n", pin,  opt, *gpio_dr, *gpio_ddr, *gpio_ctrl);
+    return ret;
+
+}
+static int do_k230_gpio(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+    int ret = 0;
+    if(argc < 2) {
+        printf("usage: k230_gpio set/get/in/out pin [value]\n");
+        return -1;
+    }
+
+    int pin = simple_strtoul(argv[2], NULL, 0);
+    char value=0;
+    if(argc > 3) {
+        value = simple_strtoul(argv[3], NULL, 0);
+    }
+    ret = k230_gpio(argv[1][0], pin, &value);
+    printf("%c pin %d value %d \n", argv[1][0], pin, value);
+    return ret;
+}
+U_BOOT_CMD(
+	k230_gpio, CONFIG_SYS_MAXARGS, 0, do_k230_gpio,
+	"k230_gpio set/get/in/out pin [value]",
+	"k230_gpio set/get/in/out pin [value]"
+);
+
+static ulong get_sp(void)
+{
+	ulong ret;
+
+	asm("mv %0, sp" : "=r"(ret) : );
+	return ret;
+}
+static ulong get_gp(void)
+{
+	ulong ret;
+
+	asm("mv %0, sp" : "=r"(ret) : );
+	return ret;
+}
+void arch_print_bdinfo(void)
+{
+    printf("malloc %lx---%lx---%lx\n", mem_malloc_start, mem_malloc_end, mem_malloc_brk);
+    printf("sp:%16lx ,%lx %lx \n", get_sp(), get_gp(),(ulong)malloc(0));
+}
+
+
+void wifi_sdio0_rst(void)
+{
+    #define SDHCI_EMMC_CTRL_R   0x52C
+    #define EMMC_RST_N_OE       3
+    #define EMMC_RST_N          2
+
+    struct mmc *mmc;
+	mmc = find_mmc_device(0);
+    if(mmc ){
+        mmc_deferred_probe(mmc);
+        u32 wifi_regon_ctrl = readl((void*)(SDIO0_BASE_ADDR + SDHCI_EMMC_CTRL_R));
+        wifi_regon_ctrl |= (1<<EMMC_RST_N_OE);
+        wifi_regon_ctrl &= ~(1<<EMMC_RST_N);
+        writel(wifi_regon_ctrl, (void*)(SDIO0_BASE_ADDR + SDHCI_EMMC_CTRL_R));
+        mdelay(10);
+        wifi_regon_ctrl |= (1<<EMMC_RST_N);
+        writel(wifi_regon_ctrl, (void*)(SDIO0_BASE_ADDR + SDHCI_EMMC_CTRL_R));
+    }
+    return;
+}
+void wifi_gpio_rst(int gpio)
+{
+    char high = 1,low = 0;
+    // reset gpio -> WIFI REGON
+    k230_gpio('o', gpio, &low);
+    mdelay(10);
+    k230_gpio('s', gpio , &high);
+    return;
+}
+#ifndef CONFIG_K230_HDMI_LCD_I2C_BUS
+    #define CONFIG_K230_HDMI_LCD_I2C_BUS 3
+#endif
+
+#ifndef CONFIG_K230_HDMI_I2C_DEV
+    #define CONFIG_K230_HDMI_I2C_DEV 0x3b
+#endif
+
+#ifndef CONFIG_K230_LCD_I2C_DEV
+    #define CONFIG_K230_LCD_I2C_DEV 0x38
+#endif
+
+static int k230_set_dtb_env(const char *varname, const char *file)
+{
+    char cmd[128]={0};
+    char *dtb_name= (char *)CONFIG_CIPHER_ADDR;
+
+    memset(dtb_name, 0 , 512);
+     // 判断存在force.dtb;envsiet; ext4size mmc 0:1 k.dtb;
+    sprintf(cmd, "ext4load mmc ${mmc_boot_dev_num}:1 0x%lx %s", (ulong)dtb_name, file); //:1
+    printf("%s\n",cmd);
+    if(0 != run_command(cmd, 0)){
+        printf("cmd %s error\n",cmd);
+        return -1;
+    }
+    dtb_name[strcspn(dtb_name, "\r\n")] = '\0';
+
+    if(strcmp(env_get("dtb"), dtb_name) != 0){
+        if(env_set("dtb", dtb_name) || env_save()){ //如果一样，则退出，否则修改环境变量，并保存环境变量；
+            printf("dtb env set error\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+static int do_k230_set_dtb(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+    int ret = 0;
+    char cmd[128]={0};
+    struct udevice *bus, *chip;
+
+    // 判断存在force.dtb;envsiet; ext4size mmc 0:1 k.dtb;
+    sprintf(cmd, "ext4size mmc ${mmc_boot_dev_num}:1 force_dtb"); //:1
+    //printf("%s\n",cmd);
+    if( (0 == run_command(cmd, 0))  &&
+        (0 < env_get_ulong("filesize", 16, 0)) ){
+        return k230_set_dtb_env("dtb","force_dtb");
+    }
+
+	ret = uclass_get_device_by_seq(UCLASS_I2C, CONFIG_K230_HDMI_LCD_I2C_BUS, &bus);
+	if (ret ==0 ) {
+        if(0 == dm_i2c_probe(bus, CONFIG_K230_LCD_I2C_DEV, 0, &chip)){ //探测到lcd
+            return k230_set_dtb_env("dtb", "lcd_dtb");
+        }
+        if(0 == dm_i2c_probe(bus, CONFIG_K230_HDMI_I2C_DEV, 0, &chip)){ //探测到hdmi；
+            return k230_set_dtb_env("dtb", "hdmi_dtb");
+        }
+	}
+    //探测失败默认lcd;
+    return k230_set_dtb_env("dtb", "lcd_dtb");//默认lcd；;
+}
+U_BOOT_CMD(
+	k230_set_dtb, CONFIG_SYS_MAXARGS, 0, do_k230_set_dtb,
+	"set dtb by display",
+	"set dtb by display"
+);
+
+static int do_2_burn_mode(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+    //int ret = 0;
+    // k230_detect_display();
+    // return 0;
+    writel(0x5aa5a55a, (void*)0x80230000);
+    flush_dcache_range(0x80230000,0x80230000+4);
+    writel(0x10001, (void*)SYSCTL_BOOT_BASE_ADDR+0x60);
+    return 0;
+}
+U_BOOT_CMD(
+	reboot_to_upgrade, CONFIG_SYS_MAXARGS, 0, do_2_burn_mode,
+	"k230 reboot and  enter burn mode ",
+	"k230 reboot and  enter burn mode "
+);
+
+#endif
+
+#if defined(CONFIG_OF_LIBFDT) && defined(CONFIG_OF_BOARD_SETUP)
+__weak int ft_board_setup(void *blob, struct bd_info *bd)
+{
+    phys_addr_t base;
+	phys_size_t size;
+	// struct cpu_type *cpu;
+
+	// cpu = gd->arch.cpu;
+	// ft_cpu_setup(blob, bd);
+
+	base = env_get_bootm_low();
+	size = env_get_bootm_size();
+
+	fdt_fixup_memory(blob, (u64)base, (u64)size);
+    return 0;
+}
+
+#endif

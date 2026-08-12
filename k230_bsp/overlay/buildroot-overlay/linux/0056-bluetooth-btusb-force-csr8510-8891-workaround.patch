@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 3 Aug 2026 02:35:00 +0000
+Subject: [PATCH] bluetooth: btusb: force CSR8510 0x8891 clone workaround
+
+The K230 test adapter enumerates as USB 0a12:0001 with bcdDevice 0x8891 and reports CSR HCI/LMP version 0x22bb. Treat this bcdDevice as a fake CSR clone, keep RESET_ON_CLOSE to avoid startup HCI Reset, and skip the generic runtime suspend workaround which made this sample less deterministic.
+
+This is part of the CSR8510 bring-up investigation. It lets the kernel bind btusb and create hci0, but it does not by itself make BLE scanning work on the tested adapter.
+---
+--- a/drivers/bluetooth/btusb.c	2025-02-12 09:31:32.000000000 +0000
++++ b/drivers/bluetooth/btusb.c	2026-08-03 02:52:10.430068059 +0000
+@@ -2386,6 +2386,9 @@
+ 		is_fake = true;
+ 
+ 	/* Other clones which beat all the above checks */
++	else if (bcdDevice == 0x8891)
++		is_fake = true;
++
+ 	else if (bcdDevice == 0x0134 &&
+ 		 le16_to_cpu(rp->lmp_subver) == 0x0c5c &&
+ 		 rp->hci_ver == BLUETOOTH_VER_2_0)
+@@ -2403,11 +2406,16 @@
+ 		set_bit(HCI_QUIRK_BROKEN_ERR_DATA_REPORTING, &hdev->quirks);
+ 		set_bit(HCI_QUIRK_BROKEN_FILTER_CLEAR_ALL, &hdev->quirks);
+ 		set_bit(HCI_QUIRK_NO_SUSPEND_NOTIFIER, &hdev->quirks);
++		if (bcdDevice == 0x8891)
++			set_bit(HCI_QUIRK_BROKEN_LOCAL_COMMANDS, &hdev->quirks);
+ 
+-		/* Clear the reset quirk since this is not an actual
+-		 * early Bluetooth 1.1 device from CSR.
++		/* This 0x8891 clone times out on HCI Reset during init. Keep
++		 * RESET_ON_CLOSE so hci_init0/1 skip the startup reset.
+ 		 */
+-		clear_bit(HCI_QUIRK_RESET_ON_CLOSE, &hdev->quirks);
++		if (bcdDevice == 0x8891)
++			set_bit(HCI_QUIRK_RESET_ON_CLOSE, &hdev->quirks);
++		else
++			clear_bit(HCI_QUIRK_RESET_ON_CLOSE, &hdev->quirks);
+ 		clear_bit(HCI_QUIRK_SIMULTANEOUS_DISCOVERY, &hdev->quirks);
+ 
+ 		/*
+@@ -2436,15 +2444,17 @@
+ 		 * apply this initialization quirk to every controller that gets here,
+ 		 * it should be harmless. The alternative is to not work at all.
+ 		 */
+-		pm_runtime_allow(&data->udev->dev);
++		if (bcdDevice != 0x8891) {
++			pm_runtime_allow(&data->udev->dev);
+ 
+-		ret = pm_runtime_suspend(&data->udev->dev);
+-		if (ret >= 0)
+-			msleep(200);
+-		else
+-			bt_dev_warn(hdev, "CSR: Couldn't suspend the device for our Barrot 8041a02 receive-issue workaround");
++			ret = pm_runtime_suspend(&data->udev->dev);
++			if (ret >= 0)
++				msleep(200);
++			else
++				bt_dev_warn(hdev, "CSR: Couldn't suspend the device for our Barrot 8041a02 receive-issue workaround");
+ 
+-		pm_runtime_forbid(&data->udev->dev);
++			pm_runtime_forbid(&data->udev->dev);
++		}
+ 
+ 		device_set_wakeup_capable(&data->udev->dev, false);
+ 

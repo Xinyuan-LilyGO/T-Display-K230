@@ -1,0 +1,81 @@
+#!/bin/sh
+
+DAEMON="bluetoothd"
+PIDFILE="/var/run/$DAEMON.pid"
+BLUETOOTHD_ARGS="-n"
+
+[ -r "/etc/default/$DAEMON" ] && . "/etc/default/$DAEMON"
+
+start_manual()
+{
+	printf 'Starting %s: ' "$DAEMON"
+	start-stop-daemon --start --background --make-pidfile \
+		--pidfile "$PIDFILE" --exec "/usr/libexec/bluetooth/$DAEMON" \
+		-- $BLUETOOTHD_ARGS
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+start()
+{
+	if [ "${K230_BLUETOOTHD_AUTO_START:-0}" != "1" ]; then
+		echo "bluetoothd disabled by default; BLE app starts it on demand"
+		exit 0
+	fi
+	start_manual
+}
+
+stop()
+{
+	printf 'Stopping %s: ' "$DAEMON"
+	start-stop-daemon --stop --pidfile "$PIDFILE" \
+		--exec "/usr/libexec/bluetooth/$DAEMON"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+		return "$status"
+	fi
+	while start-stop-daemon --stop --test --quiet --pidfile "$PIDFILE" \
+		--exec "/usr/libexec/bluetooth/$DAEMON"; do
+		sleep 0.1
+	done
+	rm -f "$PIDFILE"
+	return "$status"
+}
+
+restart()
+{
+	stop
+	start_manual
+}
+
+reload()
+{
+	printf 'Reloading %s: ' "$DAEMON"
+	start-stop-daemon --stop --signal HUP -q --pidfile "$PIDFILE" \
+		--exec "/usr/libexec/bluetooth/$DAEMON"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+case "$1" in
+	start|stop|restart|reload)
+		"$1";;
+	start-manual|start-force)
+		start_manual;;
+	*)
+		echo "Usage: $0 {start|start-manual|start-force|stop|restart|reload}"
+		exit 1
+esac

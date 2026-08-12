@@ -1,0 +1,56 @@
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+new file mode 100644
+index 0000000..4b22922
+--- /dev/null
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -0,0 +1,50 @@
++// SPDX-License-Identifier: GPL-2.0 OR MIT
++#include "k230.dtsi"
++#include "display-rm69a10-568x1232.dtsi"
++/ {
++	model = "Canaan CanMV-K230 with RM69A10 OLED";
++	compatible = "canaan,canmv-k230", "canaan,kendryte-k230";
++	aliases {
++		serial3 = &uart3;
++		mmc0 = &mmc_sd0;
++		mmc1 = &mmc_sd1;
++	};
++	chosen {
++		stdout-path = "serial0:115200n8";
++	};
++	ddr: memory@0 {
++		device_type = "memory";
++		reg = <0x0 0x0 0x0 0x20000000>;
++	};
++	sound {
++		status                      = "okay";
++		compatible                  = "canaan,k230-audio-inno";
++		canaan,model                = "K230_I2S_INNO";
++		canaan,k230-i2s-controller  = <&i2s>;
++		canaan,k230-audio-codec     = <&inno_codec>;
++	};
++};
++&uart0 { status = "okay"; };
++&uart3 { status = "okay"; };
++&mmc_sd1 {
++	status = "okay";
++	no-1-8-v;
++	cap-sd-highspeed;
++	mshc_ctrl_r = <0x00>;
++};
++&usb0 { status = "okay"; };
++&usb1 { status = "okay"; };
++&lcd {
++	dsi_reset-gpios = <&gpio0_ports 22 GPIO_ACTIVE_HIGH>;
++	backlight_gpio-gpios = <&gpio0_ports 25 GPIO_ACTIVE_HIGH>;
++};
++&i2c4 { status = "okay"; };
++&mmc_sd0 {
++	status = "okay";
++	bus-width = <4>;
++	no-1-8-v;
++	cap-sd-highspeed;
++	cap-sdio-irq;
++	keep-power-in-suspend;
++	wakeup-source;
++};

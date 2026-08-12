@@ -1,0 +1,12 @@
+--- a/drivers/soc/canaan/k230-gdma.c
++++ b/drivers/soc/canaan/k230-gdma.c
+@@ -212,6 +212,9 @@
+ 		desc->plane[0].pixel_bits = K230_GDMA_BIT_24;
+ 		break;
+ 	case DRM_FORMAT_ARGB8888:
++	case DRM_FORMAT_XRGB8888:
++	case DRM_FORMAT_ABGR8888:
++	case DRM_FORMAT_XBGR8888:
+ 		desc->plane_count = 1;
+ 		desc->plane[0].pixel_bits = K230_GDMA_BIT_32;
+ 		break;

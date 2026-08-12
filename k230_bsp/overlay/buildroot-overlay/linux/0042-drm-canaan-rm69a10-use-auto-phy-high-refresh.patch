@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Fri, 31 Jul 2026 08:05:00 +0000
+Subject: [PATCH] drm/canaan: Use auto PHY for RM69A10 high refresh
+
+The fixed 2-lane PHY override was stable at the original 39.6 MHz DPI
+clock, but higher RM69A10 refresh experiments showed the panel behaves
+better when the PHY settings calculated by canaan_dsi_clk_cfg() are kept.
+
+Keep the automatic PHY result so the 49.5 MHz RM69A10 timing can run at
+about 52 Hz without the low-refresh stutter seen at the original timing.
+
+Signed-off-by: Codex <codex@local>
+---
+ drivers/gpu/drm/canaan/canaan_dsi.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/canaan/canaan_dsi.c b/drivers/gpu/drm/canaan/canaan_dsi.c
+--- a/drivers/gpu/drm/canaan/canaan_dsi.c
++++ b/drivers/gpu/drm/canaan/canaan_dsi.c
+@@ -415,9 +415,7 @@ static void canaan_dsi_encoder_enable(struct drm_encoder *encoder)
+ 		 adjusted_mode->vsync_start, adjusted_mode->vsync_end,
+ 		 adjusted_mode->vtotal);
+ 	dev_info(dsi->dev,
+-		 "DSI fixed 2-lane PHY override: m=97 n=4 voc=0x19 hsfreq=0x96\n");
+-	/* Override PHY with RT-Smart validated params for 445.5 Mbps, 2-lane */
+-	k230_dsi_config_2lan_phy(dsi, 97, 4, 0x19, 0x96);
++		 "DSI fixed 2-lane PHY override disabled; using auto-PHY result\n");
+ 
+	// set dsi lan num
+	canaan_dsi_set_lan_num(dsi, device->lanes);

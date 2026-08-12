@@ -1,0 +1,134 @@
+From 37b66b38b9a1a5489708097185b7efce12aa26a4 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 3 Aug 2026 09:30:00 +0000
+Subject: [PATCH] ASoC: canaan: add external I2S output switch
+
+The RM69A10 board revision can use an external MAX98357A amplifier on the K230
+I2S pads:
+
+- BCLK: GPIO32
+- LRCK/WS: GPIO33
+- DATA/DIN: GPIO35
+- SHUTDOWN: GPIO34, handled from userspace
+
+The previous DTS pinmux enabled the pads, but the K230 INNO machine driver still
+forced the internal audio codec path. Add an ALSA mixer switch so userspace can
+select the external I2S pad route by setting audio_codec_bypass and the shared
+PDM/I2S IO mux. RM69A10 defaults to the external route so the phone UI can drive
+the MAX98357A after boot, while the UI can still switch the route back to the
+internal codec/headphone output.
+---
+ arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts |  1 +
+ sound/soc/canaan/canaan_k230_inno.c               | 47 +++++++++++++++++++++-
+ 2 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+index c4a6db0..e3a68d7 100644
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -35,6 +35,7 @@
+ 		canaan,model                = "K230_I2S_INNO";
+ 		canaan,k230-i2s-controller  = <&i2s>;
+ 		canaan,k230-audio-codec     = <&inno_codec>;
++		canaan,external-i2s-output-default;
+ 	};
+ };
+ &uart0 { status = "okay"; };
+diff --git a/sound/soc/canaan/canaan_k230_inno.c b/sound/soc/canaan/canaan_k230_inno.c
+index 9af0678..269963c 100644
+--- a/sound/soc/canaan/canaan_k230_inno.c
++++ b/sound/soc/canaan/canaan_k230_inno.c
+@@ -34,6 +34,47 @@
+ 	struct clk *pclk;
+ 	struct mutex clk_lock;
+ 	int clk_users;
++	bool external_i2s_output;
++};
++
++static void k230_inno_apply_output_route(struct k230_inno_info *priv)
++{
++	audio_i2s_in_init();
++	audio_i2s_enable_audio_codec(!priv->external_i2s_output);
++	audio_i2s_out_init(true, 32);
++}
++
++static int k230_inno_external_i2s_get(struct snd_kcontrol *kcontrol,
++				      struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
++	struct k230_inno_info *priv = snd_soc_card_get_drvdata(card);
++
++	ucontrol->value.integer.value[0] = priv->external_i2s_output;
++
++	return 0;
++}
++
++static int k230_inno_external_i2s_put(struct snd_kcontrol *kcontrol,
++				      struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
++	struct k230_inno_info *priv = snd_soc_card_get_drvdata(card);
++	bool enable = !!ucontrol->value.integer.value[0];
++
++	if (priv->external_i2s_output == enable)
++		return 0;
++
++	priv->external_i2s_output = enable;
++	k230_inno_apply_output_route(priv);
++
++	return 1;
++}
++
++static const struct snd_kcontrol_new k230_inno_controls[] = {
++	SOC_SINGLE_BOOL_EXT("External I2S Output Switch", 0,
++			    k230_inno_external_i2s_get,
++			    k230_inno_external_i2s_put),
+ };
+ 
+ static int k230_inno_hw_params(struct snd_pcm_substream *substream,
+@@ -48,6 +89,12 @@
+ 
+ static int k230_inno_startup(struct snd_pcm_substream *substream)
+ {
++	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
++	struct snd_soc_card *card = rtd->card;
++	struct k230_inno_info *priv = snd_soc_card_get_drvdata(card);
++
++	k230_inno_apply_output_route(priv);
++
+ 	return 0;
+ }
+ 
+@@ -76,6 +123,8 @@
+ 	.owner = THIS_MODULE,
+ 	.dai_link = &canaan_k230_dailink,
+ 	.num_links = 1,
++	.controls = k230_inno_controls,
++	.num_controls = ARRAY_SIZE(k230_inno_controls),
+ };
+ 
+ static int canaan_k230_inno_probe(struct platform_device *pdev)
+@@ -97,6 +146,8 @@
+ 		return -ENOMEM;
+ 
+ 	mutex_init(&priv->clk_lock);
++	priv->external_i2s_output =
++		of_property_read_bool(np, "canaan,external-i2s-output-default");
+ 
+ 	card->dev = &pdev->dev;
+ 	snd_soc_card_set_drvdata(card, priv);
+@@ -133,9 +184,9 @@
+ 		return ret;
+ 	}
+ 
+-	audio_i2s_in_init();
+-	audio_i2s_enable_audio_codec(true);
+-	audio_i2s_out_init(true, 32);
++	k230_inno_apply_output_route(priv);
++	dev_info(&pdev->dev, "External I2S output %s by default\n",
++		 priv->external_i2s_output ? "enabled" : "disabled");
+ 
+ 	return ret;
+ }
+-- 
+2.25.1

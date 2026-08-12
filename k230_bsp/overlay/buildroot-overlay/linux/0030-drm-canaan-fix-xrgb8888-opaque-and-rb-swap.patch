@@ -1,0 +1,16 @@
+--- a/drivers/gpu/drm/canaan/canaan_vo.c	2026-06-16 15:34:36.936143173 +0000
++++ b/drivers/gpu/drm/canaan/canaan_vo.c	2026-06-16 15:35:08.969898143 +0000
+@@ -219,9 +219,12 @@
+ 
+ 	switch (fb->format->format) {
+ 	case DRM_FORMAT_XRGB8888:
++		reg_val = 0x03;
++		rb_swap = 0x40;
++		break;
+ 	case DRM_FORMAT_ARGB8888:
+ 		reg_val = 0x53;
+-		rb_swap = 0x4F;
++		rb_swap = 0x0;
+ 		break;
+ 	case DRM_FORMAT_ARGB4444:
+ 		reg_val = 0x54;

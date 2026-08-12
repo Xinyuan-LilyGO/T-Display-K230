@@ -1,0 +1,25 @@
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10-hdmi.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10-hdmi.dts
+index 9b152b3..3e80e33 100644
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10-hdmi.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10-hdmi.dts
+@@ -1,4 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0 OR MIT
++#if 0
+ #include "k230.dtsi"
+ 
+ / {
+@@ -216,4 +217,14 @@ &v4l2isp {
+ 	dev0-sensor-name = "gc2093";
+ 	dev0-sensor-mode = <0>;
+ 	dev0-sensor-i2c-bus = <0>; /* alias i2c0 = &i2c4 */
+ };
++#endif
++
++/*
++ * The board-specific HDMI attempt above is kept for reference but is not used.
++ * The SDK CanMV v3 HDMI DTB was verified on T-Display K230: LT9611 probes,
++ * EDID is read, and HDMI-A-1 exposes 800x480@60. Reuse that known-good HDMI
++ * graph until a reduced board-specific DTS is proven.
++ */
++
++#include "k230-canmv-v3.dts"

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Fri, 31 Jul 2026 07:40:00 +0000
+Subject: [PATCH] drm/canaan: Log RM69A10 DSI clock and PHY settings
+
+Add informational logs for the RM69A10 display bring-up path. This does
+not change register programming; it records the requested and quantized
+DPI clock, automatic PHY calculation, final mode totals, and the fixed
+2-lane PHY override currently required by the panel.
+
+These logs make refresh-rate experiments easier to diagnose without
+changing the known-good RGB888/39.6 MHz display configuration.
+
+Signed-off-by: Codex <codex@local>
+---
+ drivers/gpu/drm/canaan/canaan_dsi.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/drivers/gpu/drm/canaan/canaan_dsi.c b/drivers/gpu/drm/canaan/canaan_dsi.c
+--- a/drivers/gpu/drm/canaan/canaan_dsi.c
++++ b/drivers/gpu/drm/canaan/canaan_dsi.c
+@@ -386,6 +386,10 @@ static int canaan_dsi_clk_cfg(struct canaan_dsi *dsi, u32 clk)
+ 	iounmap(dis_clk);
+ 
+ 	k230_dsi_config_2lan_phy(dsi, m - 2, n - 1, voc, 0x96);
++	dev_info(dsi->dev,
++		 "DSI clock cfg: req=%u kHz adjusted=%u kHz div=%u lanes=%u bpp=24 phy_target=%u kHz auto_phy_freq=%u kHz auto_m=%u auto_n=%u auto_voc=0x%x hsfreq=0x96\n",
++		 clk, dsi->clk_freq, div, device->lanes, phy_clk_freq,
++		 dsi->phy_freq, m - 2, n - 1, voc);
+ 
+ 	return 0;
+ }
+@@ -403,8 +407,17 @@ static void canaan_dsi_encoder_enable(struct drm_encoder *encoder)
+ 	dev_vdbg(dsi->dev, "DSI encoder enable %u\n", adjusted_mode->clock);
+ 	if (canaan_dsi_clk_cfg(dsi, adjusted_mode->clock))
+ 		dev_err(dsi->dev, "MIPI clock not support\n");
++	dev_info(dsi->dev,
++		 "DSI mode: clock=%u hdisplay=%u hsync_start=%u hsync_end=%u htotal=%u vdisplay=%u vsync_start=%u vsync_end=%u vtotal=%u\n",
++		 adjusted_mode->clock, adjusted_mode->hdisplay,
++		 adjusted_mode->hsync_start, adjusted_mode->hsync_end,
++		 adjusted_mode->htotal, adjusted_mode->vdisplay,
++		 adjusted_mode->vsync_start, adjusted_mode->vsync_end,
++		 adjusted_mode->vtotal);
++	dev_info(dsi->dev,
++		 "DSI fixed 2-lane PHY override: m=97 n=4 voc=0x19 hsfreq=0x96\n");
+ 	/* Override PHY with RT-Smart validated params for 445.5 Mbps, 2-lane */
+	k230_dsi_config_2lan_phy(dsi, 97, 4, 0x19, 0x96);
+ 
+	// set dsi lan num
+	canaan_dsi_set_lan_num(dsi, device->lanes);

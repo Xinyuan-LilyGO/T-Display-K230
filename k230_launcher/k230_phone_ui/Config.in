@@ -1,0 +1,8 @@
+config BR2_PACKAGE_K230_PHONE_UI
+    bool "k230 phone-style ui"
+    select BR2_PACKAGE_LVGL
+    select BR2_PACKAGE_LIBDRM
+    select BR2_PACKAGE_LIBEVDEV
+    select BR2_PACKAGE_VVCAM
+    help
+      Phone-style LVGL launcher for the LILYGO T-Display K230.

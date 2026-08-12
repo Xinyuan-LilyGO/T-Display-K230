@@ -1,0 +1,44 @@
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+index 4b22922..1f12341 100644
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -53,6 +53,19 @@
+ 	backlight_gpio-gpios = <&gpio0_ports 25 GPIO_ACTIVE_HIGH>;
+ };
+ &iomux {
++	lora_ospi_pins: lora_ospi_pins {
++		pin_clk_mo_mi {
++			pins = K230_IO15, K230_IO16, K230_IO17;
++			function = "alt1";
++		};
++
++		pin_cs {
++			pins = K230_IO14;
++			function = "alt1";
++			bias-pull-up;
++		};
++	};
++
+ 	cam_i2c4_pins: cam_i2c4_pins {
+ 		pins = K230_IO7, K230_IO8;
+ 		function = K230_IO7_I2C4_SCL;
+@@ -69,6 +82,19 @@
+ 	};
+ };
+ 
++&spi0 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&lora_ospi_pins>;
++
++	spidev0: spidev@0 {
++		compatible = "rohm,dh2228fv";
++		reg = <0>;
++		spi-max-frequency = <4000000>;
++		status = "okay";
++	};
++};
++
+ &i2c4 {
+ 	status = "okay";
+ 	pinctrl-names = "default";

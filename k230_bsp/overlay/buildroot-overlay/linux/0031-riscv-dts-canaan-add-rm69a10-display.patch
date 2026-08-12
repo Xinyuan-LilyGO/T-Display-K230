@@ -1,0 +1,91 @@
+diff --git a/arch/riscv/boot/dts/canaan/Makefile b/arch/riscv/boot/dts/canaan/Makefile
+index 2cabb52..abcc2e2 100644
+--- a/arch/riscv/boot/dts/canaan/Makefile
++++ b/arch/riscv/boot/dts/canaan/Makefile
+@@ -10,3 +10,4 @@ dtb-$(CONFIG_ARCH_CANAAN) += sipeed_maix_go.dtb
+ dtb-$(CONFIG_ARCH_CANAAN) += sipeed_maixduino.dtb
+ 
+ obj-$(CONFIG_ARCH_CANAAN_K210_DTB_BUILTIN) += $(addsuffix .dtb.o, $(CONFIG_ARCH_CANAAN_K210_DTB_SOURCE))
++dtb-$(CONFIG_ARCH_CANAAN) += k230-canmv-rm69a10.dtb
+diff --git a/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi b/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
+new file mode 100644
+index 0000000..9e093c4
+--- /dev/null
++++ b/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
+@@ -0,0 +1,76 @@
++// SPDX-License-Identifier: GPL-2.0
++&vo {
++	vth_line = <10>;
++};
++&dsi {
++	ports {
++		port@1 {
++			reg = <1>;
++			dsi_out_rm69a10: endpoint {
++				remote-endpoint = <&rm69a10_in>;
++			};
++		};
++	};
++	lcd: panel@0 {
++		compatible = "canaan,universal";
++		reg = <0>;
++		panel-width-mm = <65>;
++		panel-height-mm = <145>;
++		panel-dsi-lane = <2>;
++		panel-init-sequence = [
++			39 00 02 FE FD
++			39 00 02 80 FC
++			39 00 02 FE 00
++			39 00 05 2A 00 00 02 37
++			39 00 05 2B 00 00 04 CF
++			39 00 05 31 00 03 02 34
++			39 00 05 30 00 00 04 CF
++			05 00 01 12
++			15 00 02 35 00
++			15 00 02 51 FE
++			05 78 01 11
++			05 0A 01 29
++			15 00 02 3A 77
++		];
++		display-timings {
++			timing-0 {
++				clock-frequency = <49500000>;
++				hactive = <568>;
++				vactive = <1232>;
++				hfront-porch = <100>;
++				hback-porch = <40>;
++				hsync-len = <40>;
++				vfront-porch = <4>;
++				vback-porch = <16>;
++				vsync-len = <16>;
++			};
++		};
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++			port@0 {
++				reg = <0>;
++				rm69a10_in: endpoint {
++					remote-endpoint = <&dsi_out_rm69a10>;
++				};
++			};
++		};
++	};
++};
++&i2c3 {
++	status = "okay";
++	clock-frequency = <400000>;
++	gt9895@5d {
++		compatible = "goodix,nottingham";
++		reg = <0x5d>;
++		interrupt-parent = <&gpio0_ports>;
++		interrupts = <23 IRQ_TYPE_EDGE_FALLING>;
++		goodix,reset-gpio = <&gpio0_ports 24 GPIO_ACTIVE_HIGH>;
++		goodix,irq-gpio = <&gpio0_ports 23 GPIO_ACTIVE_HIGH>;
++		goodix,irq-flags = <IRQ_TYPE_EDGE_FALLING>;
++		goodix,panel-max-x = <1060>;
++		goodix,panel-max-y = <2400>;
++		goodix,panel-max-w = <255>;
++		goodix,panel-max-p = <4096>;
++	};
++};

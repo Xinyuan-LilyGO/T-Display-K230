@@ -1,0 +1,94 @@
+From 9d3b7a8f6b5d4a2c7e1f0a9b8c6d5e4f3a2b1c0d Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Wed, 29 Jul 2026 00:00:00 +0000
+Subject: [PATCH] riscv: dts: canaan: add T-Display GC2093 camera bringup
+
+Add the board-level pieces required by the LILYGO T-Display K230 GC2093
+camera path: stable I2C aliases for the vvcam userspace driver, I2C4
+and MCLK pinmux, CSI2 MIPI configuration, sensor reset GPIO, and sensor
+MCLK parameters consumed by the vvcam MIPI driver.
+---
+ arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts | 60 +++++++++++++++++++++-
+ 1 file changed, 59 insertions(+), 1 deletion(-)
+
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+index 4b22922..c59d671 100644
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -6,6 +6,8 @@ / {
+ 	compatible = "canaan,canmv-k230", "canaan,kendryte-k230";
+ 	aliases {
+ 		serial3 = &uart3;
++		i2c0 = &i2c4;
++		i2c1 = &i2c3;
+ 		mmc0 = &mmc_sd0;
+ 		mmc1 = &mmc_sd1;
+ 	};
+@@ -31,7 +33,64 @@ &lcd {
+ 	dsi_reset-gpios = <&gpio0_ports 22 GPIO_ACTIVE_HIGH>;
+ 	backlight_gpio-gpios = <&gpio0_ports 25 GPIO_ACTIVE_HIGH>;
+ };
+-&i2c4 { status = "okay"; };
++&iomux {
++	cam_i2c4_pins: cam_i2c4_pins {
++		pins = K230_IO7, K230_IO8;
++		function = K230_IO7_I2C4_SCL;
++		bias-pull-up;
++		input-enable;
++		drive-strength = <8>;
++	};
++
++	cam_mclk1_pins: cam_mclk1_pins {
++		pins = K230_IO13;
++		function = K230_IO13_M_CLK1;
++		output-enable;
++		drive-strength = <8>;
++	};
++};
++
++&i2c4 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&cam_i2c4_pins>;
++
++	gc2093@37 {
++		compatible = "galaxycore,gc2093";
++		reg = <0x37>;
++	};
++};
++
++&mipi0 {
++	status = "okay";
++	/* set to CSI2 */
++	id = <2>;
++	reg = <0x0 0x9000a800 0x0 0x800>;
++	interrupts = <121 IRQ_TYPE_LEVEL_HIGH>;
++	resets = <&sysctl_reset
++			  K230_RESET_CSI2_REG_OFFSET
++			  K230_RESET_CSI2_TYPE
++			  K230_RESET_CSI2_DONE_BIT
++			  K230_RESET_CSI2_ASSERT_BIT>,
++			 <&sysctl_reset
++			  K230_RESET_M2_REG_OFFSET
++			  K230_RESET_M2_TYPE
++			  K230_RESET_M2_DONE_BIT
++			  K230_RESET_M2_ASSERT_BIT>;
++	reset-names = "csi", "sensor";
++	reset-gpios = <&gpio0_ports 21 GPIO_ACTIVE_HIGH>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&cam_mclk1_pins>;
++	canaan,sensor-mclk-id = <1>;
++	canaan,sensor-mclk-parent = <9>;
++	canaan,sensor-mclk-div = <25>;
++};
++
++&v4l2isp {
++	dev0-sensor-name = "gc2093";
++	dev0-sensor-mode = <0>;
++	dev0-sensor-i2c-bus = <0>; /* alias i2c0 = &i2c4 */
++};
+ &mmc_sd0 {
+ 	status = "okay";
+ 	bus-width = <4>;
+-- 
+2.25.1

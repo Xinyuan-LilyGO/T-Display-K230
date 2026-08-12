@@ -1,0 +1,90 @@
+--- a/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
++++ b/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
+@@ -2,6 +2,9 @@
+ &vo {
+ 	vth_line = <10>;
+ };
++&display {
++	canaan,skip-fbdev-setup;
++};
+ &dsi {
+ 	ports {
+ 		port@1 {
+@@ -17,6 +20,7 @@
+ 		panel-width-mm = <65>;
+ 		panel-height-mm = <145>;
+ 		panel-dsi-lane = <2>;
++		canaan,preserve-boot-splash;
+ 		canaan,dsi-command-backlight;
+ 		default-brightness = <254>;
+ 		max-brightness = <255>;
+--- a/drivers/gpu/drm/canaan/canaan_drv.c
++++ b/drivers/gpu/drm/canaan/canaan_drv.c
+@@ -247,7 +247,10 @@
+ 		goto finish_poll;
+ 	}
+ 
+-	drm_fbdev_generic_setup(drm_dev, 32);
++	if (of_property_read_bool(dev->of_node, "canaan,skip-fbdev-setup"))
++		dev_info(dev, "skip DRM fbdev setup to preserve boot splash\n");
++	else
++		drm_fbdev_generic_setup(drm_dev, 32);
+ 	DRM_DEV_INFO(dev, "Canaan K230 DRM driver register successfully\n");
+ 
+ 	return 0;
+--- a/drivers/gpu/drm/panel/panel-canaan-universal.c
++++ b/drivers/gpu/drm/panel/panel-canaan-universal.c
+@@ -72,6 +72,7 @@
+ 	u32 max_brightness;
+ 	bool dsi_command_backlight;
+ 	bool prepared;
++	bool preserve_boot_splash;
+ 
+ 	struct panel_cmd_seq *init_seq_v1;
+ };
+@@ -373,30 +374,44 @@
+ 
+ 	mipi_dsi_set_drvdata(dsi, ctx);
+ 
+-	ctx->reset = devm_gpiod_get(&dsi->dev, "dsi_reset", GPIOD_OUT_LOW);
++	ctx->preserve_boot_splash =
++		of_property_read_bool(dsi->dev.of_node,
++				      "canaan,preserve-boot-splash");
++
++	ctx->reset = devm_gpiod_get(&dsi->dev, "dsi_reset",
++				    ctx->preserve_boot_splash ?
++				    GPIOD_ASIS : GPIOD_OUT_LOW);
+ 	if (IS_ERR(ctx->reset)) {
+ 		dev_err(&dsi->dev, "Couldn't get our reset GPIO, error: %ld\n",
+ 			PTR_ERR(ctx->reset));
+ 		ctx->reset = NULL;
++	} else if (ctx->preserve_boot_splash) {
++		dev_info(&dsi->dev,
++			 "probe: preserving boot splash, skip reset GPIO toggle\n");
+ 	} else {
+ 		gpiod_direction_output(ctx->reset, 1);
+ 		panel_simple_sleep(200);
+ 		gpiod_set_value_cansleep(ctx->reset, 0);
+ 		panel_simple_sleep(200);
+ 		gpiod_set_value_cansleep(ctx->reset, 1);
+ 	}
+ 
+ 	ctx->power_on =
+-		devm_gpiod_get(&dsi->dev, "backlight_gpio", GPIOD_OUT_LOW);
++		devm_gpiod_get(&dsi->dev, "backlight_gpio",
++			       ctx->preserve_boot_splash ?
++			       GPIOD_ASIS : GPIOD_OUT_LOW);
+ 	if (IS_ERR(ctx->power_on)) {
+ 		dev_err(&dsi->dev,
+ 			"Couldn't get our backlight_gpio GPIO, error: %ld\n",
+ 			PTR_ERR(ctx->power_on));
+ 		ctx->power_on = NULL;
++	} else if (ctx->preserve_boot_splash) {
++		dev_info(&dsi->dev,
++			 "probe: preserving boot splash, leave backlight GPIO unchanged\n");
+ 	} else {
+ 		gpiod_direction_output(ctx->power_on, 1);
+ 	}
+ 
+ 	ctx->dsi = dsi;
+ 	ctx->desc = of_device_get_match_data(&dsi->dev);
