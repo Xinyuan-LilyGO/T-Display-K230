@@ -234,7 +234,7 @@ VIDEO_SRC="${LAUNCHER_DIR}/resources/videos"
 INSTALL_SCRIPT="${LAUNCHER_DIR}/scripts/install_to_sdk.sh"
 
 [[ -x "${INSTALL_SCRIPT}" ]] || die "missing launcher install script: ${INSTALL_SCRIPT}"
-[[ -d "${SDK_DIR}/.git" ]] || die "SDK is not a git checkout: ${SDK_DIR}"
+git -C "${SDK_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "SDK is not a git checkout: ${SDK_DIR}"
 [[ -d "${LAUNCHER_DIR}" ]] || die "missing launcher directory: ${LAUNCHER_DIR}"
 
 if [[ "${DO_BUILD}" -eq 1 ]]; then

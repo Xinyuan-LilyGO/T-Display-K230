@@ -22,7 +22,7 @@ OUTPUT_CONF_DIR="$SDK_DIR/output/$CONF"
 OUTPUT_PACKAGE_BUILD_DIR="$OUTPUT_CONF_DIR/build/k230_phone_ui"
 OUTPUT_TARGET_APP_DIR="$OUTPUT_CONF_DIR/target/root/app/k230_phone_ui"
 
-if [ ! -d "$SDK_DIR/.git" ]; then
+if ! git -C "$SDK_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "ERROR: $SDK_DIR is not a git checkout" >&2
     exit 1
 fi

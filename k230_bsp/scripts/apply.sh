@@ -8,13 +8,14 @@ fi
 
 SDK_DIR="$(cd "$1" && pwd)"
 BSP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXPECTED_COMMIT="$(sed -n '1p' "${BSP_DIR}/metadata/upstream_sdk_commit.txt")"
-CURRENT_COMMIT="$(git -C "${SDK_DIR}" rev-parse HEAD)"
 
-if [ ! -d "${SDK_DIR}/.git" ]; then
+if ! git -C "${SDK_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "Not a git checkout: ${SDK_DIR}" >&2
     exit 1
 fi
+
+EXPECTED_COMMIT="$(sed -n '1p' "${BSP_DIR}/metadata/upstream_sdk_commit.txt")"
+CURRENT_COMMIT="$(git -C "${SDK_DIR}" rev-parse HEAD)"
 
 echo "T-Display K230 BSP apply"
 echo "SDK: ${SDK_DIR}"
