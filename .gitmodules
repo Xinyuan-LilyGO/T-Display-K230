@@ -1,3 +1,4 @@
 [submodule "k230_linux_sdk"]
 	path = k230_linux_sdk
 	url = https://github.com/kendryte/k230_linux_sdk.git
+	ignore = dirty
