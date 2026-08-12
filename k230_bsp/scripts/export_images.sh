@@ -12,11 +12,7 @@ OUT_DIR="${2:-${BSP_DIR}/images}"
 CONF="${3:-k230_canmv_t_display_rm69a10_defconfig}"
 SDK_IMAGES="${SDK_DIR}/output/${CONF}/images"
 UPSTREAM_COMMIT="$(git -C "${SDK_DIR}" rev-parse HEAD)"
-BSP_COMMIT="not-a-git-repo"
-
-if [ -d "${BSP_DIR}/.git" ]; then
-    BSP_COMMIT="$(git -C "${BSP_DIR}" rev-parse HEAD)"
-fi
+BSP_COMMIT="$(git -C "${BSP_DIR}" rev-parse HEAD 2>/dev/null || echo not-a-git-repo)"
 
 if [ ! -d "${SDK_IMAGES}" ]; then
     echo "Missing SDK images directory: ${SDK_IMAGES}" >&2
