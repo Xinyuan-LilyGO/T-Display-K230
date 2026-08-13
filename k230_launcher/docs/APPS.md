@@ -6,6 +6,7 @@ This guide explains the apps shipped with the T-Display K230 LVGL launcher.
 
 - The home screen is a scrollable app grid. Tap an icon to open an app.
 - Back navigation is available from the top-left back button, the configured edge-swipe gesture, or `Esc` on the hardware keyboard when keyboard back navigation is enabled.
+- Edge-swipe back can be enabled in `Settings` > `Display`. When enabled, swipe inward from the left or right screen edge to return to the previous page. On rotated screens, use the visible left/right edge of the current display orientation.
 - Display orientation, font size, page transition effects, brightness, and screen timeout are configured in `Settings` > `Display`.
 - Language is configured in `Settings` > `Language`.
 - Audio output and volume defaults are configured in `Settings` > `Audio`.
@@ -37,9 +38,9 @@ Use the `MTP` app to expose these folders to a host computer over USB.
 | `Radio` | Plays network radio streams and custom stream URLs. | Select a preset or enter a custom URL, then use play/pause and volume controls. Network access must be available. |
 | `Record` | Records from the board microphone, lists recording files, plays them back, and deletes recordings. | Tap record to start and stop. Open the list to play or delete files from `/root/recordings`. |
 | `Mic FFT` | Displays a live microphone spectrum and basic level information. | Use it to check microphone input and adjust the displayed gain for easier signal inspection. |
-| `LoRa` | Controls SX1262 or LR2021 modules with Factory, Chat, Listen, Auto TX, and Continuous TX modes. | Select or edit a profile, then choose the operating mode. Continuous TX shows an antenna warning before transmitting a carrier. |
-| `LoRaWAN` | Manages LoRaWAN profiles and runs OTAA/ABP-style profile tests through the LoRa module. | Load an existing profile, create or edit a profile, validate key lengths, then run the selected profile. Optional simulated telemetry can be enabled. |
-| `NES` | Loads `.nes` ROMs from `/root/nes` and runs them with touch controls or the hardware keyboard. | Select a ROM from the list. Keyboard controls: arrows or `W/A/S/D` for direction, `Enter` for Start, `Space` or `Shift` for Select, `U/I/O` for A, `H/J/K` for B, and `Esc` to stop or return to the ROM list. |
+| `LoRa` | Controls SX1262 or LR2021 modules with Factory, Chat, Listen, Auto TX, and Continuous TX modes. | Select or edit a profile, then choose the operating mode. Continuous TX is for engineering RF testing only, is not recommended for normal use, and must only be used with a suitable antenna connected. |
+| `LoRaWAN` | Manages LoRaWAN profiles and runs OTAA profile tests through the LoRa module. | Load an existing profile, create or edit a profile, validate key lengths, save it, then run the selected profile. Optional simulated telemetry can be enabled. |
+| `NES` | Loads `.nes` ROMs from `/root/nes` and runs them with touch controls or the hardware keyboard. | NES ROMs are not bundled by default. Add your own ROM files to `/root/nes`, then select a ROM from the list. Keyboard controls: arrows or `W/A/S/D` for direction, `Enter` for Start, `Space` or `Shift` for Select, `U/I/O` for A, `H/J/K` for B, and `Esc` to stop or return to the ROM list. |
 | `AI` | Opens the bundled K230 AI demo interface when model resources are installed. | Use it to run supported local AI demos and view their results on the screen. |
 | `RTSP` | Starts or stops camera RTSP streaming and shows the stream address. | Enable streaming, then open the displayed URL from a computer on the same network. Stop RTSP before using the `Camera` app. |
 | `Wi-Fi` | Scans Wi-Fi networks, saves passwords, connects, and reconnects saved networks. | Turn Wi-Fi on, tap a network, enter a password of at least 8 characters, and wait for the connection result. |
@@ -54,7 +55,7 @@ Use the `MTP` app to expose these folders to a host computer over USB.
 | `Keyboard` | Tests the TCA8418 keyboard matrix, keyboard interrupt path, key mapping, and keyboard backlight. | Press hardware keys to light the matching key. Adjust keyboard backlight from the page or Settings. |
 | `LED Test` | Controls XL9555-driven LEDs. | Toggle LEDs from the page. The board LED logic is active-low where noted by the UI. |
 | `Cellular` | Tests the nRF9151 serial modem path, SIM state, LTE status, GNSS, NMEA output, and satellite C/N0 bars. | Power the modem, test AT link, check SIM, start GNSS, then monitor fix status and signal bars. |
-| `USB Modem` | Displays USB modem detection and connection status for supported USB cellular modems. | Connect a modem to USB, open the app, and inspect the detected state and logs. |
+| `USB Modem` | Debug page for USB modem detection and connection status. | This page is currently for engineering/debug visibility only. It does not provide a complete end-user dialing or data-session workflow yet. |
 | `Settings` | Groups network, display, language, time, audio, keyboard, sensor, and system settings. | Open a category, adjust values, and return. Most user settings are persisted. |
 | `System` | Shows system information such as memory, CPU, thermal, display, and network state. | Open it for a compact runtime status overview. |
 | `Display` | Adjusts brightness, orientation, font size, transition effects, and screen timeout. | Select the desired display behavior. Screen timeout also turns off keyboard backlight when a keyboard is present. |
@@ -64,6 +65,25 @@ Use the `MTP` app to expose these folders to a host computer over USB.
 | `Motion` | Runs a simple animation scene for display refresh and UI smoothness checks. | Open it to visually inspect animation stability and the reported LVGL frame rate. |
 | `About` | Shows board, software, and build information. | Open it to identify the installed launcher/BSP image. |
 | `Reboot` | Reboots the board after confirmation. | Use it when a clean software reboot is needed. |
+
+## LoRaWAN Profile Setup
+
+The `LoRaWAN` app stores profile files under `/root/lorawan`.
+
+1. Open `LoRaWAN`.
+2. Tap `New` to create a profile, or `Load` to select an existing `*.json` profile.
+3. Choose the `Region` button that matches your LoRaWAN network. Supported region buttons are `EU868`, `US915`, `AU915`, `EU433`, `CN470`, `AS923`, `AS923_2`, `AS923_3`, `AS923_4`, `KR920`, and `IN865`.
+4. Fill in `JoinEUI`, `DevEUI`, `AppKey`, and `NwkKey`.
+5. `JoinEUI` and `DevEUI` must be 16 hexadecimal digits. `AppKey` and `NwkKey` must be 32 hexadecimal digits.
+6. Set `Sub-band` when required by the selected region or network server. Use `0` for the default.
+7. Set `Interval` in seconds. The app enforces a minimum interval of 60 seconds.
+8. Set `FPort` from `1` to `223`.
+9. Enable `Confirmed uplink` only when the network expects confirmed frames. Enable `ADR` when the network should manage data rate.
+10. Enable simulated temperature upload if you want the app to send generated temperature payloads for testing.
+11. Tap `Save profile`, enter or accept a file name such as `lora_wan_0.json`, then return to the main LoRaWAN page.
+12. Tap `Run` to prepare the radio, join through OTAA, and send payloads with the saved profile.
+
+Save the profile before running it. The app refuses to run profiles with unsaved changes or invalid key lengths.
 
 ## Settings Pages
 
@@ -79,4 +99,3 @@ Some functions are reached through `Settings` instead of direct home icons:
 | `Keyboard settings` | Controls keyboard detection, keyboard back navigation, and keyboard backlight behavior. |
 | `Sensors` | Shows AHT20 temperature/humidity and related sensor status. |
 | `Charger` | Shows and configures BQ25896 charger options when present. |
-
