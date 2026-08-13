@@ -1,71 +1,143 @@
-# T-Display K230 GPIO and Hardware Map
+<div align="center" markdown="1">
+  <img src="../../.github/LilyGo_logo.png" alt="LilyGo logo" width="100"/>
+</div>
+
+<h1 align = "center">🌟 T-Display K230 GPIO and Hardware Map 🌟</h1>
 
 This document records the GPIO, bus, and peripheral assignments expected by the
-T-Display K230 BSP.
+T-Display K230 BSP. The hardware is split into three groups:
 
-## GPIO Map
+- K230 main board
+- optional nRF52840 BLE/audio/sensor base board
+- optional nRF9151 cellular/GNSS/keyboard base board
 
-| K230 GPIO | Direction | Connected function | Signal / role | Notes |
+## K230 Main Board
+
+### 40-Pin Expansion Header
+
+The K230 main board exposes the following 40-pin header.
+
+| Left side | Right side |
+| --- | --- |
+| `ADC0` | `ADC2` |
+| `ADC1` | `GND` |
+| `GPIO47` | `GPIO43` |
+| `GPIO14` | `GPIO46` |
+| `GPIO17` | `GPIO18` |
+| `GPIO53` | `GPIO52` |
+| `GPIO33` | `GPIO62` |
+| `GPIO34` | `GPIO32` |
+| `GPIO29` | `GPIO31` |
+| `GPIO28` | `GPIO30` |
+| `GPIO6` | `GPIO26` |
+| `GPIO3` | `GPIO5` |
+| `GPIO63` | `GPIO27` |
+| `GPIO35` | `GPIO4` |
+| `GPIO45` | `GPIO2` |
+| `GPIO44` | `GPIO42` |
+| `GPIO15` | `GPIO16` |
+| `GPIO19` | `GPIO20` |
+| `5V` | `3V3` |
+| `GND` | `USB-IN-5V` |
+
+### Main-Board Devices
+
+| Function | K230 signal | Direction | Peripheral signal | Notes |
 | --- | --- | --- | --- | --- |
-| `GPIO0` | Input | BOOT0 user button | Button input | Idle high, pressed low. The launcher uses it for screen/backlight toggle behavior. |
-| `GPIO2` | Output | nRF9151 | `EN` | High enables the nRF9151 module. |
-| `GPIO3` | UART1 TX | nRF52840 or RTL8723DS BT UART variant | K230 TX to module RX | Default BLE bridge preset uses UART1. RTL8723DS Bluetooth also needs a BT UART if that hardware variant is assembled. |
-| `GPIO4` | UART1 RX | nRF52840 or RTL8723DS BT UART variant | K230 RX from module TX | Paired with `GPIO3`. |
-| `GPIO5` | Output | SX1262/LR2021 | LoRa reset | Active level is controlled by the RadioLib HAL. |
-| `GPIO14` | Output | SX1262/LR2021 | SPI chip select | LoRa SPI CS. |
-| `GPIO15` | Output | SX1262/LR2021 | SPI SCLK | LoRa SPI clock. |
-| `GPIO16` | Output | SX1262/LR2021 | SPI MOSI | LoRa SPI host-to-radio data. |
-| `GPIO17` | Input | SX1262/LR2021 | SPI MISO | LoRa SPI radio-to-host data. |
-| `GPIO19` | Input | SX1262/LR2021 | `BUSY` | Radio busy status. |
-| `GPIO20` | Input | SX1262/LR2021 | IRQ / DIO1 line to K230 | SX1262 uses DIO1 on this K230 line. LR2021 chip-side IRQ DIO number is `11`, while the K230 interrupt line is `GPIO20`. |
-| `GPIO22` | Output | RM69A10 AMOLED | Panel reset | Used by U-Boot logo path and Linux display bring-up. |
-| `GPIO23` | Input | GT9895 touch / optional LT9611 HDMI bridge | Shared IRQ | Hardware may share the touch IRQ with the LT9611 IRQ. |
-| `GPIO24` | Output | GT9895 touch / optional LT9611 HDMI bridge | Shared reset | Hardware may share the touch reset with the LT9611 reset. |
-| `GPIO25` | Output | RM69A10 AMOLED | Panel power/backlight enable | Used by the boot logo path and launcher backlight control path. |
-| `GPIO28` | UART3 TX | nRF9151 | K230 TX to nRF9151 RX | 115200 8N1, no RTS/CTS. |
-| `GPIO29` | UART3 RX | nRF9151 | K230 RX from nRF9151 TX | 115200 8N1, no RTS/CTS. |
-| `GPIO32` | I2S | MAX98357A | `BCLK` | External I2S amplifier bit clock. |
-| `GPIO33` | I2S | MAX98357A | `LRCK` / `WS` | External I2S amplifier word-select clock. |
-| `GPIO34` | Output | MAX98357A | `SHUTDOWN` | High enables the amplifier, low shuts it down. |
-| `GPIO35` | I2S | MAX98357A | `DIN` | External I2S amplifier data input. |
-| `GPIO36` | I2C3 SCL | Optional LT9611 HDMI bridge | `SCL` | Optional HDMI bridge control bus. |
-| `GPIO37` | I2C3 SDA | Optional LT9611 HDMI bridge | `SDA` | Optional HDMI bridge control bus. |
-| `GPIO42` | Input | TCA8418 keyboard | Keyboard interrupt | Default keyboard-base interrupt line. If a hardware variant routes RTL8723DS BT UART RTS here, the DTS/overlay must match that variant. |
-| `GPIO43` | UART CTS | RTL8723DS BT UART variant | BT UART CTS | Only used when the RTL8723DS Bluetooth UART hardware variant is assembled. |
-| `GPIO44` | Output | SX1262/LR2021 | LoRa module power enable | Enables the LoRa module power path. |
-| `GPIO46` | I2C4 SCL | Keyboard base / sensors | `SCL` | Used for the board I2C device group when present. |
-| `GPIO47` | I2C4 SDA | Keyboard base / sensors | `SDA` | Used for the board I2C device group when present. |
-| `GPIO52` | PWM4 / Output | Keyboard backlight | Backlight PWM | U-Boot initializes it low early; userspace drives PWM brightness. |
-| `GPIO64` | PMU input | INT0 / power key | PMU input channel 0 | Not a normal GPIO line. Idle low, pressed high. Exposed through the PMU/input power-key path. |
+| BOOT0 button | `GPIO0` | Input | Button input | Idle high, pressed low. The launcher uses it for screen/backlight toggle behavior. |
+| PMU INT0 / power key | `GPIO64` | PMU input | PMU input channel 0 | Not a normal GPIO line. Idle low, pressed high. Exposed through the PMU/input power-key path. |
+| RM69A10 AMOLED | `GPIO22` | Output | Reset | Used by U-Boot logo path and Linux display bring-up. |
+| RM69A10 AMOLED | `GPIO25` | Output | Panel enable | Used by the boot logo path and launcher backlight/display enable path. |
+| RM69A10 AMOLED | MIPI DSI | Output | Display data | Default launcher display output. The validated LVGL path uses RGB565 for stable refresh. |
+| GT9895 touch | `GPIO37` | I2C SDA | Touch SDA | Shared I2C pins with the optional LT9611 HDMI bridge path. |
+| GT9895 touch | `GPIO36` | I2C SCL | Touch SCL | Touch controller I2C address is `0x5D`. |
+| GT9895 touch | `GPIO23` | Input | Touch IRQ | Hardware shares this line with the optional LT9611 IRQ. |
+| GT9895 touch | `GPIO24` | Output | Touch reset | Hardware shares this line with the optional LT9611 reset. |
+| LT9611 HDMI bridge | `GPIO37` | I2C SDA | LT9611 SDA | Optional HDMI bridge path. |
+| LT9611 HDMI bridge | `GPIO36` | I2C SCL | LT9611 SCL | Optional HDMI bridge path. |
+| LT9611 HDMI bridge | `GPIO23` | Input | LT9611 IRQ | Shared with touch IRQ. |
+| LT9611 HDMI bridge | `GPIO24` | Output | LT9611 reset | Shared with touch reset. |
+| GC2093 camera | `GPIO49` | I2C SDA | Camera SDA | Camera sensor I2C address is `0x37`. |
+| GC2093 camera | `GPIO48` | I2C SCL | Camera SCL | Used with the MIPI CSI camera path. |
+| GC2093 camera | MIPI CSI | Input | Camera data | Used by camera preview, capture, RTSP, and AI camera features. |
+| SD card | `GPIO54` | SDIO CMD | SD CMD | Boot/storage SDMMC path. |
+| SD card | `GPIO55` | SDIO CLK | SD CLK | Boot/storage SDMMC path. |
+| SD card | `GPIO56` | SDIO D0 | SD D0 | Boot/storage SDMMC path. |
+| SD card | `GPIO57` | SDIO D1 | SD D1 | Boot/storage SDMMC path. |
+| SD card | `GPIO58` | SDIO D2 | SD D2 | Boot/storage SDMMC path. |
+| SD card | `GPIO59` | SDIO D3 | SD D3 | Boot/storage SDMMC path. |
+| Wi-Fi | SDIO | I/O | RTL8189FS or RTL8723DS Wi-Fi | RTL8723DS Bluetooth requires separate BT UART hardware signals; SDIO covers Wi-Fi only. |
+| USB host | USB | I/O | USB Ethernet, USB modem, USB Bluetooth | Supported by the root filesystem packages included by the BSP. |
+| SX1262/LR2021 LoRa | `GPIO16` | SPI MOSI | MOSI | Main-board LoRa SPI. |
+| SX1262/LR2021 LoRa | `GPIO17` | SPI MISO | MISO | Main-board LoRa SPI. |
+| SX1262/LR2021 LoRa | `GPIO15` | SPI SCLK | SCK | Main-board LoRa SPI. |
+| SX1262/LR2021 LoRa | `GPIO14` | Output | CS | SPI chip select. |
+| SX1262/LR2021 LoRa | `GPIO5` | Output | Reset | Controlled by the RadioLib HAL. |
+| SX1262/LR2021 LoRa | `GPIO19` | Input | BUSY | Radio busy status. |
+| SX1262/LR2021 LoRa | `GPIO20` | Input | IRQ / DIO1 line to K230 | SX1262 DIO1 is connected here. LR2021 chip-side IRQ DIO number is `11`, while the K230 interrupt line is `GPIO20`. |
+| SX1262/LR2021 LoRa | `GPIO44` | Output | Power enable | Enables the LoRa module power path. |
 
-## Non-GPIO Buses and Devices
+## nRF52840 BLE / Audio / Sensor Base Board
 
-| Function | Interface | Address / node | Notes |
-| --- | --- | --- | --- |
-| RM69A10 AMOLED | MIPI DSI | Panel timing in display DTB and U-Boot logo path | Default launcher display. The validated LVGL path uses RGB565 for stable refresh. |
-| GT9895 / Goodix Berlin touch | I2C + IRQ/reset GPIOs | Input event device from Linux touch driver | The BSP uses the full Goodix Berlin/Nottingham driver path with type-B multitouch slot reporting. |
-| GC2093 camera | MIPI CSI + I2C | I2C address `0x37` | Used by camera preview, capture, RTSP, and AI camera features. |
-| RTL8189FS Wi-Fi | SDIO | SDIO controller | Default SDIO Wi-Fi option. |
-| RTL8723DS Wi-Fi | SDIO | SDIO controller | Optional SDIO Wi-Fi option. Bluetooth requires the separate BT UART hardware signals. |
-| nRF52840 BLE bridge | UART1 | `/dev/ttyS1` | Used by the BLE launcher page when the nRF52840 bridge firmware is installed. |
-| nRF9151 cellular/GNSS | UART3 + `GPIO2` enable | `/dev/ttyS3`, 115200 8N1 | Used by the Cellular app for AT link, SIM, LTE, GNSS, NMEA, and C/N0 display. |
-| SX1262 / LR2021 LoRa | SPI + GPIO control | RadioLib HAL | SX1262 and LR2021 are auto-detected by the launcher where supported. |
-| AHT20 | I2C4 group | `0x38` | Temperature and humidity sensor. |
-| TCA8418 | I2C4 group | `0x34` | Keyboard matrix controller. |
-| XL9555 | I2C4 group | `0x20` | GPIO expander for LED and keyboard-base support. |
-| BQ25896 | I2C4 group | `0x6B` | Charger and USB/power-source status. |
-| BQ27220 | I2C4 group | `0x55` | Battery gauge telemetry. |
-| MAX98357A | I2S + shutdown GPIO | External amplifier route | Audio output route can be selected from the launcher settings. |
-| USB Ethernet / USB modem / USB Bluetooth | USB host | Linux USB stack | Supported by the root filesystem packages included by the BSP. |
-| Optional LT9611 HDMI bridge | MIPI DSI + I2C3 + GPIO23/24 | I2C3 control bus | Optional hardware path. AMOLED remains the default display output. |
+This optional base board provides BLE Central functionality through nRF52840,
+AHT20 sensing, and the MAX98357A external I2S amplifier.
+
+| Base-board function | Base-board signal | K230 signal | Direction from K230 | Notes |
+| --- | --- | --- | --- | --- |
+| nRF52840 UART | `P0.11` / Arduino `11` RX | `GPIO3` / UART1 TX | Output | K230 sends AT commands to nRF52840 on `/dev/ttyS1`, 115200 8N1. |
+| nRF52840 UART | `P0.12` / Arduino `12` TX | `GPIO4` / UART1 RX | Input | nRF52840 sends AT responses and BLE events to K230. |
+| nRF52840 LED | `P1.00` / Arduino `32` | Local to base board | Output from nRF52840 | Communication/activity LED driven by the nRF52840 firmware. |
+| nRF52840 debug | USB CDC `Serial` | Host computer | I/O | 115200 baud debug output when the nRF52840 USB-C port is connected. |
+| AHT20 sensor | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C address `0x38`. |
+| AHT20 sensor | SDA | `GPIO47` / I2C4 SDA | I2C | Shares the expansion I2C bus. |
+| MAX98357A amplifier | `DOUT` / `DIN` | `GPIO35` / I2S data | Output | External I2S amplifier data input. |
+| MAX98357A amplifier | `CLK` / `BCLK` | `GPIO32` / I2S BCLK | Output | External I2S amplifier bit clock. |
+| MAX98357A amplifier | `WS` / `LRCK` | `GPIO33` / I2S LRCK | Output | External I2S amplifier word-select clock. |
+| MAX98357A amplifier | Shutdown control | `GPIO34` | Output | High enables the amplifier, low shuts it down. |
+
+## nRF9151 Cellular / GNSS / Keyboard Base Board
+
+This optional base board provides cellular/GNSS through nRF9151, keyboard input,
+keyboard backlight, battery gauge, charger, and GPIO expander devices.
+
+| Base-board function | Base-board signal | K230 signal | Direction from K230 | Notes |
+| --- | --- | --- | --- | --- |
+| nRF9151 enable | Power enable | `GPIO2` | Output | K230 drives this line high to enable the module. |
+| nRF9151 UART1 | `P0.26` / RX1 | `GPIO28` / UART3 TX | Output | Main AT command link from K230 to nRF9151, `/dev/ttyS3`, 115200 8N1. |
+| nRF9151 UART1 | `P0.27` / TX1 | `GPIO29` / UART3 RX | Input | AT response and URC link from nRF9151 to K230. |
+| nRF9151 debug UART2 | `P0.29` / TX2 | External USB-UART RX | Output from nRF9151 | Optional Serial LTE Modem debug log output. |
+| nRF9151 debug UART2 | `P0.28` / RX2 | External USB-UART TX | Input to nRF9151 | Optional debug-console input. |
+| nRF9151 LED | `P0.23` | Local to base board | Output from nRF9151 | Firmware-controlled run/GNSS status LED. |
+| BQ25896 charger | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C address `0x6B`. |
+| BQ25896 charger | SDA | `GPIO47` / I2C4 SDA | I2C | Charger and USB/power-source status. |
+| BQ27220 battery gauge | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C address `0x55`. |
+| BQ27220 battery gauge | SDA | `GPIO47` / I2C4 SDA | I2C | Battery current/capacity telemetry. |
+| TCA8418 keyboard | SCL | `GPIO46` / I2C4 SCL | I2C | Linux uses the 7-bit address `0x34`; some schematics list `0x69` as the 8-bit/read-format address. |
+| TCA8418 keyboard | SDA | `GPIO47` / I2C4 SDA | I2C | Keyboard matrix controller. |
+| TCA8418 keyboard | Reset | `GPIO43` | Output | Keyboard controller reset. |
+| TCA8418 keyboard | IRQ | `GPIO42` | Input | Keyboard interrupt line. |
+| XL9555 GPIO expander | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C address `0x20`. |
+| XL9555 GPIO expander | SDA | `GPIO47` / I2C4 SDA | I2C | LED and keyboard-base support. |
+| Keyboard backlight | PWM | `GPIO52` / PWM4 | Output | Userspace drives keyboard-backlight brightness. |
 
 ## I2C Address Quick Reference
 
-| 7-bit address | Device |
-| --- | --- |
-| `0x20` | XL9555 GPIO expander |
-| `0x34` | TCA8418 keyboard controller |
-| `0x37` | GC2093 camera sensor |
-| `0x38` | AHT20 temperature/humidity sensor |
-| `0x55` | BQ27220 battery gauge |
-| `0x6B` | BQ25896 charger |
+| 7-bit address | Device | Board group |
+| --- | --- | --- |
+| `0x20` | XL9555 GPIO expander | nRF9151 keyboard base |
+| `0x34` | TCA8418 keyboard controller | nRF9151 keyboard base |
+| `0x37` | GC2093 camera sensor | K230 main board |
+| `0x38` | AHT20 temperature/humidity sensor | nRF52840 base |
+| `0x55` | BQ27220 battery gauge | nRF9151 keyboard base |
+| `0x5D` | GT9895 / Goodix touch controller | K230 main board |
+| `0x6B` | BQ25896 charger | nRF9151 keyboard base |
+
+## Address and Variant Notes
+
+- The GT9895 touch controller uses I2C address `0x5D`.
+- The TCA8418 keyboard controller is normally addressed as `0x34` in Linux
+  7-bit I2C notation. If a schematic lists `0x69`, that is the shifted 8-bit
+  read-format address.
+- `GPIO42` is the default TCA8418 keyboard interrupt in this BSP.
+- Some RTL8723DS Bluetooth hardware variants route BT UART RTS/CTS to K230 pins
+  such as `GPIO42`/`GPIO43`. Use a matching DTS/overlay for that hardware.
