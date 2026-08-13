@@ -79,6 +79,52 @@ The image is exported to:
 k230_bsp/images/sysimage-sdcard.img
 ```
 
+## Build From Windows With WSL2
+
+Building from native Windows shells such as CMD, PowerShell, Git Bash, MSYS2, or
+Cygwin is not recommended. Use WSL2 with Ubuntu so the SDK sees a normal Linux
+filesystem, permissions, symlinks, and shell environment.
+
+Install Ubuntu 22.04 from an Administrator PowerShell window:
+
+```powershell
+wsl --install -d Ubuntu-22.04
+```
+
+Restart Windows if WSL asks for it, then open the Ubuntu terminal and install the
+basic tools:
+
+```sh
+sudo apt update
+sudo apt install -y git ca-certificates build-essential make rsync python3
+```
+
+Clone and build inside the WSL Linux filesystem, for example under `~/work`.
+Do not build under `/mnt/c/Users/...`; that path is slower and can break
+Linux-style permissions or symlinks used by the SDK.
+
+```sh
+mkdir -p ~/work
+cd ~/work
+git clone --recurse-submodules https://github.com/Xinyuan-LilyGO/T-Display-K230.git t-display-k230
+cd t-display-k230
+./scripts/setup_ubuntu.sh
+./scripts/apply_to_sdk.sh
+./scripts/build_sdcard_image.sh
+```
+
+The generated image is:
+
+```text
+k230_bsp/images/sysimage-sdcard.img
+```
+
+To open the image folder from Windows Explorer:
+
+```sh
+explorer.exe "$(wslpath -w k230_bsp/images)"
+```
+
 ## Flashing
 
 On Linux, replace `/dev/sdX` with the actual TF-card block device:
@@ -95,6 +141,21 @@ diskutil unmountDisk /dev/diskN
 sudo dd if=k230_bsp/images/sysimage-sdcard.img of=/dev/rdiskN bs=8m status=progress
 sync
 ```
+
+### Flash With Rufus On Windows
+
+1. Insert the TF card into the Windows PC.
+2. Open Rufus.
+3. In `Device`, select the TF card.
+4. In `Boot selection`, choose `Disk or ISO image`, then click `SELECT`.
+5. Select `sysimage-sdcard.img` from `k230_bsp/images/`.
+6. Click `START`.
+7. If Rufus asks for the write mode, select `Write in DD Image mode`.
+8. Confirm the erase warning and wait until Rufus reports completion.
+9. Eject the TF card safely and insert it into the T-Display K230.
+
+After flashing, Windows may show a prompt asking to format an unknown partition.
+Cancel that prompt. The card contains Linux partitions used by the K230 image.
 
 ## Fast SSH Deployment
 

@@ -78,6 +78,51 @@ git submodule update --init --recursive
 k230_bsp/images/sysimage-sdcard.img
 ```
 
+## 在 Windows 中通过 WSL2 编译
+
+不建议在原生 Windows 的 CMD、PowerShell、Git Bash、MSYS2 或 Cygwin 中直接
+编译。推荐使用 WSL2 Ubuntu，这样 SDK 可以使用正常的 Linux 文件系统、权限、
+软链接和 shell 环境。
+
+在管理员 PowerShell 中安装 Ubuntu 22.04：
+
+```powershell
+wsl --install -d Ubuntu-22.04
+```
+
+如果 WSL 提示需要重启 Windows，请先重启。然后打开 Ubuntu 终端，安装基础工具：
+
+```sh
+sudo apt update
+sudo apt install -y git ca-certificates build-essential make rsync python3
+```
+
+源码和构建目录请放在 WSL 的 Linux 文件系统内，例如 `~/work`。不要放在
+`/mnt/c/Users/...` 下面编译；这个路径速度较慢，也可能影响 SDK 依赖的 Linux
+权限和软链接。
+
+```sh
+mkdir -p ~/work
+cd ~/work
+git clone --recurse-submodules https://github.com/Xinyuan-LilyGO/T-Display-K230.git t-display-k230
+cd t-display-k230
+./scripts/setup_ubuntu.sh
+./scripts/apply_to_sdk.sh
+./scripts/build_sdcard_image.sh
+```
+
+生成的镜像路径是：
+
+```text
+k230_bsp/images/sysimage-sdcard.img
+```
+
+如果需要从 Windows 资源管理器打开镜像目录：
+
+```sh
+explorer.exe "$(wslpath -w k230_bsp/images)"
+```
+
 ## 烧录
 
 Linux 下将 `/dev/sdX` 替换为真实 TF 卡设备：
@@ -94,6 +139,21 @@ diskutil unmountDisk /dev/diskN
 sudo dd if=k230_bsp/images/sysimage-sdcard.img of=/dev/rdiskN bs=8m status=progress
 sync
 ```
+
+### Windows 使用 Rufus 烧录
+
+1. 将 TF 卡插入 Windows 电脑。
+2. 打开 Rufus。
+3. 在 `设备` 中选择 TF 卡。
+4. 在 `引导类型选择` 中选择 `磁盘或 ISO 镜像`，然后点击 `选择`。
+5. 选择 `k230_bsp/images/` 目录下的 `sysimage-sdcard.img`。
+6. 点击 `开始`。
+7. 如果 Rufus 询问写入模式，选择 `以 DD 镜像模式写入`。
+8. 确认清空 TF 卡的提示，等待 Rufus 写入完成。
+9. 安全弹出 TF 卡，然后插入 T-Display K230。
+
+烧录完成后，Windows 可能会提示格式化未知分区。请取消该提示。TF 卡中包含
+K230 镜像使用的 Linux 分区。
 
 ## SSH 快速部署
 
