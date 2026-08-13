@@ -1,4 +1,8 @@
-# T-Display K230 Launcher App Guide
+<div align="center" markdown="1">
+  <img src="../../.github/LilyGo_logo.png" alt="LilyGo logo" width="100"/>
+</div>
+
+<h1 align = "center">🌟 T-Display K230 Launcher App Guide 🌟</h1>
 
 This guide explains the apps shipped with the T-Display K230 LVGL launcher.
 
@@ -8,8 +12,8 @@ This guide explains the apps shipped with the T-Display K230 LVGL launcher.
 - Back navigation is available from the top-left back button, the configured edge-swipe gesture, or `Esc` on the hardware keyboard when keyboard back navigation is enabled.
 - Edge-swipe back can be enabled in `Settings` > `Display`. When enabled, swipe inward from the left or right screen edge to return to the previous page. On rotated screens, use the visible left/right edge of the current display orientation.
 - Display orientation, font size, page transition effects, brightness, and screen timeout are configured in `Settings` > `Display`.
-- Language is configured in `Settings` > `Language`.
-- Audio output and volume defaults are configured in `Settings` > `Audio`.
+- Language is configured in `Settings` > `Language`. The default language is English, and the default configuration includes Chinese, English, and Japanese.
+- Audio output and default volume are configured in `Settings` > `Audio`. The default output uses an external I2S device.
 - If the keyboard base is attached, hardware keyboard input can replace the on-screen keyboard.
 
 ## Storage Folders

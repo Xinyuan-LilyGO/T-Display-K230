@@ -5,7 +5,7 @@
 <h1 align = "center">🌟 LilyGo T-Display K230 🌟</h1>
 
 本仓库用于从 Kendryte 官方 K230 Linux SDK 构建 LILYGO T-Display K230
-的 SD 卡镜像，包含板级支持文件、LVGL 启动器应用和主机侧辅助脚本。
+的 SD 卡镜像，包含板级支持文件、LVGL 启动器应用和主机侧辅助脚本
 
 已验证的上游 SDK：
 
@@ -32,7 +32,7 @@ scripts/           主机依赖安装、overlay 应用、镜像构建和 SSH 部
 
 ## 从全新 Ubuntu 电脑开始构建
 
-推荐 Ubuntu 22.04 或 24.04。
+推荐 Ubuntu 22.04 或 24.04
 
 安装 Git 和基础构建工具：
 
@@ -112,17 +112,17 @@ Launcher：
 
 ## 已包含的硬件支持
 
-- RM69A10 AMOLED MIPI DSI 屏幕和 U-Boot 启动 logo。
-- GT9895 / Goodix Berlin 触摸。
-- GC2093 摄像头。
-- RTL8189FS 和 RTL8723DS SDIO Wi-Fi。
-- USB 蓝牙适配器支持和 BlueZ 运行环境。
-- nRF52840 UART 预设。
-- nRF9151 UART 和使能引脚预设。
-- SX1262/LR2021 LoRa SPI 预设。
-- MAX98357A 外部 I2S 功放和音频输出切换。
-- AHT20、BQ25896、BQ27220、XL9555、TCA8418 键盘底板 I2C 设备。
-- 键盘中断 GPIO42 和键盘背光 GPIO52/PWM4。
-- PMU 电源键 input 和 K230 温度传感器支持。
+- RM69A10 AMOLED MIPI DSI 屏幕和 U-Boot 启动 logo
+- GT9895 / Goodix Berlin 触摸
+- GC2093 摄像头
+- RTL8189FS SDIO Wi-Fi
+- USB 蓝牙适配器支持和 BlueZ 运行环境
+- nRF52840 UART 预设
+- nRF9151 UART 和使能引脚预设
+- SX1262/LR2021 LoRa SPI 预设
+- MAX98357A 外部 I2S 功放和音频输出切换
+- AHT20、BQ25896、BQ27220、XL9555、TCA8418 键盘底板 I2C 设备
+- 键盘中断 GPIO42 和键盘背光 GPIO52/PWM4
+- PMU 电源键 input 和 K230 温度传感器支持
 
-`k230_bsp/images/` 下的镜像文件是本机构建产物。
+`k230_bsp/images/` 下的镜像文件是本机构建产物

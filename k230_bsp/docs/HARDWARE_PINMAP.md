@@ -40,6 +40,8 @@ The K230 main board exposes the following 40-pin header.
 | `5V` | `3V3` |
 | `GND` | `USB-IN-5V` |
 
+* With USB-C facing down, the left side of the 2x20 pin header is the reference point.
+
 ### Main-Board Devices
 
 | Function | K230 signal | Direction | Peripheral signal | Notes |
@@ -74,7 +76,7 @@ The K230 main board exposes the following 40-pin header.
 | SX1262/LR2021 LoRa | `GPIO14` | Output | CS | SPI chip select. |
 | SX1262/LR2021 LoRa | `GPIO5` | Output | Reset | Controlled by the RadioLib HAL. |
 | SX1262/LR2021 LoRa | `GPIO19` | Input | BUSY | Radio busy status. |
-| SX1262/LR2021 LoRa | `GPIO20` | Input | IRQ / DIO1 line to K230 | SX1262 DIO1 is connected here. LR2021 chip-side IRQ DIO number is `11`, while the K230 interrupt line is `GPIO20`. |
+| SX1262/LR2021 LoRa | `GPIO20` | Input | IRQ / DIO1 line to K230 | SX1262 version, DIO1 is connected to the K230 side interrupt line `GPIO20`. LR2021 version, the IRQ DIO number is `DIO11`, which is connected to the K230 `GPIO20`.. |
 | SX1262/LR2021 LoRa | `GPIO44` | Output | Power enable | Enables the LoRa module power path. |
 
 ## nRF52840 BLE / Audio / Sensor Base Board
@@ -86,7 +88,7 @@ AHT20 sensing, and the MAX98357A external I2S amplifier.
 | --- | --- | --- | --- | --- |
 | nRF52840 UART | `P0.11` / Arduino `11` RX | `GPIO3` / UART1 TX | Output | K230 sends AT commands to nRF52840 on `/dev/ttyS1`, 115200 8N1. |
 | nRF52840 UART | `P0.12` / Arduino `12` TX | `GPIO4` / UART1 RX | Input | nRF52840 sends AT responses and BLE events to K230. |
-| nRF52840 LED | `P1.00` / Arduino `32` | Local to base board | Output from nRF52840 | Communication/activity LED driven by the nRF52840 firmware. |
+| nRF52840 LED | `P1.00` / Arduino `32` |Blue LED (mounted on the nRF52840 board) | Output from nRF52840 | Communication/activity LED driven by the nRF52840 firmware. |
 | nRF52840 debug | USB CDC `Serial` | Host computer | I/O | 115200 baud debug output when the nRF52840 USB-C port is connected. |
 | AHT20 sensor | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C address `0x38`. |
 | AHT20 sensor | SDA | `GPIO47` / I2C4 SDA | I2C | Shares the expansion I2C bus. |
@@ -107,12 +109,12 @@ keyboard backlight, battery gauge, charger, and GPIO expander devices.
 | nRF9151 UART1 | `P0.27` / TX1 | `GPIO29` / UART3 RX | Input | AT response and URC link from nRF9151 to K230. |
 | nRF9151 debug UART2 | `P0.29` / TX2 | External USB-UART RX | Output from nRF9151 | Optional Serial LTE Modem debug log output. |
 | nRF9151 debug UART2 | `P0.28` / RX2 | External USB-UART TX | Input to nRF9151 | Optional debug-console input. |
-| nRF9151 LED | `P0.23` | Local to base board | Output from nRF9151 | Firmware-controlled run/GNSS status LED. |
+| nRF9151 LED | `P0.23` | Blue LED (mounted inside the PCB board) | Output from nRF9151 | Firmware-controlled run/GNSS status LED. |
 | BQ25896 charger | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C address `0x6B`. |
 | BQ25896 charger | SDA | `GPIO47` / I2C4 SDA | I2C | Charger and USB/power-source status. |
 | BQ27220 battery gauge | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C address `0x55`. |
 | BQ27220 battery gauge | SDA | `GPIO47` / I2C4 SDA | I2C | Battery current/capacity telemetry. |
-| TCA8418 keyboard | SCL | `GPIO46` / I2C4 SCL | I2C | Linux uses the 7-bit address `0x34`; some schematics list `0x69` as the 8-bit/read-format address. |
+| TCA8418 keyboard | SCL | `GPIO46` / I2C4 SCL | I2C | Linux uses the 7-bit address `0x34` |
 | TCA8418 keyboard | SDA | `GPIO47` / I2C4 SDA | I2C | Keyboard matrix controller. |
 | TCA8418 keyboard | Reset | `GPIO43` | Output | Keyboard controller reset. |
 | TCA8418 keyboard | IRQ | `GPIO42` | Input | Keyboard interrupt line. |
@@ -124,20 +126,11 @@ keyboard backlight, battery gauge, charger, and GPIO expander devices.
 
 | 7-bit address | Device | Board group |
 | --- | --- | --- |
-| `0x20` | XL9555 GPIO expander | nRF9151 keyboard base |
-| `0x34` | TCA8418 keyboard controller | nRF9151 keyboard base |
 | `0x37` | GC2093 camera sensor | K230 main board |
-| `0x38` | AHT20 temperature/humidity sensor | nRF52840 base |
-| `0x55` | BQ27220 battery gauge | nRF9151 keyboard base |
 | `0x5D` | GT9895 / Goodix touch controller | K230 main board |
 | `0x6B` | BQ25896 charger | nRF9151 keyboard base |
+| `0x38` | AHT20 temperature/humidity sensor | nRF52840 base |
+| `0x20` | XL9555 GPIO expander | nRF9151 keyboard base |
+| `0x34` | TCA8418 keyboard controller | nRF9151 keyboard base |
+| `0x55` | BQ27220 battery gauge | nRF9151 keyboard base |
 
-## Address and Variant Notes
-
-- The GT9895 touch controller uses I2C address `0x5D`.
-- The TCA8418 keyboard controller is normally addressed as `0x34` in Linux
-  7-bit I2C notation. If a schematic lists `0x69`, that is the shifted 8-bit
-  read-format address.
-- `GPIO42` is the default TCA8418 keyboard interrupt in this BSP.
-- Some RTL8723DS Bluetooth hardware variants route BT UART RTS/CTS to K230 pins
-  such as `GPIO42`/`GPIO43`. Use a matching DTS/overlay for that hardware.
