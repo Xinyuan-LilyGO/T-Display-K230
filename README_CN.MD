@@ -1,6 +1,10 @@
-# LILYGO T-Display K230
+<div align="center" markdown="1">
+  <img src=".github/LilyGo_logo.png" alt="LilyGo logo" width="100"/>
+</div>
 
-本仓库用于从 Kendryte 官方 K230 Linux SDK 构建 LILYGO T-Display K230 RM69A10
+<h1 align = "center">🌟 LilyGo T-Display K230 🌟</h1>
+
+本仓库用于从 Kendryte 官方 K230 Linux SDK 构建 LILYGO T-Display K230
 的 SD 卡镜像，包含板级支持文件、LVGL 启动器应用和主机侧辅助脚本。
 
 已验证的上游 SDK：
@@ -33,7 +37,7 @@ sudo apt install -y git ca-certificates build-essential make rsync python3
 克隆本仓库并拉取 SDK 子模块：
 
 ```sh
-git clone --recurse-submodules <this-repository-url> t-display-k230
+git clone --recurse-submodules https://github.com/Xinyuan-LilyGO/T-Display-K230.git t-display-k230
 cd t-display-k230
 ```
 

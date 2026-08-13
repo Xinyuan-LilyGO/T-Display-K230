@@ -1,6 +1,10 @@
-# T-Display K230 Launcher
+<div align="center" markdown="1">
+  <img src="../.github/LilyGo_logo.png" alt="LilyGo logo" width="100"/>
+</div>
 
-这个目录存放 LILYGO T-Display K230 RM69A10 板子的手机风格 LVGL 启动器应用。
+<h1 align = "center">🌟 LilyGo T-Display K230 Launcher 🌟</h1>
+
+这个目录存放 LILYGO T-Display K230 手机风格 LVGL 启动器应用。
 
 ## 前置条件
 
@@ -14,7 +18,7 @@ sudo apt install -y git ca-certificates build-essential make rsync python3
 请先安装并应用 BSP：
 
 ```sh
-git clone --recurse-submodules <this-repository-url> t-display-k230
+git clone --recurse-submodules https://github.com/Xinyuan-LilyGO/T-Display-K230.git t-display-k230
 cd t-display-k230
 ./scripts/apply_to_sdk.sh
 ```

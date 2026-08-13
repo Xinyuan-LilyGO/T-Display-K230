@@ -1,4 +1,8 @@
-# LILYGO T-Display K230 BSP
+<div align="center" markdown="1">
+  <img src="../.github/LilyGo_logo.png" alt="LilyGo logo" width="100"/>
+</div>
+
+<h1 align = "center">🌟 LilyGo T-Display K230 BSP 🌟</h1>
 
 这个目录是 LILYGO T-Display K230 RM69A10 硬件的板级支持 overlay，
 用于叠加到 Kendryte 官方 K230 Linux SDK。
@@ -55,7 +59,7 @@ cd ..
 克隆本仓库：
 
 ```sh
-git clone --recurse-submodules <this-repository-url> t-display-k230
+git clone --recurse-submodules https://github.com/Xinyuan-LilyGO/T-Display-K230.git t-display-k230
 ```
 
 安装上游 SDK 工具链和依赖：

@@ -1,7 +1,11 @@
-# LILYGO T-Display K230
+<div align="center" markdown="1">
+  <img src=".github/LilyGo_logo.png" alt="LilyGo logo" width="100"/>
+</div>
+
+<h1 align = "center">🌟 LilyGo T-Display K230 🌟</h1>
 
 This repository packages the board support files, launcher application, and host
-scripts for building a LILYGO T-Display K230 RM69A10 SD-card image from the
+scripts for building a LILYGO T-Display K230 SD-card image from the
 official Kendryte K230 Linux SDK.
 
 Validated upstream SDK:
@@ -34,7 +38,7 @@ sudo apt install -y git ca-certificates build-essential make rsync python3
 Clone this repository with the SDK submodule:
 
 ```sh
-git clone --recurse-submodules <this-repository-url> t-display-k230
+git clone --recurse-submodules https://github.com/Xinyuan-LilyGO/T-Display-K230.git t-display-k230
 cd t-display-k230
 ```
 
