@@ -23,6 +23,13 @@ k230_linux_sdk/    Kendryte 官方 K230 Linux SDK 子模块
 scripts/           主机依赖安装、overlay 应用、镜像构建和 SSH 部署脚本
 ```
 
+## 文档入口
+
+- [Launcher 应用使用说明](k230_launcher/docs/APPS_CN.md)
+- [BSP GPIO 和硬件连接表](k230_bsp/docs/HARDWARE_PINMAP_CN.md)
+- [BSP README](k230_bsp/README_CN.MD)
+- [Launcher README](k230_launcher/README_CN.MD)
+
 ## 从全新 Ubuntu 电脑开始构建
 
 推荐 Ubuntu 22.04 或 24.04。

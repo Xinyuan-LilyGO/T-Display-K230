@@ -26,6 +26,10 @@ cd t-display-k230
 
 The BSP README explains the full SDK dependency setup and image build flow.
 
+## App Guide
+
+See [docs/APPS.md](docs/APPS.md) for the usage guide of each launcher app.
+
 ## Install Into The SDK
 
 Clone or copy this launcher next to the SDK, then run:

@@ -29,6 +29,9 @@ dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 - 键盘中断 GPIO42 和键盘背光 GPIO52/PWM4。
 - PMU 电源键 input 驱动和 K230 温度传感器支持。
 
+GPIO、总线和外设连接关系请看
+[docs/HARDWARE_PINMAP_CN.md](docs/HARDWARE_PINMAP_CN.md)。
+
 ## 从全新 Ubuntu 电脑开始构建
 
 上游 SDK 主要验证环境是 Ubuntu 22.04 和 Ubuntu 24.04。
@@ -142,7 +145,8 @@ scripts/apply.sh         将 BSP overlay 应用到 SDK
 scripts/build.sh         构建 k230_canmv_t_display_rm69a10_defconfig
 scripts/export_images.sh 将镜像产物复制到 images/
 metadata/                上游 SDK URL/commit 和 overlay 文件清单
-docs/HARDWARE_PINMAP.md  板级引脚说明
+docs/HARDWARE_PINMAP.md  板级 GPIO 和硬件连接说明
+docs/HARDWARE_PINMAP_CN.md 中文板级 GPIO 和硬件连接说明
 images/                  本地镜像导出目录
 ```
 

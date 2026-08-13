@@ -25,6 +25,10 @@ cd t-display-k230
 
 完整 SDK 依赖安装、工具链准备、镜像构建方式请看 BSP 的 README。
 
+## 应用使用说明
+
+每个 launcher 应用的用途和用法请看 [docs/APPS_CN.md](docs/APPS_CN.md)。
+
 ## 安装到 SDK
 
 将本仓库放在 SDK 旁边，然后执行：

@@ -24,6 +24,13 @@ k230_linux_sdk/    Official Kendryte K230 Linux SDK submodule
 scripts/           Host setup, SDK overlay, image build, and SSH deployment helpers
 ```
 
+## Documentation
+
+- [Launcher app guide](k230_launcher/docs/APPS.md)
+- [BSP GPIO and hardware map](k230_bsp/docs/HARDWARE_PINMAP.md)
+- [BSP README](k230_bsp/README.MD)
+- [Launcher README](k230_launcher/README.MD)
+
 ## Build From A Fresh Ubuntu PC
 
 Ubuntu 22.04 or 24.04 is recommended.

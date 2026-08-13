@@ -29,6 +29,9 @@ dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 - Keyboard interrupt GPIO42 and keyboard backlight GPIO52/PWM4.
 - PMU power-key input and K230 thermal sensor support.
 
+See [docs/HARDWARE_PINMAP.md](docs/HARDWARE_PINMAP.md) for the GPIO, bus, and
+peripheral connection map.
+
 ## Build From a Fresh Ubuntu PC
 
 The upstream SDK is verified mainly on Ubuntu 22.04 and 24.04.
@@ -143,7 +146,8 @@ scripts/apply.sh         Apply BSP overlay to an SDK checkout
 scripts/build.sh         Build k230_canmv_t_display_rm69a10_defconfig
 scripts/export_images.sh Copy image artifacts into images/
 metadata/                Upstream SDK URL/commit and overlay manifest
-docs/HARDWARE_PINMAP.md  Board pin map
+docs/HARDWARE_PINMAP.md  Board GPIO and hardware map
+docs/HARDWARE_PINMAP_CN.md Chinese board GPIO and hardware map
 images/                  Local image export directory
 ```
 
