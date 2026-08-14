@@ -91,6 +91,8 @@ typedef enum {
     MESH_PROFILE_EU868,
     MESH_PROFILE_LITE,
     MESH_PROFILE_NARROW,
+    MESH_PROFILE_HAM_20KHZ,
+    MESH_PROFILE_HAM_100KHZ,
 } mesh_choice_profile_t;
 
 typedef struct {
@@ -129,13 +131,25 @@ static const mesh_region_choice_t mesh_region_choices[] = {
     {"IN", "India", MESH_PROFILE_STD, "LONG_FAST"},
     {"NZ_865", "NZ 865", MESH_PROFILE_STD, "LONG_FAST"},
     {"TH", "Thailand", MESH_PROFILE_STD, "LONG_FAST"},
+    {"UA_433", "Ukraine 433", MESH_PROFILE_STD, "LONG_FAST"},
     {"MY_433", "Malaysia 433", MESH_PROFILE_STD, "LONG_FAST"},
     {"MY_919", "Malaysia 919", MESH_PROFILE_STD, "LONG_FAST"},
     {"SG_923", "Singapore 923", MESH_PROFILE_STD, "LONG_FAST"},
     {"PH_433", "Philippines 433", MESH_PROFILE_STD, "LONG_FAST"},
     {"PH_868", "Philippines 868", MESH_PROFILE_STD, "LONG_FAST"},
     {"PH_915", "Philippines 915", MESH_PROFILE_STD, "LONG_FAST"},
+    {"KZ_433", "Kazakhstan 433", MESH_PROFILE_STD, "LONG_FAST"},
+    {"KZ_863", "Kazakhstan 863", MESH_PROFILE_STD, "LONG_FAST"},
+    {"NP_865", "Nepal 865", MESH_PROFILE_STD, "LONG_FAST"},
     {"BR_902", "Brazil 902", MESH_PROFILE_STD, "LONG_FAST"},
+    {"ITU1_2M", "ITU1 2m", MESH_PROFILE_HAM_20KHZ, "TINY_FAST"},
+    {"ITU2_2M", "ITU2 2m", MESH_PROFILE_HAM_20KHZ, "TINY_FAST"},
+    {"ITU3_2M", "ITU3 2m", MESH_PROFILE_HAM_20KHZ, "TINY_FAST"},
+    {"ITU2_125CM", "ITU2 1.25m", MESH_PROFILE_HAM_100KHZ, "NARROW_SLOW"},
+    {"ITU1_70CM", "ITU1 70cm", MESH_PROFILE_HAM_100KHZ, "NARROW_SLOW"},
+    {"ITU2_70CM", "ITU2 70cm", MESH_PROFILE_HAM_100KHZ, "NARROW_SLOW"},
+    {"ITU3_70CM", "ITU3 70cm", MESH_PROFILE_HAM_100KHZ, "NARROW_SLOW"},
+    {"LORA_24", "LoRa 2.4GHz", MESH_PROFILE_STD, "LONG_FAST"},
 };
 
 static const mesh_preset_choice_t mesh_preset_choices[] = {
@@ -165,8 +179,14 @@ static const mesh_preset_choice_t mesh_preset_choices[] = {
     {"MEDIUM_TURBO", "Medium Turbo", MESH_PROFILE_MASK(MESH_PROFILE_STD)},
     {"LITE_FAST", "Lite Fast", MESH_PROFILE_MASK(MESH_PROFILE_LITE)},
     {"LITE_SLOW", "Lite Slow", MESH_PROFILE_MASK(MESH_PROFILE_LITE)},
-    {"NARROW_FAST", "Narrow Fast", MESH_PROFILE_MASK(MESH_PROFILE_NARROW)},
-    {"NARROW_SLOW", "Narrow Slow", MESH_PROFILE_MASK(MESH_PROFILE_NARROW)},
+    {"NARROW_FAST", "Narrow Fast",
+     MESH_PROFILE_MASK(MESH_PROFILE_NARROW) |
+         MESH_PROFILE_MASK(MESH_PROFILE_HAM_100KHZ)},
+    {"NARROW_SLOW", "Narrow Slow",
+     MESH_PROFILE_MASK(MESH_PROFILE_NARROW) |
+         MESH_PROFILE_MASK(MESH_PROFILE_HAM_100KHZ)},
+    {"TINY_FAST", "Tiny Fast", MESH_PROFILE_MASK(MESH_PROFILE_HAM_20KHZ)},
+    {"TINY_SLOW", "Tiny Slow", MESH_PROFILE_MASK(MESH_PROFILE_HAM_20KHZ)},
 };
 
 static const mesh_choice_t mesh_power_choices[] = {

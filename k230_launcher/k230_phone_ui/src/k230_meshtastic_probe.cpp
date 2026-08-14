@@ -64,6 +64,8 @@
 #define MESHTASTIC_NODE_CACHE_SIZE 24U
 #define MESHTASTIC_PACKET_HISTORY_SIZE 64U
 #define MESHTASTIC_PACKET_HISTORY_TTL_US (30ULL * 60ULL * 1000000ULL)
+#define MESHTASTIC_CHAT_DEDUP_SIZE 16U
+#define MESHTASTIC_CHAT_DEDUP_TTL_US (45ULL * 1000000ULL)
 #define MESHTASTIC_DELAYED_TX_QUEUE_SIZE 4U
 #define MESHTASTIC_REBROADCAST_MIN_DELAY_US 150000ULL
 #define MESHTASTIC_REBROADCAST_JITTER_US 700000ULL
@@ -742,6 +744,13 @@ typedef struct {
 } mesh_history_entry_t;
 
 typedef struct {
+    uint32_t from;
+    uint32_t to;
+    uint64_t seen_us;
+    char text[96];
+} mesh_chat_dedup_entry_t;
+
+typedef struct {
     uint32_t node = 0;
     uint64_t last_seen_us = 0;
     int rssi_dbm = 0;
@@ -976,13 +985,25 @@ static const meshtastic_region_t meshtastic_regions[] = {
     {"IN", 865.0f, 867.0f, 30, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"NZ_865", 864.0f, 868.0f, 36, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"TH", 920.0f, 925.0f, 27, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
+    {"UA_433", 433.0f, 434.7f, 10, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"MY_433", 433.0f, 435.0f, 20, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"MY_919", 919.0f, 924.0f, 27, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"SG_923", 917.0f, 925.0f, 20, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"PH_433", 433.0f, 434.7f, 10, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"PH_868", 868.0f, 869.4f, 14, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"PH_915", 915.0f, 918.0f, 24, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
+    {"KZ_433", 433.075f, 434.775f, 10, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
+    {"KZ_863", 863.0f, 868.0f, 30, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
+    {"NP_865", 865.0f, 868.0f, 30, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"BR_902", 902.0f, 907.5f, 30, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
+    {"ITU1_2M", 144.0f, 146.0f, 30, false, REGION_PROFILE_HAM_20KHZ, "TINY_FAST", 26},
+    {"ITU2_2M", 144.0f, 148.0f, 30, false, REGION_PROFILE_HAM_20KHZ, "TINY_FAST", 51},
+    {"ITU3_2M", 144.0f, 148.0f, 30, false, REGION_PROFILE_HAM_20KHZ, "TINY_FAST", 33},
+    {"ITU2_125CM", 220.0f, 225.0f, 30, false, REGION_PROFILE_HAM_100KHZ, "NARROW_SLOW", 37},
+    {"ITU1_70CM", 430.0f, 440.0f, 30, false, REGION_PROFILE_HAM_100KHZ, "NARROW_SLOW", 37},
+    {"ITU2_70CM", 420.0f, 450.0f, 30, false, REGION_PROFILE_HAM_100KHZ, "NARROW_SLOW", 137},
+    {"ITU3_70CM", 430.0f, 450.0f, 30, false, REGION_PROFILE_HAM_100KHZ, "NARROW_SLOW", 37},
+    {"LORA_24", 2400.0f, 2483.5f, 10, true, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"UNSET", 902.0f, 928.0f, 30, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
 };
 
@@ -1014,6 +1035,8 @@ static LR2021 *active_lr2021;
 static mesh_history_entry_t mesh_history[MESHTASTIC_PACKET_HISTORY_SIZE];
 static size_t mesh_history_count;
 static size_t mesh_history_next;
+static mesh_chat_dedup_entry_t mesh_chat_dedup[MESHTASTIC_CHAT_DEDUP_SIZE];
+static size_t mesh_chat_dedup_next;
 static delayed_tx_t mesh_delayed_tx_queue[MESHTASTIC_DELAYED_TX_QUEUE_SIZE];
 static ack_retry_entry_t mesh_ack_retry_queue[MESHTASTIC_ACK_RETRY_QUEUE_SIZE];
 static char daemon_event_log[MESHTASTIC_EVENT_LOG_LINES][MESHTASTIC_EVENT_LOG_LINE_LEN];
@@ -2714,6 +2737,39 @@ static void mesh_history_remember_tx(const tx_frame_t &frame)
     }
 }
 
+static bool mesh_chat_text_seen_recently(uint32_t from, uint32_t to,
+                                         const std::string &text)
+{
+    uint64_t now = monotonic_us();
+
+    if(text.empty()) {
+        return false;
+    }
+    for(size_t i = 0; i < MESHTASTIC_CHAT_DEDUP_SIZE; i++) {
+        if(mesh_chat_dedup[i].seen_us == 0ULL ||
+           now < mesh_chat_dedup[i].seen_us ||
+           now - mesh_chat_dedup[i].seen_us > MESHTASTIC_CHAT_DEDUP_TTL_US) {
+            continue;
+        }
+        if(mesh_chat_dedup[i].from == from && mesh_chat_dedup[i].to == to &&
+           strncmp(mesh_chat_dedup[i].text, text.c_str(),
+                   sizeof(mesh_chat_dedup[i].text)) == 0) {
+            mesh_chat_dedup[i].seen_us = now;
+            return true;
+        }
+    }
+
+    mesh_chat_dedup[mesh_chat_dedup_next].from = from;
+    mesh_chat_dedup[mesh_chat_dedup_next].to = to;
+    mesh_chat_dedup[mesh_chat_dedup_next].seen_us = now;
+    snprintf(mesh_chat_dedup[mesh_chat_dedup_next].text,
+             sizeof(mesh_chat_dedup[mesh_chat_dedup_next].text), "%s",
+             text.c_str());
+    mesh_chat_dedup_next =
+        (mesh_chat_dedup_next + 1U) % MESHTASTIC_CHAT_DEDUP_SIZE;
+    return false;
+}
+
 static uint32_t mesh_prng_u32(uint32_t salt)
 {
     static uint32_t state;
@@ -3340,9 +3396,14 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
             if(!duplicate && channel_match && !clean.empty() &&
                (header.to == MESHTASTIC_NODENUM_BROADCAST ||
                 header.to == opts.from_node || header.from == opts.from_node)) {
-                daemon_chat("RX 0x%08x rssi=%ddBm snr=%.1f: %s",
-                            header.from, (int)roundf(rssi), snr,
-                            clean.c_str());
+                if(mesh_chat_text_seen_recently(header.from, header.to, clean)) {
+                    daemon_event("Mesh chat duplicate text suppressed from=0x%08x to=0x%08x text=%s",
+                                 header.from, header.to, clean.c_str());
+                } else {
+                    daemon_chat("RX 0x%08x rssi=%ddBm snr=%.1f: %s",
+                                header.from, (int)roundf(rssi), snr,
+                                clean.c_str());
+                }
             }
         } else if(decoded.portnum == MESHTASTIC_POSITION_APP) {
             mesh_position_info_t position;
@@ -3697,6 +3758,9 @@ static std::string daemon_nodes_response(void)
         response += "No nodes seen yet\n";
         return response;
     }
+    snprintf(line, sizeof(line), "Node count: %u\n",
+             (unsigned)mesh_node_count);
+    response += line;
     for(size_t i = 0; i < mesh_node_count; i++) {
         uint32_t age_s = 0;
         const char *long_name = mesh_nodes[i].long_name[0] ?
