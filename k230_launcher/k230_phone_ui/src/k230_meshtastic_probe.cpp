@@ -847,6 +847,15 @@ typedef struct {
 } mesh_data_proto_t;
 
 typedef struct {
+    bool active = false;
+    uint32_t to_node = MESHTASTIC_NODENUM_BROADCAST;
+    uint32_t packet_id = 0;
+    uint8_t hop_limit = 3;
+    bool want_ack = false;
+    mesh_data_proto_t data;
+} phoneapi_mesh_tx_t;
+
+typedef struct {
     std::string long_name;
     std::string short_name;
     int hw_model = -1;
@@ -1056,6 +1065,10 @@ static pthread_t phoneapi_thread;
 static volatile bool phoneapi_thread_running;
 static bool phoneapi_thread_started;
 static probe_options_t phoneapi_opts;
+static pthread_mutex_t phoneapi_uart_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int phoneapi_uart_fd = -1;
+static pthread_mutex_t phoneapi_tx_mutex = PTHREAD_MUTEX_INITIALIZER;
+static phoneapi_mesh_tx_t phoneapi_pending_tx;
 
 static void radio_event_isr(void)
 {
@@ -1913,6 +1926,19 @@ static void append_bool_field(std::vector<uint8_t> *out, uint32_t field,
     append_uint32_field(out, field, value ? 1U : 0U);
 }
 
+static void append_float_field(std::vector<uint8_t> *out, uint32_t field,
+                               float value)
+{
+    uint32_t raw;
+
+    if(!out) {
+        return;
+    }
+    memcpy(&raw, &value, sizeof(raw));
+    append_varint(out, (field << 3U) | 5U);
+    append_fixed32(out, raw);
+}
+
 static uint32_t phoneapi_region_enum(const std::string &name)
 {
     struct region_map_t {
@@ -2194,12 +2220,22 @@ static bool phoneapi_hex_decode(const char *hex, size_t len,
     return true;
 }
 
+static uint8_t mesh_header_hop_limit(const mesh_header_t &header);
+static uint8_t mesh_header_hop_start(const mesh_header_t &header);
+static bool mesh_header_want_ack(const mesh_header_t &header);
+static bool decode_data_proto(const uint8_t *data, size_t len,
+                              mesh_data_proto_t *decoded);
+static bool phoneapi_send_from_payload(int fd, uint32_t field,
+                                       const std::vector<uint8_t> &payload,
+                                       const char *label);
+
 typedef struct {
     bool has_want_config = false;
     uint32_t want_config_id = 0;
     bool disconnect = false;
     bool heartbeat = false;
     size_t packet_len = 0;
+    std::vector<uint8_t> packet;
 } phoneapi_to_radio_t;
 
 static bool phoneapi_proto_skip(const uint8_t *data, size_t len, size_t *pos,
@@ -2259,6 +2295,7 @@ static bool phoneapi_parse_to_radio(const uint8_t *data, size_t len,
                 return false;
             }
             out->packet_len = l;
+            out->packet.assign(data + pos, data + pos + l);
             pos += l;
         } else if(field == 3U && wire == 0U) {
             if(!read_varint(data, len, &pos, &out->want_config_id)) {
@@ -2283,6 +2320,165 @@ static bool phoneapi_parse_to_radio(const uint8_t *data, size_t len,
         }
     }
     return true;
+}
+
+static bool phoneapi_parse_mesh_packet(const std::vector<uint8_t> &packet,
+                                       phoneapi_mesh_tx_t *out)
+{
+    size_t pos = 0;
+    phoneapi_mesh_tx_t found;
+    bool has_decoded = false;
+
+    if(!out) {
+        return false;
+    }
+    while(pos < packet.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(packet.data(), packet.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 2U && wire == 5U && pos + 4U <= packet.size()) {
+            found.to_node = get_le32(packet.data() + pos);
+            pos += 4U;
+        } else if(field == 4U && wire == 2U) {
+            uint32_t l;
+            if(!read_varint(packet.data(), packet.size(), &pos, &l) ||
+               pos + l > packet.size()) {
+                return false;
+            }
+            has_decoded = decode_data_proto(packet.data() + pos, l,
+                                            &found.data);
+            pos += l;
+        } else if(field == 6U && wire == 5U && pos + 4U <= packet.size()) {
+            found.packet_id = get_le32(packet.data() + pos);
+            pos += 4U;
+        } else if(field == 9U && wire == 0U) {
+            uint32_t hop;
+            if(!read_varint(packet.data(), packet.size(), &pos, &hop)) {
+                return false;
+            }
+            found.hop_limit = (uint8_t)(hop & 0x07U);
+        } else if(field == 10U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(packet.data(), packet.size(), &pos, &value)) {
+                return false;
+            }
+            found.want_ack = value != 0U;
+        } else if(!phoneapi_proto_skip(packet.data(), packet.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    if(!has_decoded || found.data.portnum == 0U) {
+        return false;
+    }
+    if(found.hop_limit == 0U) {
+        found.hop_limit = phoneapi_opts.hop_limit;
+    }
+    found.active = true;
+    *out = found;
+    return true;
+}
+
+static bool phoneapi_queue_mesh_tx(const phoneapi_mesh_tx_t &tx)
+{
+    bool queued = false;
+
+    pthread_mutex_lock(&phoneapi_tx_mutex);
+    if(!phoneapi_pending_tx.active) {
+        phoneapi_pending_tx = tx;
+        phoneapi_pending_tx.active = true;
+        queued = true;
+    }
+    pthread_mutex_unlock(&phoneapi_tx_mutex);
+    return queued;
+}
+
+static bool phoneapi_take_mesh_tx(phoneapi_mesh_tx_t *tx)
+{
+    bool found = false;
+
+    if(!tx) {
+        return false;
+    }
+    pthread_mutex_lock(&phoneapi_tx_mutex);
+    if(phoneapi_pending_tx.active) {
+        *tx = phoneapi_pending_tx;
+        phoneapi_pending_tx = phoneapi_mesh_tx_t();
+        found = true;
+    }
+    pthread_mutex_unlock(&phoneapi_tx_mutex);
+    return found;
+}
+
+static bool encode_phoneapi_mesh_packet_decoded(const mesh_header_t &header,
+                                                const std::vector<uint8_t> &decoded,
+                                                float rssi, float snr,
+                                                std::vector<uint8_t> *out)
+{
+    uint32_t now = (uint32_t)time(nullptr);
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_varint(out, (1U << 3U) | 5U);
+    append_fixed32(out, header.from);
+    append_varint(out, (2U << 3U) | 5U);
+    append_fixed32(out, header.to);
+    append_uint32_field(out, 3U, 0U);
+    append_bytes_field(out, 4U, decoded);
+    append_varint(out, (6U << 3U) | 5U);
+    append_fixed32(out, header.id);
+    append_varint(out, (7U << 3U) | 5U);
+    append_fixed32(out, now);
+    append_float_field(out, 8U, snr);
+    append_uint32_field(out, 9U, mesh_header_hop_limit(header));
+    if(mesh_header_want_ack(header)) {
+        append_bool_field(out, 10U, true);
+    }
+    if(rssi < 0.0f) {
+        append_varint(out, (12U << 3U) | 0U);
+        append_varint(out, (uint32_t)(int32_t)roundf(rssi));
+    }
+    append_uint32_field(out, 15U, mesh_header_hop_start(header));
+    if(header.next_hop != 0U) {
+        append_uint32_field(out, 18U, header.next_hop);
+    }
+    if(header.relay_node != 0U) {
+        append_uint32_field(out, 19U, header.relay_node);
+    }
+    return true;
+}
+
+static bool phoneapi_send_from_payload_global(uint32_t field,
+                                              const std::vector<uint8_t> &payload,
+                                              const char *label)
+{
+    int fd = phoneapi_uart_fd;
+
+    if(fd < 0 || !phoneapi_thread_running) {
+        return false;
+    }
+    return phoneapi_send_from_payload(fd, field, payload, label);
+}
+
+static void phoneapi_notify_mesh_rx(const mesh_header_t &header,
+                                    const std::vector<uint8_t> &decoded,
+                                    float rssi, float snr)
+{
+    std::vector<uint8_t> packet;
+
+    if(!encode_phoneapi_mesh_packet_decoded(header, decoded, rssi, snr,
+                                            &packet)) {
+        return;
+    }
+    (void)phoneapi_send_from_payload_global(2U, packet, "rx_packet");
 }
 
 static int phoneapi_open_uart(void)
@@ -2322,7 +2518,9 @@ static bool phoneapi_uart_send_line(int fd, const std::string &line)
     std::string wire = line + "\r\n";
     const char *ptr = wire.c_str();
     size_t left = wire.size();
+    bool ok = true;
 
+    pthread_mutex_lock(&phoneapi_uart_mutex);
     while(left > 0U) {
         ssize_t n = write(fd, ptr, left);
         if(n < 0) {
@@ -2333,12 +2531,14 @@ static bool phoneapi_uart_send_line(int fd, const std::string &line)
                 usleep(1000);
                 continue;
             }
-            return false;
+            ok = false;
+            break;
         }
         ptr += n;
         left -= (size_t)n;
     }
-    return true;
+    pthread_mutex_unlock(&phoneapi_uart_mutex);
+    return ok;
 }
 
 static bool phoneapi_send_from_payload(int fd, uint32_t field,
@@ -2442,8 +2642,20 @@ static void phoneapi_process_toradio(int fd, const char *hex, size_t hex_len)
         }
     }
     if(msg.packet_len > 0U) {
-        daemon_event("PhoneAPI ToRadio packet len=%u queued=unsupported",
-                     (unsigned)msg.packet_len);
+        phoneapi_mesh_tx_t tx;
+        if(phoneapi_parse_mesh_packet(msg.packet, &tx)) {
+            if(phoneapi_queue_mesh_tx(tx)) {
+                daemon_event("PhoneAPI ToRadio packet queued len=%u port=%u to=0x%08x ack=%s",
+                             (unsigned)msg.packet_len, tx.data.portnum,
+                             tx.to_node, tx.want_ack ? "on" : "off");
+            } else {
+                daemon_event("PhoneAPI ToRadio packet dropped queue busy len=%u",
+                             (unsigned)msg.packet_len);
+            }
+        } else {
+            daemon_event("PhoneAPI ToRadio packet unsupported len=%u",
+                         (unsigned)msg.packet_len);
+        }
     }
     if(msg.heartbeat) {
         daemon_event("PhoneAPI heartbeat");
@@ -2497,6 +2709,9 @@ static void *phoneapi_thread_main(void *arg)
         phoneapi_thread_running = false;
         return nullptr;
     }
+    pthread_mutex_lock(&phoneapi_uart_mutex);
+    phoneapi_uart_fd = fd;
+    pthread_mutex_unlock(&phoneapi_uart_mutex);
     daemon_event("PhoneAPI bridge ready uart=%s adv=%s",
                  MESHTASTIC_PHONEAPI_UART_DEV, MESHTASTIC_PHONEAPI_ADV_NAME);
     (void)phoneapi_uart_send_line(fd, "AT+MESHCLR");
@@ -2553,6 +2768,9 @@ static void *phoneapi_thread_main(void *arg)
         }
     }
     (void)phoneapi_uart_send_line(fd, "AT+MESHADV=OFF");
+    pthread_mutex_lock(&phoneapi_uart_mutex);
+    phoneapi_uart_fd = -1;
+    pthread_mutex_unlock(&phoneapi_uart_mutex);
     close(fd);
     daemon_event("PhoneAPI bridge stopped");
     return nullptr;
@@ -3893,6 +4111,76 @@ static bool build_mesh_frame(const probe_options_t &opts,
     return true;
 }
 
+static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
+                                           const phoneapi_mesh_tx_t &tx,
+                                           tx_frame_t *frame)
+{
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> data_proto;
+    std::string channel_name;
+    mesh_header_t header;
+    uint32_t packet_id = tx.packet_id;
+    uint8_t hop_limit = tx.hop_limit != 0U ? tx.hop_limit : opts.hop_limit;
+    char summary[220];
+
+    if(!frame || !parse_psk(opts.psk, &key)) {
+        return false;
+    }
+    if(packet_id == 0U) {
+        packet_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+        if(packet_id == 0U) {
+            packet_id = 1U;
+        }
+    }
+    if(!encode_data_proto(tx.data.portnum, tx.data.payload,
+                          tx.data.request_id, tx.data.reply_id,
+                          &data_proto)) {
+        return false;
+    }
+    if(!aes_ctr_crypt(key, opts.from_node, packet_id, &data_proto)) {
+        return false;
+    }
+    if(data_proto.size() + MESHTASTIC_HEADER_LENGTH >
+       MESHTASTIC_MAX_LORA_PAYLOAD_LEN) {
+        return false;
+    }
+
+    memset(&header, 0, sizeof(header));
+    header.to = tx.to_node == 0U ? MESHTASTIC_NODENUM_BROADCAST : tx.to_node;
+    header.from = opts.from_node;
+    header.id = packet_id;
+    header.flags = (hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
+                   ((hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
+                    MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
+    if(tx.want_ack && header.to != MESHTASTIC_NODENUM_BROADCAST) {
+        header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
+    }
+    channel_name = effective_mesh_channel_name(opts);
+    header.channel = mesh_channel_hash(channel_name, key);
+    header.next_hop = 0;
+    header.relay_node = (uint8_t)(opts.from_node & 0xffU);
+
+    frame->bytes.clear();
+    append_mesh_header(&frame->bytes, header);
+    frame->bytes.insert(frame->bytes.end(), data_proto.begin(),
+                        data_proto.end());
+    frame->rebroadcast = false;
+    frame->want_ack = mesh_header_want_ack(header);
+    frame->routing_ack = false;
+    frame->to_node = header.to;
+    frame->from_node = header.from;
+    frame->packet_id = header.id;
+    frame->ack_request_id = 0;
+    frame->channel = header.channel;
+    snprintf(summary, sizeof(summary),
+             "phoneapi mesh id=0x%08x from=0x%08x to=0x%08x ch=0x%02x port=%u payload=%u hop=%u ack=%s",
+             header.id, header.from, header.to, header.channel,
+             tx.data.portnum, (unsigned)tx.data.payload.size(), hop_limit,
+             frame->want_ack ? "on" : "off");
+    frame->summary = summary;
+    return true;
+}
+
 static bool build_mesh_nodeinfo_frame(const probe_options_t &opts,
                                       tx_frame_t *frame)
 {
@@ -4101,6 +4389,9 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
     }
     data_ok = decode_data_proto(payload.data(), payload.size(), &decoded);
     if(data_ok) {
+        if(channel_match && !duplicate && header.from != opts.from_node) {
+            phoneapi_notify_mesh_rx(header, payload, rssi, snr);
+        }
         if(decoded.portnum == MESHTASTIC_TEXT_MESSAGE_APP) {
             std::string text;
             std::string clean = mesh_clean_text(text);
@@ -5544,6 +5835,36 @@ int main(int argc, char **argv)
                         daemon_chat("TX 0x%08x: %s", opts.from_node,
                                     clean.c_str());
                     }
+                }
+            }
+        }
+
+        if(active_op != OP_TX) {
+            phoneapi_mesh_tx_t phoneapi_tx;
+            if(phoneapi_take_mesh_tx(&phoneapi_tx)) {
+                tx_frame_t frame;
+                if(build_phoneapi_mesh_data_frame(opts, phoneapi_tx, &frame)) {
+                    if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
+                        if(frame.want_ack) {
+                            (void)mesh_ack_track_frame(frame);
+                        }
+                        if(phoneapi_tx.data.portnum ==
+                           MESHTASTIC_TEXT_MESSAGE_APP &&
+                           !phoneapi_tx.data.payload.empty()) {
+                            std::string text(
+                                (const char *)phoneapi_tx.data.payload.data(),
+                                phoneapi_tx.data.payload.size());
+                            std::string clean = mesh_clean_text(text);
+                            if(!clean.empty()) {
+                                daemon_chat("TX 0x%08x: %s", opts.from_node,
+                                            clean.c_str());
+                            }
+                        }
+                    }
+                } else {
+                    daemon_event("PhoneAPI TX build failed port=%u payload=%u",
+                                 phoneapi_tx.data.portnum,
+                                 (unsigned)phoneapi_tx.data.payload.size());
                 }
             }
         }
