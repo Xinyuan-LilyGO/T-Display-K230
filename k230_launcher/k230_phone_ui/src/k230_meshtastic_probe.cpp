@@ -28,7 +28,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.14"
+#define PROBE_VERSION "0.18"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define LORA_PIN_CS 14U
@@ -74,6 +74,20 @@
 #define OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH 0
 #define OVERRIDE_SLOT_PRESET_HASH -1
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+
+static const uint32_t lr2021_16e8_rf_switch_dio_pins[] = {
+    RADIOLIB_LR2021_DIO6, RADIOLIB_LR2021_DIO7,
+    RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC,
+};
+
+static const Module::RfSwitchMode_t lr2021_16e8_rf_switch_table[] = {
+    {LR2021::MODE_STBY, {0, 0}},
+    {LR2021::MODE_TX, {0, 0}},
+    {LR2021::MODE_RX, {0, 0}},
+    {LR2021::MODE_TX_HF, {0, 1}},
+    {LR2021::MODE_RX_HF, {1, 0}},
+    END_OF_MODE_TABLE,
+};
 
 enum {
     K230_HAL_GPIO_INPUT = 0,
@@ -987,6 +1001,7 @@ static uint32_t mesh_nak_rx_count;
 static uint32_t mesh_ack_retry_count;
 static uint32_t mesh_ack_timeout_count;
 static uint32_t mesh_ack_drop_count;
+static LR2021 *active_lr2021;
 static mesh_history_entry_t mesh_history[MESHTASTIC_PACKET_HISTORY_SIZE];
 static size_t mesh_history_count;
 static size_t mesh_history_next;
@@ -1027,6 +1042,17 @@ static uint64_t tx_poll_finish_delay_us(size_t len)
         delay = 12000000ULL;
     }
     return delay;
+}
+
+static uint64_t tx_min_finish_delay_us(size_t len)
+{
+    return tx_poll_finish_delay_us(len);
+}
+
+static bool elapsed_after(uint64_t now_us, uint64_t start_us,
+                          uint64_t delay_us)
+{
+    return now_us >= start_us && now_us - start_us > delay_us;
 }
 
 static void signal_handler(int signum)
@@ -4053,6 +4079,9 @@ static int16_t begin_chip(chip_type_t chip, PhysicalLayer *radio,
                               profile->sf, profile->cr, profile->sync_word,
                               profile->power, profile->preamble, 3.0f);
         if(state == RADIOLIB_ERR_NONE) {
+            lr2021->setRfSwitchTable(lr2021_16e8_rf_switch_dio_pins,
+                                     lr2021_16e8_rf_switch_table);
+            printf("LR2021 16E8 RF switch: sub1G TX/RX DIO6=0 DIO7=0, 2.4G TX=01 RX=10\n");
             state = lr2021->setOutputPower(profile->power);
         }
         if(state == RADIOLIB_ERR_NONE) {
@@ -4171,6 +4200,13 @@ static int start_rx(PhysicalLayer *radio)
     take_radio_events();
     radio->clearPacketSentAction();
     radio->setPacketReceivedAction(radio_event_isr);
+    if(active_lr2021) {
+        state = active_lr2021->clearRxFifo();
+        if(state != RADIOLIB_ERR_NONE) {
+            fprintf(stderr, "LR2021 clear RX FIFO failed: %d %s\n",
+                    state, error_name(state));
+        }
+    }
     state = radio->startReceive();
     if(state != RADIOLIB_ERR_NONE) {
         fprintf(stderr, "RX start failed: %d %s\n", state, error_name(state));
@@ -4197,6 +4233,13 @@ static int start_tx(PhysicalLayer *radio, const tx_frame_t &frame)
     active_op = OP_IDLE;
     state = radio->standby();
     if(state == RADIOLIB_ERR_NONE) {
+        if(active_lr2021) {
+            int16_t fifo_state = active_lr2021->clearTxFifo();
+            if(fifo_state != RADIOLIB_ERR_NONE) {
+                fprintf(stderr, "LR2021 clear TX FIFO failed: %d %s\n",
+                        fifo_state, error_name(fifo_state));
+            }
+        }
         radio->clearPacketReceivedAction();
         radio->setPacketSentAction(radio_event_isr);
         state = radio->startTransmit(frame.bytes.data(), len);
@@ -4283,6 +4326,13 @@ static void handle_tx_event(PhysicalLayer *radio)
 
     state = radio->finishTransmit();
     active_op = OP_IDLE;
+    if(active_lr2021) {
+        int16_t fifo_state = active_lr2021->clearTxFifo();
+        if(fifo_state != RADIOLIB_ERR_NONE) {
+            fprintf(stderr, "LR2021 clear TX FIFO after finish failed: %d %s\n",
+                    fifo_state, error_name(fifo_state));
+        }
+    }
     if(state == RADIOLIB_ERR_NONE) {
         tx_count++;
         daemon_event("TX done: %lu", (unsigned long)tx_count);
@@ -4472,6 +4522,7 @@ int main(int argc, char **argv)
         delete hal;
         return 1;
     }
+    active_lr2021 = (chip == CHIP_LR2021) ? lr2021 : nullptr;
     printf("Radio ready: %s\n", chip_name(chip));
 
     if(start_rx(radio) != 0) {
@@ -4503,8 +4554,24 @@ int main(int argc, char **argv)
         uint64_t now = monotonic_us();
         unsigned int events = take_radio_events();
 
+        if(events == 0U && active_op == OP_RX &&
+           hal && hal->digitalRead(LORA_PIN_DIO1) == K230_HAL_GPIO_HIGH) {
+            events = 1U;
+            printf("RX DIO poll event\n");
+        }
+
         if(events > 0U) {
-            handle_radio_event(radio, opts);
+            if(active_op == OP_TX &&
+               !elapsed_after(now, active_op_start_us,
+                              tx_min_finish_delay_us(active_tx_len))) {
+                printf("TX event ignored before air-time guard: elapsed=%llu guard=%llu events=%u\n",
+                       (unsigned long long)(now >= active_op_start_us ?
+                                            now - active_op_start_us : 0),
+                       (unsigned long long)tx_min_finish_delay_us(active_tx_len),
+                       events);
+            } else {
+                handle_radio_event(radio, opts);
+            }
             if(active_op != OP_TX && !opts.auto_tx && send_once_started &&
                !send_once_finished &&
                (!send_once_awaiting_ack || mesh_ack_pending_count() == 0U)) {
@@ -4582,7 +4649,8 @@ int main(int argc, char **argv)
         }
 
         if(active_op == OP_TX &&
-           now - active_op_start_us > tx_poll_finish_delay_us(active_tx_len)) {
+           elapsed_after(now, active_op_start_us,
+                         tx_poll_finish_delay_us(active_tx_len))) {
             handle_tx_event(radio);
             if(send_once_started &&
                (!send_once_awaiting_ack || mesh_ack_pending_count() == 0U)) {
@@ -4590,7 +4658,8 @@ int main(int argc, char **argv)
             }
         }
 
-        if(active_op == OP_TX && now - active_op_start_us > 15000000ULL) {
+        if(active_op == OP_TX &&
+           elapsed_after(now, active_op_start_us, 15000000ULL)) {
             fprintf(stderr, "TX timeout watchdog\n");
             active_op = OP_IDLE;
             (void)radio->standby();

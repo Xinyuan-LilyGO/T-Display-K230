@@ -179,6 +179,10 @@ target_include_directories(k230_meshtastic_probe PRIVATE
     ${RADIOLIB_DIR}
 )
 
+target_compile_definitions(k230_meshtastic_probe PRIVATE
+    RADIOLIB_GODMODE=1
+)
+
 target_compile_definitions(k230_phone_ui PRIVATE
     LV_CONF_PATH="${CMAKE_SYSROOT}/usr/include/lvgl/lv_conf.h"
     K230_R58_COMPACT_SWITCH_TEST=0
