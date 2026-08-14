@@ -43,6 +43,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Record` / 录音 | 使用板载麦克风录音，列出录音文件，支持播放和删除 | 点击录音按钮开始或停止录音进入录音列表后可以播放或删除 `/root/recordings` 中的录音 |
 | `Mic FFT` / 麦克风频谱 | 实时显示麦克风频谱和输入电平信息 | 用于快速检查麦克风是否工作，也可以调整显示增益方便观察弱信号 |
 | `LoRa` | 控制 SX1262 或 LR2021，支持 Factory、聊天、监听、自动发送、连续载波发射等模式 | 选择或编辑 profile 后选择工作模式连续载波发射只建议工程射频测试使用，不建议普通用户日常使用，并且必须确认已经连接合适天线 |
+| `Meshtastic` | 控制独立 `k230_meshtastic_probe` daemon，提供最小 Meshtastic 风格 LoRa mesh 文本、节点缓存、事件日志和 profile 设置 | 点击 `Start` 启动 daemon，通过 `Profile` 设置 region、preset、channel、PSK、TX power、node/from/to/hop/ACK点击 `Send Message` 发送文本，`Nodes` 查看收到的节点缓存当前实现是最小 flood mesh/daemon 控制面板，不是完整 Meshtastic runtime |
 | `LoRaWAN` | 管理 LoRaWAN profile，并通过 LoRa 模块运行 OTAA 入网和发送测试 | 加载已有 profile，或新建/编辑 profile应用会检查密钥长度配置保存后才能运行，可按需开启模拟温度数据上传 |
 | `NES` | 从 `/root/nes` 加载 `.nes` ROM，并支持触摸按键和硬件键盘控制 | 镜像默认不内置 NES ROM请自行将 ROM 文件放入 `/root/nes`，再从列表选择 ROM键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 为 Start，`Space` 或 `Shift` 为 Select，`U/I/O` 为 A，`H/J/K` 为 B，`Esc` 停止游戏或返回 ROM 列表 |
 | `AI` | 打开随镜像提供的 K230 AI 示例界面 | 当模型资源存在时，可以运行支持的本地 AI 示例，并在屏幕上查看结果 |

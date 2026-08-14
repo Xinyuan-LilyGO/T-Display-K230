@@ -91,6 +91,7 @@ set(K230_PHONE_UI_SOURCES
     ui_audio.c
     ui_mic_spectrum.c
     ui_usb_storage.c
+    ui_meshtastic.c
     ui_lora.cpp
     ui_nes.cpp
     ${LIBTMT_DIR}/tmt.c
@@ -117,6 +118,10 @@ add_executable(k230_lora_flrc_bench lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOUR
 add_executable(k230_lora_flrc_video lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_lora_flrc_tile_stream lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_halow_udp_stream halow_udp_stream.c)
+add_executable(k230_meshtastic_probe
+    k230_meshtastic_probe.cpp
+    ${RADIOLIB_REQUIRED_SOURCES}
+)
 add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(drm_motion_probe drm_motion_probe.c)
 add_executable(drm_motion_probe_rgb565 drm_motion_probe.c)
@@ -165,6 +170,11 @@ target_include_directories(k230_lora_flrc_video PRIVATE
 )
 
 target_include_directories(k230_lora_flrc_tile_stream PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${RADIOLIB_DIR}
+)
+
+target_include_directories(k230_meshtastic_probe PRIVATE
     ${CMAKE_SYSROOT}/usr/include
     ${RADIOLIB_DIR}
 )
@@ -288,7 +298,18 @@ target_link_libraries(k230_halow_udp_stream PRIVATE
     jpeg
 )
 
-install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_halow_udp_stream k230_pcm_volume drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
+target_link_directories(k230_meshtastic_probe PRIVATE
+    ${CMAKE_SYSROOT}/usr/lib
+)
+
+target_link_libraries(k230_meshtastic_probe PRIVATE
+    gpiod
+    crypto
+    m
+    pthread
+)
+
+install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_halow_udp_stream k230_meshtastic_probe k230_pcm_volume drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
 install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
         ${CMAKE_CURRENT_SOURCE_DIR}/k230_halow_camera_stream.sh
         DESTINATION /root/app/k230_phone_ui)

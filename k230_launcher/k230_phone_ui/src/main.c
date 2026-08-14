@@ -147,6 +147,7 @@
 #include "ui_multitouch.h"
 #include "ui_language.h"
 #include "ui_lora.h"
+#include "ui_meshtastic.h"
 #include "ui_mic_spectrum.h"
 #include "ui_nes.h"
 #include "ui_prefs.h"
@@ -480,6 +481,7 @@ static const app_item_t app_items[] = {
     {"Record", LV_SYMBOL_STOP, 0xEF4D5A, PAGE_RECORDER},
     {"Mic FFT", LV_SYMBOL_BARS, 0x22D3EE, PAGE_MIC_FFT},
     {"LoRa", LV_SYMBOL_UPLOAD, 0x7C3AED, PAGE_LORA},
+    {"Meshtastic", "MESH", 0x10B981, PAGE_MESHTASTIC},
     {"LoRa FLRC", "FLRC", 0xA855F7, PAGE_LORA_FLRC},
     {"Halow", "Ha", 0x25C281, PAGE_HALOW},
     {"LoRaWAN", "WAN", 0x14B8A6, PAGE_LORAWAN},
@@ -581,6 +583,8 @@ static const char *page_name(page_id_t page)
         return "Mic FFT";
     case PAGE_LORA:
         return "LoRa";
+    case PAGE_MESHTASTIC:
+        return "Meshtastic";
     case PAGE_LORA_FLRC:
         return "LoRa FLRC";
     case PAGE_HALOW:
@@ -8003,6 +8007,7 @@ static void cleanup_page_state(void)
     ui_halow_cleanup();
     ui_lora_flrc_cleanup();
     ui_lora_cleanup();
+    ui_meshtastic_cleanup();
     ui_nes_cleanup();
     ui_mic_spectrum_cleanup();
     ui_hardware_cleanup();
@@ -8983,6 +8988,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_LORA:
         ui_lora_create(scr);
+        break;
+    case PAGE_MESHTASTIC:
+        ui_meshtastic_create(scr);
         break;
     case PAGE_LORA_FLRC:
         ui_lora_flrc_create(scr);
