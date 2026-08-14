@@ -29,6 +29,7 @@
 #define HALOW_PREF_PEER_IP "halow.peer_ip"
 #define HALOW_PREF_NETMASK "halow.netmask"
 #define HALOW_PREF_PRESET "halow.preset"
+#define HALOW_PREF_PRESET_SCHEMA "halow.preset.schema"
 #define HALOW_PREF_FPS "halow.fps"
 #define HALOW_PREF_QUALITY "halow.quality"
 #define HALOW_IP_MAX 48
@@ -37,7 +38,8 @@
 #define HALOW_DEFAULT_LOCAL_IP "192.168.100.210"
 #define HALOW_DEFAULT_PEER_IP "192.168.100.237"
 #define HALOW_DEFAULT_NETMASK "255.255.255.0"
-#define HALOW_DEFAULT_PRESET "720p"
+#define HALOW_DEFAULT_PRESET "320x240"
+#define HALOW_PRESET_SCHEMA "2"
 #define HALOW_DEFAULT_FPS 12
 #define HALOW_DEFAULT_QUALITY 45
 #define HALOW_PREVIEW_W 640
@@ -65,8 +67,8 @@ static uint64_t halow_frames;
 static uint64_t halow_dropped;
 static uint64_t halow_errors;
 static unsigned halow_last_frame_bytes;
-static unsigned halow_stream_w = 1280;
-static unsigned halow_stream_h = 720;
+static unsigned halow_stream_w = 320;
+static unsigned halow_stream_h = 240;
 static pid_t halow_pid = -1;
 
 static lv_timer_t *halow_timer;
@@ -76,8 +78,9 @@ static lv_obj_t *halow_stats_label;
 static lv_obj_t *halow_log_label;
 static lv_obj_t *halow_preview_image;
 static lv_obj_t *halow_preview_placeholder;
+static lv_obj_t *halow_preset_btn_320;
+static lv_obj_t *halow_preset_btn_640;
 static lv_obj_t *halow_preset_btn_720;
-static lv_obj_t *halow_preset_btn_1080;
 static lv_obj_t *halow_quality_btn_low;
 static lv_obj_t *halow_quality_btn_mid;
 static lv_obj_t *halow_quality_btn_high;
@@ -146,18 +149,23 @@ static void halow_save_uint(const char *key, unsigned value)
 
 static void halow_apply_preset_dimensions_locked(void)
 {
-    if(strcmp(halow_preset, "1080p") == 0) {
-        halow_stream_w = 1920;
-        halow_stream_h = 1080;
-    } else {
-        snprintf(halow_preset, sizeof(halow_preset), "720p");
+    if(strcmp(halow_preset, "720p") == 0) {
         halow_stream_w = 1280;
         halow_stream_h = 720;
+    } else if(strcmp(halow_preset, "640x480") == 0) {
+        halow_stream_w = 640;
+        halow_stream_h = 480;
+    } else {
+        snprintf(halow_preset, sizeof(halow_preset), "320x240");
+        halow_stream_w = 320;
+        halow_stream_h = 240;
     }
 }
 
 static void halow_load_prefs(void)
 {
+    char schema[16];
+
     pthread_mutex_lock(&halow_lock);
     ui_prefs_get(HALOW_PREF_LOCAL_IP, halow_local_ip, sizeof(halow_local_ip),
                  HALOW_DEFAULT_LOCAL_IP);
@@ -167,6 +175,13 @@ static void halow_load_prefs(void)
                  HALOW_DEFAULT_NETMASK);
     ui_prefs_get(HALOW_PREF_PRESET, halow_preset, sizeof(halow_preset),
                  HALOW_DEFAULT_PRESET);
+    ui_prefs_get(HALOW_PREF_PRESET_SCHEMA, schema, sizeof(schema), "");
+    if(strcmp(schema, HALOW_PRESET_SCHEMA) != 0) {
+        snprintf(halow_preset, sizeof(halow_preset), "%s",
+                 HALOW_DEFAULT_PRESET);
+        ui_prefs_set(HALOW_PREF_PRESET, halow_preset);
+        ui_prefs_set(HALOW_PREF_PRESET_SCHEMA, HALOW_PRESET_SCHEMA);
+    }
     halow_fps = halow_pref_uint(HALOW_PREF_FPS, HALOW_DEFAULT_FPS, 1, 30);
     halow_quality = halow_pref_uint(HALOW_PREF_QUALITY,
                                     HALOW_DEFAULT_QUALITY, 5, 95);
@@ -561,7 +576,7 @@ static void halow_update_preview(void)
     lv_image_cache_drop(&halow_preview_dsc);
     lv_image_set_src(halow_preview_image, &halow_preview_dsc);
     lv_image_set_scale(halow_preview_image, scale);
-    lv_obj_align(halow_preview_image, LV_ALIGN_CENTER, 0, 18);
+    lv_obj_align(halow_preview_image, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(halow_preview_image, LV_OBJ_FLAG_HIDDEN);
     if(halow_preview_placeholder &&
        lv_obj_is_valid(halow_preview_placeholder)) {
@@ -757,9 +772,11 @@ static void halow_update_settings_buttons(void)
     snprintf(preset, sizeof(preset), "%s", halow_preset);
     quality = halow_quality;
     pthread_mutex_unlock(&halow_lock);
-    halow_style_choice(halow_preset_btn_720, strcmp(preset, "720p") == 0,
+    halow_style_choice(halow_preset_btn_320, strcmp(preset, "320x240") == 0,
                        0x25C281);
-    halow_style_choice(halow_preset_btn_1080, strcmp(preset, "1080p") == 0,
+    halow_style_choice(halow_preset_btn_640, strcmp(preset, "640x480") == 0,
+                       0x25C281);
+    halow_style_choice(halow_preset_btn_720, strcmp(preset, "720p") == 0,
                        0x25C281);
     halow_style_choice(halow_quality_btn_low, quality <= 35U, 0x3DA5FF);
     halow_style_choice(halow_quality_btn_mid, quality > 35U && quality < 60U,
@@ -812,8 +829,9 @@ static void halow_settings_close(void)
         lv_obj_delete(halow_settings_overlay);
     }
     halow_settings_overlay = NULL;
+    halow_preset_btn_320 = NULL;
+    halow_preset_btn_640 = NULL;
     halow_preset_btn_720 = NULL;
-    halow_preset_btn_1080 = NULL;
     halow_quality_btn_low = NULL;
     halow_quality_btn_mid = NULL;
     halow_quality_btn_high = NULL;
@@ -878,15 +896,21 @@ static void halow_settings_event_cb(lv_event_t *event)
     section = ui_label(card, "Resolution", &lv_font_montserrat_18, 0x9AA4AF);
     lv_obj_set_pos(section, 0, 62);
     y = 96;
-    col_w = (card_w - pad * 2 - gap) / 2;
+    col_w = (card_w - pad * 2 - gap * 2) / 3;
+    halow_preset_btn_320 =
+        ui_command_button(card, 0, y, col_w, "320x240", 0xF2F5F8);
+    lv_obj_add_event_cb(halow_preset_btn_320, halow_preset_event_cb,
+                        LV_EVENT_CLICKED, "320x240");
+    halow_preset_btn_640 =
+        ui_command_button(card, col_w + gap, y, col_w, "640x480",
+                          0xF2F5F8);
+    lv_obj_add_event_cb(halow_preset_btn_640, halow_preset_event_cb,
+                        LV_EVENT_CLICKED, "640x480");
     halow_preset_btn_720 =
-        ui_command_button(card, 0, y, col_w, "720p", 0xF2F5F8);
+        ui_command_button(card, (col_w + gap) * 2, y, col_w, "720p",
+                          0xF2F5F8);
     lv_obj_add_event_cb(halow_preset_btn_720, halow_preset_event_cb,
                         LV_EVENT_CLICKED, "720p");
-    halow_preset_btn_1080 =
-        ui_command_button(card, col_w + gap, y, col_w, "1080p", 0xF2F5F8);
-    lv_obj_add_event_cb(halow_preset_btn_1080, halow_preset_event_cb,
-                        LV_EVENT_CLICKED, "1080p");
 
     section = ui_label(card, "JPEG quality", &lv_font_montserrat_18, 0x9AA4AF);
     lv_obj_set_pos(section, 0, y + 82);
@@ -923,7 +947,7 @@ static void halow_settings_event_cb(lv_event_t *event)
                         (void *)(uintptr_t)15U);
 
     section = ui_label(card,
-                       "720p is the minimum Halow stream preset. The screen preview is downscaled for UI smoothness.",
+                       "Lower presets reduce HaLow bandwidth and CPU load. Use 720p only when the link is stable.",
                        &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_pos(section, 0, y + 86);
     lv_obj_set_width(section, card_w - pad * 2);
@@ -937,7 +961,6 @@ void ui_halow_create(lv_obj_t *scr)
     lv_obj_t *preview;
     lv_obj_t *side;
     lv_obj_t *btn;
-    lv_obj_t *title;
     lv_obj_t *placeholder_icon;
     lv_obj_t *placeholder_text;
     int landscape = ui_is_landscape();
@@ -956,6 +979,7 @@ void ui_halow_create(lv_obj_t *scr)
     int side_h;
     int inner_w;
     int row_w;
+    int button_gap;
     int y;
 
     halow_load_prefs();
@@ -994,19 +1018,16 @@ void ui_halow_create(lv_obj_t *scr)
     preview = ui_panel(body, preview_x, preview_y, preview_w, preview_h);
     lv_obj_set_style_bg_color(preview, lv_color_hex(0x081018), 0);
     lv_obj_set_style_border_color(preview, lv_color_hex(0x174C3A), 0);
-    title = ui_label(preview, "Halow Preview", &lv_font_montserrat_24,
-                     0xF2F5F8);
-    lv_obj_set_pos(title, 18, 14);
 
     halow_preview_panel_w = preview_w - 32;
-    halow_preview_panel_h = preview_h - 72;
+    halow_preview_panel_h = preview_h - 32;
     halow_preview_image = lv_image_create(preview);
     lv_obj_add_flag(halow_preview_image, LV_OBJ_FLAG_HIDDEN);
 
     halow_preview_placeholder = lv_obj_create(preview);
-    lv_obj_set_pos(halow_preview_placeholder, 16, 56);
+    lv_obj_set_pos(halow_preview_placeholder, 16, 16);
     lv_obj_set_size(halow_preview_placeholder, preview_w - 32,
-                    preview_h - 72);
+                    preview_h - 32);
     lv_obj_set_style_bg_color(halow_preview_placeholder,
                               lv_color_hex(0x10201B), 0);
     lv_obj_set_style_bg_opa(halow_preview_placeholder, LV_OPA_COVER, 0);
@@ -1028,6 +1049,7 @@ void ui_halow_create(lv_obj_t *scr)
 
     side = ui_panel(body, side_x, side_y, side_w, side_h);
     lv_obj_set_style_bg_color(side, lv_color_hex(0x151B22), 0);
+    ui_make_scrollable(side, 48);
     inner_w = side_w - 32;
     if(inner_w < 260) {
         inner_w = 260;
@@ -1050,7 +1072,8 @@ void ui_halow_create(lv_obj_t *scr)
     if(row_w < 118) {
         row_w = 118;
     }
-    y = landscape ? 176 : 190;
+    button_gap = landscape ? 10 : 18;
+    y = landscape ? 148 : 190;
     btn = ui_command_button(side, 0, y, row_w, "Local IP", 0x60A5FA);
     lv_obj_add_event_cb(btn, halow_edit_ip_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)HALOW_FIELD_LOCAL_IP);
@@ -1058,24 +1081,24 @@ void ui_halow_create(lv_obj_t *scr)
                             0x60A5FA);
     lv_obj_add_event_cb(btn, halow_edit_ip_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)HALOW_FIELD_PEER_IP);
-    y += 70;
+    y += 60 + button_gap;
     btn = ui_command_button(side, 0, y, row_w, "Apply IP", 0x25C281);
     lv_obj_add_event_cb(btn, halow_apply_local_ip_event_cb, LV_EVENT_CLICKED,
                         NULL);
     btn = ui_command_button(side, row_w + gap, y, row_w, "Settings",
                             0xF2F5F8);
     lv_obj_add_event_cb(btn, halow_settings_event_cb, LV_EVENT_CLICKED, NULL);
-    y += 78;
+    y += 60 + button_gap;
     btn = ui_command_button(side, 0, y, row_w, "Start RX", 0x3DA5FF);
     lv_obj_add_event_cb(btn, halow_start_rx_event_cb, LV_EVENT_CLICKED, NULL);
     btn = ui_command_button(side, row_w + gap, y, row_w, "Start TX",
                             0x25C281);
     lv_obj_add_event_cb(btn, halow_start_tx_event_cb, LV_EVENT_CLICKED, NULL);
-    y += 70;
+    y += 60 + button_gap;
     btn = ui_command_button(side, 0, y, row_w, "Stop", 0xEF4D5A);
     lv_obj_add_event_cb(btn, halow_stop_event_cb, LV_EVENT_CLICKED, NULL);
 
-    y += 76;
+    y += landscape ? 46 : 76;
     halow_stats_label = ui_label(side, "--", &lv_font_montserrat_16,
                                  0x9AA4AF);
     lv_obj_set_pos(halow_stats_label, 0, y);
@@ -1083,9 +1106,6 @@ void ui_halow_create(lv_obj_t *scr)
     lv_label_set_long_mode(halow_stats_label, LV_LABEL_LONG_WRAP);
 
     y += landscape ? 88 : 110;
-    if(y > side_h - 140) {
-        y = side_h - 140;
-    }
     halow_log_label =
         ui_label(side, "No log yet", &lv_font_montserrat_14, 0xC9D3DF);
     lv_obj_set_pos(halow_log_label, 0, y);

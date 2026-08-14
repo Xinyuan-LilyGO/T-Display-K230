@@ -47,7 +47,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `NES` | 从 `/root/nes` 加载 `.nes` ROM，并支持触摸按键和硬件键盘控制 | 镜像默认不内置 NES ROM请自行将 ROM 文件放入 `/root/nes`，再从列表选择 ROM键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 为 Start，`Space` 或 `Shift` 为 Select，`U/I/O` 为 A，`H/J/K` 为 B，`Esc` 停止游戏或返回 ROM 列表 |
 | `AI` | 打开随镜像提供的 K230 AI 示例界面 | 当模型资源存在时，可以运行支持的本地 AI 示例，并在屏幕上查看结果 |
 | `RTSP` | 开启或停止摄像头 RTSP 推流，并显示推流地址 | 开启后，在同一网络的电脑上打开界面显示的 URL使用相机前需要先关闭 RTSP |
-| `Halow` | 通过接在以太网口上的 Wi-Fi HaLow 链路，在两台设备之间发送或接收摄像头视频帧 | 将 HaLow 设备接到网口，先设置本机静态 IP，再输入对端 IP摄像头端点击 `Start TX`，显示端点击 `Start RX`默认从 720p 配置起步，接收帧会保存到 `/root/videos/halow_rx` |
+| `Halow` | 通过接在以太网口上的 Wi-Fi HaLow 链路，在两台设备之间发送或接收摄像头视频帧 | 将 HaLow 设备接到网口，先设置本机静态 IP，再输入对端 IP摄像头端点击 `Start TX`，显示端点击 `Start RX`分辨率档位为 `320x240`、`640x480`、`720p`，默认使用 `320x240`接收帧会保存到 `/root/videos/halow_rx` |
 | `Wi-Fi` | 扫描 Wi-Fi、保存密码、连接网络和自动回连 | 打开 Wi-Fi，点击网络名称，输入不少于 8 位的密码，等待连接结果 |
 | `Bluetooth` / 蓝牙 | 扫描有名称的 BLE 设备，连接设备，并显示 GATT 服务、特征和描述符 | 打开蓝牙，点击设备名称，确认连接后进入设备详情页 |
 | `MTP` | 开启 USB MTP 文件管理 | 点击开启后，通过 USB 连接电脑，管理照片、截图、音乐、视频、ROM 等文件 |

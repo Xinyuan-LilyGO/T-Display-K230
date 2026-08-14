@@ -45,7 +45,6 @@ static const ui_translation_t ui_translations[] = {
     { "LoRa", "LoRa" },
     { "Halow", "Halow", "Halow" },
     { "Halow video", "Halow 视频", "Halow ビデオ" },
-    { "Halow Preview", "Halow 预览", "Halow プレビュー" },
     { "Set local IP, enter peer IP, then start TX or RX", "设置本机 IP，输入对端 IP，然后启动 TX 或 RX", "ローカル IP と相手 IP を設定して TX/RX を開始" },
     { "Local IP", "本机 IP", "ローカル IP" },
     { "Peer IP", "对端 IP", "相手 IP" },

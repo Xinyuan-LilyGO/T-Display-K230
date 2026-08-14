@@ -6,7 +6,7 @@ PEER=""
 LOCAL_IP=""
 NETMASK="255.255.255.0"
 PORT="5600"
-PRESET="720p"
+PRESET="320x240"
 FPS="12"
 JPEG_QUALITY="45"
 PAYLOAD="1200"
@@ -16,8 +16,8 @@ DURATION="3600"
 CAMERA_DEV="/dev/video1"
 CAPTURE_WIDTH="1920"
 CAPTURE_HEIGHT="1080"
-ENCODE_WIDTH="1280"
-ENCODE_HEIGHT="720"
+ENCODE_WIDTH="320"
+ENCODE_HEIGHT="240"
 PREVIEW_WIDTH="640"
 PREVIEW_HEIGHT="360"
 CAMERA_ROTATE="90"
@@ -51,7 +51,8 @@ Options:
   --local-ip IP          Configure eth0 with this local IP before starting.
   --netmask MASK         Netmask for --local-ip. Default 255.255.255.0.
   --port N               UDP port. Default 5600.
-  --preset 720p|1080p    Transmit resolution. Default 720p.
+  --preset 320x240|640x480|720p
+                          Transmit resolution. Default 320x240.
   --fps N                Capture/send FPS. Default 12.
   --jpeg-quality N       JPEG quality 5..95. Default 45.
   --payload N            UDP payload bytes. Default 1200.
@@ -95,15 +96,21 @@ camera_device_index() {
 
 apply_preset() {
     case "${PRESET}" in
-        720p)
-            ENCODE_WIDTH="1280"
-            ENCODE_HEIGHT="720"
+        320x240|qvga)
+            ENCODE_WIDTH="320"
+            ENCODE_HEIGHT="240"
             PREVIEW_WIDTH="640"
             PREVIEW_HEIGHT="360"
             ;;
-        1080p)
-            ENCODE_WIDTH="1920"
-            ENCODE_HEIGHT="1080"
+        640x480|vga)
+            ENCODE_WIDTH="640"
+            ENCODE_HEIGHT="480"
+            PREVIEW_WIDTH="640"
+            PREVIEW_HEIGHT="360"
+            ;;
+        720p)
+            ENCODE_WIDTH="1280"
+            ENCODE_HEIGHT="720"
             PREVIEW_WIDTH="640"
             PREVIEW_HEIGHT="360"
             ;;
