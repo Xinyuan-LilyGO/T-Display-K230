@@ -671,9 +671,86 @@ static void mesh_chat_rebuild(const char *shown)
     } else {
         lv_obj_t *last = lv_obj_get_child(mesh_chat_scroll, count - 1);
         if(last) {
+            lv_obj_scroll_to_view(last, LV_ANIM_OFF);
+        }
+    }
+}
+
+static int mesh_chat_near_bottom(void)
+{
+    if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll)) {
+        return 1;
+    }
+
+    lv_obj_update_layout(mesh_chat_scroll);
+    return lv_obj_get_scroll_bottom(mesh_chat_scroll) <= 36;
+}
+
+static int mesh_chat_append_tail(const char *old_text, const char *new_text,
+                                 const char **tail)
+{
+    size_t old_len;
+
+    if(tail) {
+        *tail = NULL;
+    }
+    if(!old_text || !old_text[0] || !new_text || !tail) {
+        return 0;
+    }
+
+    old_len = strlen(old_text);
+    if(strncmp(old_text, new_text, old_len) != 0 ||
+       new_text[old_len] == '\0') {
+        return 0;
+    }
+
+    if(new_text[old_len] == '\n') {
+        *tail = new_text + old_len + 1;
+    } else if(old_len > 0 && old_text[old_len - 1] == '\n') {
+        *tail = new_text + old_len;
+    } else {
+        return 0;
+    }
+
+    return (*tail && (*tail)[0]) ? 1 : 0;
+}
+
+static int mesh_chat_append_lines(const char *lines, int auto_scroll)
+{
+    char copy[3072];
+    char *line;
+    char *save = NULL;
+    int appended = 0;
+
+    if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll) ||
+       !lines || !lines[0]) {
+        return 0;
+    }
+
+    snprintf(copy, sizeof(copy), "%s", lines);
+    line = strtok_r(copy, "\n", &save);
+    while(line) {
+        ui_trim_text(line);
+        if(line[0] && strcmp(line, "No mesh messages yet") != 0) {
+            mesh_chat_add_bubble(line);
+            appended++;
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+
+    if(appended > 0 && auto_scroll) {
+        int child_count;
+        lv_obj_t *last;
+
+        lv_obj_update_layout(mesh_chat_scroll);
+        child_count = lv_obj_get_child_count(mesh_chat_scroll);
+        last = child_count > 0 ? lv_obj_get_child(mesh_chat_scroll,
+                                                  child_count - 1) : NULL;
+        if(last) {
             lv_obj_scroll_to_view(last, LV_ANIM_ON);
         }
     }
+    return appended;
 }
 
 static int mesh_chat_line_exists(const char *text, const char *line)
@@ -726,7 +803,10 @@ static void mesh_refresh_chat(void)
 {
     char response[3072];
     const char *shown;
+    const char *append_lines = NULL;
     int has_new_rx;
+    int can_append;
+    int was_near_bottom;
 
     if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll)) {
         return;
@@ -742,8 +822,16 @@ static void mesh_refresh_chat(void)
         return;
     }
     has_new_rx = mesh_chat_has_new_rx(mesh_last_chat_text, shown);
+    was_near_bottom = mesh_chat_near_bottom();
+    can_append = mesh_chat_append_tail(mesh_last_chat_text, shown,
+                                       &append_lines);
     snprintf(mesh_last_chat_text, sizeof(mesh_last_chat_text), "%s", shown);
-    mesh_chat_rebuild(shown);
+    if(can_append &&
+       mesh_chat_append_lines(append_lines, was_near_bottom) > 0) {
+        app_request_fast_refresh();
+    } else {
+        mesh_chat_rebuild(shown);
+    }
     if(has_new_rx) {
         ui_audio_play_notification();
     }
