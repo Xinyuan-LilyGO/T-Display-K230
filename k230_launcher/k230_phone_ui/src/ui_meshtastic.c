@@ -32,6 +32,9 @@
 #define MESHTASTIC_PREF_TO "meshtastic.to"
 #define MESHTASTIC_PREF_HOP "meshtastic.hop"
 #define MESHTASTIC_PREF_ACK "meshtastic.ack"
+#define MESHTASTIC_PREF_REBROADCAST "meshtastic.rebroadcast"
+#define MESHTASTIC_DEFAULT_UI_REGION "EU_868"
+#define MESHTASTIC_DEFAULT_UI_PRESET "LONG_FAST"
 
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
@@ -42,8 +45,8 @@ static lv_obj_t *mesh_send_button;
 static lv_timer_t *mesh_timer;
 static char mesh_status_text[512] = "Not running";
 static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
-static char mesh_region[24] = "US";
-static char mesh_preset[32] = "LONG_FAST";
+static char mesh_region[24] = MESHTASTIC_DEFAULT_UI_REGION;
+static char mesh_preset[32] = MESHTASTIC_DEFAULT_UI_PRESET;
 static char mesh_channel_name[64] = "";
 static char mesh_psk[80] = "default";
 static char mesh_tx_power[8] = "auto";
@@ -52,8 +55,10 @@ static char mesh_from_node[24] = "0";
 static char mesh_to_node[24] = "0xffffffff";
 static char mesh_hop_limit[8] = "3";
 static int mesh_ack_enabled = 1;
+static int mesh_rebroadcast_enabled = 0;
 static lv_obj_t *mesh_settings_overlay;
-static lv_obj_t *mesh_settings_value_labels[10];
+static lv_obj_t *mesh_nodes_overlay;
+static lv_obj_t *mesh_settings_value_labels[11];
 
 typedef enum {
     MESH_FIELD_REGION = 0,
@@ -66,6 +71,8 @@ typedef enum {
     MESH_FIELD_TO,
     MESH_FIELD_HOP,
     MESH_FIELD_ACK,
+    MESH_FIELD_REBROADCAST,
+    MESH_FIELD_COUNT,
 } mesh_setting_field_t;
 
 static int mesh_write_all(int fd, const char *data, size_t len)
@@ -310,13 +317,14 @@ static void mesh_update_profile_label(void)
     char text[420];
 
     snprintf(text, sizeof(text),
-             "Profile %s / %s / channel=%s / psk=%s / power=%s\nNode %s / from=%s to=%s hop=%s ack=%s",
+             "Profile %s / %s / channel=%s / psk=%s / power=%s\nNode %s / from=%s to=%s hop=%s ack=%s relay=%s",
              mesh_region, mesh_preset,
              mesh_channel_name[0] ? mesh_channel_name : "<preset>",
              mesh_psk, mesh_tx_power, mesh_node_name,
              mesh_from_text_is_auto(mesh_from_node) ? "auto" : mesh_from_node,
              mesh_to_text_is_broadcast(mesh_to_node) ? "broadcast" : mesh_to_node,
-             mesh_hop_limit, mesh_ack_enabled ? "on" : "off");
+             mesh_hop_limit, mesh_ack_enabled ? "on" : "off",
+             mesh_rebroadcast_enabled ? "on" : "off");
     if(mesh_profile_label && lv_obj_is_valid(mesh_profile_label)) {
         lv_label_set_text(mesh_profile_label, text);
     }
@@ -325,9 +333,9 @@ static void mesh_update_profile_label(void)
 static void mesh_load_profile_prefs(void)
 {
     ui_prefs_get(MESHTASTIC_PREF_REGION, mesh_region, sizeof(mesh_region),
-                 "US");
+                 MESHTASTIC_DEFAULT_UI_REGION);
     ui_prefs_get(MESHTASTIC_PREF_PRESET, mesh_preset, sizeof(mesh_preset),
-                 "LONG_FAST");
+                 MESHTASTIC_DEFAULT_UI_PRESET);
     ui_prefs_get(MESHTASTIC_PREF_CHANNEL, mesh_channel_name,
                  sizeof(mesh_channel_name), "");
     ui_prefs_get(MESHTASTIC_PREF_PSK, mesh_psk, sizeof(mesh_psk), "default");
@@ -346,6 +354,12 @@ static void mesh_load_profile_prefs(void)
         ui_prefs_get(MESHTASTIC_PREF_ACK, ack, sizeof(ack), "1");
         mesh_ack_enabled = strcmp(ack, "0") != 0;
     }
+    {
+        char rebroadcast[8];
+        ui_prefs_get(MESHTASTIC_PREF_REBROADCAST, rebroadcast,
+                     sizeof(rebroadcast), "0");
+        mesh_rebroadcast_enabled = strcmp(rebroadcast, "0") != 0;
+    }
     mesh_normalize_power();
     mesh_normalize_hop();
 }
@@ -362,6 +376,8 @@ static void mesh_save_profile_prefs(void)
     ui_prefs_set(MESHTASTIC_PREF_TO, mesh_to_node);
     ui_prefs_set(MESHTASTIC_PREF_HOP, mesh_hop_limit);
     ui_prefs_set(MESHTASTIC_PREF_ACK, mesh_ack_enabled ? "1" : "0");
+    ui_prefs_set(MESHTASTIC_PREF_REBROADCAST,
+                 mesh_rebroadcast_enabled ? "1" : "0");
 }
 
 static void mesh_refresh_daemon_log(void)
@@ -455,6 +471,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     char from_arg[32];
     char to_arg[32];
     char hop_arg[16];
+    char relay_option[24];
     char command[1040];
     int rc;
 
@@ -489,24 +506,28 @@ static void mesh_start_event_cb(lv_event_t *event)
     mesh_safe_or_default(to_arg, sizeof(to_arg), mesh_to_node, "0xffffffff");
     mesh_normalize_hop();
     mesh_safe_or_default(hop_arg, sizeof(hop_arg), mesh_hop_limit, "3");
+    relay_option[0] = '\0';
+    if(!mesh_rebroadcast_enabled) {
+        snprintf(relay_option, sizeof(relay_option), "--no-rebroadcast ");
+    }
     if(mesh_channel_name[0]) {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--channel-name %s --psk %s %s--node %s --from %s --to %s --hop-limit %s %s "
+                 "--channel-name %s --psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, channel_arg, psk_arg,
                  power_option, node_arg, from_arg, to_arg, hop_arg,
-                 mesh_ack_enabled ? "--ack" : "--no-ack");
+                 mesh_ack_enabled ? "--ack" : "--no-ack", relay_option);
     } else {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--psk %s %s--node %s --from %s --to %s --hop-limit %s %s "
+                 "--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, psk_arg, power_option,
                  node_arg, from_arg, to_arg, hop_arg,
-                 mesh_ack_enabled ? "--ack" : "--no-ack");
+                 mesh_ack_enabled ? "--ack" : "--no-ack", relay_option);
     }
     rc = system(command);
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
@@ -561,6 +582,8 @@ static const char *mesh_setting_name(mesh_setting_field_t field)
         return "Hop limit";
     case MESH_FIELD_ACK:
         return "ACK";
+    case MESH_FIELD_REBROADCAST:
+        return "Rebroadcast";
     default:
         return "Setting";
     }
@@ -603,6 +626,9 @@ static const char *mesh_setting_value(mesh_setting_field_t field,
     case MESH_FIELD_ACK:
         snprintf(buf, len, "%s", mesh_ack_enabled ? "On" : "Off");
         return buf;
+    case MESH_FIELD_REBROADCAST:
+        snprintf(buf, len, "%s", mesh_rebroadcast_enabled ? "On" : "Off");
+        return buf;
     default:
         return "";
     }
@@ -610,7 +636,7 @@ static const char *mesh_setting_value(mesh_setting_field_t field,
 
 static void mesh_settings_refresh(void)
 {
-    for(int i = 0; i < (int)MESH_FIELD_ACK + 1; i++) {
+    for(int i = 0; i < (int)MESH_FIELD_COUNT; i++) {
         char buf[32];
         if(mesh_settings_value_labels[i] &&
            lv_obj_is_valid(mesh_settings_value_labels[i])) {
@@ -635,11 +661,12 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
     }
     switch(field) {
     case MESH_FIELD_REGION:
-        mesh_safe_or_default(mesh_region, sizeof(mesh_region), text, "US");
+        mesh_safe_or_default(mesh_region, sizeof(mesh_region), text,
+                             MESHTASTIC_DEFAULT_UI_REGION);
         break;
     case MESH_FIELD_PRESET:
         mesh_safe_or_default(mesh_preset, sizeof(mesh_preset), text,
-                             "LONG_FAST");
+                             MESHTASTIC_DEFAULT_UI_PRESET);
         break;
     case MESH_FIELD_CHANNEL:
         if(!text[0] || strcmp(text, "-") == 0 ||
@@ -702,6 +729,7 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
         snprintf(mesh_hop_limit, sizeof(mesh_hop_limit), "%lu", value);
         break;
     case MESH_FIELD_ACK:
+    case MESH_FIELD_REBROADCAST:
     default:
         return;
     }
@@ -720,12 +748,18 @@ static void mesh_setting_edit_event_cb(lv_event_t *event)
     char placeholder[96];
     char value[32];
 
-    if(field == MESH_FIELD_ACK) {
-        mesh_ack_enabled = !mesh_ack_enabled;
+    if(field == MESH_FIELD_ACK || field == MESH_FIELD_REBROADCAST) {
+        if(field == MESH_FIELD_ACK) {
+            mesh_ack_enabled = !mesh_ack_enabled;
+        } else {
+            mesh_rebroadcast_enabled = !mesh_rebroadcast_enabled;
+        }
         mesh_save_profile_prefs();
         mesh_settings_refresh();
-        mesh_append_log("settings saved: ACK=%s",
-                        mesh_ack_enabled ? "on" : "off");
+        mesh_append_log("settings saved: %s=%s", mesh_setting_name(field),
+                        field == MESH_FIELD_ACK ?
+                        (mesh_ack_enabled ? "on" : "off") :
+                        (mesh_rebroadcast_enabled ? "on" : "off"));
         return;
     }
 
@@ -755,6 +789,15 @@ static void mesh_settings_close_event_cb(lv_event_t *event)
     }
     mesh_settings_overlay = NULL;
     memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
+}
+
+static void mesh_nodes_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
+        lv_obj_delete(mesh_nodes_overlay);
+    }
+    mesh_nodes_overlay = NULL;
 }
 
 static void mesh_profile_event_cb(lv_event_t *event)
@@ -794,7 +837,7 @@ static void mesh_profile_event_cb(lv_event_t *event)
     lv_obj_add_event_cb(btn, mesh_settings_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
 
-    for(int i = 0; i <= (int)MESH_FIELD_ACK; i++) {
+    for(int i = 0; i < (int)MESH_FIELD_COUNT; i++) {
         char value[32];
         lv_obj_t *name = ui_label(panel, mesh_setting_name((mesh_setting_field_t)i),
                                   &lv_font_montserrat_16, 0x9AA4AF);
@@ -810,8 +853,12 @@ static void mesh_profile_event_cb(lv_event_t *event)
         lv_label_set_long_mode(mesh_settings_value_labels[i],
                                LV_LABEL_LONG_DOT);
         edit = ui_command_button(panel, panel_w - 124, y - 4, 96,
-                                 i == (int)MESH_FIELD_ACK ? "Toggle" : "Edit",
-                                 i == (int)MESH_FIELD_ACK ? 0x25C281 :
+                                 (i == (int)MESH_FIELD_ACK ||
+                                  i == (int)MESH_FIELD_REBROADCAST) ?
+                                 "Toggle" : "Edit",
+                                 (i == (int)MESH_FIELD_ACK ||
+                                  i == (int)MESH_FIELD_REBROADCAST) ?
+                                 0x25C281 :
                                  0x3DA5FF);
         lv_obj_add_event_cb(edit, mesh_setting_edit_event_cb,
                             LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -825,6 +872,14 @@ static void mesh_nodes_event_cb(lv_event_t *event)
 {
     char response[2048];
     const char *shown;
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *label;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int panel_w = ui_is_landscape() ? screen_w - 96 : screen_w - 48;
+    int panel_h = ui_is_landscape() ? screen_h - 64 : screen_h - 96;
 
     (void)event;
     if(mesh_ipc_command("NODES\n", response, sizeof(response)) != 0) {
@@ -836,7 +891,28 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     if(strncmp(response, "OK nodes\n", 9) == 0) {
         shown = response + 9;
     }
-    mesh_append_log("nodes:\n%s", shown);
+    if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
+        lv_obj_delete(mesh_nodes_overlay);
+    }
+    mesh_nodes_overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(mesh_nodes_overlay, screen_w, screen_h);
+    lv_obj_set_style_bg_color(mesh_nodes_overlay, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_nodes_overlay, LV_OPA_80, 0);
+    lv_obj_clear_flag(mesh_nodes_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    panel = ui_scroll_panel(mesh_nodes_overlay, (screen_w - panel_w) / 2,
+                            (screen_h - panel_h) / 2, panel_w, panel_h);
+    title = ui_label(panel, "Meshtastic nodes", &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+    btn = ui_command_button(panel, panel_w - 124, 0, 96, "Close", 0x374151);
+    lv_obj_add_event_cb(btn, mesh_nodes_close_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    label = ui_label(panel, shown, &lv_font_montserrat_16, 0xCBD5E1);
+    lv_obj_set_pos(label, 0, 56);
+    lv_obj_set_width(label, panel_w - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 }
 
 static void mesh_send_submit_cb(const char *text, void *user_data)
@@ -920,7 +996,7 @@ void ui_meshtastic_create(lv_obj_t *scr)
 
     status_panel = ui_panel(body, 24, 0, left_w, 226);
     mesh_panel_title(status_panel, "Mesh daemon",
-                     "US LongFast socket bridge for SX1262/LR2021");
+                     "Configurable Meshtastic bridge for SX1262/LR2021");
     mesh_status_label = ui_label(status_panel, "Daemon offline",
                                  &lv_font_montserrat_24, 0xF5A524);
     lv_obj_align(mesh_status_label, LV_ALIGN_TOP_LEFT, 0, 82);
@@ -998,4 +1074,8 @@ void ui_meshtastic_cleanup(void)
     mesh_chat_label = NULL;
     mesh_log_label = NULL;
     mesh_send_button = NULL;
+    if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
+        lv_obj_delete(mesh_nodes_overlay);
+    }
+    mesh_nodes_overlay = NULL;
 }

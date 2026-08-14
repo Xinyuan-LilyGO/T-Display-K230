@@ -3544,7 +3544,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
              "region=%s preset=%s freq=%.3f bw=%.1f sf=%u cr=4/%u sw=0x%02x power=%d node=%s "
-             "from=0x%08x to=0x%08x want_ack=%s channel=%s socket=%s\n",
+             "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
              (unsigned long)tx_count, (unsigned long)rx_count, queued,
              (unsigned)mesh_history_count,
@@ -3566,6 +3566,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              opts.profile.cr, opts.profile.sync_word, opts.profile.power,
              opts.node_name.c_str(), opts.from_node,
              opts.to_node, opts.want_ack ? "on" : "off",
+             opts.rebroadcast ? "on" : "off",
              effective_mesh_channel_name(opts).c_str(),
              opts.socket_path.c_str());
     return std::string(buf);
