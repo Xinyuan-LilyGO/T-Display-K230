@@ -28,7 +28,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.18"
+#define PROBE_VERSION "0.19"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define LORA_PIN_CS 14U
@@ -71,6 +71,8 @@
 #define MESHTASTIC_ACK_RETRY_QUEUE_SIZE 4U
 #define MESHTASTIC_ACK_RETRY_TIMEOUT_US 12000000ULL
 #define MESHTASTIC_ACK_RETRY_MAX 3U
+#define MESHTASTIC_NODEINFO_INTERVAL_US (10ULL * 60ULL * 1000000ULL)
+#define MESHTASTIC_NODEINFO_RETRY_US (60ULL * 1000000ULL)
 #define MESHTASTIC_MAX_K230_TX_POWER_DBM 22
 #define OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH 0
 #define OVERRIDE_SLOT_PRESET_HASH -1
@@ -704,6 +706,8 @@ typedef struct {
     uint8_t hop_limit = 3;
     uint32_t interval_ms = 1000;
     uint32_t duration_sec = 0;
+    uint32_t nodeinfo_interval_sec =
+        (uint32_t)(MESHTASTIC_NODEINFO_INTERVAL_US / 1000000ULL);
     std::string region;
     std::string preset;
     uint32_t frequency_slot = 0;
@@ -798,6 +802,7 @@ typedef struct {
     uint32_t to_node = 0;
     uint32_t from_node = 0;
     uint32_t packet_id = 0;
+    uint32_t ack_request_id = 0;
     uint8_t channel = 0;
     uint8_t old_hop = 0;
     uint8_t new_hop = 0;
@@ -1002,6 +1007,9 @@ static uint32_t mesh_nak_rx_count;
 static uint32_t mesh_ack_retry_count;
 static uint32_t mesh_ack_timeout_count;
 static uint32_t mesh_ack_drop_count;
+static uint32_t mesh_nodeinfo_tx_count;
+static uint32_t mesh_nodeinfo_drop_count;
+static uint64_t mesh_next_nodeinfo_us;
 static LR2021 *active_lr2021;
 static mesh_history_entry_t mesh_history[MESHTASTIC_PACKET_HISTORY_SIZE];
 static size_t mesh_history_count;
@@ -2694,6 +2702,18 @@ static void mesh_history_remember(const mesh_header_t &header)
     mesh_history[index].seen_us = monotonic_us();
 }
 
+static void mesh_history_remember_tx(const tx_frame_t &frame)
+{
+    mesh_header_t header;
+
+    if(frame.packet_id == 0U || frame.bytes.size() < MESHTASTIC_HEADER_LENGTH) {
+        return;
+    }
+    if(parse_mesh_header(frame.bytes.data(), frame.bytes.size(), &header)) {
+        mesh_history_remember(header);
+    }
+}
+
 static uint32_t mesh_prng_u32(uint32_t salt)
 {
     static uint32_t state;
@@ -2782,6 +2802,19 @@ static bool mesh_delayed_ack_enqueue(const tx_frame_t &frame)
     uint64_t now = monotonic_us();
 
     for(size_t i = 0; i < MESHTASTIC_DELAYED_TX_QUEUE_SIZE; i++) {
+        if(mesh_delayed_tx_queue[i].active &&
+           mesh_delayed_tx_queue[i].frame.routing_ack &&
+           mesh_delayed_tx_queue[i].frame.ack_request_id == frame.ack_request_id &&
+           mesh_delayed_tx_queue[i].frame.to_node == frame.to_node &&
+           mesh_delayed_tx_queue[i].frame.channel == frame.channel) {
+            daemon_event("Mesh ACK already queued req=0x%08x to=0x%08x queued=%u",
+                         frame.ack_request_id, frame.to_node,
+                         mesh_delayed_tx_count());
+            return true;
+        }
+    }
+
+    for(size_t i = 0; i < MESHTASTIC_DELAYED_TX_QUEUE_SIZE; i++) {
         if(mesh_delayed_tx_queue[i].active) {
             continue;
         }
@@ -2859,6 +2892,14 @@ static uint32_t mesh_ack_next_ms(uint64_t now_us)
         return 0U;
     }
     return (uint32_t)((best_due - now_us + 999ULL) / 1000ULL);
+}
+
+static uint32_t mesh_nodeinfo_next_ms(uint64_t now_us)
+{
+    if(mesh_next_nodeinfo_us == 0ULL || mesh_next_nodeinfo_us <= now_us) {
+        return 0U;
+    }
+    return (uint32_t)((mesh_next_nodeinfo_us - now_us + 999ULL) / 1000ULL);
 }
 
 static bool mesh_ack_track_frame(const tx_frame_t &frame)
@@ -2993,6 +3034,7 @@ static bool build_mesh_rebroadcast_frame(const probe_options_t &opts,
     frame->to_node = fwd.to;
     frame->from_node = fwd.from;
     frame->packet_id = fwd.id;
+    frame->ack_request_id = 0;
     frame->channel = fwd.channel;
     frame->old_hop = old_hop;
     frame->new_hop = new_hop;
@@ -3060,6 +3102,7 @@ static bool build_mesh_frame(const probe_options_t &opts,
     frame->to_node = header.to;
     frame->from_node = header.from;
     frame->packet_id = header.id;
+    frame->ack_request_id = 0;
     frame->channel = header.channel;
     snprintf(summary, sizeof(summary),
              "mesh id=0x%08x from=0x%08x to=0x%08x ch=0x%02x name=%s hop=%u ack=%s psk=%s text=%s",
@@ -3124,6 +3167,7 @@ static bool build_mesh_nodeinfo_frame(const probe_options_t &opts,
     frame->to_node = header.to;
     frame->from_node = header.from;
     frame->packet_id = header.id;
+    frame->ack_request_id = 0;
     frame->channel = header.channel;
     snprintf(summary, sizeof(summary),
              "mesh nodeinfo id=0x%08x from=0x%08x ch=0x%02x name=%s hop=%u psk=%s",
@@ -3136,6 +3180,7 @@ static bool build_mesh_nodeinfo_frame(const probe_options_t &opts,
 static bool build_mesh_ack_frame(const probe_options_t &opts,
                                  const mesh_header_t &rx_header,
                                  uint32_t error_reason,
+                                 bool ack_wants_ack,
                                  tx_frame_t *frame)
 {
     std::vector<uint8_t> key;
@@ -3175,6 +3220,9 @@ static bool build_mesh_ack_frame(const probe_options_t &opts,
     header.flags = (ack_hop & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
                    ((ack_hop << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
                     MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
+    if(ack_wants_ack) {
+        header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
+    }
     header.channel = rx_header.channel;
     header.next_hop = 0;
     header.relay_node = (uint8_t)(opts.from_node & 0xffU);
@@ -3184,16 +3232,17 @@ static bool build_mesh_ack_frame(const probe_options_t &opts,
     frame->bytes.insert(frame->bytes.end(), data_proto.begin(),
                         data_proto.end());
     frame->rebroadcast = false;
-    frame->want_ack = false;
+    frame->want_ack = mesh_header_want_ack(header);
     frame->routing_ack = true;
     frame->to_node = header.to;
     frame->from_node = header.from;
     frame->packet_id = header.id;
+    frame->ack_request_id = rx_header.id;
     frame->channel = header.channel;
     snprintf(summary, sizeof(summary),
-             "mesh ack id=0x%08x req=0x%08x from=0x%08x to=0x%08x ch=0x%02x hop=%u err=%u",
+             "mesh ack id=0x%08x req=0x%08x from=0x%08x to=0x%08x ch=0x%02x hop=%u err=%u ack=%s",
              header.id, rx_header.id, header.from, header.to, header.channel,
-             ack_hop, error_reason);
+             ack_hop, error_reason, frame->want_ack ? "on" : "off");
     frame->summary = summary;
     return true;
 }
@@ -3245,6 +3294,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
     bool should_rebroadcast = false;
     bool data_ok = false;
     bool ack_candidate = false;
+    bool ack_wants_ack = false;
 
     if(!parse_mesh_header(data, len, &header)) {
         daemon_event("RX %lu len=%u rssi=%.1f snr=%.1f mesh=short",
@@ -3421,14 +3471,18 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
 
     ack_candidate = channel_match && data_ok && header.to == opts.from_node &&
                     header.from != opts.from_node &&
-                    mesh_header_want_ack(header) &&
-                    !(decoded.portnum == MESHTASTIC_ROUTING_APP &&
-                      decoded.request_id != 0U);
+                    mesh_header_want_ack(header);
+    if(ack_candidate) {
+        ack_wants_ack = decoded.portnum == MESHTASTIC_TEXT_MESSAGE_APP &&
+                        decoded.request_id == 0U &&
+                        decoded.reply_id == 0U;
+    }
     if(ack_candidate &&
        build_mesh_ack_frame(opts, header, MESHTASTIC_ROUTING_ERROR_NONE,
-                            rebroadcast_frame)) {
-        daemon_event("Mesh ACK candidate req=0x%08x to=0x%08x",
-                     header.id, header.from);
+                            ack_wants_ack, rebroadcast_frame)) {
+        daemon_event("Mesh ACK candidate req=0x%08x to=0x%08x ack=%s",
+                     header.id, header.from,
+                     ack_wants_ack ? "reliable" : "plain");
         if(duplicate) {
             daemon_event("Mesh ACK duplicate request id=0x%08x from=0x%08x",
                          header.id, header.from);
@@ -3570,6 +3624,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "delayed=%u next_rebroadcast_ms=%u "
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
+             "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
              "region=%s preset=%s freq=%.3f bw=%.1f sf=%u cr=4/%u sw=0x%02x power=%d node=%s "
              "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
@@ -3587,6 +3642,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_ack_retry_count,
              (unsigned long)mesh_ack_timeout_count,
              (unsigned long)mesh_ack_drop_count,
+             (unsigned long)mesh_nodeinfo_tx_count,
+             (unsigned long)mesh_nodeinfo_drop_count,
+             mesh_nodeinfo_next_ms(now),
              opts.resolved_region.empty() ? "-" : opts.resolved_region.c_str(),
              opts.resolved_preset.empty() ? "-" : opts.resolved_preset.c_str(),
              opts.profile.freq, opts.profile.bandwidth, opts.profile.sf,
@@ -3910,6 +3968,7 @@ static void print_usage(const char *argv0)
             "  --no-ack         Disable Routing ACK request\n"
             "  --nodeinfo       Send one NodeInfo packet when daemon starts (default)\n"
             "  --no-nodeinfo    Do not advertise this node on daemon start\n"
+            "  --nodeinfo-interval SEC  Periodic daemon NodeInfo interval, default 600\n"
             "  --no-rebroadcast Disable minimal broadcast flood forwarding\n"
             "  --channel-name S Default primary channel name, empty uses preset name\n"
             "  --psk VALUE      default, none/off/0, or 16/32-byte hex key\n",
@@ -3957,6 +4016,12 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->advertise_nodeinfo = true;
         } else if(strcmp(arg, "--no-nodeinfo") == 0) {
             opts->advertise_nodeinfo = false;
+        } else if(strcmp(arg, "--nodeinfo-interval") == 0 && i + 1 < argc &&
+                  parse_u32(argv[++i], &tmp, 10)) {
+            if(tmp < 60U) {
+                tmp = 60U;
+            }
+            opts->nodeinfo_interval_sec = tmp;
         } else if(strcmp(arg, "--ack") == 0) {
             opts->want_ack = true;
             opts->want_ack_set = true;
@@ -4281,6 +4346,7 @@ static int start_tx(PhysicalLayer *radio, const tx_frame_t &frame)
     active_op = OP_TX;
     active_tx_len = len;
     active_op_start_us = monotonic_us();
+    mesh_history_remember_tx(frame);
     daemon_event("TX start len=%u: %s", (unsigned)len,
                  frame.summary.c_str());
     return 0;
@@ -4397,6 +4463,8 @@ static void handle_delayed_tx(PhysicalLayer *radio, uint64_t now_us)
                          frame.packet_id,
                          (unsigned long)mesh_rebroadcast_drop_count);
         }
+    } else if(frame.routing_ack && frame.want_ack) {
+        (void)mesh_ack_track_frame(frame);
     }
 }
 
@@ -4464,7 +4532,6 @@ int main(int argc, char **argv)
     bool send_once_started = false;
     bool send_once_finished = false;
     bool send_once_awaiting_ack = false;
-    bool nodeinfo_pending = false;
     int daemon_fd = -1;
     std::string pending_daemon_send;
 
@@ -4574,7 +4641,8 @@ int main(int argc, char **argv)
                      opts.resolved_preset.empty() ? "-" :
                      opts.resolved_preset.c_str(),
                      opts.profile.freq);
-        nodeinfo_pending = opts.mesh_mode && opts.advertise_nodeinfo;
+        mesh_next_nodeinfo_us =
+            (opts.mesh_mode && opts.advertise_nodeinfo) ? monotonic_us() : 0ULL;
     }
     printf("Listening. Press Ctrl-C to stop.\n");
 
@@ -4616,18 +4684,26 @@ int main(int argc, char **argv)
         handle_delayed_tx(radio, now);
         handle_ack_retry(radio, now);
 
-        if(nodeinfo_pending && active_op != OP_TX) {
+        if(mesh_next_nodeinfo_us != 0ULL && now >= mesh_next_nodeinfo_us &&
+           active_op != OP_TX) {
             tx_frame_t frame;
-            nodeinfo_pending = false;
+            uint64_t interval_us =
+                (uint64_t)opts.nodeinfo_interval_sec * 1000000ULL;
             if(build_mesh_nodeinfo_frame(opts, &frame)) {
                 if(start_tx(radio, frame) == 0) {
+                    mesh_nodeinfo_tx_count++;
+                    mesh_next_nodeinfo_us = now + interval_us;
                     daemon_event("NodeInfo TX start node=%s from=0x%08x",
                                  opts.node_name.c_str(), opts.from_node);
                 } else {
+                    mesh_nodeinfo_drop_count++;
+                    mesh_next_nodeinfo_us = now + MESHTASTIC_NODEINFO_RETRY_US;
                     daemon_event("NodeInfo TX start failed node=%s",
                                  opts.node_name.c_str());
                 }
             } else {
+                mesh_nodeinfo_drop_count++;
+                mesh_next_nodeinfo_us = now + MESHTASTIC_NODEINFO_RETRY_US;
                 daemon_event("NodeInfo build failed node=%s",
                              opts.node_name.c_str());
             }
