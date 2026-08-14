@@ -280,9 +280,13 @@ static void halow_start_role(const char *role)
     char peer_q[HALOW_IP_MAX * 6];
     char netmask_q[HALOW_IP_MAX * 6];
     char preset_q[64];
+    char camera_transform[96];
     char cmd[1024];
     unsigned fps;
     unsigned quality;
+    int landscape;
+    int camera_rotate;
+    int camera_flip_y;
     pid_t pid;
 
     if(!role || (strcmp(role, "tx") != 0 && strcmp(role, "rx") != 0)) {
@@ -330,6 +334,11 @@ static void halow_start_role(const char *role)
     halow_shell_quote(peer_q, sizeof(peer_q), peer_ip);
     halow_shell_quote(netmask_q, sizeof(netmask_q), netmask);
     halow_shell_quote(preset_q, sizeof(preset_q), preset);
+    landscape = ui_is_landscape();
+    camera_rotate = landscape ? 0 : 90;
+    camera_flip_y = landscape ? 1 : 0;
+    snprintf(camera_transform, sizeof(camera_transform), "--camera-rotate %d%s",
+             camera_rotate, camera_flip_y ? " --camera-flip-y" : "");
     unlink(HALOW_LOG);
     unlink(HALOW_INNER_LOG);
     unlink(HALOW_STOP_FILE);
@@ -339,9 +348,9 @@ static void halow_start_role(const char *role)
     if(strcmp(role, "tx") == 0) {
         snprintf(cmd, sizeof(cmd),
                  "exec %s --role tx --peer %s --local-ip %s --netmask %s "
-                 "--preset %s --fps %u --jpeg-quality %u > %s 2>&1",
+                 "--preset %s --fps %u --jpeg-quality %u %s > %s 2>&1",
                  HALOW_SCRIPT, peer_q, local_q, netmask_q, preset_q, fps,
-                 quality, HALOW_LOG);
+                 quality, camera_transform, HALOW_LOG);
     } else {
         snprintf(cmd, sizeof(cmd),
                  "exec %s --role rx --local-ip %s --netmask %s --preset %s "

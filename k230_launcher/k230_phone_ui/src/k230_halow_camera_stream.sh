@@ -166,7 +166,7 @@ if [ -n "${LOCAL_IP}" ]; then
     ifconfig eth0 "${LOCAL_IP}" netmask "${NETMASK}" >> "${UDP_LOG}" 2>&1 || true
 fi
 
-log "role=${ROLE} peer=${PEER:-none} port=${PORT} preset=${PRESET} stream=${ENCODE_WIDTH}x${ENCODE_HEIGHT}@${FPS} q=${JPEG_QUALITY} preview=${PREVIEW_WIDTH}x${PREVIEW_HEIGHT}"
+log "role=${ROLE} peer=${PEER:-none} port=${PORT} preset=${PRESET} stream=${ENCODE_WIDTH}x${ENCODE_HEIGHT}@${FPS} q=${JPEG_QUALITY} preview=${PREVIEW_WIDTH}x${PREVIEW_HEIGHT} rotate=${CAMERA_ROTATE} flip_x=${CAMERA_FLIP_X} flip_y=${CAMERA_FLIP_Y}"
 
 if [ "${ROLE}" = "rx" ]; then
     exec "${UDP_BIN}" --role rx --port "${PORT}" --out-dir "${RX_DIR}" \
