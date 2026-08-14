@@ -32,6 +32,8 @@
 #define HALOW_PREF_PRESET_SCHEMA "halow.preset.schema"
 #define HALOW_PREF_FPS "halow.fps"
 #define HALOW_PREF_QUALITY "halow.quality"
+#define HALOW_PREF_FORMAT "halow.format"
+#define HALOW_PREF_TRANSPORT "halow.transport"
 #define HALOW_IP_MAX 48
 #define HALOW_STATUS_MAX 192
 #define HALOW_LOG_TEXT_MAX 1024
@@ -40,6 +42,8 @@
 #define HALOW_DEFAULT_NETMASK "255.255.255.0"
 #define HALOW_DEFAULT_PRESET "320x240"
 #define HALOW_PRESET_SCHEMA "2"
+#define HALOW_DEFAULT_FORMAT "jpeg"
+#define HALOW_DEFAULT_TRANSPORT "udp"
 #define HALOW_DEFAULT_FPS 12
 #define HALOW_DEFAULT_QUALITY 45
 #define HALOW_PREVIEW_W 640
@@ -56,6 +60,8 @@ static char halow_local_ip[HALOW_IP_MAX] = HALOW_DEFAULT_LOCAL_IP;
 static char halow_peer_ip[HALOW_IP_MAX] = HALOW_DEFAULT_PEER_IP;
 static char halow_netmask[HALOW_IP_MAX] = HALOW_DEFAULT_NETMASK;
 static char halow_preset[16] = HALOW_DEFAULT_PRESET;
+static char halow_frame_format[16] = HALOW_DEFAULT_FORMAT;
+static char halow_transport[16] = HALOW_DEFAULT_TRANSPORT;
 static unsigned halow_fps = HALOW_DEFAULT_FPS;
 static unsigned halow_quality = HALOW_DEFAULT_QUALITY;
 static char halow_status[HALOW_STATUS_MAX] = "Ready";
@@ -84,6 +90,10 @@ static lv_obj_t *halow_preset_btn_720;
 static lv_obj_t *halow_quality_btn_low;
 static lv_obj_t *halow_quality_btn_mid;
 static lv_obj_t *halow_quality_btn_high;
+static lv_obj_t *halow_format_btn_jpeg;
+static lv_obj_t *halow_format_btn_raw;
+static lv_obj_t *halow_transport_btn_udp;
+static lv_obj_t *halow_transport_btn_tcp;
 static lv_obj_t *halow_settings_overlay;
 static uint8_t *halow_preview_pixels;
 static lv_image_dsc_t halow_preview_dsc;
@@ -117,6 +127,16 @@ static int halow_ipv4_valid(const char *text)
         return 0;
     }
     return a <= 255U && b <= 255U && c <= 255U && d <= 255U;
+}
+
+static int halow_frame_format_valid(const char *text)
+{
+    return text && (strcmp(text, "jpeg") == 0 || strcmp(text, "raw") == 0);
+}
+
+static int halow_transport_valid(const char *text)
+{
+    return text && (strcmp(text, "udp") == 0 || strcmp(text, "tcp") == 0);
 }
 
 static unsigned halow_pref_uint(const char *key, unsigned fallback,
@@ -175,6 +195,10 @@ static void halow_load_prefs(void)
                  HALOW_DEFAULT_NETMASK);
     ui_prefs_get(HALOW_PREF_PRESET, halow_preset, sizeof(halow_preset),
                  HALOW_DEFAULT_PRESET);
+    ui_prefs_get(HALOW_PREF_FORMAT, halow_frame_format,
+                 sizeof(halow_frame_format), HALOW_DEFAULT_FORMAT);
+    ui_prefs_get(HALOW_PREF_TRANSPORT, halow_transport,
+                 sizeof(halow_transport), HALOW_DEFAULT_TRANSPORT);
     ui_prefs_get(HALOW_PREF_PRESET_SCHEMA, schema, sizeof(schema), "");
     if(strcmp(schema, HALOW_PRESET_SCHEMA) != 0) {
         snprintf(halow_preset, sizeof(halow_preset), "%s",
@@ -185,6 +209,16 @@ static void halow_load_prefs(void)
     halow_fps = halow_pref_uint(HALOW_PREF_FPS, HALOW_DEFAULT_FPS, 1, 30);
     halow_quality = halow_pref_uint(HALOW_PREF_QUALITY,
                                     HALOW_DEFAULT_QUALITY, 5, 95);
+    if(!halow_frame_format_valid(halow_frame_format)) {
+        snprintf(halow_frame_format, sizeof(halow_frame_format), "%s",
+                 HALOW_DEFAULT_FORMAT);
+        ui_prefs_set(HALOW_PREF_FORMAT, halow_frame_format);
+    }
+    if(!halow_transport_valid(halow_transport)) {
+        snprintf(halow_transport, sizeof(halow_transport), "%s",
+                 HALOW_DEFAULT_TRANSPORT);
+        ui_prefs_set(HALOW_PREF_TRANSPORT, halow_transport);
+    }
     if(!halow_ipv4_valid(halow_local_ip)) {
         snprintf(halow_local_ip, sizeof(halow_local_ip), "%s",
                  HALOW_DEFAULT_LOCAL_IP);
@@ -276,12 +310,16 @@ static void halow_start_role(const char *role)
     char peer_ip[HALOW_IP_MAX];
     char netmask[HALOW_IP_MAX];
     char preset[16];
+    char frame_format[16];
+    char transport[16];
     char local_q[HALOW_IP_MAX * 6];
     char peer_q[HALOW_IP_MAX * 6];
     char netmask_q[HALOW_IP_MAX * 6];
     char preset_q[64];
+    char frame_format_q[64];
+    char transport_q[64];
     char camera_transform[96];
-    char cmd[1024];
+    char cmd[1280];
     unsigned fps;
     unsigned quality;
     int landscape;
@@ -306,6 +344,8 @@ static void halow_start_role(const char *role)
     snprintf(peer_ip, sizeof(peer_ip), "%s", halow_peer_ip);
     snprintf(netmask, sizeof(netmask), "%s", halow_netmask);
     snprintf(preset, sizeof(preset), "%s", halow_preset);
+    snprintf(frame_format, sizeof(frame_format), "%s", halow_frame_format);
+    snprintf(transport, sizeof(transport), "%s", halow_transport);
     fps = halow_fps;
     quality = halow_quality;
     halow_mbps = 0.0;
@@ -334,6 +374,8 @@ static void halow_start_role(const char *role)
     halow_shell_quote(peer_q, sizeof(peer_q), peer_ip);
     halow_shell_quote(netmask_q, sizeof(netmask_q), netmask);
     halow_shell_quote(preset_q, sizeof(preset_q), preset);
+    halow_shell_quote(frame_format_q, sizeof(frame_format_q), frame_format);
+    halow_shell_quote(transport_q, sizeof(transport_q), transport);
     landscape = ui_is_landscape();
     camera_rotate = landscape ? 0 : 90;
     camera_flip_y = landscape ? 1 : 0;
@@ -348,15 +390,18 @@ static void halow_start_role(const char *role)
     if(strcmp(role, "tx") == 0) {
         snprintf(cmd, sizeof(cmd),
                  "exec %s --role tx --peer %s --local-ip %s --netmask %s "
-                 "--preset %s --fps %u --jpeg-quality %u %s > %s 2>&1",
+                 "--preset %s --fps %u --frame-format %s "
+                 "--transport %s --jpeg-quality %u %s > %s 2>&1",
                  HALOW_SCRIPT, peer_q, local_q, netmask_q, preset_q, fps,
-                 quality, camera_transform, HALOW_LOG);
+                 frame_format_q, transport_q, quality, camera_transform,
+                 HALOW_LOG);
     } else {
         snprintf(cmd, sizeof(cmd),
                  "exec %s --role rx --local-ip %s --netmask %s --preset %s "
-                 "--fps %u --jpeg-quality %u > %s 2>&1",
-                 HALOW_SCRIPT, local_q, netmask_q, preset_q, fps, quality,
-                 HALOW_LOG);
+                 "--fps %u --frame-format %s --transport %s "
+                 "--jpeg-quality %u > %s 2>&1",
+                 HALOW_SCRIPT, local_q, netmask_q, preset_q, fps,
+                 frame_format_q, transport_q, quality, HALOW_LOG);
     }
 
     pid = fork();
@@ -600,6 +645,8 @@ static void halow_timer_cb(lv_timer_t *timer)
     char local_ip[HALOW_IP_MAX];
     char peer_ip[HALOW_IP_MAX];
     char preset[16];
+    char frame_format[16];
+    char transport[16];
     char status[HALOW_STATUS_MAX];
     char role[16];
     char log_text[HALOW_LOG_TEXT_MAX];
@@ -627,6 +674,8 @@ static void halow_timer_cb(lv_timer_t *timer)
     snprintf(local_ip, sizeof(local_ip), "%s", halow_local_ip);
     snprintf(peer_ip, sizeof(peer_ip), "%s", halow_peer_ip);
     snprintf(preset, sizeof(preset), "%s", halow_preset);
+    snprintf(frame_format, sizeof(frame_format), "%s", halow_frame_format);
+    snprintf(transport, sizeof(transport), "%s", halow_transport);
     snprintf(status, sizeof(status), "%s", halow_status);
     snprintf(role, sizeof(role), "%s", running ? halow_role : "Idle");
     fps = halow_fps;
@@ -653,9 +702,12 @@ static void halow_timer_cb(lv_timer_t *timer)
             snprintf(eth_ip, sizeof(eth_ip), "No eth0 IP");
         }
         lv_label_set_text_fmt(halow_config_label,
-                              "eth0 %s\nLocal %s  Peer %s\n%s  %ux%u  %ufps  Q%u",
+                              "eth0 %s\nLocal %s  Peer %s\n%s  %ux%u  %ufps  %s/%s  Q%u",
                               eth_ip, local_ip, peer_ip, preset, stream_w,
-                              stream_h, fps, quality);
+                              stream_h, fps,
+                              strcmp(transport, "tcp") == 0 ? "TCP" : "UDP",
+                              strcmp(frame_format, "raw") == 0 ? "RAW" :
+                              "JPEG", quality);
     }
     if(halow_stats_label && lv_obj_is_valid(halow_stats_label)) {
         lv_label_set_text_fmt(halow_stats_label,
@@ -779,10 +831,14 @@ static void halow_style_choice(lv_obj_t *btn, int active, uint32_t color)
 static void halow_update_settings_buttons(void)
 {
     char preset[16];
+    char frame_format[16];
+    char transport[16];
     unsigned quality;
 
     pthread_mutex_lock(&halow_lock);
     snprintf(preset, sizeof(preset), "%s", halow_preset);
+    snprintf(frame_format, sizeof(frame_format), "%s", halow_frame_format);
+    snprintf(transport, sizeof(transport), "%s", halow_transport);
     quality = halow_quality;
     pthread_mutex_unlock(&halow_lock);
     halow_style_choice(halow_preset_btn_320, strcmp(preset, "320x240") == 0,
@@ -795,6 +851,14 @@ static void halow_update_settings_buttons(void)
     halow_style_choice(halow_quality_btn_mid, quality > 35U && quality < 60U,
                        0x3DA5FF);
     halow_style_choice(halow_quality_btn_high, quality >= 60U, 0x3DA5FF);
+    halow_style_choice(halow_format_btn_jpeg,
+                       strcmp(frame_format, "jpeg") == 0, 0xF5B84B);
+    halow_style_choice(halow_format_btn_raw,
+                       strcmp(frame_format, "raw") == 0, 0xF5B84B);
+    halow_style_choice(halow_transport_btn_udp,
+                       strcmp(transport, "udp") == 0, 0x8B5CF6);
+    halow_style_choice(halow_transport_btn_tcp,
+                       strcmp(transport, "tcp") == 0, 0x8B5CF6);
 }
 
 static void halow_preset_event_cb(lv_event_t *event)
@@ -825,6 +889,37 @@ static void halow_quality_event_cb(lv_event_t *event)
     halow_update_settings_buttons();
 }
 
+static void halow_format_event_cb(lv_event_t *event)
+{
+    const char *frame_format = (const char *)lv_event_get_user_data(event);
+
+    if(!halow_frame_format_valid(frame_format)) {
+        return;
+    }
+    pthread_mutex_lock(&halow_lock);
+    snprintf(halow_frame_format, sizeof(halow_frame_format), "%s",
+             frame_format);
+    ui_prefs_set(HALOW_PREF_FORMAT, halow_frame_format);
+    pthread_mutex_unlock(&halow_lock);
+    halow_set_status("Format saved");
+    halow_update_settings_buttons();
+}
+
+static void halow_transport_event_cb(lv_event_t *event)
+{
+    const char *transport = (const char *)lv_event_get_user_data(event);
+
+    if(!halow_transport_valid(transport)) {
+        return;
+    }
+    pthread_mutex_lock(&halow_lock);
+    snprintf(halow_transport, sizeof(halow_transport), "%s", transport);
+    ui_prefs_set(HALOW_PREF_TRANSPORT, halow_transport);
+    pthread_mutex_unlock(&halow_lock);
+    halow_set_status("Transport saved");
+    halow_update_settings_buttons();
+}
+
 static void halow_fps_event_cb(lv_event_t *event)
 {
     unsigned fps = (unsigned)(uintptr_t)lv_event_get_user_data(event);
@@ -848,6 +943,10 @@ static void halow_settings_close(void)
     halow_quality_btn_low = NULL;
     halow_quality_btn_mid = NULL;
     halow_quality_btn_high = NULL;
+    halow_format_btn_jpeg = NULL;
+    halow_format_btn_raw = NULL;
+    halow_transport_btn_udp = NULL;
+    halow_transport_btn_tcp = NULL;
 }
 
 static void halow_settings_close_event_cb(lv_event_t *event)
@@ -925,6 +1024,36 @@ static void halow_settings_event_cb(lv_event_t *event)
     lv_obj_add_event_cb(halow_preset_btn_720, halow_preset_event_cb,
                         LV_EVENT_CLICKED, "720p");
 
+    section = ui_label(card, "Transport format", &lv_font_montserrat_18,
+                       0x9AA4AF);
+    lv_obj_set_pos(section, 0, y + 82);
+    y += 116;
+    col_w = (card_w - pad * 2 - gap) / 2;
+    halow_format_btn_jpeg =
+        ui_command_button(card, 0, y, col_w, "JPEG", 0xF2F5F8);
+    lv_obj_add_event_cb(halow_format_btn_jpeg, halow_format_event_cb,
+                        LV_EVENT_CLICKED, "jpeg");
+    halow_format_btn_raw =
+        ui_command_button(card, col_w + gap, y, col_w, "RAW LAN",
+                          0xF2F5F8);
+    lv_obj_add_event_cb(halow_format_btn_raw, halow_format_event_cb,
+                        LV_EVENT_CLICKED, "raw");
+
+    section = ui_label(card, "Transport protocol", &lv_font_montserrat_18,
+                       0x9AA4AF);
+    lv_obj_set_pos(section, 0, y + 82);
+    y += 116;
+    col_w = (card_w - pad * 2 - gap) / 2;
+    halow_transport_btn_udp =
+        ui_command_button(card, 0, y, col_w, "UDP", 0xF2F5F8);
+    lv_obj_add_event_cb(halow_transport_btn_udp, halow_transport_event_cb,
+                        LV_EVENT_CLICKED, "udp");
+    halow_transport_btn_tcp =
+        ui_command_button(card, col_w + gap, y, col_w, "TCP LAN",
+                          0xF2F5F8);
+    lv_obj_add_event_cb(halow_transport_btn_tcp, halow_transport_event_cb,
+                        LV_EVENT_CLICKED, "tcp");
+
     section = ui_label(card, "JPEG quality", &lv_font_montserrat_18, 0x9AA4AF);
     lv_obj_set_pos(section, 0, y + 82);
     y += 116;
@@ -960,7 +1089,7 @@ static void halow_settings_event_cb(lv_event_t *event)
                         (void *)(uintptr_t)15U);
 
     section = ui_label(card,
-                       "Lower presets reduce HaLow bandwidth and CPU load. Use 720p only when the link is stable.",
+                       "JPEG/UDP is safer for low bandwidth HaLow links. RAW/TCP LAN removes JPEG encode/decode and UDP chunk overhead for wired or high throughput tests.",
                        &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_pos(section, 0, y + 86);
     lv_obj_set_width(section, card_w - pad * 2);

@@ -9,7 +9,9 @@ PORT="5600"
 PRESET="320x240"
 FPS="12"
 JPEG_QUALITY="45"
-PAYLOAD="1200"
+FRAME_FORMAT="jpeg"
+TRANSPORT="udp"
+PAYLOAD="1400"
 PACKET_GAP_US="0"
 REPEAT="1"
 DURATION="3600"
@@ -54,8 +56,11 @@ Options:
   --preset 320x240|640x480|720p
                           Transmit resolution. Default 320x240.
   --fps N                Capture/send FPS. Default 12.
+  --frame-format jpeg|raw
+                          JPEG for low bandwidth links, raw/RGB565 for LAN.
+  --transport udp|tcp     UDP packet stream or TCP LAN stream. Default udp.
   --jpeg-quality N       JPEG quality 5..95. Default 45.
-  --payload N            UDP payload bytes. Default 1200.
+  --payload N            UDP payload bytes. Default 1400.
   --packet-gap-us N      Delay between UDP packets. Default 0.
   --repeat N             Repeat each UDP frame 1..4. Default 1.
   --duration SEC         Run limit. Default 3600.
@@ -97,18 +102,24 @@ camera_device_index() {
 apply_preset() {
     case "${PRESET}" in
         320x240|qvga)
+            CAPTURE_WIDTH="640"
+            CAPTURE_HEIGHT="480"
             ENCODE_WIDTH="320"
             ENCODE_HEIGHT="240"
             PREVIEW_WIDTH="640"
             PREVIEW_HEIGHT="360"
             ;;
         640x480|vga)
+            CAPTURE_WIDTH="640"
+            CAPTURE_HEIGHT="480"
             ENCODE_WIDTH="640"
             ENCODE_HEIGHT="480"
             PREVIEW_WIDTH="640"
             PREVIEW_HEIGHT="360"
             ;;
         720p)
+            CAPTURE_WIDTH="1280"
+            CAPTURE_HEIGHT="720"
             ENCODE_WIDTH="1280"
             ENCODE_HEIGHT="720"
             PREVIEW_WIDTH="640"
@@ -130,6 +141,8 @@ while [ "$#" -gt 0 ]; do
         --port) PORT="$2"; shift 2 ;;
         --preset) PRESET="$2"; shift 2 ;;
         --fps) FPS="$2"; shift 2 ;;
+        --frame-format) FRAME_FORMAT="$2"; shift 2 ;;
+        --transport) TRANSPORT="$2"; shift 2 ;;
         --jpeg-quality) JPEG_QUALITY="$2"; shift 2 ;;
         --payload) PAYLOAD="$2"; shift 2 ;;
         --packet-gap-us) PACKET_GAP_US="$2"; shift 2 ;;
@@ -151,6 +164,15 @@ case "${CAMERA_ROTATE}" in
     0|90|180|270) ;;
     *) log "invalid camera rotate: ${CAMERA_ROTATE}"; exit 2 ;;
 esac
+case "${FRAME_FORMAT}" in
+    jpeg|jpg) FRAME_FORMAT="jpeg" ;;
+    raw|rgb565) FRAME_FORMAT="raw" ;;
+    *) log "invalid frame format: ${FRAME_FORMAT}"; exit 2 ;;
+esac
+case "${TRANSPORT}" in
+    udp|tcp) ;;
+    *) log "invalid transport: ${TRANSPORT}"; exit 2 ;;
+esac
 apply_preset
 
 trap cleanup INT TERM EXIT
@@ -166,14 +188,16 @@ if [ -n "${LOCAL_IP}" ]; then
     ifconfig eth0 "${LOCAL_IP}" netmask "${NETMASK}" >> "${UDP_LOG}" 2>&1 || true
 fi
 
-log "role=${ROLE} peer=${PEER:-none} port=${PORT} preset=${PRESET} stream=${ENCODE_WIDTH}x${ENCODE_HEIGHT}@${FPS} q=${JPEG_QUALITY} preview=${PREVIEW_WIDTH}x${PREVIEW_HEIGHT} rotate=${CAMERA_ROTATE} flip_x=${CAMERA_FLIP_X} flip_y=${CAMERA_FLIP_Y}"
+log "role=${ROLE} peer=${PEER:-none} port=${PORT} transport=${TRANSPORT} format=${FRAME_FORMAT} preset=${PRESET} stream=${ENCODE_WIDTH}x${ENCODE_HEIGHT}@${FPS} q=${JPEG_QUALITY} preview=${PREVIEW_WIDTH}x${PREVIEW_HEIGHT} rotate=${CAMERA_ROTATE} flip_x=${CAMERA_FLIP_X} flip_y=${CAMERA_FLIP_Y}"
 
 if [ "${ROLE}" = "rx" ]; then
     exec "${UDP_BIN}" --role rx --port "${PORT}" --out-dir "${RX_DIR}" \
         --payload "${PAYLOAD}" --preview-file "${PREVIEW_FILE}" \
         --meta-file "${PREVIEW_META}" --preview-width "${PREVIEW_WIDTH}" \
         --preview-height "${PREVIEW_HEIGHT}" --stream-width "${ENCODE_WIDTH}" \
-        --stream-height "${ENCODE_HEIGHT}" --stop-file "${STOP_FILE}"
+        --stream-height "${ENCODE_HEIGHT}" --frame-format "${FRAME_FORMAT}" \
+        --transport "${TRANSPORT}" \
+        --stop-file "${STOP_FILE}"
 fi
 
 if [ -z "${PEER}" ]; then
@@ -196,13 +220,18 @@ fi
 if [ "${CAMERA_FLIP_Y}" = "1" ]; then
     transform_args="${transform_args} --flip-y"
 fi
+if [ "${FRAME_FORMAT}" = "jpeg" ]; then
+    stream_output_args="--stream-output jpeg --jpeg-quality ${JPEG_QUALITY}"
+else
+    stream_output_args="--stream-output raw"
+fi
 
 camera_index="$(camera_device_index)"
 "${CAPTURE_BIN}" -d "${camera_index}" \
     -w "${CAPTURE_WIDTH}" -h "${CAPTURE_HEIGHT}" -f NV16 \
     --thumb-width "${ENCODE_WIDTH}" --thumb-height "${ENCODE_HEIGHT}" \
     --skip 1 --stream-dir "${TX_DIR}" --stream-prefix halow_cam \
-    --stream-output jpeg --jpeg-quality "${JPEG_QUALITY}" \
+    ${stream_output_args} \
     --stream-duration "${DURATION}" --stream-fps "${FPS}" \
     --stream-max-files 4 ${transform_args} > "${CAPTURE_LOG}" 2>&1 &
 CAPTURE_PID="$!"
@@ -212,8 +241,10 @@ CAPTURE_PID="$!"
     --preview-file "${PREVIEW_FILE}" --meta-file "${PREVIEW_META}" \
     --preview-width "${PREVIEW_WIDTH}" --preview-height "${PREVIEW_HEIGHT}" \
     --stream-width "${ENCODE_WIDTH}" --stream-height "${ENCODE_HEIGHT}" \
-    --stop-file "${STOP_FILE}" --packet-gap-us "${PACKET_GAP_US}" \
-    --repeat "${REPEAT}" > "${UDP_LOG}" 2>&1 &
+    --frame-format "${FRAME_FORMAT}" --transport "${TRANSPORT}" \
+    --stop-file "${STOP_FILE}" \
+    --packet-gap-us "${PACKET_GAP_US}" --repeat "${REPEAT}" \
+    > "${UDP_LOG}" 2>&1 &
 UDP_PID="$!"
 
 start_s="$(date +%s)"

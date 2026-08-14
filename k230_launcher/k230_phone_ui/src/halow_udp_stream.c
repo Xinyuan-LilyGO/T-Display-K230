@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <jpeglib.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -16,12 +17,18 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 #define HALOW_MAGIC "KHWV"
 #define HALOW_VERSION 1U
 #define HALOW_TYPE_DATA 1U
 #define HALOW_HEADER_SIZE 40U
+#define HALOW_TCP_MAGIC "KHTV"
+#define HALOW_TCP_HEADER_SIZE 32U
 #define HALOW_DEFAULT_PORT 5600
-#define HALOW_DEFAULT_PAYLOAD 1200U
+#define HALOW_DEFAULT_PAYLOAD 1400U
 #define HALOW_DEFAULT_PREVIEW_W 640U
 #define HALOW_DEFAULT_PREVIEW_H 360U
 #define HALOW_MAX_FRAME_SIZE (4U * 1024U * 1024U)
@@ -33,8 +40,20 @@ typedef enum {
     HALOW_ROLE_RX,
 } halow_role_t;
 
+typedef enum {
+    HALOW_FRAME_JPEG = 0,
+    HALOW_FRAME_RAW_RGB565,
+} halow_frame_format_t;
+
+typedef enum {
+    HALOW_TRANSPORT_UDP = 0,
+    HALOW_TRANSPORT_TCP,
+} halow_transport_t;
+
 typedef struct {
     halow_role_t role;
+    halow_frame_format_t frame_format;
+    halow_transport_t transport;
     char host[96];
     int port;
     char in_dir[256];
@@ -152,6 +171,9 @@ static void usage(const char *argv0)
             "  --preview-height N   RGB565 preview height. Default %u\n"
             "  --stream-width N     Encoded stream width, for metadata.\n"
             "  --stream-height N    Encoded stream height, for metadata.\n"
+            "  --frame-format jpeg|raw\n"
+            "                        JPEG for low bandwidth links, raw/RGB565 for LAN.\n"
+            "  --transport udp|tcp  UDP packet stream or TCP LAN stream. Default udp.\n"
             "  --stop-file PATH     Stop marker path.\n"
             "  --packet-gap-us N    TX delay between packets. Default 0.\n"
             "  --repeat N           Repeat each UDP frame. Default 1.\n",
@@ -176,10 +198,54 @@ static int parse_uint_arg(const char *text, unsigned *out)
     return 0;
 }
 
+static const char *frame_format_name(halow_frame_format_t format)
+{
+    return format == HALOW_FRAME_RAW_RGB565 ? "raw" : "jpeg";
+}
+
+static int parse_frame_format(const char *text, halow_frame_format_t *out)
+{
+    if(!text || !out) {
+        return -1;
+    }
+    if(strcmp(text, "jpeg") == 0 || strcmp(text, "jpg") == 0) {
+        *out = HALOW_FRAME_JPEG;
+        return 0;
+    }
+    if(strcmp(text, "raw") == 0 || strcmp(text, "rgb565") == 0) {
+        *out = HALOW_FRAME_RAW_RGB565;
+        return 0;
+    }
+    return -1;
+}
+
+static const char *transport_name(halow_transport_t transport)
+{
+    return transport == HALOW_TRANSPORT_TCP ? "tcp" : "udp";
+}
+
+static int parse_transport(const char *text, halow_transport_t *out)
+{
+    if(!text || !out) {
+        return -1;
+    }
+    if(strcmp(text, "udp") == 0) {
+        *out = HALOW_TRANSPORT_UDP;
+        return 0;
+    }
+    if(strcmp(text, "tcp") == 0) {
+        *out = HALOW_TRANSPORT_TCP;
+        return 0;
+    }
+    return -1;
+}
+
 static void options_init(halow_options_t *opts)
 {
     memset(opts, 0, sizeof(*opts));
     opts->role = HALOW_ROLE_RX;
+    opts->frame_format = HALOW_FRAME_JPEG;
+    opts->transport = HALOW_TRANSPORT_UDP;
     opts->port = HALOW_DEFAULT_PORT;
     snprintf(opts->preview_file, sizeof(opts->preview_file),
              "/tmp/k230_halow_preview.rgb565");
@@ -218,6 +284,8 @@ static int parse_args(int argc, char **argv, halow_options_t *opts)
         {"idle-us", required_argument, NULL, 1013},
         {"packet-gap-us", required_argument, NULL, 1014},
         {"repeat", required_argument, NULL, 1015},
+        {"frame-format", required_argument, NULL, 1016},
+        {"transport", required_argument, NULL, 1017},
         {"help", no_argument, NULL, 'h'},
         {0, 0, 0, 0},
     };
@@ -309,6 +377,16 @@ static int parse_args(int argc, char **argv, halow_options_t *opts)
                 return -1;
             }
             break;
+        case 1016:
+            if(parse_frame_format(optarg, &opts->frame_format) != 0) {
+                return -1;
+            }
+            break;
+        case 1017:
+            if(parse_transport(optarg, &opts->transport) != 0) {
+                return -1;
+            }
+            break;
         case 'h':
             usage(argv[0]);
             exit(0);
@@ -368,7 +446,7 @@ static int mkdir_p(const char *path)
     return 0;
 }
 
-static int has_jpeg_suffix(const char *name)
+static int has_frame_suffix(const char *name, halow_frame_format_t format)
 {
     size_t len;
 
@@ -376,11 +454,16 @@ static int has_jpeg_suffix(const char *name)
         return 0;
     }
     len = strlen(name);
+    if(format == HALOW_FRAME_RAW_RGB565) {
+        return (len > 4U && strcmp(name + len - 4U, ".raw") == 0) ||
+               (len > 7U && strcmp(name + len - 7U, ".rgb565") == 0);
+    }
     return (len > 4U && strcmp(name + len - 4U, ".jpg") == 0) ||
            (len > 5U && strcmp(name + len - 5U, ".jpeg") == 0);
 }
 
-static int find_newest_jpeg(const char *dir, char *out, size_t out_len)
+static int find_newest_frame(const char *dir, halow_frame_format_t format,
+                             char *out, size_t out_len)
 {
     DIR *dp;
     struct dirent *de;
@@ -393,7 +476,7 @@ static int find_newest_jpeg(const char *dir, char *out, size_t out_len)
 
     while((de = readdir(dp)) != NULL) {
         if(de->d_name[0] == '.' || strstr(de->d_name, ".tmp") ||
-           !has_jpeg_suffix(de->d_name)) {
+           !has_frame_suffix(de->d_name, format)) {
             continue;
         }
         if(!best[0] || strcmp(de->d_name, best) > 0) {
@@ -409,7 +492,8 @@ static int find_newest_jpeg(const char *dir, char *out, size_t out_len)
     return 0;
 }
 
-static void trim_older_jpegs(const char *dir, const char *keep_path)
+static void trim_older_frames(const char *dir, halow_frame_format_t format,
+                              const char *keep_path)
 {
     DIR *dp;
     struct dirent *de;
@@ -423,7 +507,7 @@ static void trim_older_jpegs(const char *dir, const char *keep_path)
     while((de = readdir(dp)) != NULL) {
         char path[512];
 
-        if(de->d_name[0] == '.' || !has_jpeg_suffix(de->d_name) ||
+        if(de->d_name[0] == '.' || !has_frame_suffix(de->d_name, format) ||
            strcmp(de->d_name, keep_name) >= 0) {
             continue;
         }
@@ -615,6 +699,116 @@ out:
     return ret;
 }
 
+static int raw_rgb565_to_preview(const uint8_t *raw, size_t raw_len,
+                                 unsigned src_w, unsigned src_h,
+                                 const char *preview_file,
+                                 unsigned preview_w, unsigned preview_h)
+{
+    uint8_t *rgb565 = NULL;
+    FILE *fp = NULL;
+    char tmp_path[512];
+    unsigned draw_w;
+    unsigned draw_h;
+    unsigned off_x;
+    unsigned off_y;
+    size_t expected;
+    int ret = -1;
+
+    if(!raw || !preview_file || !preview_file[0] || src_w == 0 ||
+       src_h == 0 || preview_w == 0 || preview_h == 0) {
+        return -1;
+    }
+    expected = (size_t)src_w * src_h * 2U;
+    if(raw_len < expected || expected > HALOW_MAX_FRAME_SIZE) {
+        return -1;
+    }
+
+    rgb565 = (uint8_t *)calloc((size_t)preview_w * preview_h, 2U);
+    if(!rgb565) {
+        return -1;
+    }
+
+    draw_w = preview_w;
+    draw_h = preview_h;
+    if((uint64_t)src_w * preview_h > (uint64_t)src_h * preview_w) {
+        draw_h = (unsigned)(((uint64_t)src_h * preview_w) / src_w);
+        if(draw_h == 0) {
+            draw_h = 1;
+        }
+    } else {
+        draw_w = (unsigned)(((uint64_t)src_w * preview_h) / src_h);
+        if(draw_w == 0) {
+            draw_w = 1;
+        }
+    }
+    off_x = (preview_w - draw_w) / 2U;
+    off_y = (preview_h - draw_h) / 2U;
+
+    for(unsigned y = 0; y < draw_h; y++) {
+        unsigned sy = (unsigned)(((uint64_t)y * src_h) / draw_h);
+
+        if(sy >= src_h) {
+            sy = src_h - 1U;
+        }
+        for(unsigned x = 0; x < draw_w; x++) {
+            unsigned sx = (unsigned)(((uint64_t)x * src_w) / draw_w);
+            size_t src_off;
+            size_t dst_off;
+
+            if(sx >= src_w) {
+                sx = src_w - 1U;
+            }
+            src_off = ((size_t)sy * src_w + sx) * 2U;
+            dst_off = ((size_t)(off_y + y) * preview_w + (off_x + x)) * 2U;
+            rgb565[dst_off + 0] = raw[src_off + 0];
+            rgb565[dst_off + 1] = raw[src_off + 1];
+        }
+    }
+
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", preview_file);
+    fp = fopen(tmp_path, "wb");
+    if(!fp) {
+        goto out;
+    }
+    if(fwrite(rgb565, 1, (size_t)preview_w * preview_h * 2U, fp) !=
+       (size_t)preview_w * preview_h * 2U) {
+        goto out;
+    }
+    if(fclose(fp) != 0) {
+        fp = NULL;
+        goto out;
+    }
+    fp = NULL;
+    if(rename(tmp_path, preview_file) != 0) {
+        unlink(tmp_path);
+        goto out;
+    }
+    ret = 0;
+
+out:
+    if(fp) {
+        fclose(fp);
+    }
+    if(ret != 0) {
+        unlink(tmp_path);
+    }
+    free(rgb565);
+    return ret;
+}
+
+static int frame_to_preview(const halow_options_t *opts, const uint8_t *data,
+                            size_t len, unsigned stream_w,
+                            unsigned stream_h)
+{
+    if(opts->frame_format == HALOW_FRAME_RAW_RGB565) {
+        return raw_rgb565_to_preview(data, len, stream_w, stream_h,
+                                     opts->preview_file, opts->preview_w,
+                                     opts->preview_h);
+    }
+    return decode_jpeg_to_preview(data, len, opts->preview_file,
+                                  opts->preview_w, opts->preview_h);
+}
+
 static void write_meta(const halow_options_t *opts, const char *role,
                        const char *frame_path, const halow_stats_t *stats,
                        unsigned frame_size)
@@ -640,12 +834,13 @@ static void write_meta(const halow_options_t *opts, const char *role,
         return;
     }
     fprintf(fp,
-            "role=%s\nframe_file=%s\nwidth=%u\nheight=%u\n"
+            "role=%s\nformat=%s\ntransport=%s\nframe_file=%s\nwidth=%u\nheight=%u\n"
             "stream_width=%u\nstream_height=%u\nframes=%llu\npackets=%llu\n"
             "bytes=%llu\ndropped=%llu\nerrors=%llu\nmbps=%.3f\nfps=%.2f\n"
             "last_frame_bytes=%u\n",
-            role, frame_path ? frame_path : "", opts->preview_w,
-            opts->preview_h, opts->stream_w, opts->stream_h,
+            role, frame_format_name(opts->frame_format),
+            transport_name(opts->transport), frame_path ? frame_path : "",
+            opts->preview_w, opts->preview_h, opts->stream_w, opts->stream_h,
             (unsigned long long)stats->frames,
             (unsigned long long)stats->packets,
             (unsigned long long)stats->bytes,
@@ -735,6 +930,51 @@ static int parse_packet_header(const uint8_t *packet, size_t len,
     return 0;
 }
 
+static void fill_tcp_header(uint8_t *header, unsigned frame_id,
+                            unsigned stream_w, unsigned stream_h,
+                            unsigned frame_size, unsigned frame_crc)
+{
+    memcpy(header, HALOW_TCP_MAGIC, 4);
+    header[4] = HALOW_VERSION;
+    header[5] = HALOW_TYPE_DATA;
+    put_u16(header + 6, HALOW_TCP_HEADER_SIZE);
+    put_u32(header + 8, frame_id);
+    put_u16(header + 12, (uint16_t)stream_w);
+    put_u16(header + 14, (uint16_t)stream_h);
+    put_u32(header + 16, frame_size);
+    put_u32(header + 20, frame_crc);
+    put_u64(header + 24, monotonic_us());
+}
+
+static int parse_tcp_header(const uint8_t *header, size_t len,
+                            unsigned *frame_id, unsigned *stream_w,
+                            unsigned *stream_h, unsigned *frame_size,
+                            unsigned *frame_crc, uint64_t *timestamp_us)
+{
+    unsigned header_len;
+
+    if(len < HALOW_TCP_HEADER_SIZE ||
+       memcmp(header, HALOW_TCP_MAGIC, 4) != 0 ||
+       header[4] != HALOW_VERSION || header[5] != HALOW_TYPE_DATA) {
+        return -1;
+    }
+    header_len = get_u16(header + 6);
+    if(header_len != HALOW_TCP_HEADER_SIZE) {
+        return -1;
+    }
+    *frame_id = get_u32(header + 8);
+    *stream_w = get_u16(header + 12);
+    *stream_h = get_u16(header + 14);
+    *frame_size = get_u32(header + 16);
+    *frame_crc = get_u32(header + 20);
+    *timestamp_us = get_u64(header + 24);
+    if(*frame_size == 0 || *frame_size > HALOW_MAX_FRAME_SIZE ||
+       *stream_w == 0 || *stream_h == 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int tx_send_frame(int fd, const struct sockaddr_in *addr,
                          const halow_options_t *opts, const uint8_t *data,
                          size_t len, unsigned frame_id)
@@ -783,7 +1023,65 @@ static int tx_send_frame(int fd, const struct sockaddr_in *addr,
     return ret;
 }
 
-static int run_tx(const halow_options_t *opts)
+static void tune_socket_buffers(int fd)
+{
+    int buf = 4 * 1024 * 1024;
+
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
+}
+
+static void configure_tcp_socket(int fd)
+{
+    int yes = 1;
+
+    tune_socket_buffers(fd);
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+}
+
+static int write_all(int fd, const uint8_t *data, size_t len)
+{
+    size_t off = 0;
+
+    while(off < len) {
+        ssize_t n = send(fd, data + off, len - off, MSG_NOSIGNAL);
+
+        if(n < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if(n == 0) {
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static int read_all(int fd, uint8_t *data, size_t len)
+{
+    size_t off = 0;
+
+    while(off < len) {
+        ssize_t n = recv(fd, data + off, len - off, 0);
+
+        if(n < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if(n == 0) {
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static int run_tx_udp(const halow_options_t *opts)
 {
     int fd;
     struct sockaddr_in addr;
@@ -796,6 +1094,7 @@ static int run_tx(const halow_options_t *opts)
         perror("socket");
         return 1;
     }
+    tune_socket_buffers(fd);
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)opts->port);
@@ -808,9 +1107,11 @@ static int run_tx(const halow_options_t *opts)
     memset(&stats, 0, sizeof(stats));
     stats.start_us = monotonic_us();
     stats.last_log_us = stats.start_us;
-    printf("Halow UDP TX host=%s port=%d stream=%ux%u preview=%ux%u\n",
-           opts->host, opts->port, opts->stream_w, opts->stream_h,
-           opts->preview_w, opts->preview_h);
+    printf("Halow UDP TX host=%s port=%d format=%s stream=%ux%u "
+           "preview=%ux%u payload=%u\n",
+           opts->host, opts->port, frame_format_name(opts->frame_format),
+           opts->stream_w, opts->stream_h, opts->preview_w, opts->preview_h,
+           opts->payload_size);
     fflush(stdout);
 
     while(!stop_requested(opts)) {
@@ -819,7 +1120,8 @@ static int run_tx(const halow_options_t *opts)
         size_t data_len = 0;
         uint64_t now_us;
 
-        if(find_newest_jpeg(opts->in_dir, path, sizeof(path)) != 0) {
+        if(find_newest_frame(opts->in_dir, opts->frame_format, path,
+                             sizeof(path)) != 0) {
             usleep((useconds_t)opts->idle_us);
             continue;
         }
@@ -828,7 +1130,7 @@ static int run_tx(const halow_options_t *opts)
             continue;
         }
         snprintf(last_path, sizeof(last_path), "%s", path);
-        trim_older_jpegs(opts->in_dir, path);
+        trim_older_frames(opts->in_dir, opts->frame_format, path);
 
         if(read_file(path, &data, &data_len) != 0) {
             stats.errors++;
@@ -844,12 +1146,109 @@ static int run_tx(const halow_options_t *opts)
             stats.frames++;
             stats.packets += (uint64_t)packets * opts->repeat;
             stats.bytes += data_len;
-            decode_jpeg_to_preview(data, data_len, opts->preview_file,
-                                   opts->preview_w, opts->preview_h);
+            frame_to_preview(opts, data, data_len, opts->stream_w,
+                             opts->stream_h);
             write_meta(opts, "TX", path, &stats, (unsigned)data_len);
             frame_id++;
         } else {
             stats.errors++;
+        }
+
+        free(data);
+        unlink(path);
+
+        now_us = monotonic_us();
+        if(now_us - stats.last_log_us >= HALOW_STATS_INTERVAL_US) {
+            stats.last_log_us = now_us;
+            log_stats("TX", &stats, opts->stream_w, opts->stream_h,
+                      (unsigned)data_len);
+        }
+    }
+    log_stats("TX", &stats, opts->stream_w, opts->stream_h, 0);
+    close(fd);
+    return 0;
+}
+
+static int run_tx_tcp(const halow_options_t *opts)
+{
+    int fd;
+    struct sockaddr_in addr;
+    halow_stats_t stats;
+    char last_path[512] = "";
+    unsigned frame_id = 1;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if(fd < 0) {
+        perror("socket");
+        return 1;
+    }
+    configure_tcp_socket(fd);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)opts->port);
+    if(inet_pton(AF_INET, opts->host, &addr.sin_addr) != 1) {
+        fprintf(stderr, "invalid host: %s\n", opts->host);
+        close(fd);
+        return 2;
+    }
+    if(connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        perror("connect");
+        close(fd);
+        return 1;
+    }
+
+    memset(&stats, 0, sizeof(stats));
+    stats.start_us = monotonic_us();
+    stats.last_log_us = stats.start_us;
+    printf("Halow TCP TX host=%s port=%d format=%s stream=%ux%u "
+           "preview=%ux%u\n",
+           opts->host, opts->port, frame_format_name(opts->frame_format),
+           opts->stream_w, opts->stream_h, opts->preview_w, opts->preview_h);
+    fflush(stdout);
+
+    while(!stop_requested(opts)) {
+        char path[512];
+        uint8_t *data = NULL;
+        size_t data_len = 0;
+        uint8_t header[HALOW_TCP_HEADER_SIZE];
+        uint64_t now_us;
+        uint32_t crc;
+
+        if(find_newest_frame(opts->in_dir, opts->frame_format, path,
+                             sizeof(path)) != 0) {
+            usleep((useconds_t)opts->idle_us);
+            continue;
+        }
+        if(strcmp(path, last_path) == 0) {
+            usleep((useconds_t)opts->idle_us);
+            continue;
+        }
+        snprintf(last_path, sizeof(last_path), "%s", path);
+        trim_older_frames(opts->in_dir, opts->frame_format, path);
+
+        if(read_file(path, &data, &data_len) != 0) {
+            stats.errors++;
+            unlink(path);
+            continue;
+        }
+
+        crc = crc32_update(0, data, data_len);
+        fill_tcp_header(header, frame_id, opts->stream_w, opts->stream_h,
+                        (unsigned)data_len, crc);
+        if(write_all(fd, header, sizeof(header)) == 0 &&
+           write_all(fd, data, data_len) == 0) {
+            stats.frames++;
+            stats.packets++;
+            stats.bytes += data_len;
+            frame_to_preview(opts, data, data_len, opts->stream_w,
+                             opts->stream_h);
+            write_meta(opts, "TX", path, &stats, (unsigned)data_len);
+            frame_id++;
+        } else {
+            stats.errors++;
+            free(data);
+            unlink(path);
+            break;
         }
 
         free(data);
@@ -900,15 +1299,17 @@ static int rx_frame_prepare(halow_rx_frame_t *frame, unsigned frame_id,
     return 0;
 }
 
-static int write_rx_jpeg(const halow_options_t *opts, unsigned frame_id,
-                         const uint8_t *data, size_t len, char *out_path,
-                         size_t out_len)
+static int write_rx_frame(const halow_options_t *opts, unsigned frame_id,
+                          const uint8_t *data, size_t len, char *out_path,
+                          size_t out_len)
 {
     FILE *fp;
     char tmp[512];
+    const char *ext = opts->frame_format == HALOW_FRAME_RAW_RGB565 ?
+                      "raw" : "jpg";
 
-    snprintf(out_path, out_len, "%s/halow_%010u.jpg", opts->out_dir,
-             frame_id);
+    snprintf(out_path, out_len, "%s/halow_%010u.%s", opts->out_dir,
+             frame_id, ext);
     snprintf(tmp, sizeof(tmp), "%s.tmp", out_path);
     fp = fopen(tmp, "wb");
     if(!fp) {
@@ -930,7 +1331,168 @@ static int write_rx_jpeg(const halow_options_t *opts, unsigned frame_id,
     return 0;
 }
 
-static int run_rx(const halow_options_t *opts)
+static int run_rx_tcp(const halow_options_t *opts)
+{
+    int listen_fd;
+    struct sockaddr_in addr;
+    halow_stats_t stats;
+
+    if(mkdir_p(opts->out_dir) != 0) {
+        fprintf(stderr, "mkdir %s failed: %s\n", opts->out_dir,
+                strerror(errno));
+        return 1;
+    }
+
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if(listen_fd < 0) {
+        perror("socket");
+        return 1;
+    }
+    {
+        int yes = 1;
+
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        tune_socket_buffers(listen_fd);
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((uint16_t)opts->port);
+    if(bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        perror("bind");
+        close(listen_fd);
+        return 1;
+    }
+    if(listen(listen_fd, 1) != 0) {
+        perror("listen");
+        close(listen_fd);
+        return 1;
+    }
+
+    memset(&stats, 0, sizeof(stats));
+    stats.start_us = monotonic_us();
+    stats.last_log_us = stats.start_us;
+    printf("Halow TCP RX port=%d format=%s preview=%ux%u\n",
+           opts->port, frame_format_name(opts->frame_format),
+           opts->preview_w, opts->preview_h);
+    fflush(stdout);
+
+    while(!stop_requested(opts)) {
+        fd_set rfds;
+        struct timeval tv;
+        int ready;
+        int client_fd;
+
+        FD_ZERO(&rfds);
+        FD_SET(listen_fd, &rfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000;
+        ready = select(listen_fd + 1, &rfds, NULL, NULL, &tv);
+        if(ready < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            perror("select");
+            break;
+        }
+        if(ready == 0) {
+            uint64_t now_us = monotonic_us();
+
+            if(now_us - stats.last_log_us >= HALOW_STATS_INTERVAL_US) {
+                stats.last_log_us = now_us;
+                log_stats("RX", &stats, opts->stream_w, opts->stream_h, 0);
+            }
+            continue;
+        }
+
+        client_fd = accept(listen_fd, NULL, NULL);
+        if(client_fd < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            perror("accept");
+            break;
+        }
+        configure_tcp_socket(client_fd);
+        printf("Halow TCP RX client connected\n");
+        fflush(stdout);
+
+        while(!stop_requested(opts)) {
+            uint8_t header[HALOW_TCP_HEADER_SIZE];
+            uint8_t *data = NULL;
+            unsigned frame_id;
+            unsigned stream_w;
+            unsigned stream_h;
+            unsigned frame_size;
+            unsigned frame_crc;
+            uint64_t packet_ts;
+            uint64_t now_us;
+            uint32_t crc;
+            char path[512] = "";
+
+            if(read_all(client_fd, header, sizeof(header)) != 0) {
+                break;
+            }
+            if(parse_tcp_header(header, sizeof(header), &frame_id, &stream_w,
+                                &stream_h, &frame_size, &frame_crc,
+                                &packet_ts) != 0) {
+                stats.errors++;
+                break;
+            }
+            (void)packet_ts;
+            data = (uint8_t *)malloc(frame_size);
+            if(!data) {
+                stats.errors++;
+                break;
+            }
+            if(read_all(client_fd, data, frame_size) != 0) {
+                free(data);
+                stats.errors++;
+                break;
+            }
+            crc = crc32_update(0, data, frame_size);
+            if(crc == frame_crc) {
+                int write_ok = 0;
+
+                if(opts->frame_format == HALOW_FRAME_RAW_RGB565) {
+                    snprintf(path, sizeof(path), "raw-live");
+                    write_ok = 1;
+                } else if(write_rx_frame(opts, frame_id, data, frame_size,
+                                         path, sizeof(path)) == 0) {
+                    write_ok = 1;
+                }
+                if(write_ok) {
+                    stats.frames++;
+                    stats.packets++;
+                    stats.bytes += frame_size;
+                    frame_to_preview(opts, data, frame_size, stream_w,
+                                     stream_h);
+                    write_meta(opts, "RX", path, &stats, frame_size);
+                } else {
+                    stats.errors++;
+                }
+            } else {
+                stats.errors++;
+            }
+            free(data);
+
+            now_us = monotonic_us();
+            if(now_us - stats.last_log_us >= HALOW_STATS_INTERVAL_US) {
+                stats.last_log_us = now_us;
+                log_stats("RX", &stats, stream_w, stream_h, frame_size);
+            }
+        }
+        close(client_fd);
+        printf("Halow TCP RX client disconnected\n");
+        fflush(stdout);
+    }
+
+    log_stats("RX", &stats, opts->stream_w, opts->stream_h, 0);
+    close(listen_fd);
+    return 0;
+}
+
+static int run_rx_udp(const halow_options_t *opts)
 {
     int fd;
     struct sockaddr_in addr;
@@ -951,10 +1513,9 @@ static int run_rx(const halow_options_t *opts)
     }
     {
         int yes = 1;
-        int buf = 4 * 1024 * 1024;
 
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
+        tune_socket_buffers(fd);
     }
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -970,8 +1531,9 @@ static int run_rx(const halow_options_t *opts)
     memset(&frame, 0, sizeof(frame));
     stats.start_us = monotonic_us();
     stats.last_log_us = stats.start_us;
-    printf("Halow UDP RX port=%d preview=%ux%u\n", opts->port,
-           opts->preview_w, opts->preview_h);
+    printf("Halow UDP RX port=%d format=%s preview=%ux%u payload=%u\n",
+           opts->port, frame_format_name(opts->frame_format),
+           opts->preview_w, opts->preview_h, opts->payload_size);
     fflush(stdout);
 
     while(!stop_requested(opts)) {
@@ -1061,15 +1623,26 @@ static int run_rx(const halow_options_t *opts)
             uint32_t crc = crc32_update(0, frame.data, frame.frame_size);
             char path[512] = "";
 
-            if(crc == frame.frame_crc &&
-               write_rx_jpeg(opts, frame.frame_id, frame.data,
-                             frame.frame_size, path, sizeof(path)) == 0) {
-                stats.frames++;
-                stats.bytes += frame.frame_size;
-                decode_jpeg_to_preview(frame.data, frame.frame_size,
-                                       opts->preview_file, opts->preview_w,
-                                       opts->preview_h);
-                write_meta(opts, "RX", path, &stats, frame.frame_size);
+            if(crc == frame.frame_crc) {
+                int write_ok = 0;
+
+                if(opts->frame_format == HALOW_FRAME_RAW_RGB565) {
+                    snprintf(path, sizeof(path), "raw-live");
+                    write_ok = 1;
+                } else if(write_rx_frame(opts, frame.frame_id, frame.data,
+                                         frame.frame_size, path,
+                                         sizeof(path)) == 0) {
+                    write_ok = 1;
+                }
+                if(write_ok) {
+                    stats.frames++;
+                    stats.bytes += frame.frame_size;
+                    frame_to_preview(opts, frame.data, frame.frame_size,
+                                     frame.stream_w, frame.stream_h);
+                    write_meta(opts, "RX", path, &stats, frame.frame_size);
+                } else {
+                    stats.errors++;
+                }
             } else {
                 stats.errors++;
             }
@@ -1100,7 +1673,9 @@ int main(int argc, char **argv)
         return 2;
     }
     if(opts.role == HALOW_ROLE_TX) {
-        return run_tx(&opts);
+        return opts.transport == HALOW_TRANSPORT_TCP ? run_tx_tcp(&opts) :
+                                                       run_tx_udp(&opts);
     }
-    return run_rx(&opts);
+    return opts.transport == HALOW_TRANSPORT_TCP ? run_rx_tcp(&opts) :
+                                                   run_rx_udp(&opts);
 }
