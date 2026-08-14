@@ -39,12 +39,13 @@
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
 static lv_obj_t *mesh_profile_label;
-static lv_obj_t *mesh_chat_label;
+static lv_obj_t *mesh_chat_scroll;
 static lv_obj_t *mesh_log_label;
 static lv_obj_t *mesh_send_button;
 static lv_timer_t *mesh_timer;
 static char mesh_status_text[512] = "Not running";
 static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
+static char mesh_last_chat_text[3072];
 static char mesh_region[24] = MESHTASTIC_DEFAULT_UI_REGION;
 static char mesh_preset[32] = MESHTASTIC_DEFAULT_UI_PRESET;
 static char mesh_channel_name[64] = "";
@@ -314,13 +315,13 @@ static int mesh_to_text_is_broadcast(const char *text)
 
 static void mesh_update_profile_label(void)
 {
-    char text[420];
+    char text[260];
 
     snprintf(text, sizeof(text),
-             "Profile %s / %s / channel=%s / psk=%s / power=%s\nNode %s / from=%s to=%s hop=%s ack=%s relay=%s",
+             "%s / %s  channel=%s\n%s -> %s  hop=%s  ACK=%s  relay=%s",
              mesh_region, mesh_preset,
              mesh_channel_name[0] ? mesh_channel_name : "<preset>",
-             mesh_psk, mesh_tx_power, mesh_node_name,
+             mesh_node_name,
              mesh_from_text_is_auto(mesh_from_node) ? "auto" : mesh_from_node,
              mesh_to_text_is_broadcast(mesh_to_node) ? "broadcast" : mesh_to_node,
              mesh_hop_limit, mesh_ack_enabled ? "on" : "off",
@@ -398,12 +399,211 @@ static void mesh_refresh_daemon_log(void)
     lv_label_set_text(mesh_log_label, shown);
 }
 
+static void mesh_chat_parse_line(const char *line, int *sent,
+                                 char *meta, size_t meta_len,
+                                 char *body, size_t body_len)
+{
+    const char *colon;
+    size_t prefix_len;
+
+    if(sent) {
+        *sent = 0;
+    }
+    if(meta && meta_len > 0U) {
+        meta[0] = '\0';
+    }
+    if(body && body_len > 0U) {
+        body[0] = '\0';
+    }
+    if(!line || !line[0] || !body || body_len == 0U) {
+        return;
+    }
+
+    if(strncmp(line, "TX ", 3) == 0) {
+        if(sent) {
+            *sent = 1;
+        }
+        colon = strstr(line, ": ");
+        if(colon) {
+            prefix_len = (size_t)(colon - line);
+            if(meta && meta_len > 0U) {
+                snprintf(meta, meta_len, "%.*s", (int)prefix_len, line);
+            }
+            snprintf(body, body_len, "%s", colon + 2);
+            return;
+        }
+    } else if(strncmp(line, "RX ", 3) == 0) {
+        colon = strstr(line, ": ");
+        if(colon) {
+            prefix_len = (size_t)(colon - line);
+            if(meta && meta_len > 0U) {
+                snprintf(meta, meta_len, "%.*s", (int)prefix_len, line);
+            }
+            snprintf(body, body_len, "%s", colon + 2);
+            return;
+        }
+    }
+
+    if(meta && meta_len > 0U) {
+        snprintf(meta, meta_len, "system");
+    }
+    snprintf(body, body_len, "%s", line);
+}
+
+static void mesh_chat_add_empty(void)
+{
+    lv_obj_t *box;
+    lv_obj_t *icon;
+    lv_obj_t *text;
+    int page_w;
+
+    if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll)) {
+        return;
+    }
+    lv_obj_update_layout(mesh_chat_scroll);
+    page_w = lv_obj_get_width(mesh_chat_scroll);
+    if(page_w < 240) {
+        page_w = ui_page_panel_width();
+    }
+
+    box = lv_obj_create(mesh_chat_scroll);
+    lv_obj_set_size(box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_pad_top(box, 36, 0);
+    lv_obj_set_style_pad_bottom(box, 20, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    icon = ui_label(box, LV_SYMBOL_LIST, &lv_font_montserrat_32, 0x64748B);
+    lv_obj_set_width(icon, page_w - 48);
+    lv_obj_set_style_text_align(icon, LV_TEXT_ALIGN_CENTER, 0);
+
+    text = ui_label(box, "No mesh messages yet", &lv_font_montserrat_18,
+                    0x94A3B8);
+    lv_obj_set_width(text, page_w - 48);
+    lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+}
+
+static void mesh_chat_add_bubble(const char *line)
+{
+    int sent = 0;
+    char meta[96];
+    char body[256];
+    lv_obj_t *row;
+    lv_obj_t *bubble;
+    lv_obj_t *text;
+    lv_obj_t *footer;
+    int page_w;
+    int bubble_w;
+
+    if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll) ||
+       !line || !line[0]) {
+        return;
+    }
+    mesh_chat_parse_line(line, &sent, meta, sizeof(meta), body, sizeof(body));
+    ui_trim_text(body);
+    ui_trim_text(meta);
+    if(!body[0]) {
+        return;
+    }
+
+    lv_obj_update_layout(mesh_chat_scroll);
+    page_w = lv_obj_get_width(mesh_chat_scroll);
+    if(page_w < 260) {
+        page_w = ui_page_panel_width();
+    }
+    bubble_w = (page_w * 72) / 100;
+    if(bubble_w < 260) {
+        bubble_w = page_w > 300 ? 260 : page_w - 28;
+    }
+    if(bubble_w > 620) {
+        bubble_w = 620;
+    }
+
+    row = lv_obj_create(mesh_chat_scroll);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_top(row, 5, 0);
+    lv_obj_set_style_pad_bottom(row, 5, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, sent ? LV_FLEX_ALIGN_END :
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    bubble = lv_obj_create(row);
+    lv_obj_set_width(bubble, bubble_w);
+    lv_obj_set_height(bubble, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(bubble,
+                              lv_color_hex(sent ? 0x16A34A : 0x232B35), 0);
+    lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bubble, 0, 0);
+    lv_obj_set_style_radius(bubble, 8, 0);
+    lv_obj_set_style_pad_all(bubble, 10, 0);
+    lv_obj_set_style_pad_row(bubble, 5, 0);
+    lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
+
+    text = ui_label(bubble, body, &lv_font_montserrat_18, 0xFFFFFF);
+    lv_obj_set_width(text, bubble_w - 20);
+    lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+
+    footer = ui_label(bubble, meta[0] ? meta : (sent ? "TX" : "RX"),
+                      &lv_font_montserrat_14,
+                      sent ? 0xDDFCE8 : 0x94A3B8);
+    lv_obj_set_width(footer, bubble_w - 20);
+    lv_label_set_long_mode(footer, LV_LABEL_LONG_DOT);
+}
+
+static void mesh_chat_rebuild(const char *shown)
+{
+    char copy[3072];
+    char *line;
+    char *save = NULL;
+    int count = 0;
+
+    if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll)) {
+        return;
+    }
+    lv_obj_clean(mesh_chat_scroll);
+    if(!shown || !shown[0]) {
+        mesh_chat_add_empty();
+        return;
+    }
+
+    snprintf(copy, sizeof(copy), "%s", shown);
+    line = strtok_r(copy, "\n", &save);
+    while(line) {
+        ui_trim_text(line);
+        if(line[0] && strcmp(line, "No mesh messages yet") != 0) {
+            mesh_chat_add_bubble(line);
+            count++;
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    if(count == 0) {
+        mesh_chat_add_empty();
+    } else {
+        lv_obj_t *last = lv_obj_get_child(mesh_chat_scroll, count - 1);
+        if(last) {
+            lv_obj_scroll_to_view(last, LV_ANIM_ON);
+        }
+    }
+}
+
 static void mesh_refresh_chat(void)
 {
     char response[3072];
     const char *shown;
 
-    if(!mesh_chat_label || !lv_obj_is_valid(mesh_chat_label)) {
+    if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll)) {
         return;
     }
     if(mesh_ipc_command("CHAT\n", response, sizeof(response)) != 0) {
@@ -413,7 +613,11 @@ static void mesh_refresh_chat(void)
     if(strncmp(response, "OK chat\n", 8) == 0) {
         shown = response + 8;
     }
-    lv_label_set_text(mesh_chat_label, shown);
+    if(strcmp(mesh_last_chat_text, shown) == 0) {
+        return;
+    }
+    snprintf(mesh_last_chat_text, sizeof(mesh_last_chat_text), "%s", shown);
+    mesh_chat_rebuild(shown);
 }
 
 static void mesh_refresh_status(void)
@@ -438,7 +642,12 @@ static void mesh_refresh_status(void)
                                     0);
     }
     if(mesh_detail_label && lv_obj_is_valid(mesh_detail_label)) {
-        lv_label_set_text(mesh_detail_label, mesh_status_text);
+        char detail[220];
+        snprintf(detail, sizeof(detail), "%s / %s  node=%s  to=%s",
+                 mesh_region, mesh_preset, mesh_node_name,
+                 mesh_to_text_is_broadcast(mesh_to_node) ? "broadcast" :
+                 mesh_to_node);
+        lv_label_set_text(mesh_detail_label, detail);
     }
     if(mesh_send_button && lv_obj_is_valid(mesh_send_button)) {
         if(online) {
@@ -788,6 +997,7 @@ static void mesh_settings_close_event_cb(lv_event_t *event)
         lv_obj_delete(mesh_settings_overlay);
     }
     mesh_settings_overlay = NULL;
+    mesh_log_label = NULL;
     memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
 }
 
@@ -800,18 +1010,25 @@ static void mesh_nodes_close_event_cb(lv_event_t *event)
     mesh_nodes_overlay = NULL;
 }
 
+static void mesh_nodes_event_cb(lv_event_t *event);
+
 static void mesh_profile_event_cb(lv_event_t *event)
 {
     lv_obj_t *panel;
     lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *section;
+    lv_obj_t *status;
+    lv_obj_t *log_title;
     lv_obj_t *btn;
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
     int landscape = ui_is_landscape();
     int panel_w = landscape ? screen_w - 80 : screen_w - 40;
     int panel_h = landscape ? screen_h - 48 : screen_h - 80;
-    int row_h = 56;
-    int y = 58;
+    int row_h = 58;
+    int button_w;
+    int y = 0;
 
     (void)event;
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
@@ -829,13 +1046,53 @@ static void mesh_profile_event_cb(lv_event_t *event)
                             (screen_w - panel_w) / 2,
                             (screen_h - panel_h) / 2,
                             panel_w, panel_h);
-    title = ui_label(panel, "Meshtastic settings", &lv_font_montserrat_24,
+    title = ui_label(panel, "Meshtastic", &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+    subtitle = ui_label(panel,
+                        "Mesh radio, channel, ACK and node settings",
+                        &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(subtitle, 0, 34);
+    lv_obj_set_width(subtitle, panel_w - 156);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
 
     btn = ui_command_button(panel, panel_w - 124, 0, 96, "Close", 0x374151);
     lv_obj_add_event_cb(btn, mesh_settings_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
+
+    y = 76;
+    section = ui_label(panel, "Connection", &lv_font_montserrat_18,
+                       0xF2F5F8);
+    lv_obj_set_pos(section, 0, y);
+    y += 34;
+    button_w = (panel_w - 80) / 4;
+    if(button_w < 96) {
+        button_w = 96;
+    }
+    btn = ui_command_button(panel, 0, y, button_w, "Start", 0x25C281);
+    lv_obj_add_event_cb(btn, mesh_start_event_cb, LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(panel, button_w + 12, y, button_w, "Stop",
+                            0xEF4D5A);
+    lv_obj_add_event_cb(btn, mesh_stop_event_cb, LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(panel, (button_w + 12) * 2, y, button_w,
+                            "Refresh", 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_refresh_event_cb, LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(panel, (button_w + 12) * 3, y, button_w,
+                            "Nodes", 0x25C281);
+    lv_obj_add_event_cb(btn, mesh_nodes_event_cb, LV_EVENT_CLICKED, NULL);
+
+    y += 78;
+    status = ui_label(panel, mesh_status_text, &lv_font_montserrat_14,
+                      0xCBD5E1);
+    lv_obj_set_pos(status, 0, y);
+    lv_obj_set_width(status, panel_w - 40);
+    lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
+
+    y += landscape ? 76 : 112;
+    section = ui_label(panel, "Radio profile", &lv_font_montserrat_18,
+                       0xF2F5F8);
+    lv_obj_set_pos(section, 0, y);
+    y += 42;
 
     for(int i = 0; i < (int)MESH_FIELD_COUNT; i++) {
         char value[32];
@@ -865,7 +1122,19 @@ static void mesh_profile_event_cb(lv_event_t *event)
         y += row_h;
     }
 
+    y += 12;
+    log_title = ui_label(panel, "Event log", &lv_font_montserrat_18,
+                         0xF2F5F8);
+    lv_obj_set_pos(log_title, 0, y);
+    y += 36;
+    mesh_log_label = ui_label(panel, mesh_log_text[0] ? mesh_log_text : "Ready",
+                              &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(mesh_log_label, 0, y);
+    lv_obj_set_width(mesh_log_label, panel_w - 40);
+    lv_label_set_long_mode(mesh_log_label, LV_LABEL_LONG_WRAP);
+
     mesh_settings_refresh();
+    mesh_refresh_daemon_log();
 }
 
 static void mesh_nodes_event_cb(lv_event_t *event)
@@ -972,91 +1241,89 @@ void ui_meshtastic_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
     lv_obj_t *status_panel;
-    lv_obj_t *chat_panel;
-    lv_obj_t *log_panel;
+    lv_obj_t *input_panel;
+    lv_obj_t *input_hint;
     lv_obj_t *btn;
+    int top_y = 132;
+    int body_h = ui_body_height(top_y);
+    int x = ui_page_panel_x();
+    int content_w = ui_page_panel_width();
     int landscape = ui_is_landscape();
-    int w = ui_screen_width();
-    int content_w = ui_content_width();
-    int col_gap = 16;
-    int left_w = landscape ? (w - 64 - col_gap) / 2 : 520;
-    int right_w = landscape ? left_w : 520;
-    int x_right = landscape ? 24 + left_w + col_gap : 24;
-    int chat_y = landscape ? 0 : 250;
-    int log_y = landscape ? 250 : 500;
+    int status_h = landscape ? 86 : 118;
+    int input_h = 76;
+    int gap = landscape ? 10 : 14;
+    int chat_y = status_h + gap;
+    int input_y = body_h - input_h - 18;
+    int chat_h = input_y - chat_y - gap;
+    int input_button_w;
 
     mesh_load_profile_prefs();
     ui_create_header(scr, "Meshtastic");
-    body = ui_page_body(scr, 150);
+    body = ui_page_body(scr, top_y);
 
-    if(!landscape) {
-        content_w = 568;
+    if(chat_h < 260) {
+        chat_h = 260;
+        input_y = chat_y + chat_h + gap;
     }
-    (void)content_w;
 
-    status_panel = ui_panel(body, 24, 0, left_w, 226);
-    mesh_panel_title(status_panel, "Mesh daemon",
-                     "Configurable Meshtastic bridge for SX1262/LR2021");
+    status_panel = ui_panel(body, x, 0, content_w, status_h);
+    lv_obj_set_style_bg_color(status_panel, lv_color_hex(0x0F172A), 0);
+
     mesh_status_label = ui_label(status_panel, "Daemon offline",
-                                 &lv_font_montserrat_24, 0xF5A524);
-    lv_obj_align(mesh_status_label, LV_ALIGN_TOP_LEFT, 0, 82);
+                                 &lv_font_montserrat_22, 0xF5A524);
+    lv_obj_set_pos(mesh_status_label, 0, 0);
 
-    mesh_profile_label = ui_label(status_panel, "",
-                                  &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_width(mesh_profile_label, left_w - 32);
-    lv_label_set_long_mode(mesh_profile_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(mesh_profile_label, LV_ALIGN_TOP_LEFT, 0, 66);
-    mesh_update_profile_label();
+    mesh_profile_label = ui_label(status_panel, "", &lv_font_montserrat_16,
+                                  0xCBD5E1);
+    lv_obj_set_pos(mesh_profile_label, 0, 34);
+    lv_obj_set_width(mesh_profile_label, content_w - 188);
+    lv_label_set_long_mode(mesh_profile_label, landscape ?
+                           LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP);
 
-    mesh_detail_label = ui_label(status_panel, "Not running",
-                                 &lv_font_montserrat_16, 0xCBD5E1);
-    lv_obj_set_width(mesh_detail_label, left_w - 32);
-    lv_label_set_long_mode(mesh_detail_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(mesh_detail_label, LV_ALIGN_TOP_LEFT, 0, 120);
+    mesh_detail_label = ui_label(status_panel, "",
+                                 &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(mesh_detail_label, 0, status_h - 42);
+    lv_obj_set_width(mesh_detail_label, content_w - 188);
+    lv_label_set_long_mode(mesh_detail_label, LV_LABEL_LONG_DOT);
 
-    btn = ui_command_button(status_panel, 0, 154, 112, "Start", 0x25C281);
-    lv_obj_add_event_cb(btn, mesh_start_event_cb, LV_EVENT_CLICKED, NULL);
-    btn = ui_command_button(status_panel, 124, 154, 112, "Stop", 0xEF4D5A);
-    lv_obj_add_event_cb(btn, mesh_stop_event_cb, LV_EVENT_CLICKED, NULL);
-    btn = ui_command_button(status_panel, 248, 154, 112, "Refresh", 0x3DA5FF);
-    lv_obj_add_event_cb(btn, mesh_refresh_event_cb, LV_EVENT_CLICKED, NULL);
-    btn = ui_command_button(status_panel, 372, 154, 112, "Profile", 0x7C3AED);
+    btn = ui_command_button(status_panel, content_w - 164, 8, 64,
+                            LV_SYMBOL_LIST, 0x25C281);
+    lv_obj_add_event_cb(btn, mesh_nodes_event_cb, LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(status_panel, content_w - 88, 8, 64,
+                            LV_SYMBOL_SETTINGS, 0xA78BFA);
     lv_obj_add_event_cb(btn, mesh_profile_event_cb, LV_EVENT_CLICKED, NULL);
 
-    chat_panel = ui_panel(body, x_right, chat_y, right_w, 226);
-    mesh_panel_title(chat_panel, "Chat", "Decoded TX/RX text cache");
-    mesh_send_button = ui_command_button(chat_panel, 0, 92, 220,
-                                         "Send Message", 0x7C3AED);
+    mesh_chat_scroll = ui_panel(body, x, chat_y, content_w, chat_h);
+    lv_obj_set_style_bg_color(mesh_chat_scroll, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_pad_all(mesh_chat_scroll, 12, 0);
+    lv_obj_set_style_pad_row(mesh_chat_scroll, 0, 0);
+    ui_make_scrollable(mesh_chat_scroll, 20);
+    lv_obj_set_flex_flow(mesh_chat_scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(mesh_chat_scroll, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    mesh_chat_add_empty();
+
+    input_panel = ui_panel(body, x, input_y, content_w, input_h);
+    lv_obj_set_style_bg_color(input_panel, lv_color_hex(0x0F172A), 0);
+    input_button_w = content_w - 120;
+    if(input_button_w < 180) {
+        input_button_w = 180;
+    }
+    input_hint = ui_command_button(input_panel, 0, 0, input_button_w,
+                                   "Type message", 0xCBD5E1);
+    lv_obj_add_event_cb(input_hint, mesh_send_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    mesh_send_button = ui_command_button(input_panel, input_button_w + 12, 0,
+                                         76, "Send", 0x25C281);
     lv_obj_add_event_cb(mesh_send_button, mesh_send_event_cb,
                         LV_EVENT_CLICKED, NULL);
-    btn = ui_command_button(chat_panel, 240, 92, 104, "Status", 0x3DA5FF);
-    lv_obj_add_event_cb(btn, mesh_refresh_event_cb, LV_EVENT_CLICKED, NULL);
-    btn = ui_command_button(chat_panel, 356, 92, 104, "Nodes", 0x25C281);
-    lv_obj_add_event_cb(btn, mesh_nodes_event_cb, LV_EVENT_CLICKED, NULL);
 
-    mesh_chat_label = ui_label(chat_panel, "No mesh messages yet",
-                               &lv_font_montserrat_16, 0xCBD5E1);
-    lv_obj_set_pos(mesh_chat_label, 0, 144);
-    lv_obj_set_width(mesh_chat_label, right_w - 32);
-    lv_label_set_long_mode(mesh_chat_label, LV_LABEL_LONG_WRAP);
-
-    log_panel = ui_scroll_panel(body, landscape ? 24 : 24, log_y,
-                                landscape ? w - 48 : 520,
-                                landscape ? 250 : 420);
-    mesh_panel_title(log_panel, "Event log", NULL);
-    mesh_log_label = ui_label(log_panel, "Ready", &lv_font_montserrat_16,
-                              0xCBD5E1);
-    lv_obj_set_pos(mesh_log_label, 0, 42);
-    lv_obj_set_width(mesh_log_label, landscape ? w - 96 : 488);
-    lv_label_set_long_mode(mesh_log_label, LV_LABEL_LONG_WRAP);
-
-    if(mesh_log_text[0]) {
-        lv_label_set_text(mesh_log_label, mesh_log_text);
-    } else {
+    if(!mesh_log_text[0]) {
         snprintf(mesh_log_text, sizeof(mesh_log_text), "%s\n",
                  "Meshtastic UI ready");
-        lv_label_set_text(mesh_log_label, mesh_log_text);
     }
+    mesh_last_chat_text[0] = '\0';
+    mesh_update_profile_label();
 
     mesh_refresh_status();
     mesh_timer = lv_timer_create(mesh_timer_cb, 2000, NULL);
@@ -1071,9 +1338,14 @@ void ui_meshtastic_cleanup(void)
     mesh_status_label = NULL;
     mesh_detail_label = NULL;
     mesh_profile_label = NULL;
-    mesh_chat_label = NULL;
+    mesh_chat_scroll = NULL;
     mesh_log_label = NULL;
     mesh_send_button = NULL;
+    if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
+        lv_obj_delete(mesh_settings_overlay);
+    }
+    mesh_settings_overlay = NULL;
+    memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
     if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
         lv_obj_delete(mesh_nodes_overlay);
     }
