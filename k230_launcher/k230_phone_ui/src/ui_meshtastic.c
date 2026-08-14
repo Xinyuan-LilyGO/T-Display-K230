@@ -1,5 +1,6 @@
 #include "ui_meshtastic.h"
 
+#include "ui_audio.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
 #include "ui_prefs.h"
@@ -675,10 +676,57 @@ static void mesh_chat_rebuild(const char *shown)
     }
 }
 
+static int mesh_chat_line_exists(const char *text, const char *line)
+{
+    const char *pos;
+    size_t len;
+
+    if(!text || !line || !line[0]) {
+        return 0;
+    }
+
+    len = strlen(line);
+    pos = text;
+    while((pos = strstr(pos, line)) != NULL) {
+        int before_ok = pos == text || pos[-1] == '\n';
+        int after_ok = pos[len] == '\0' || pos[len] == '\n';
+
+        if(before_ok && after_ok) {
+            return 1;
+        }
+        pos++;
+    }
+    return 0;
+}
+
+static int mesh_chat_has_new_rx(const char *old_text, const char *new_text)
+{
+    char copy[3072];
+    char *save = NULL;
+    char *line;
+
+    if(!old_text || !old_text[0] || !new_text || !new_text[0]) {
+        return 0;
+    }
+
+    snprintf(copy, sizeof(copy), "%s", new_text);
+    line = strtok_r(copy, "\n", &save);
+    while(line) {
+        ui_trim_text(line);
+        if(strncmp(line, "RX ", 3) == 0 &&
+           !mesh_chat_line_exists(old_text, line)) {
+            return 1;
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    return 0;
+}
+
 static void mesh_refresh_chat(void)
 {
     char response[3072];
     const char *shown;
+    int has_new_rx;
 
     if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll)) {
         return;
@@ -693,8 +741,12 @@ static void mesh_refresh_chat(void)
     if(strcmp(mesh_last_chat_text, shown) == 0) {
         return;
     }
+    has_new_rx = mesh_chat_has_new_rx(mesh_last_chat_text, shown);
     snprintf(mesh_last_chat_text, sizeof(mesh_last_chat_text), "%s", shown);
     mesh_chat_rebuild(shown);
+    if(has_new_rx) {
+        ui_audio_play_notification();
+    }
 }
 
 static void mesh_layout_main(void)

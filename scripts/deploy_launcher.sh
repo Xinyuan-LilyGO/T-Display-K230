@@ -13,6 +13,7 @@ REMOTE_FACE_DIR="${REMOTE_FACE_DIR:-/root/app/face_detect}"
 REMOTE_BOOT="${REMOTE_BOOT:-/boot}"
 REMOTE_MUSIC_DIR="${REMOTE_MUSIC_DIR:-/root/music}"
 REMOTE_VIDEO_DIR="${REMOTE_VIDEO_DIR:-/root/videos}"
+REMOTE_NOTIFICATION_DIR="${REMOTE_NOTIFICATION_DIR:-/root/notification}"
 LABEL="${LABEL:-launcher}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-8}"
 SSH_KEY="${SSH_KEY:-}"
@@ -50,7 +51,7 @@ Options:
   --firmware                 Also deploy /boot/Image and RM69A10 DTB.
   --firmware-only            Deploy only /boot/Image and RM69A10 DTB.
   --full                     Deploy app, face model, firmware, and media resources.
-  --media                    Also deploy launcher resources/music and resources/videos.
+  --media                    Also deploy launcher resources/music, resources/videos, and resources/notification.
   --no-restart              Do not restart k230_phone_ui after app deployment.
   --reboot                   Reboot after deployment.
   --no-reboot                Do not reboot after deployment. This is the default.
@@ -231,6 +232,7 @@ APP_DIR="${OUT_DIR}/target/root/app/k230_phone_ui"
 FACE_DIR="${OUT_DIR}/target/root/app/face_detect"
 MUSIC_SRC="${LAUNCHER_DIR}/resources/music"
 VIDEO_SRC="${LAUNCHER_DIR}/resources/videos"
+NOTIFICATION_SRC="${LAUNCHER_DIR}/resources/notification"
 INSTALL_SCRIPT="${LAUNCHER_DIR}/scripts/install_to_sdk.sh"
 
 [[ -x "${INSTALL_SCRIPT}" ]] || die "missing launcher install script: ${INSTALL_SCRIPT}"
@@ -297,6 +299,7 @@ ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
 set -e
 mkdir -p "${REMOTE_TMP}/app" "${REMOTE_TMP}/face_detect" \
          "${REMOTE_TMP}/boot" "${REMOTE_TMP}/music" "${REMOTE_TMP}/videos" \
+         "${REMOTE_TMP}/notification" \
          "${REMOTE_BACKUP}/app" "${REMOTE_BACKUP}/boot" "${REMOTE_BACKUP}/media"
 
 if [ "${DEPLOY_APP}" = "1" ]; then
@@ -319,6 +322,7 @@ fi
 if [ "${DEPLOY_MEDIA}" = "1" ]; then
     [ -d /root/music ] && cp -a /root/music "${REMOTE_BACKUP}/media/music" 2>/dev/null || true
     [ -d /root/videos ] && cp -a /root/videos "${REMOTE_BACKUP}/media/videos" 2>/dev/null || true
+    [ -d /root/notification ] && cp -a /root/notification "${REMOTE_BACKUP}/media/notification" 2>/dev/null || true
 fi
 REMOTE
 
@@ -354,11 +358,17 @@ if [[ "${DEPLOY_MEDIA}" -eq 1 ]]; then
     else
         echo "No video resource directory: ${VIDEO_SRC}"
     fi
+    if [[ -d "${NOTIFICATION_SRC}" ]]; then
+        tar -C "${NOTIFICATION_SRC}" -cf - . | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
+            "tar -C '${REMOTE_TMP}/notification' -xf -"
+    else
+        echo "No notification resource directory: ${NOTIFICATION_SRC}"
+    fi
 fi
 
 echo "[3/5] Install on target"
 ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
-    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' REMOTE_MUSIC_DIR='${REMOTE_MUSIC_DIR}' REMOTE_VIDEO_DIR='${REMOTE_VIDEO_DIR}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' RESTART_APP='${RESTART_APP}' SET_AUDIO_OUTPUT='${SET_AUDIO_OUTPUT}' sh -s" <<'REMOTE'
+    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' REMOTE_MUSIC_DIR='${REMOTE_MUSIC_DIR}' REMOTE_VIDEO_DIR='${REMOTE_VIDEO_DIR}' REMOTE_NOTIFICATION_DIR='${REMOTE_NOTIFICATION_DIR}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' RESTART_APP='${RESTART_APP}' SET_AUDIO_OUTPUT='${SET_AUDIO_OUTPUT}' sh -s" <<'REMOTE'
 set -e
 
 if [ "${DEPLOY_APP}" = "1" ]; then
@@ -402,7 +412,7 @@ if [ "${DEPLOY_FIRMWARE}" = "1" ]; then
 fi
 
 if [ "${DEPLOY_MEDIA}" = "1" ]; then
-    mkdir -p "${REMOTE_MUSIC_DIR}" "${REMOTE_VIDEO_DIR}" /root/nes /root/photos /root/screenshots /root/recordings /root/lorawan
+    mkdir -p "${REMOTE_MUSIC_DIR}" "${REMOTE_VIDEO_DIR}" "${REMOTE_NOTIFICATION_DIR}" /root/nes /root/photos /root/screenshots /root/recordings /root/lorawan
     if [ "$(find "${REMOTE_TMP}/music" -mindepth 1 -print -quit 2>/dev/null)" ]; then
         rm -rf "${REMOTE_MUSIC_DIR}"
         mkdir -p "${REMOTE_MUSIC_DIR}"
@@ -412,6 +422,11 @@ if [ "${DEPLOY_MEDIA}" = "1" ]; then
         rm -rf "${REMOTE_VIDEO_DIR}"
         mkdir -p "${REMOTE_VIDEO_DIR}"
         cp -a "${REMOTE_TMP}/videos/." "${REMOTE_VIDEO_DIR}/"
+    fi
+    if [ "$(find "${REMOTE_TMP}/notification" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+        rm -rf "${REMOTE_NOTIFICATION_DIR}"
+        mkdir -p "${REMOTE_NOTIFICATION_DIR}"
+        cp -a "${REMOTE_TMP}/notification/." "${REMOTE_NOTIFICATION_DIR}/"
     fi
 fi
 

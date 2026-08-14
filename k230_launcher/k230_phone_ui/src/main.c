@@ -607,6 +607,8 @@ static const char *page_name(page_id_t page)
         return "Audio";
     case PAGE_AUDIO_OUTPUT:
         return "Audio output";
+    case PAGE_NOTIFICATION_SETTINGS:
+        return "Notifications";
     case PAGE_I2S_TEST:
         return "I2S Test";
     case PAGE_I2C_SCAN:
@@ -9033,6 +9035,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_AUDIO_OUTPUT:
         ui_audio_output_create(scr);
+        break;
+    case PAGE_NOTIFICATION_SETTINGS:
+        ui_notification_settings_create(scr);
         break;
     case PAGE_I2S_TEST:
         ui_i2s_test_create(scr);

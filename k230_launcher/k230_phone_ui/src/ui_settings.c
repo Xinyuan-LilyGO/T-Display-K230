@@ -252,6 +252,10 @@ void ui_settings_create(lv_obj_t *scr)
                         "Volume and output route", 0x22D3EE,
                         PAGE_AUDIO_SETTINGS);
     y = settings_next_row_y(y);
+    ui_settings_nav_row(body, y, LV_SYMBOL_AUDIO, "Notifications",
+                        "Incoming message sound", 0xA78BFA,
+                        PAGE_NOTIFICATION_SETTINGS);
+    y = settings_next_row_y(y);
 #if K230_FAN_ENABLED
     ui_settings_nav_row(body, y, "FAN", "Fan",
                         "Manual or automatic cooling", 0xF5A524,

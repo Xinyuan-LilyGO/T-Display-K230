@@ -63,7 +63,8 @@ install -D -m 0755 "$LAUNCHER_DIR/rootfs_overlay/etc/init.d/S99zz_k230_phone_ui"
 
 mkdir -p "$ROOTFS_DIR/root/music" "$ROOTFS_DIR/root/nes" "$ROOTFS_DIR/root/videos" \
     "$ROOTFS_DIR/root/photos" "$ROOTFS_DIR/root/screenshots" \
-    "$ROOTFS_DIR/root/recordings" "$ROOTFS_DIR/root/lorawan"
+    "$ROOTFS_DIR/root/recordings" "$ROOTFS_DIR/root/lorawan" \
+    "$ROOTFS_DIR/root/notification"
 
 sync_media_dir() {
     local src="$1"
@@ -80,6 +81,7 @@ sync_media_dir() {
 
 sync_media_dir "$RESOURCE_DIR/videos" "$ROOTFS_DIR/root/videos" "video"
 sync_media_dir "$RESOURCE_DIR/music" "$ROOTFS_DIR/root/music" "music"
+sync_media_dir "$RESOURCE_DIR/notification" "$ROOTFS_DIR/root/notification" "notification"
 
 if [ -e "$STAMP" ]; then
     mv "$STAMP" "$STAMP.stale.$(date +%Y%m%d_%H%M%S)"

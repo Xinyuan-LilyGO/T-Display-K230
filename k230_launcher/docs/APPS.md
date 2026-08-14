@@ -14,6 +14,7 @@ This guide explains the apps shipped with the T-Display K230 LVGL launcher.
 - Display orientation, font size, page transition effects, brightness, and screen timeout are configured in `Settings` > `Display`.
 - Language is configured in `Settings` > `Language`. The default language is English, and the default configuration includes Chinese, English, and Japanese.
 - Audio output and default volume are configured in `Settings` > `Audio`. The default output uses an external I2S device.
+- Incoming message notification sound is configured in `Settings` > `Notifications`.
 - If the keyboard base is attached, hardware keyboard input can replace the on-screen keyboard.
 
 ## Storage Folders
@@ -29,6 +30,7 @@ The launcher creates these folders in the target root filesystem:
 | `/root/screenshots` | Screenshot app and keyboard screenshot shortcut |
 | `/root/recordings` | Recorder app |
 | `/root/lorawan` | LoRaWAN profile files |
+| `/root/notification` | Notification sound files |
 
 Use the `MTP` app to expose these folders to a host computer over USB.
 
@@ -43,7 +45,7 @@ Use the `MTP` app to expose these folders to a host computer over USB.
 | `Record` | Records from the board microphone, lists recording files, plays them back, and deletes recordings. | Tap record to start and stop. Open the list to play or delete files from `/root/recordings`. |
 | `Mic FFT` | Displays a live microphone spectrum and basic level information. | Use it to check microphone input and adjust the displayed gain for easier signal inspection. |
 | `LoRa` | Controls SX1262 or LR2021 modules with Factory, Chat, Listen, Auto TX, and Continuous TX modes. | Select or edit a profile, then choose the operating mode. Continuous TX is for engineering RF testing only, is not recommended for normal use, and must only be used with a suitable antenna connected. |
-| `Meshtastic` | Controls the standalone `k230_meshtastic_probe` daemon for a minimal Meshtastic-style LoRa mesh text path, node cache, event log, and profile settings. | Tap `Start` to launch the daemon. Use `Profile` to set region, preset, channel, PSK, TX power, node/from/to/hop/ACK. Use `Send Message` for text and `Nodes` to inspect the node cache. This is a minimal flood-mesh daemon panel, not a full Meshtastic runtime. |
+| `Meshtastic` | Controls the standalone `k230_meshtastic_probe` daemon for a minimal Meshtastic-style LoRa mesh text path, node cache, event log, and profile settings. | The daemon starts when the app opens. Use the settings icon to set region, preset, channel, PSK, TX power, node/from/to/hop/ACK. Type in the message field to send text and open the node page to inspect the node cache. New received messages play the sound selected in `Settings` > `Notifications`. |
 | `LoRaWAN` | Manages LoRaWAN profiles and runs OTAA profile tests through the LoRa module. | Load an existing profile, create or edit a profile, validate key lengths, save it, then run the selected profile. Optional simulated telemetry can be enabled. |
 | `NES` | Loads `.nes` ROMs from `/root/nes` and runs them with touch controls or the hardware keyboard. | NES ROMs are not bundled by default. Add your own ROM files to `/root/nes`, then select a ROM from the list. Keyboard controls: arrows or `W/A/S/D` for direction, `Enter` for Start, `Space` or `Shift` for Select, `U/I/O` for A, `H/J/K` for B, and `Esc` to stop or return to the ROM list. |
 | `AI` | Opens the bundled K230 AI demo interface when model resources are installed. | Use it to run supported local AI demos and view their results on the screen. |

@@ -3,6 +3,7 @@
 #include "ui_hardware.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
+#include "ui_prefs.h"
 
 #include <lvgl/src/misc/cache/instance/lv_image_cache.h>
 #include <ctype.h>
@@ -33,6 +34,10 @@
 #define AUDIO_VOLUME_CONFIG_PATH "/root/.k230_phone_audio_volume"
 #define AUDIO_PCM_VOLUME_BIN "/root/app/k230_phone_ui/k230_pcm_volume"
 #define AUDIO_RECORD_DIR "/root/recordings"
+#define AUDIO_NOTIFICATION_DIR "/root/notification"
+#define AUDIO_NOTIFICATION_PREF "audio.notification_sound"
+#define AUDIO_NOTIFICATION_NONE "none"
+#define AUDIO_NOTIFICATION_LOG_PATH "/tmp/k230_phone_notification.log"
 #define AUDIO_RECORDER_LOG_PATH "/tmp/k230_phone_recorder.log"
 #define AUDIO_COVER_PATH "/tmp/k230_phone_album.rgb565"
 #define AUDIO_COVER_SIZE 456
@@ -46,6 +51,7 @@
 #define AUDIO_ICON_MIC "MIC"
 #define AUDIO_ICON_REC "REC"
 #define AUDIO_ICON_STOP "STOP"
+#define AUDIO_MAX_NOTIFICATIONS 32
 
 typedef struct {
     char path[AUDIO_PATH_MAX];
@@ -91,6 +97,10 @@ static char custom_stream_url[AUDIO_PATH_MAX];
 static audio_track_t recordings[AUDIO_MAX_RECORDINGS];
 static int recording_count;
 static int selected_recording = -1;
+static audio_track_t notification_sounds[AUDIO_MAX_NOTIFICATIONS];
+static int notification_sound_count;
+static char notification_selected[AUDIO_TITLE_MAX];
+static pid_t notification_pid = -1;
 static char current_record_path[AUDIO_PATH_MAX];
 static pid_t recorder_pid = -1;
 static uint64_t recorder_start_us;
@@ -168,10 +178,16 @@ static char recorder_delete_pending_title[AUDIO_TITLE_MAX];
 static lv_obj_t *recorder_row[AUDIO_MAX_RECORDINGS];
 static lv_obj_t *recorder_row_icon[AUDIO_MAX_RECORDINGS];
 static lv_obj_t *recorder_row_meta[AUDIO_MAX_RECORDINGS];
+static lv_obj_t *notification_status_label;
+static lv_obj_t *notification_current_label;
+static lv_obj_t *notification_row[AUDIO_MAX_NOTIFICATIONS + 1];
+static lv_obj_t *notification_row_meta[AUDIO_MAX_NOTIFICATIONS + 1];
 
 static void audio_start_local(int index);
 static void audio_start_local_at(int index, int start_sec);
 static void audio_apply_volume_throttled(int force);
+static void audio_notification_reap(void);
+static void notification_refresh_ui(void);
 static void music_refresh_ui(void);
 static void recorder_refresh_ui(void);
 static void recorder_rebuild_list_overlay(void);
@@ -969,6 +985,120 @@ static void audio_scan_tracks(void)
     }
 }
 
+static int notification_name_valid(const char *name)
+{
+    if(!name || !name[0] || strchr(name, '/') || strstr(name, "..")) {
+        return 0;
+    }
+    return audio_supported_file(name);
+}
+
+static void notification_make_path(const char *name, char *path, size_t len)
+{
+    snprintf(path, len, "%s/%s", AUDIO_NOTIFICATION_DIR, name ? name : "");
+}
+
+static void notification_scan_sounds(void)
+{
+    DIR *dp;
+    struct dirent *entry;
+
+    notification_sound_count = 0;
+    memset(notification_sounds, 0, sizeof(notification_sounds));
+
+    dp = opendir(AUDIO_NOTIFICATION_DIR);
+    if(!dp) {
+        return;
+    }
+
+    while((entry = readdir(dp)) != NULL &&
+          notification_sound_count < AUDIO_MAX_NOTIFICATIONS) {
+        char path[AUDIO_PATH_MAX];
+        struct stat st;
+        audio_track_t *item;
+
+        if(strcmp(entry->d_name, ".") == 0 ||
+           strcmp(entry->d_name, "..") == 0 ||
+           !notification_name_valid(entry->d_name)) {
+            continue;
+        }
+
+        notification_make_path(entry->d_name, path, sizeof(path));
+        if(stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            continue;
+        }
+
+        item = &notification_sounds[notification_sound_count++];
+        snprintf(item->path, sizeof(item->path), "%s", path);
+        snprintf(item->title, sizeof(item->title), "%s", entry->d_name);
+        snprintf(item->meta, sizeof(item->meta), "%s  %ld KB",
+                 audio_format_label(entry->d_name),
+                 (long)((st.st_size + 1023) / 1024));
+    }
+
+    closedir(dp);
+    if(notification_sound_count > 1) {
+        qsort(notification_sounds, (size_t)notification_sound_count,
+              sizeof(notification_sounds[0]), audio_track_compare);
+    }
+}
+
+static int notification_find_index(const char *name)
+{
+    if(!name || !name[0]) {
+        return -1;
+    }
+    for(int i = 0; i < notification_sound_count; i++) {
+        if(strcmp(notification_sounds[i].title, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int notification_default_index(void)
+{
+    int idx = notification_find_index("notification01.mp3");
+
+    if(idx >= 0) {
+        return idx;
+    }
+    return notification_sound_count > 0 ? 0 : -1;
+}
+
+static int notification_load_selected(char *name, size_t len)
+{
+    char value[AUDIO_TITLE_MAX];
+    int idx;
+
+    if(!name || len == 0) {
+        return -1;
+    }
+
+    name[0] = '\0';
+    ui_prefs_get(AUDIO_NOTIFICATION_PREF, value, sizeof(value), "");
+    ui_trim_text(value);
+    if(strcmp(value, AUDIO_NOTIFICATION_NONE) == 0) {
+        snprintf(name, len, "%s", AUDIO_NOTIFICATION_NONE);
+        return -1;
+    }
+
+    notification_scan_sounds();
+    if(notification_name_valid(value)) {
+        idx = notification_find_index(value);
+        if(idx >= 0) {
+            snprintf(name, len, "%s", notification_sounds[idx].title);
+            return idx;
+        }
+    }
+
+    idx = notification_default_index();
+    if(idx >= 0) {
+        snprintf(name, len, "%s", notification_sounds[idx].title);
+    }
+    return idx;
+}
+
 static int recorder_file_supported(const char *name)
 {
     return audio_ends_with(name, ".wav");
@@ -1251,6 +1381,89 @@ static int audio_start_command(const char *cmd, const char *title,
     snprintf(player_source, sizeof(player_source), "%s", source);
     audio_set_status("Starting");
     return 0;
+}
+
+static void audio_notification_reap(void)
+{
+    int status;
+
+    if(notification_pid <= 0) {
+        return;
+    }
+    if(waitpid(notification_pid, &status, WNOHANG) == notification_pid) {
+        notification_pid = -1;
+    }
+}
+
+static int audio_play_notification_path(const char *path)
+{
+    char quoted[AUDIO_PATH_MAX * 2];
+    char cmd[AUDIO_PATH_MAX * 4];
+    pid_t pid;
+
+    audio_notification_reap();
+    if(notification_pid > 0) {
+        audio_debug_log("NOTIFICATION_SKIP reason=busy");
+        return -1;
+    }
+    if(!path || access(path, R_OK) != 0) {
+        audio_debug_log("NOTIFICATION_SKIP reason=missing path=\"%s\"",
+                        path ? path : "");
+        return -1;
+    }
+    if(!audio_has_command("/usr/bin/ffmpeg") ||
+       !audio_has_command("/usr/bin/aplay") ||
+       !audio_has_command(AUDIO_PCM_VOLUME_BIN)) {
+        audio_debug_log("NOTIFICATION_SKIP reason=missing-command");
+        return -1;
+    }
+    if(audio_shell_quote(path, quoted, sizeof(quoted)) != 0) {
+        audio_debug_log("NOTIFICATION_SKIP reason=quote path=\"%s\"", path);
+        return -1;
+    }
+
+    audio_load_volume_once();
+    audio_apply_volume_throttled(1);
+    snprintf(cmd, sizeof(cmd),
+             "ffmpeg -nostdin -hide_banner -loglevel error -i %s "
+             "-vn -f s16le -acodec pcm_s16le -ac 2 -ar %d - "
+             "2>" AUDIO_NOTIFICATION_LOG_PATH " | "
+             AUDIO_PCM_VOLUME_BIN " " AUDIO_VOLUME_CONFIG_PATH
+             " 2>>" AUDIO_NOTIFICATION_LOG_PATH " | "
+             "aplay -q -D default -t raw -f S16_LE -c 2 -r %d "
+             "-B %d -F %d - >>" AUDIO_NOTIFICATION_LOG_PATH " 2>&1",
+             quoted, AUDIO_PCM_RATE, AUDIO_PCM_RATE,
+             AUDIO_APLAY_BUFFER_US, AUDIO_APLAY_PERIOD_US);
+
+    pid = fork();
+    if(pid < 0) {
+        audio_debug_log("NOTIFICATION_SKIP reason=fork");
+        return -1;
+    }
+    if(pid == 0) {
+        setpgid(0, 0);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    setpgid(pid, pid);
+    notification_pid = pid;
+    audio_debug_log("NOTIFICATION_PLAY pid=%d path=\"%s\"", (int)pid, path);
+    return 0;
+}
+
+void ui_audio_play_notification(void)
+{
+    char name[AUDIO_TITLE_MAX];
+    char path[AUDIO_PATH_MAX];
+    int idx;
+
+    idx = notification_load_selected(name, sizeof(name));
+    if(idx < 0 || strcmp(name, AUDIO_NOTIFICATION_NONE) == 0) {
+        audio_debug_log("NOTIFICATION_SKIP reason=disabled");
+        return;
+    }
+    notification_make_path(name, path, sizeof(path));
+    (void)audio_play_notification_path(path);
 }
 
 static void audio_toggle_pause(void)
@@ -2164,6 +2377,228 @@ static lv_obj_t *audio_create_row(lv_obj_t *parent, int y, const char *left_icon
         *meta_out = detail;
     }
     return row;
+}
+
+static int notification_current_index_from_list(char *name, size_t len)
+{
+    char value[AUDIO_TITLE_MAX];
+    int idx;
+
+    if(name && len > 0) {
+        name[0] = '\0';
+    }
+
+    ui_prefs_get(AUDIO_NOTIFICATION_PREF, value, sizeof(value), "");
+    ui_trim_text(value);
+    if(strcmp(value, AUDIO_NOTIFICATION_NONE) == 0) {
+        if(name && len > 0) {
+            snprintf(name, len, "%s", AUDIO_NOTIFICATION_NONE);
+        }
+        return -1;
+    }
+    if(notification_name_valid(value)) {
+        idx = notification_find_index(value);
+        if(idx >= 0) {
+            if(name && len > 0) {
+                snprintf(name, len, "%s", notification_sounds[idx].title);
+            }
+            return idx;
+        }
+    }
+
+    idx = notification_default_index();
+    if(idx >= 0 && name && len > 0) {
+        snprintf(name, len, "%s", notification_sounds[idx].title);
+    }
+    return idx;
+}
+
+static void notification_style_row(lv_obj_t *row, lv_obj_t *meta,
+                                   int selected, const char *default_meta,
+                                   uint32_t accent)
+{
+    if(row) {
+        lv_obj_set_style_bg_color(row,
+                                  lv_color_hex(selected ? 0x211B32 :
+                                               0x151B22), 0);
+        lv_obj_set_style_border_color(row,
+                                      lv_color_hex(selected ? accent :
+                                                   0x25303A), 0);
+    }
+    if(meta) {
+        lv_label_set_text(meta, selected ? ui_tr("Selected") :
+                          ui_tr(default_meta ? default_meta : ""));
+        lv_obj_set_style_text_color(meta,
+                                    lv_color_hex(selected ? accent :
+                                                 0x9AA4AF), 0);
+    }
+}
+
+static void notification_refresh_ui(void)
+{
+    char name[AUDIO_TITLE_MAX];
+    int idx;
+
+    idx = notification_current_index_from_list(name, sizeof(name));
+    snprintf(notification_selected, sizeof(notification_selected), "%s",
+             idx >= 0 ? notification_sounds[idx].title :
+             (strcmp(name, AUDIO_NOTIFICATION_NONE) == 0 ?
+              AUDIO_NOTIFICATION_NONE : ""));
+
+    if(notification_current_label) {
+        char text[160];
+
+        snprintf(text, sizeof(text), "%s: %s", ui_tr("Current"),
+                 idx >= 0 ? notification_sounds[idx].title : ui_tr("Off"));
+        lv_label_set_text(notification_current_label, text);
+    }
+    if(notification_status_label) {
+        if(notification_sound_count == 0) {
+            lv_label_set_text(notification_status_label,
+                              ui_tr("No notification sounds"));
+            lv_obj_set_style_text_color(notification_status_label,
+                                        lv_color_hex(0xF5A524), 0);
+        } else {
+            char text[96];
+
+            snprintf(text, sizeof(text), "%d %s", notification_sound_count,
+                     ui_tr("sounds"));
+            lv_label_set_text(notification_status_label, text);
+            lv_obj_set_style_text_color(notification_status_label,
+                                        lv_color_hex(0x9AA4AF), 0);
+        }
+    }
+
+    notification_style_row(notification_row[0], notification_row_meta[0],
+                           idx < 0 &&
+                           strcmp(notification_selected,
+                                  AUDIO_NOTIFICATION_NONE) == 0,
+                           "Disable sound", 0x9AA4AF);
+    for(int i = 0; i < notification_sound_count; i++) {
+        notification_style_row(notification_row[i + 1],
+                               notification_row_meta[i + 1],
+                               i == idx, notification_sounds[i].meta,
+                               0xA78BFA);
+    }
+}
+
+static void notification_select_cb(lv_event_t *event)
+{
+    intptr_t raw = (intptr_t)lv_event_get_user_data(event);
+
+    if(raw < 0) {
+        ui_prefs_set(AUDIO_NOTIFICATION_PREF, AUDIO_NOTIFICATION_NONE);
+    } else if(raw < notification_sound_count) {
+        ui_prefs_set(AUDIO_NOTIFICATION_PREF, notification_sounds[raw].title);
+    }
+    notification_refresh_ui();
+    app_request_fast_refresh();
+}
+
+static void notification_play_cb(lv_event_t *event)
+{
+    char name[AUDIO_TITLE_MAX];
+    int idx;
+
+    (void)event;
+    idx = notification_current_index_from_list(name, sizeof(name));
+    if(idx < 0) {
+        if(notification_status_label) {
+            lv_label_set_text(notification_status_label, ui_tr("Off"));
+            lv_obj_set_style_text_color(notification_status_label,
+                                        lv_color_hex(0x9AA4AF), 0);
+        }
+        return;
+    }
+    if(audio_play_notification_path(notification_sounds[idx].path) == 0) {
+        if(notification_status_label) {
+            lv_label_set_text(notification_status_label, ui_tr("Playing"));
+            lv_obj_set_style_text_color(notification_status_label,
+                                        lv_color_hex(0x25C281), 0);
+        }
+    } else if(notification_status_label) {
+        lv_label_set_text(notification_status_label,
+                          ui_tr("Playback failed"));
+        lv_obj_set_style_text_color(notification_status_label,
+                                    lv_color_hex(0xEF4D5A), 0);
+    }
+}
+
+void ui_notification_settings_create(lv_obj_t *scr)
+{
+    lv_obj_t *body;
+    lv_obj_t *title;
+    lv_obj_t *hint;
+    lv_obj_t *play_btn;
+    int x = ui_page_panel_x();
+    int w = ui_page_panel_width();
+    int y = 0;
+
+    ui_create_header(scr, "Notifications");
+    body = ui_scroll_panel(scr, x, ui_page_top_y(154), w, ui_body_height(154));
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    lv_obj_set_style_pad_all(body, 16, 0);
+
+    notification_scan_sounds();
+    memset(notification_row, 0, sizeof(notification_row));
+    memset(notification_row_meta, 0, sizeof(notification_row_meta));
+
+    title = ui_label(body, "Notification sound", &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, y);
+
+    play_btn = ui_command_button(body, ui_fit_width(body, 0, w) - 132, y - 4,
+                                 112, "Play", 0x25C281);
+    lv_obj_add_event_cb(play_btn, notification_play_cb, LV_EVENT_CLICKED,
+                        NULL);
+    y += 44;
+
+    notification_current_label = ui_label(body, "--", &lv_font_montserrat_18,
+                                          0xA78BFA);
+    lv_obj_set_width(notification_current_label, ui_inner_width());
+    lv_label_set_long_mode(notification_current_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(notification_current_label, LV_ALIGN_TOP_LEFT, 0, y);
+    y += 34;
+
+    notification_status_label = ui_label(body, "--", &lv_font_montserrat_16,
+                                         0x9AA4AF);
+    lv_obj_set_width(notification_status_label, ui_inner_width());
+    lv_label_set_long_mode(notification_status_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(notification_status_label, LV_ALIGN_TOP_LEFT, 0, y);
+    y += 44;
+
+    hint = ui_label(body, "Sounds in /root/notification",
+                    &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(hint, ui_inner_width());
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 0, y);
+    y += 42;
+
+    notification_row[0] = audio_create_row(body, y, "OFF", "Off",
+                                           "Disable sound", 0x9AA4AF,
+                                           notification_select_cb,
+                                           (void *)(intptr_t)-1, 0,
+                                           NULL, &notification_row_meta[0]);
+    y += 84;
+
+    for(int i = 0; i < notification_sound_count; i++) {
+        notification_row[i + 1] =
+            audio_create_row(body, y, LV_SYMBOL_AUDIO,
+                             notification_sounds[i].title,
+                             notification_sounds[i].meta, 0xA78BFA,
+                             notification_select_cb,
+                             (void *)(intptr_t)i, 0,
+                             NULL, &notification_row_meta[i + 1]);
+        y += 84;
+    }
+
+    if(notification_sound_count == 0) {
+        lv_obj_t *empty = ui_label(body, "No notification sounds",
+                                   &lv_font_montserrat_20, 0xF5A524);
+        lv_obj_align(empty, LV_ALIGN_TOP_LEFT, 0, y + 12);
+    }
+
+    notification_refresh_ui();
 }
 
 static void recorder_record_cb(lv_event_t *event)
@@ -3255,6 +3690,7 @@ void ui_net_radio_create(lv_obj_t *scr)
 void ui_audio_cleanup(void)
 {
     recorder_close_delete_confirm();
+    audio_notification_reap();
 
     if(recorder_input_route_active) {
         if(recorder_pid > 0) {
@@ -3315,6 +3751,8 @@ void ui_audio_cleanup(void)
     recorder_list_back = NULL;
     recorder_list_title = NULL;
     recorder_list_panel = NULL;
+    notification_status_label = NULL;
+    notification_current_label = NULL;
     memset(music_mode_btn, 0, sizeof(music_mode_btn));
     memset(music_row, 0, sizeof(music_row));
     memset(music_row_icon, 0, sizeof(music_row_icon));
@@ -3324,4 +3762,6 @@ void ui_audio_cleanup(void)
     memset(recorder_row, 0, sizeof(recorder_row));
     memset(recorder_row_icon, 0, sizeof(recorder_row_icon));
     memset(recorder_row_meta, 0, sizeof(recorder_row_meta));
+    memset(notification_row, 0, sizeof(notification_row));
+    memset(notification_row_meta, 0, sizeof(notification_row_meta));
 }

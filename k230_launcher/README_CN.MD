@@ -44,9 +44,10 @@ cd t-display-k230
 - `buildroot-overlay/package/k230_phone_ui`
 - 在 `k230_canmv_t_display_rm69a10_defconfig` 中启用 `BR2_PACKAGE_K230_PHONE_UI=y`
 - `S99zz_k230_phone_ui` 自启动服务
-- 默认媒体目录：`/root/music`、`/root/nes`、`/root/videos`、`/root/photos`、`/root/screenshots`、`/root/recordings`、`/root/lorawan`
+- 默认媒体目录：`/root/music`、`/root/nes`、`/root/videos`、`/root/photos`、`/root/screenshots`、`/root/recordings`、`/root/lorawan`、`/root/notification`
 - 可选打包媒体：将 `resources/videos` 同步到镜像内 `/root/videos`
 - 可选打包媒体：将 `resources/music` 同步到镜像内 `/root/music`
+- 可选打包通知音效：将 `resources/notification` 同步到镜像内 `/root/notification`
 
 如果资源目录不在默认位置，可以这样指定：
 
