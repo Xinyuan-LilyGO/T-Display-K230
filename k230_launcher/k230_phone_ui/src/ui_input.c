@@ -19,7 +19,7 @@ typedef enum {
     UI_INPUT_KBD_PINYIN,
 } ui_input_keyboard_mode_t;
 
-typedef struct {
+struct ui_input_inline {
     lv_obj_t *overlay;
     lv_obj_t *dialog;
     lv_obj_t *textarea;
@@ -38,10 +38,21 @@ typedef struct {
     const char *min_length_text;
     ui_input_submit_cb_t submit_cb;
     void *user_data;
-} ui_input_dialog_state_t;
+    int inline_mode;
+    lv_obj_t *keyboard_parent;
+    ui_input_inline_layout_cb_t layout_cb;
+    void *layout_user_data;
+};
+
+typedef struct ui_input_inline ui_input_dialog_state_t;
 
 static ui_input_dialog_state_t *active_dialog;
+static ui_input_dialog_state_t *active_inline;
 static int soft_keyboard_enabled = 1;
+
+static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state);
+static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
+                                     void *user_data);
 
 static const char *const ui_input_kbd_lower_map[] = {
     "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "\n",
@@ -149,12 +160,102 @@ void ui_input_dialog_close_active(void)
     app_request_fast_refresh();
 }
 
+static int ui_input_inline_reserved_h(ui_input_dialog_state_t *state)
+{
+    int reserved_h = 0;
+
+    if(!state || !state->inline_mode || !state->keyboard ||
+       !lv_obj_is_valid(state->keyboard) ||
+       lv_obj_has_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN)) {
+        return 0;
+    }
+
+    lv_obj_update_layout(state->keyboard);
+    reserved_h = lv_obj_get_height(state->keyboard);
+    if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar) &&
+       state->keyboard_mode == UI_INPUT_KBD_PINYIN &&
+       !lv_obj_has_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_update_layout(state->candidate_bar);
+        reserved_h += lv_obj_get_height(state->candidate_bar) + 6;
+    }
+    return reserved_h;
+}
+
+static void ui_input_inline_apply_layout(ui_input_dialog_state_t *state,
+                                         int active)
+{
+    int reserved_h = active ? ui_input_inline_reserved_h(state) : 0;
+
+    if(state && state->layout_cb) {
+        state->layout_cb(active, reserved_h, state->layout_user_data);
+    }
+    app_request_fast_refresh();
+}
+
+static void ui_input_inline_hide_state(ui_input_dialog_state_t *state)
+{
+    if(!state || !state->inline_mode) {
+        return;
+    }
+    if(state->keyboard && lv_obj_is_valid(state->keyboard)) {
+        lv_obj_add_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar)) {
+        lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(active_inline == state) {
+        active_inline = NULL;
+        if(state->hardware_keyboard) {
+            ui_extension_keyboard_set_key_cb(NULL, NULL);
+        }
+    }
+    state->pinyin_comp[0] = '\0';
+    ui_input_inline_apply_layout(state, 0);
+}
+
+static void ui_input_inline_show_state(ui_input_dialog_state_t *state)
+{
+    if(!state || !state->inline_mode || !state->textarea ||
+       !lv_obj_is_valid(state->textarea)) {
+        return;
+    }
+
+    if(active_inline && active_inline != state) {
+        ui_input_inline_hide_state(active_inline);
+    }
+    active_inline = state;
+    if(state->keyboard && lv_obj_is_valid(state->keyboard)) {
+        lv_obj_clear_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(state->keyboard);
+        if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar)) {
+            lv_obj_move_foreground(state->candidate_bar);
+        }
+        ui_input_pinyin_update_candidates(state);
+    } else {
+        state->hardware_keyboard = 1;
+        ui_extension_keyboard_set_key_cb(ui_input_hardware_key_cb, state);
+    }
+    lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
+    ui_input_inline_apply_layout(state, 1);
+}
+
 static void ui_input_align_dialog(ui_input_dialog_state_t *state)
 {
     int32_t keyboard_h;
     int32_t reserved_h;
 
-    if(!state || !state->dialog) {
+    if(!state) {
+        return;
+    }
+    if(state->inline_mode) {
+        ui_input_inline_apply_layout(state,
+                                     active_inline == state ||
+                                     (state->keyboard &&
+                                      !lv_obj_has_flag(state->keyboard,
+                                                       LV_OBJ_FLAG_HIDDEN)));
+        return;
+    }
+    if(!state->dialog) {
         return;
     }
 
@@ -182,7 +283,7 @@ static void ui_input_align_dialog(ui_input_dialog_state_t *state)
 
 static void ui_input_submit(ui_input_dialog_state_t *state)
 {
-    char text[NET_PASS_MAX];
+    char text[512];
     const char *src;
     size_t len;
 
@@ -215,6 +316,16 @@ static void ui_input_submit(ui_input_dialog_state_t *state)
     if(state->submit_cb) {
         state->submit_cb(text, state->user_data);
     }
+    if(state->inline_mode) {
+        if(state->textarea && lv_obj_is_valid(state->textarea)) {
+            lv_textarea_set_text(state->textarea, "");
+            lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
+        }
+        state->pinyin_comp[0] = '\0';
+        ui_input_pinyin_update_candidates(state);
+        ui_input_inline_apply_layout(state, active_inline == state);
+        return;
+    }
     ui_input_dialog_close_active();
 }
 
@@ -223,7 +334,7 @@ static void ui_input_submit_async(void *user_data)
     ui_input_dialog_state_t *state =
         (ui_input_dialog_state_t *)user_data;
 
-    if(state && state == active_dialog) {
+    if(state && (state == active_dialog || state == active_inline)) {
         ui_input_submit(state);
     }
 }
@@ -235,6 +346,8 @@ static void ui_input_cancel_async(void *user_data)
 
     if(state && state == active_dialog) {
         ui_input_dialog_close_active();
+    } else if(state && state == active_inline) {
+        ui_input_inline_hide_state(state);
     }
 }
 
@@ -244,7 +357,10 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
     ui_input_dialog_state_t *state =
         (ui_input_dialog_state_t *)user_data;
 
-    if(!pressed || !state || state != active_dialog || !state->textarea ||
+    if(!pressed || !state ||
+       (!state->inline_mode && state != active_dialog) ||
+       (state->inline_mode && state != active_inline) ||
+       !state->textarea ||
        !lv_obj_is_valid(state->textarea)) {
         return;
     }
@@ -427,7 +543,11 @@ static void ui_input_keyboard_send_button(ui_input_dialog_state_t *state,
     } else if(strcmp(text, "PY") == 0) {
         ui_input_keyboard_set_mode(state, UI_INPUT_KBD_PINYIN);
     } else if(strcmp(text, "Cancel") == 0) {
-        ui_input_dialog_close_active();
+        if(state->inline_mode) {
+            ui_input_inline_hide_state(state);
+        } else {
+            ui_input_dialog_close_active();
+        }
     } else if(strcmp(text, "Enter") == 0) {
         ui_input_submit(state);
     } else if(strcmp(text, "Del") == 0) {
@@ -526,7 +646,9 @@ static void ui_input_event_cb(lv_event_t *event)
     }
 
     if(code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
-        if(state->keyboard && state->textarea) {
+        if(state->inline_mode) {
+            ui_input_inline_show_state(state);
+        } else if(state->keyboard && state->textarea) {
             lv_obj_clear_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
             ui_input_align_dialog(state);
         } else if(state->hardware_keyboard && state->textarea) {
@@ -535,7 +657,11 @@ static void ui_input_event_cb(lv_event_t *event)
     } else if(code == LV_EVENT_READY) {
         ui_input_submit(state);
     } else if(code == LV_EVENT_CANCEL) {
-        ui_input_dialog_close_active();
+        if(state->inline_mode) {
+            ui_input_inline_hide_state(state);
+        } else {
+            ui_input_dialog_close_active();
+        }
     }
 }
 
@@ -817,4 +943,137 @@ void ui_input_dialog_open(const ui_input_dialog_config_t *config)
         lv_obj_send_event(state->textarea, LV_EVENT_FOCUSED, NULL);
     }
     app_request_fast_refresh();
+}
+
+ui_input_inline_t *ui_input_inline_create(lv_obj_t *textarea,
+                                          lv_obj_t *keyboard_parent,
+                                          size_t max_length,
+                                          ui_input_submit_cb_t submit_cb,
+                                          void *submit_user_data,
+                                          ui_input_inline_layout_cb_t layout_cb,
+                                          void *layout_user_data)
+{
+    ui_input_dialog_state_t *state;
+    int landscape = ui_is_landscape();
+    int screen_h = ui_screen_height();
+    int keyboard_h = landscape ? 156 : 330;
+    int candidate_h = landscape ? 42 : 52;
+    int use_soft_keyboard;
+
+    if(!textarea || !lv_obj_is_valid(textarea)) {
+        return NULL;
+    }
+    if(keyboard_h > screen_h / 2) {
+        keyboard_h = screen_h / 2;
+    }
+
+    state = calloc(1, sizeof(*state));
+    if(!state) {
+        return NULL;
+    }
+    state->inline_mode = 1;
+    state->textarea = textarea;
+    state->keyboard_parent = keyboard_parent ? keyboard_parent : lv_screen_active();
+    state->submit_cb = submit_cb;
+    state->user_data = submit_user_data;
+    state->layout_cb = layout_cb;
+    state->layout_user_data = layout_user_data;
+
+    lv_textarea_set_one_line(state->textarea, true);
+    lv_textarea_set_max_length(state->textarea,
+                               max_length ? (uint32_t)max_length :
+                               NET_PASS_MAX - 1U);
+    lv_obj_add_event_cb(state->textarea, ui_input_event_cb, LV_EVENT_FOCUSED,
+                        state);
+    lv_obj_add_event_cb(state->textarea, ui_input_event_cb, LV_EVENT_CLICKED,
+                        state);
+    lv_obj_add_event_cb(state->textarea, ui_input_event_cb, LV_EVENT_READY,
+                        state);
+    lv_obj_add_event_cb(state->textarea, ui_input_event_cb, LV_EVENT_CANCEL,
+                        state);
+
+    use_soft_keyboard = ui_input_soft_keyboard_enabled() ||
+                        !ui_extension_keyboard_active();
+    if(use_soft_keyboard) {
+        state->candidate_bar = lv_buttonmatrix_create(state->keyboard_parent);
+        lv_obj_set_size(state->candidate_bar, ui_screen_width(), candidate_h);
+        lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, -keyboard_h);
+        ui_input_style_keyboard(state->candidate_bar, landscape);
+        lv_obj_set_style_text_font(state->candidate_bar,
+                                   ui_font_for_text("中文",
+                                                    &lv_font_montserrat_16),
+                                   LV_PART_MAIN);
+        lv_obj_set_style_text_font(state->candidate_bar,
+                                   ui_font_for_text("中文",
+                                                    &lv_font_montserrat_16),
+                                   LV_PART_ITEMS);
+        lv_obj_add_event_cb(state->candidate_bar,
+                            ui_input_candidate_event_cb,
+                            LV_EVENT_VALUE_CHANGED, state);
+        lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+
+        state->keyboard = lv_buttonmatrix_create(state->keyboard_parent);
+        lv_obj_set_size(state->keyboard, ui_screen_width(), keyboard_h);
+        lv_obj_align(state->keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+        ui_input_style_keyboard(state->keyboard, landscape);
+        lv_obj_add_event_cb(state->keyboard, ui_input_keyboard_event_cb,
+                            LV_EVENT_VALUE_CHANGED, state);
+        ui_input_keyboard_set_mode(state, UI_INPUT_KBD_LOWER);
+        lv_obj_add_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
+        if(state->candidate_bar) {
+            lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+        ui_input_inline_apply_layout(state, 0);
+    } else {
+        state->hardware_keyboard = 1;
+    }
+
+    ui_input_log("inline create soft=%d hw_active=%d",
+                 use_soft_keyboard, ui_extension_keyboard_active());
+    return state;
+}
+
+void ui_input_inline_destroy(ui_input_inline_t *state)
+{
+    if(!state) {
+        return;
+    }
+    ui_input_inline_hide_state(state);
+    if(state->textarea && lv_obj_is_valid(state->textarea)) {
+        lv_obj_remove_event_cb_with_user_data(state->textarea,
+                                              ui_input_event_cb, state);
+    }
+    if(state->keyboard && lv_obj_is_valid(state->keyboard)) {
+        lv_obj_delete(state->keyboard);
+    }
+    if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar)) {
+        lv_obj_delete(state->candidate_bar);
+    }
+    if(active_inline == state) {
+        active_inline = NULL;
+    }
+    free(state);
+    app_request_fast_refresh();
+}
+
+void ui_input_inline_focus(ui_input_inline_t *state)
+{
+    ui_input_inline_show_state(state);
+}
+
+void ui_input_inline_submit(ui_input_inline_t *state)
+{
+    if(state) {
+        ui_input_submit(state);
+    }
+}
+
+void ui_input_inline_hide(ui_input_inline_t *state)
+{
+    ui_input_inline_hide_state(state);
+}
+
+int ui_input_inline_is_active(ui_input_inline_t *state)
+{
+    return state && active_inline == state;
 }

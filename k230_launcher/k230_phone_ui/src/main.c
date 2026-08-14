@@ -3314,6 +3314,9 @@ static void nav_back(void)
     if(current_page == PAGE_VIDEO && ui_video_player_handle_back()) {
         return;
     }
+    if(current_page == PAGE_MESHTASTIC && ui_meshtastic_handle_back()) {
+        return;
+    }
 
     if(page_stack_len > 0) {
         page_id_t target = page_stack[page_stack_len - 1];
