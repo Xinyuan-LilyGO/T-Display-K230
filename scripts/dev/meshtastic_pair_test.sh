@@ -14,6 +14,7 @@ PRESET="${PRESET:-LONG_FAST}"
 HOP_LIMIT="${HOP_LIMIT:-3}"
 TEST_TEXT="${TEST_TEXT:-k230 meshtastic pair test}"
 KEEP_DAEMON=0
+RUN_ACK=0
 NODE_A=""
 NODE_B=""
 HOST_A=""
@@ -37,6 +38,7 @@ Options:
   --region NAME          Region. Default: EU_868.
   --preset NAME          Preset. Default: LONG_FAST.
   --text TEXT            Base text payload.
+  --ack                  Also run one A-to-B direct message ACK test.
   --keep-daemon          Leave daemons running after the test.
   -h, --help             Show this help.
 
@@ -82,18 +84,21 @@ start_daemon() {
     local host="$1"
     local node="$2"
     local name="$3"
-    local q_probe q_region q_preset q_name q_node q_hop command
+    local to_node="${4:-0xffffffff}"
+    local ack_arg="${5:---no-ack}"
+    local q_probe q_region q_preset q_name q_node q_to q_hop command
     q_probe="$(shell_quote "${PROBE}")"
     q_region="$(shell_quote "${REGION}")"
     q_preset="$(shell_quote "${PRESET}")"
     q_name="$(shell_quote "${name}")"
     q_node="$(shell_quote "${node}")"
+    q_to="$(shell_quote "${to_node}")"
     q_hop="$(shell_quote "${HOP_LIMIT}")"
     command="killall k230_meshtastic_probe 2>/dev/null || true; "
     command+="rm -f /tmp/k230_meshtastic.sock /tmp/k230_meshtastic_pair.log; "
     command+="nohup ${q_probe} --daemon --region ${q_region} --preset ${q_preset} "
-    command+="--node ${q_name} --from ${q_node} --to 0xffffffff --hop-limit ${q_hop} "
-    command+="--no-ack --no-nodeinfo --no-rebroadcast "
+    command+="--node ${q_name} --from ${q_node} --to ${q_to} --hop-limit ${q_hop} "
+    command+="${ack_arg} --no-nodeinfo --no-rebroadcast "
     command+=">/tmp/k230_meshtastic_pair.log 2>&1 & "
     command+="sleep 4; ${q_probe} --cmd-status"
     ssh_run "${host}" "${command}"
@@ -102,6 +107,30 @@ start_daemon() {
 stop_daemon() {
     local host="$1"
     ssh_run "${host}" "killall k230_meshtastic_probe 2>/dev/null || true" >/dev/null 2>&1 || true
+}
+
+ack_send_and_check() {
+    local tx_host="$1"
+    local rx_host="$2"
+    local tx_node="$3"
+    local rx_node="$4"
+    local payload="$5"
+    local q_probe q_payload tx_log
+    q_probe="$(shell_quote "${PROBE}")"
+    q_payload="$(shell_quote "${payload}")"
+    tx_log="/tmp/k230_meshtastic_ack_${tx_host//[^A-Za-z0-9]/_}.log"
+
+    echo
+    echo "Direct ACK ${tx_host} -> ${rx_host}: ${payload}"
+    start_daemon "${tx_host}" "${tx_node}" "k230-a-ack" "${rx_node}" "--ack"
+    start_daemon "${rx_host}" "${rx_node}" "k230-b-ack" "0xffffffff" "--no-ack"
+    ssh_run "${tx_host}" "${q_probe} --cmd-send ${q_payload}"
+    sleep 26
+    ssh_run "${tx_host}" "${q_probe} --cmd-log" | tee "${tx_log}"
+    ssh_run "${tx_host}" "${q_probe} --cmd-status" | tee -a "${tx_log}"
+    if ! grep -Eq "ack_rx=[1-9]|Mesh ACK received" "${tx_log}"; then
+        die "direct ACK was not received by ${tx_host}"
+    fi
 }
 
 send_and_check() {
@@ -150,6 +179,10 @@ while [[ $# -gt 0 ]]; do
             TEST_TEXT="$2"
             shift 2
             ;;
+        --ack)
+            RUN_ACK=1
+            shift
+            ;;
         --keep-daemon)
             KEEP_DAEMON=1
             shift
@@ -182,11 +215,11 @@ echo "region=${REGION} preset=${PRESET} relay=off"
 
 echo
 echo "[1/4] Start daemon on A"
-start_daemon "${HOST_A}" "${NODE_A}" "k230-a"
+start_daemon "${HOST_A}" "${NODE_A}" "k230-a" "0xffffffff" "--no-ack"
 
 echo
 echo "[2/4] Start daemon on B"
-start_daemon "${HOST_B}" "${NODE_B}" "k230-b"
+start_daemon "${HOST_B}" "${NODE_B}" "k230-b" "0xffffffff" "--no-ack"
 
 echo
 echo "[3/4] A to B"
@@ -195,6 +228,13 @@ send_and_check "${HOST_A}" "${HOST_B}" "${TEST_TEXT} A-to-B"
 echo
 echo "[4/4] B to A"
 send_and_check "${HOST_B}" "${HOST_A}" "${TEST_TEXT} B-to-A"
+
+if [[ "${RUN_ACK}" -eq 1 ]]; then
+    echo
+    echo "[ACK] A to B direct message"
+    ack_send_and_check "${HOST_A}" "${HOST_B}" "${NODE_A}" "${NODE_B}" \
+        "${TEST_TEXT} ACK A-to-B"
+fi
 
 echo
 echo "PASS: bidirectional Meshtastic text path is working."

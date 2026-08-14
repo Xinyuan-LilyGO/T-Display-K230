@@ -67,8 +67,9 @@
 #define MESHTASTIC_DELAYED_TX_QUEUE_SIZE 4U
 #define MESHTASTIC_REBROADCAST_MIN_DELAY_US 150000ULL
 #define MESHTASTIC_REBROADCAST_JITTER_US 700000ULL
+#define MESHTASTIC_ACK_RESPONSE_DELAY_US 5500000ULL
 #define MESHTASTIC_ACK_RETRY_QUEUE_SIZE 4U
-#define MESHTASTIC_ACK_RETRY_TIMEOUT_US 5000000ULL
+#define MESHTASTIC_ACK_RETRY_TIMEOUT_US 12000000ULL
 #define MESHTASTIC_ACK_RETRY_MAX 3U
 #define MESHTASTIC_MAX_K230_TX_POWER_DBM 22
 #define OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH 0
@@ -2776,6 +2777,32 @@ static bool mesh_delayed_tx_enqueue(const tx_frame_t &frame)
     return false;
 }
 
+static bool mesh_delayed_ack_enqueue(const tx_frame_t &frame)
+{
+    uint64_t now = monotonic_us();
+
+    for(size_t i = 0; i < MESHTASTIC_DELAYED_TX_QUEUE_SIZE; i++) {
+        if(mesh_delayed_tx_queue[i].active) {
+            continue;
+        }
+        mesh_delayed_tx_queue[i].frame = frame;
+        mesh_delayed_tx_queue[i].due_us =
+            now + MESHTASTIC_ACK_RESPONSE_DELAY_US;
+        mesh_delayed_tx_queue[i].active = true;
+        daemon_event("Mesh ACK scheduled id=0x%08x to=0x%08x delay=%lums queued=%u",
+                     frame.packet_id, frame.to_node,
+                     (unsigned long)(MESHTASTIC_ACK_RESPONSE_DELAY_US / 1000ULL),
+                     mesh_delayed_tx_count());
+        return true;
+    }
+
+    mesh_ack_drop_count++;
+    daemon_event("Mesh ACK queue full id=0x%08x to=0x%08x drop=%lu",
+                 frame.packet_id, frame.to_node,
+                 (unsigned long)mesh_ack_drop_count);
+    return false;
+}
+
 static bool mesh_delayed_tx_pop_due(uint64_t now_us, tx_frame_t *frame)
 {
     int best = -1;
@@ -4303,13 +4330,7 @@ static void handle_rx_event(PhysicalLayer *radio, const probe_options_t &opts)
     }
     if(rebroadcast_pending) {
         if(followup_frame.routing_ack) {
-            if(start_tx(radio, followup_frame) != 0) {
-                daemon_event("Mesh ACK TX start failed id=0x%08x to=0x%08x",
-                             followup_frame.packet_id,
-                             followup_frame.to_node);
-            } else {
-                return;
-            }
+            (void)mesh_delayed_ack_enqueue(followup_frame);
         } else {
             (void)mesh_delayed_tx_enqueue(followup_frame);
         }
@@ -4362,13 +4383,20 @@ static void handle_delayed_tx(PhysicalLayer *radio, uint64_t now_us)
     if(!mesh_delayed_tx_pop_due(now_us, &frame)) {
         return;
     }
-    daemon_event("Mesh rebroadcast due id=0x%08x queued=%u",
+    daemon_event("Mesh %s due id=0x%08x queued=%u",
+                 frame.routing_ack ? "ACK" : "rebroadcast",
                  frame.packet_id, mesh_delayed_tx_count());
     if(start_tx(radio, frame) != 0) {
-        mesh_rebroadcast_drop_count++;
-        daemon_event("Mesh rebroadcast TX start failed id=0x%08x drop=%lu",
-                     frame.packet_id,
-                     (unsigned long)mesh_rebroadcast_drop_count);
+        if(frame.routing_ack) {
+            mesh_ack_drop_count++;
+            daemon_event("Mesh ACK TX start failed id=0x%08x drop=%lu",
+                         frame.packet_id, (unsigned long)mesh_ack_drop_count);
+        } else {
+            mesh_rebroadcast_drop_count++;
+            daemon_event("Mesh rebroadcast TX start failed id=0x%08x drop=%lu",
+                         frame.packet_id,
+                         (unsigned long)mesh_rebroadcast_drop_count);
+        }
     }
 }
 
