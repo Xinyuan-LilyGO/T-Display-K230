@@ -190,8 +190,8 @@ static void options_init(halow_options_t *opts)
     opts->payload_size = HALOW_DEFAULT_PAYLOAD;
     opts->preview_w = HALOW_DEFAULT_PREVIEW_W;
     opts->preview_h = HALOW_DEFAULT_PREVIEW_H;
-    opts->stream_w = 1280;
-    opts->stream_h = 720;
+    opts->stream_w = 320;
+    opts->stream_h = 240;
     opts->idle_us = 20000;
     opts->repeat = 1;
 }
@@ -281,13 +281,13 @@ static int parse_args(int argc, char **argv, halow_options_t *opts)
             break;
         case 1011:
             if(parse_uint_arg(optarg, &opts->stream_w) != 0 ||
-               opts->stream_w < 640U || opts->stream_w > 4096U) {
+               opts->stream_w < 160U || opts->stream_w > 4096U) {
                 return -1;
             }
             break;
         case 1012:
             if(parse_uint_arg(optarg, &opts->stream_h) != 0 ||
-               opts->stream_h < 360U || opts->stream_h > 2160U) {
+               opts->stream_h < 90U || opts->stream_h > 2160U) {
                 return -1;
             }
             break;
