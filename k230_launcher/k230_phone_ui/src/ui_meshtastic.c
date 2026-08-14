@@ -103,6 +103,77 @@ static int mesh_write_all(int fd, const char *data, size_t len)
     return 0;
 }
 
+static int mesh_read_first_line(const char *path, char *buf, size_t len)
+{
+    FILE *fp;
+    size_t n;
+
+    if(!path || !buf || len == 0U) {
+        return -1;
+    }
+    buf[0] = '\0';
+    fp = fopen(path, "r");
+    if(!fp) {
+        return -1;
+    }
+    if(!fgets(buf, (int)len, fp)) {
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    n = strlen(buf);
+    while(n > 0U && (buf[n - 1U] == '\n' || buf[n - 1U] == '\r' ||
+                     buf[n - 1U] == ' ' || buf[n - 1U] == '\t')) {
+        buf[--n] = '\0';
+    }
+    return buf[0] ? 0 : -1;
+}
+
+static void mesh_auto_node_name(char *buf, size_t len)
+{
+    char mac[64];
+    char compact[13];
+    size_t out = 0;
+
+    if(!buf || len == 0U) {
+        return;
+    }
+    if(mesh_read_first_line("/sys/class/net/eth0/address", mac,
+                            sizeof(mac)) != 0 &&
+       mesh_read_first_line("/sys/class/net/wlan0/address", mac,
+                            sizeof(mac)) != 0) {
+        snprintf(buf, len, "k230-t-display");
+        return;
+    }
+    for(size_t i = 0; mac[i] && out < sizeof(compact) - 1U; i++) {
+        if(isxdigit((unsigned char)mac[i])) {
+            compact[out++] = (char)tolower((unsigned char)mac[i]);
+        }
+    }
+    compact[out] = '\0';
+    if(out >= 4U) {
+        snprintf(buf, len, "k230-%s", compact + out - 4U);
+    } else {
+        snprintf(buf, len, "k230-t-display");
+    }
+}
+
+static int mesh_node_name_is_default(const char *name)
+{
+    if(!name || !name[0] || strcmp(name, "k230-t-display") == 0) {
+        return 1;
+    }
+    if(strlen(name) == 9U && strncmp(name, "k230-", 5) == 0) {
+        for(size_t i = 5; i < 9; i++) {
+            if(!isxdigit((unsigned char)name[i])) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
 static int mesh_ipc_command(const char *command, char *response,
                             size_t response_len)
 {
@@ -347,6 +418,9 @@ static void mesh_load_profile_prefs(void)
                  sizeof(mesh_tx_power), "auto");
     ui_prefs_get(MESHTASTIC_PREF_NODE, mesh_node_name,
                  sizeof(mesh_node_name), "k230-t-display");
+    if(mesh_node_name_is_default(mesh_node_name)) {
+        mesh_auto_node_name(mesh_node_name, sizeof(mesh_node_name));
+    }
     ui_prefs_get(MESHTASTIC_PREF_FROM, mesh_from_node,
                  sizeof(mesh_from_node), "0");
     ui_prefs_get(MESHTASTIC_PREF_TO, mesh_to_node,
@@ -781,6 +855,9 @@ static void mesh_start_event_cb(lv_event_t *event)
                              "17");
         snprintf(power_option, sizeof(power_option), "--power %s ",
                  power_arg);
+    }
+    if(mesh_node_name_is_default(mesh_node_name)) {
+        mesh_auto_node_name(mesh_node_name, sizeof(mesh_node_name));
     }
     mesh_safe_or_default(node_arg, sizeof(node_arg), mesh_node_name,
                          "k230-t-display");

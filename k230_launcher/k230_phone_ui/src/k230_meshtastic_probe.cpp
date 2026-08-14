@@ -28,7 +28,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.19"
+#define PROBE_VERSION "0.20"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define LORA_PIN_CS 14U
@@ -3337,7 +3337,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                          mesh_header_want_ack(header) ? "yes" : "no",
                          rssi, snr, decoded.portnum, clean.c_str(),
                          duplicate ? " duplicate" : "");
-            if(channel_match && !clean.empty() &&
+            if(!duplicate && channel_match && !clean.empty() &&
                (header.to == MESHTASTIC_NODENUM_BROADCAST ||
                 header.to == opts.from_node || header.from == opts.from_node)) {
                 daemon_chat("RX 0x%08x rssi=%ddBm snr=%.1f: %s",
