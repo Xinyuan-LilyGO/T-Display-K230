@@ -79,6 +79,7 @@ set(K230_PHONE_UI_SOURCES
     ui_time_settings.c
     ui_terminal.c
     ui_wifi.c
+    ui_wifi_iperf.c
     ui_ethernet.c
     ui_ble.c
     ui_cellular.c
@@ -111,6 +112,9 @@ endif()
 add_executable(k230_phone_ui ${K230_PHONE_UI_SOURCES})
 add_executable(k230_phone_ui_fullswitch_test ${K230_PHONE_UI_SOURCES})
 add_executable(k230_camera_capture camera_capture.c)
+add_executable(k230_lora_flrc_bench lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
+add_executable(k230_lora_flrc_video lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
+add_executable(k230_lora_flrc_tile_stream lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(drm_motion_probe drm_motion_probe.c)
 add_executable(drm_motion_probe_rgb565 drm_motion_probe.c)
@@ -146,6 +150,21 @@ target_include_directories(drm_motion_probe_rgb565 PRIVATE
 target_include_directories(k230_camera_capture PRIVATE
     ${CMAKE_SYSROOT}/usr/include
     ${CMAKE_SYSROOT}/usr/include/libdrm
+)
+
+target_include_directories(k230_lora_flrc_bench PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${RADIOLIB_DIR}
+)
+
+target_include_directories(k230_lora_flrc_video PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${RADIOLIB_DIR}
+)
+
+target_include_directories(k230_lora_flrc_tile_stream PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${RADIOLIB_DIR}
 )
 
 target_compile_definitions(k230_phone_ui PRIVATE
@@ -230,9 +249,34 @@ target_link_directories(k230_camera_capture PRIVATE
 target_link_libraries(k230_camera_capture PRIVATE
     v4l2-drm
     display
+    jpeg
 )
 
-install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_pcm_volume drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
+target_link_libraries(k230_lora_flrc_bench PRIVATE
+    gpiod
+    m
+    pthread
+)
+
+target_link_libraries(k230_lora_flrc_video PRIVATE
+    gpiod
+    m
+    pthread
+)
+
+target_compile_definitions(k230_lora_flrc_tile_stream PRIVATE
+    K230_FLRC_TILE_STREAM=1
+)
+
+target_link_libraries(k230_lora_flrc_tile_stream PRIVATE
+    gpiod
+    m
+    pthread
+)
+
+install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_pcm_volume drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
+install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
+        DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fonts DESTINATION /root/app/k230_phone_ui)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/models/face_detection_320.kmodel)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/models/face_detection_320.kmodel

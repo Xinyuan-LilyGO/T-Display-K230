@@ -3,6 +3,8 @@
 #include "ui_i18n.h"
 #include "ui_input.h"
 
+#include <lvgl/src/misc/cache/instance/lv_image_cache.h>
+
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -12,6 +14,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -20,6 +23,7 @@
 #include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -72,6 +76,46 @@
 #define LORAWAN_PROFILE_MAX 20
 #define LORAWAN_FILE_MAX 96
 #define LORAWAN_PATH_MAX 192
+#define LORA_FLRC_LOG_PATH "/tmp/k230_lora_flrc.log"
+#define LORA_FLRC_VIDEO_BIN "/root/app/k230_phone_ui/k230_lora_flrc_video"
+#define LORA_FLRC_CAMERA_STREAM_BIN "/root/app/k230_phone_ui/k230_flrc_camera_stream.sh"
+#define LORA_FLRC_VIDEO_LOG_PATH "/tmp/k230_lora_flrc_video_ui.log"
+#define LORA_FLRC_VIDEO_FILE "/root/videos/video02.mp4"
+#define LORA_FLRC_VIDEO_TX_DIR "/root/videos/flrc_tx"
+#define LORA_FLRC_VIDEO_OUT_DIR "/root/videos/flrc_rx"
+#define LORA_FLRC_PAYLOAD_LEN 252U
+#define LORA_FLRC_CAMERA_STOP_FILE "/tmp/k230_flrc_camera_stream.stop"
+#define LORA_FLRC_DEFAULT_FREQ 2400.0f
+#define LORA_FLRC_DEFAULT_BR 2600U
+#define LORA_FLRC_DEFAULT_POWER LORA_LR2021_16E8_HF_POWER_DEFAULT
+#define LORA_FLRC_DEFAULT_SECONDS 15U
+#define LORA_FLRC_RX_POLL_US 80U
+#define LORA_FLRC_VIDEO_SPI_HZ 16000000U
+#define LORA_FLRC_VIDEO_RX_POLL_US 50U
+#define LORA_FLRC_VIDEO_RETRIES 10U
+#define LORA_FLRC_VIDEO_ACK_WAIT_MS 5000U
+#define LORA_FLRC_CAMERA_PREVIEW_FILE "/tmp/k230_flrc_camera_preview.rgb565"
+#define LORA_FLRC_CAMERA_PREVIEW_META "/tmp/k230_flrc_camera_preview.meta"
+#define LORA_FLRC_CAMERA_PREVIEW_W_DEFAULT 80U
+#define LORA_FLRC_CAMERA_PREVIEW_H_DEFAULT 60U
+#define LORA_FLRC_CAMERA_PREVIEW_W_MAX 160U
+#define LORA_FLRC_CAMERA_PREVIEW_H_MAX 120U
+
+typedef struct {
+    const char *name;
+    unsigned width;
+    unsigned height;
+    unsigned tile_w;
+    unsigned tile_h;
+    unsigned fps;
+    unsigned jpeg_quality;
+} lora_flrc_camera_preset_t;
+
+static const lora_flrc_camera_preset_t lora_flrc_camera_presets[] = {
+    {"Low 80x60", 80U, 60U, 20U, 5U, 4U, 32U},
+    {"Balanced 120x90", 120U, 90U, 20U, 5U, 4U, 28U},
+    {"Detail 160x120", 160U, 120U, 20U, 5U, 3U, 24U},
+};
 
 typedef enum {
     LORA_CHIP_NONE = 0,
@@ -5499,4 +5543,1619 @@ void ui_lora_cleanup(void)
     lora_input_row = NULL;
     lora_message_page = NULL;
     lora_message_cont = NULL;
+}
+
+typedef enum {
+    LORA_FLRC_MODE_IDLE = 0,
+    LORA_FLRC_MODE_TX,
+    LORA_FLRC_MODE_RX,
+} lora_flrc_mode_t;
+
+static pthread_mutex_t lora_flrc_lock = PTHREAD_MUTEX_INITIALIZER;
+static lv_timer_t *lora_flrc_timer;
+static lv_obj_t *lora_flrc_status_label;
+static lv_obj_t *lora_flrc_config_label;
+static lv_obj_t *lora_flrc_stats_label;
+static lv_obj_t *lora_flrc_log_label;
+static lv_obj_t *lora_flrc_preview_image;
+static lv_obj_t *lora_flrc_preview_placeholder;
+static lv_obj_t *lora_flrc_preview_placeholder_label;
+static lv_obj_t *lora_flrc_settings_overlay;
+static lv_obj_t *lora_flrc_freq_btn[2];
+static lv_obj_t *lora_flrc_br_btn[3];
+static lv_obj_t *lora_flrc_camera_preset_btn[
+    sizeof(lora_flrc_camera_presets) / sizeof(lora_flrc_camera_presets[0])];
+static lv_obj_t *lora_flrc_camera_flip_btn[2];
+static int lora_flrc_worker_active;
+static int lora_flrc_stop_requested;
+static lora_flrc_mode_t lora_flrc_mode = LORA_FLRC_MODE_IDLE;
+static float lora_flrc_freq_mhz = LORA_FLRC_DEFAULT_FREQ;
+static unsigned lora_flrc_bitrate_kbps = LORA_FLRC_DEFAULT_BR;
+static unsigned lora_flrc_camera_preset_index = 1;
+static unsigned lora_flrc_camera_preview_w = LORA_FLRC_CAMERA_PREVIEW_W_DEFAULT;
+static unsigned lora_flrc_camera_preview_h = LORA_FLRC_CAMERA_PREVIEW_H_DEFAULT;
+static unsigned lora_flrc_camera_preview_fps = 4;
+static unsigned lora_flrc_camera_jpeg_quality = 28;
+static int lora_flrc_camera_flip_x;
+static int lora_flrc_camera_flip_y;
+static double lora_flrc_video_mbps;
+static double lora_flrc_video_file_mbps;
+static uint64_t lora_flrc_video_packets;
+static uint64_t lora_flrc_video_bytes;
+static uint64_t lora_flrc_video_errors;
+static uint64_t lora_flrc_video_frames;
+static uint64_t lora_flrc_video_dropped;
+static uint64_t lora_flrc_video_elapsed_ms;
+static uint64_t lora_flrc_start_us;
+static uint64_t lora_flrc_packets;
+static uint64_t lora_flrc_bytes;
+static uint64_t lora_flrc_errors;
+static uint64_t lora_flrc_last_stats_log_us;
+static int16_t lora_flrc_last_state;
+static float lora_flrc_last_rssi_avg;
+static float lora_flrc_last_rssi_sync;
+static char lora_flrc_status[160] = "Ready";
+static char lora_flrc_log_text[640] = "Use two LR2021 boards: one TX and one RX.";
+static pid_t lora_flrc_video_pid = -1;
+static char lora_flrc_video_role[16] = "";
+static uint8_t *lora_flrc_preview_pixels;
+static lv_image_dsc_t lora_flrc_preview_dsc;
+static uint64_t lora_flrc_preview_sig;
+static int lora_flrc_preview_panel_w;
+static int lora_flrc_preview_panel_h;
+
+static void lora_flrc_timer_cb(lv_timer_t *timer);
+
+static size_t lora_flrc_preview_bytes(void)
+{
+    return (size_t)lora_flrc_camera_preview_w *
+           (size_t)lora_flrc_camera_preview_h * 2U;
+}
+
+static void lora_flrc_apply_camera_preset(unsigned index)
+{
+    const lora_flrc_camera_preset_t *preset;
+    unsigned count = (unsigned)(sizeof(lora_flrc_camera_presets) /
+                                sizeof(lora_flrc_camera_presets[0]));
+
+    if(index >= count) {
+        index = 1U;
+    }
+    preset = &lora_flrc_camera_presets[index];
+    lora_flrc_camera_preset_index = index;
+    lora_flrc_camera_preview_w = preset->width;
+    lora_flrc_camera_preview_h = preset->height;
+    lora_flrc_camera_preview_fps = preset->fps;
+    lora_flrc_camera_jpeg_quality = preset->jpeg_quality;
+    lora_flrc_preview_sig = 0;
+}
+
+static void lora_flrc_log(const char *fmt, ...)
+{
+    FILE *fp = fopen(LORA_FLRC_LOG_PATH, "a");
+    va_list ap;
+
+    if(!fp) {
+        return;
+    }
+    fprintf(fp, "[%llu] ", (unsigned long long)ui_monotonic_us());
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+}
+
+static void lora_flrc_set_status(const char *fmt, ...)
+{
+    va_list ap;
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    va_start(ap, fmt);
+    vsnprintf(lora_flrc_status, sizeof(lora_flrc_status), fmt, ap);
+    va_end(ap);
+    pthread_mutex_unlock(&lora_flrc_lock);
+}
+
+static void lora_flrc_append_log(const char *fmt, ...)
+{
+    char line[160];
+    char combined[sizeof(lora_flrc_log_text)];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    snprintf(combined, sizeof(combined), "%s\n%s", line, lora_flrc_log_text);
+    snprintf(lora_flrc_log_text, sizeof(lora_flrc_log_text), "%s", combined);
+    pthread_mutex_unlock(&lora_flrc_lock);
+    lora_flrc_log("%s", line);
+}
+
+static void lora_flrc_reset_counters_locked(lora_flrc_mode_t mode)
+{
+    lora_flrc_mode = mode;
+    lora_flrc_stop_requested = 0;
+    lora_flrc_start_us = ui_monotonic_us();
+    lora_flrc_packets = 0;
+    lora_flrc_bytes = 0;
+    lora_flrc_errors = 0;
+    lora_flrc_last_stats_log_us = 0;
+    lora_flrc_last_state = RADIOLIB_ERR_NONE;
+    lora_flrc_last_rssi_avg = 0.0f;
+    lora_flrc_last_rssi_sync = 0.0f;
+}
+
+static int16_t lora_flrc_begin_radio(void)
+{
+    int16_t state;
+    int16_t first_state;
+    uint8_t flrc_sync[] = {0x2D, 0x01, 0x4B, 0x1D};
+
+    if(lora_hw_prepare() != 0) {
+        return RADIOLIB_ERR_CHIP_NOT_FOUND;
+    }
+    if(lora_create_radio_candidate(LORA_CHIP_LR2021) != 0 || !lora_lr2021) {
+        return RADIOLIB_ERR_CHIP_NOT_FOUND;
+    }
+
+    lora_lr2021->irqDioNum = LORA_LR2021_IRQ_DIO_NUM;
+    first_state = lora_lr2021->beginFLRC(lora_flrc_freq_mhz,
+                                         (uint16_t)lora_flrc_bitrate_kbps,
+                                         RADIOLIB_LR2021_FLRC_CR_3_4,
+                                         LORA_FLRC_DEFAULT_POWER, 16,
+                                         RADIOLIB_SHAPING_0_5, 3.0f);
+    lora_flrc_log("beginFLRC freq=%.1f br=%u power=%d tcxo=3.0 state=%d %s",
+                  lora_flrc_freq_mhz, lora_flrc_bitrate_kbps,
+                  LORA_FLRC_DEFAULT_POWER, first_state,
+                  lora_error_name(first_state));
+    if(lora_lr2021_should_retry_xtal(first_state)) {
+        first_state = lora_lr2021->beginFLRC(lora_flrc_freq_mhz,
+                                             (uint16_t)lora_flrc_bitrate_kbps,
+                                             RADIOLIB_LR2021_FLRC_CR_3_4,
+                                             LORA_FLRC_DEFAULT_POWER, 16,
+                                             RADIOLIB_SHAPING_0_5, 0.0f);
+        lora_flrc_log("beginFLRC retry XTAL tcxo=0 state=%d %s",
+                      first_state, lora_error_name(first_state));
+    }
+    if(first_state != RADIOLIB_ERR_NONE &&
+       first_state != RADIOLIB_ERR_SPI_CMD_INVALID) {
+        return first_state;
+    }
+    if(first_state == RADIOLIB_ERR_SPI_CMD_INVALID) {
+        lora_flrc_log("beginFLRC power stage returned %d; continue with manual FLRC tail config for LR2021 16E8",
+                      first_state);
+    }
+
+    lora_lr2021_apply_16e8_rf_switch();
+    state = lora_lr2021_set_16e8_hf_power(LORA_FLRC_DEFAULT_POWER);
+    lora_flrc_log("FLRC setOutputPower %d state=%d %s",
+                  LORA_FLRC_DEFAULT_POWER, state, lora_error_name(state));
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+
+    state = lora_lr2021->setPreambleLength(16);
+    lora_flrc_log("FLRC setPreambleLength 16 state=%d %s",
+                  state, lora_error_name(state));
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+
+    state = lora_lr2021->setDataShaping(RADIOLIB_SHAPING_0_5);
+    lora_flrc_log("FLRC setDataShaping 0.5 state=%d %s",
+                  state, lora_error_name(state));
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+
+    state = lora_lr2021->setSyncWord(flrc_sync, sizeof(flrc_sync));
+    lora_flrc_log("FLRC setSyncWord 2D014B1D state=%d %s",
+                  state, lora_error_name(state));
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+
+    state = lora_lr2021->fixedPacketLengthMode(LORA_FLRC_PAYLOAD_LEN);
+    lora_flrc_log("FLRC fixedPacketLength len=%u state=%d %s",
+                  (unsigned)LORA_FLRC_PAYLOAD_LEN,
+                  state, lora_error_name(state));
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+
+    state = lora_lr2021->setCRC(2);
+    lora_flrc_log("FLRC setCRC 2 state=%d %s", state, lora_error_name(state));
+    return state;
+}
+
+static int16_t lora_flrc_fast_transmit(uint8_t *payload, size_t len)
+{
+    int16_t state = lora_lr2021->startTransmit(payload, len);
+    uint64_t start_us;
+    uint64_t timeout_us;
+
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+
+    timeout_us = ((uint64_t)len * 8ULL * 1000ULL) /
+                 (uint64_t)(lora_flrc_bitrate_kbps ?
+                            lora_flrc_bitrate_kbps : LORA_FLRC_DEFAULT_BR);
+    timeout_us = timeout_us * 6ULL + 20000ULL;
+    if(timeout_us < 30000ULL) {
+        timeout_us = 30000ULL;
+    }
+
+    start_us = ui_monotonic_us();
+    while(!lora_hal->digitalRead(LORA_PIN_DIO1)) {
+        if(ui_monotonic_us() - start_us > timeout_us) {
+            (void)lora_lr2021->finishTransmit();
+            return RADIOLIB_ERR_TX_TIMEOUT;
+        }
+        sched_yield();
+    }
+
+    return lora_lr2021->finishTransmit();
+}
+
+static int16_t lora_flrc_start_continuous_rx(void)
+{
+    return lora_lr2021->startReceive(RADIOLIB_LR2021_RX_TIMEOUT_INF,
+                                     RADIOLIB_IRQ_RX_DEFAULT_FLAGS,
+                                     RADIOLIB_IRQ_RX_DEFAULT_MASK,
+                                     LORA_FLRC_PAYLOAD_LEN);
+}
+
+static int lora_flrc_should_stop(void)
+{
+    int stop;
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    stop = lora_flrc_stop_requested;
+    pthread_mutex_unlock(&lora_flrc_lock);
+    return stop;
+}
+
+static void lora_flrc_record_packet(size_t len, int16_t state, int ok,
+                                    float rssi_avg, float rssi_sync)
+{
+    pthread_mutex_lock(&lora_flrc_lock);
+    if(ok) {
+        lora_flrc_packets++;
+        lora_flrc_bytes += len;
+        lora_flrc_last_rssi_avg = rssi_avg;
+        lora_flrc_last_rssi_sync = rssi_sync;
+    } else if(state != RADIOLIB_ERR_RX_TIMEOUT) {
+        lora_flrc_errors++;
+        lora_flrc_last_state = state;
+    }
+    pthread_mutex_unlock(&lora_flrc_lock);
+}
+
+static void *lora_flrc_worker_cb(void *arg)
+{
+    lora_flrc_mode_t mode = (lora_flrc_mode_t)(intptr_t)arg;
+    uint8_t payload[LORA_FLRC_PAYLOAD_LEN];
+    uint32_t seq = 0;
+    int16_t state;
+
+    memset(payload, 0xA5, sizeof(payload));
+    state = lora_flrc_begin_radio();
+    if(state != RADIOLIB_ERR_NONE) {
+        lora_flrc_set_status("LR2021 FLRC init failed: %d %s",
+                             state, lora_error_name(state));
+        lora_flrc_append_log("init failed state=%d %s", state,
+                             lora_error_name(state));
+        pthread_mutex_lock(&lora_flrc_lock);
+        lora_flrc_worker_active = 0;
+        lora_flrc_mode = LORA_FLRC_MODE_IDLE;
+        pthread_mutex_unlock(&lora_flrc_lock);
+        return NULL;
+    }
+
+    lora_flrc_set_status("%s running %.1f MHz %u kbps",
+                         mode == LORA_FLRC_MODE_TX ? "TX" : "RX",
+                         lora_flrc_freq_mhz, lora_flrc_bitrate_kbps);
+    lora_flrc_append_log("%s started %.1f MHz %u kbps len=%u",
+                         mode == LORA_FLRC_MODE_TX ? "TX" : "RX",
+                         lora_flrc_freq_mhz, lora_flrc_bitrate_kbps,
+                         (unsigned)LORA_FLRC_PAYLOAD_LEN);
+
+    while(!lora_flrc_should_stop()) {
+        if(mode == LORA_FLRC_MODE_TX) {
+            seq++;
+            memcpy(payload, &seq, sizeof(seq));
+            state = lora_flrc_fast_transmit(payload, sizeof(payload));
+            lora_flrc_record_packet(sizeof(payload), state,
+                                    state == RADIOLIB_ERR_NONE, 0.0f, 0.0f);
+            if(state != RADIOLIB_ERR_NONE) {
+                lora_flrc_append_log("TX state=%d %s", state,
+                                     lora_error_name(state));
+                lora_hal->delay(20);
+            }
+        } else {
+            float rssi_avg = 0.0f;
+            float rssi_sync = 0.0f;
+            uint16_t packet_len = 0;
+
+            state = lora_flrc_start_continuous_rx();
+            if(state != RADIOLIB_ERR_NONE) {
+                lora_flrc_record_packet(0, state, 0, 0.0f, 0.0f);
+                lora_flrc_append_log("RX start state=%d %s", state,
+                                     lora_error_name(state));
+                lora_hal->delay(10);
+                continue;
+            }
+
+            while(!lora_flrc_should_stop()) {
+                if(!lora_hal->digitalRead(LORA_PIN_DIO1)) {
+                    usleep(LORA_FLRC_RX_POLL_US);
+                    continue;
+                }
+
+                packet_len = LORA_FLRC_PAYLOAD_LEN;
+                state = lora_lr2021->readData(payload, sizeof(payload));
+                if(state == RADIOLIB_ERR_NONE) {
+                    lora_flrc_record_packet(packet_len, state, 1, rssi_avg,
+                                            rssi_sync);
+                } else {
+                    lora_flrc_record_packet(0, state, 0, 0.0f, 0.0f);
+                    (void)lora_lr2021->finishReceive();
+                    lora_hal->delayMicroseconds(250);
+                    state = lora_flrc_start_continuous_rx();
+                    if(state != RADIOLIB_ERR_NONE) {
+                        lora_flrc_record_packet(0, state, 0, 0.0f, 0.0f);
+                        lora_flrc_append_log("RX restart state=%d %s", state,
+                                             lora_error_name(state));
+                        lora_hal->delay(10);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if(lora_lr2021) {
+        (void)lora_lr2021->standby();
+    }
+    lora_flrc_set_status("Stopped");
+    lora_flrc_append_log("%s stopped", mode == LORA_FLRC_MODE_TX ? "TX" : "RX");
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    lora_flrc_worker_active = 0;
+    lora_flrc_mode = LORA_FLRC_MODE_IDLE;
+    pthread_mutex_unlock(&lora_flrc_lock);
+    return NULL;
+}
+
+static void lora_flrc_start(lora_flrc_mode_t mode)
+{
+    pthread_t thread;
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    if(lora_flrc_worker_active) {
+        pthread_mutex_unlock(&lora_flrc_lock);
+        lora_flrc_set_status("FLRC busy");
+        return;
+    }
+    lora_flrc_reset_counters_locked(mode);
+    lora_flrc_worker_active = 1;
+    pthread_mutex_unlock(&lora_flrc_lock);
+
+    if(pthread_create(&thread, NULL, lora_flrc_worker_cb,
+                      (void *)(intptr_t)mode) != 0) {
+        pthread_mutex_lock(&lora_flrc_lock);
+        lora_flrc_worker_active = 0;
+        lora_flrc_mode = LORA_FLRC_MODE_IDLE;
+        pthread_mutex_unlock(&lora_flrc_lock);
+        lora_flrc_set_status("Thread start failed");
+        return;
+    }
+    pthread_detach(thread);
+}
+
+static void lora_flrc_request_stop(void)
+{
+    pthread_mutex_lock(&lora_flrc_lock);
+    lora_flrc_stop_requested = 1;
+    pthread_mutex_unlock(&lora_flrc_lock);
+}
+
+static void lora_flrc_stop_wait(void)
+{
+    lora_flrc_request_stop();
+    for(int i = 0; i < 50; i++) {
+        int active;
+
+        pthread_mutex_lock(&lora_flrc_lock);
+        active = lora_flrc_worker_active;
+        pthread_mutex_unlock(&lora_flrc_lock);
+        if(!active) {
+            break;
+        }
+        usleep(40000);
+    }
+}
+
+static void lora_flrc_video_read_log_tail(char *out, size_t out_len)
+{
+    FILE *fp;
+    char lines[10][128];
+    char line[128];
+    unsigned index = 0;
+    unsigned count = 0;
+
+    if(!out || out_len == 0U) {
+        return;
+    }
+    out[0] = '\0';
+    fp = fopen(LORA_FLRC_VIDEO_LOG_PATH, "r");
+    if(!fp) {
+        snprintf(out, out_len, "No video log yet: %s", LORA_FLRC_VIDEO_LOG_PATH);
+        return;
+    }
+    memset(lines, 0, sizeof(lines));
+    while(fgets(line, sizeof(line), fp)) {
+        size_t len = strlen(line);
+        while(len > 0U && (line[len - 1U] == '\n' || line[len - 1U] == '\r')) {
+            line[--len] = '\0';
+        }
+        snprintf(lines[index], sizeof(lines[index]), "%s", line);
+        index = (index + 1U) % (unsigned)(sizeof(lines) / sizeof(lines[0]));
+        if(count < (unsigned)(sizeof(lines) / sizeof(lines[0]))) {
+            count++;
+        }
+    }
+    fclose(fp);
+
+    for(unsigned i = 0; i < count; i++) {
+        unsigned pos = (index + i) % (unsigned)(sizeof(lines) / sizeof(lines[0]));
+        if(lines[pos][0]) {
+            strncat(out, lines[pos], out_len - strlen(out) - 1U);
+            if(i + 1U < count) {
+                strncat(out, "\n", out_len - strlen(out) - 1U);
+            }
+        }
+    }
+}
+
+static uint64_t lora_flrc_scan_ull_after(const char *line, const char *key,
+                                         uint64_t fallback)
+{
+    const char *p = strstr(line, key);
+    unsigned long long value;
+
+    if(!p) {
+        return fallback;
+    }
+    p += strlen(key);
+    if(sscanf(p, "%llu", &value) == 1) {
+        return (uint64_t)value;
+    }
+    return fallback;
+}
+
+static double lora_flrc_scan_double_after(const char *line, const char *key,
+                                          double fallback)
+{
+    const char *p = strstr(line, key);
+    double value;
+
+    if(!p) {
+        return fallback;
+    }
+    p += strlen(key);
+    if(sscanf(p, "%lf", &value) == 1) {
+        return value;
+    }
+    return fallback;
+}
+
+static void lora_flrc_video_parse_log_stats(void)
+{
+    FILE *fp = fopen(LORA_FLRC_VIDEO_LOG_PATH, "r");
+    char line[256];
+    double mbps = 0.0;
+    double file_mbps = 0.0;
+    uint64_t packets = 0;
+    uint64_t bytes = 0;
+    uint64_t errors = 0;
+    uint64_t frames = 0;
+    uint64_t dropped = 0;
+    uint64_t elapsed_ms = 0;
+
+    if(!fp) {
+        return;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        if(strncmp(line, "STATS ", 6) == 0 ||
+           strncmp(line, "RESULT ", 7) == 0) {
+            mbps = lora_flrc_scan_double_after(line, "mbps=", mbps);
+            file_mbps = lora_flrc_scan_double_after(line, "file_mbps=",
+                                                    file_mbps);
+            packets = lora_flrc_scan_ull_after(line, "packets=", packets);
+            bytes = lora_flrc_scan_ull_after(line, "bytes=", bytes);
+            bytes = lora_flrc_scan_ull_after(line, "bytes_air=", bytes);
+            errors = lora_flrc_scan_ull_after(line, "errors=", errors);
+            frames = lora_flrc_scan_ull_after(line, "frames=", frames);
+            dropped = lora_flrc_scan_ull_after(line, "dropped=", dropped);
+            elapsed_ms = lora_flrc_scan_ull_after(line, "elapsed_ms=",
+                                                  elapsed_ms);
+        } else if(strncmp(line, "QUEUE_TX_FRAME ", 15) == 0) {
+            frames = lora_flrc_scan_ull_after(line, "sent=", frames);
+            errors = lora_flrc_scan_ull_after(line, "failed=", errors);
+            dropped = lora_flrc_scan_ull_after(line, "dropped=", dropped);
+        } else if(strncmp(line, "STREAM2_TX_FRAME ", 17) == 0) {
+            frames = lora_flrc_scan_ull_after(line, "id=", frames);
+            packets = lora_flrc_scan_ull_after(line, "packets=", packets);
+            errors = lora_flrc_scan_ull_after(line, "errors=", errors);
+            dropped = lora_flrc_scan_ull_after(line, "dropped=", dropped);
+        } else if(strncmp(line, "STREAM2_RX_FRAME ", 17) == 0) {
+            frames = lora_flrc_scan_ull_after(line, "completed=", frames);
+            dropped = lora_flrc_scan_ull_after(line, "dropped=", dropped);
+        }
+    }
+    fclose(fp);
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    lora_flrc_video_mbps = mbps;
+    lora_flrc_video_file_mbps = file_mbps;
+    lora_flrc_video_packets = packets;
+    lora_flrc_video_bytes = bytes;
+    lora_flrc_video_errors = errors;
+    lora_flrc_video_frames = frames;
+    lora_flrc_video_dropped = dropped;
+    lora_flrc_video_elapsed_ms = elapsed_ms;
+    pthread_mutex_unlock(&lora_flrc_lock);
+}
+
+static int lora_flrc_video_process_running(void)
+{
+    int status = 0;
+    pid_t rc;
+
+    if(lora_flrc_video_pid <= 0) {
+        return 0;
+    }
+    rc = waitpid(lora_flrc_video_pid, &status, WNOHANG);
+    if(rc == 0) {
+        return 1;
+    }
+    if(rc == lora_flrc_video_pid) {
+        if(WIFEXITED(status)) {
+            lora_flrc_append_log("Video %s exited code=%d",
+                                 lora_flrc_video_role,
+                                 WEXITSTATUS(status));
+        } else if(WIFSIGNALED(status)) {
+            lora_flrc_append_log("Video %s killed signal=%d",
+                                 lora_flrc_video_role,
+                                 WTERMSIG(status));
+        }
+        lora_flrc_video_pid = -1;
+        lora_flrc_video_role[0] = '\0';
+        return 0;
+    }
+    if(errno == ECHILD) {
+        lora_flrc_video_pid = -1;
+        lora_flrc_video_role[0] = '\0';
+    }
+    return 0;
+}
+
+static void lora_flrc_run_shell(const char *cmd)
+{
+    int rc;
+
+    if(!cmd || !cmd[0]) {
+        return;
+    }
+    rc = system(cmd);
+    if(rc != 0) {
+        lora_flrc_log("shell rc=%d cmd=%s", rc, cmd);
+    }
+}
+
+static void lora_flrc_video_stop(void)
+{
+    if(lora_flrc_video_pid <= 0) {
+        unlink(LORA_FLRC_CAMERA_STOP_FILE);
+        lora_flrc_run_shell(
+            "touch " LORA_FLRC_CAMERA_STOP_FILE
+            "; killall k230_lora_flrc_video k230_lora_flrc_tile_stream k230_camera_capture 2>/dev/null || true"
+            "; pkill -f k230_flrc_camera_stream.sh 2>/dev/null || true");
+        return;
+    }
+    lora_flrc_run_shell("touch " LORA_FLRC_CAMERA_STOP_FILE);
+    kill(-lora_flrc_video_pid, SIGTERM);
+    kill(lora_flrc_video_pid, SIGTERM);
+    for(int i = 0; i < 20; i++) {
+        if(!lora_flrc_video_process_running()) {
+            return;
+        }
+        usleep(100000);
+    }
+    kill(-lora_flrc_video_pid, SIGKILL);
+    kill(lora_flrc_video_pid, SIGKILL);
+    (void)waitpid(lora_flrc_video_pid, NULL, 0);
+    lora_flrc_run_shell(
+        "killall k230_lora_flrc_video k230_lora_flrc_tile_stream k230_camera_capture 2>/dev/null || true"
+        "; pkill -f k230_flrc_camera_stream.sh 2>/dev/null || true");
+    lora_flrc_append_log("Video %s stopped", lora_flrc_video_role);
+    lora_flrc_video_pid = -1;
+    lora_flrc_video_role[0] = '\0';
+}
+
+static void lora_flrc_release_app_radio(void)
+{
+    lora_flrc_stop_wait();
+    lora_delete_radio_objects();
+    if(lora_hal) {
+        delete lora_hal;
+        lora_hal = NULL;
+    }
+    lora_initialized = 0;
+}
+
+static void lora_flrc_video_start(const char *role)
+{
+    char cmd[1024];
+    char camera_transform[96];
+    float freq;
+    unsigned br;
+    unsigned preview_w;
+    unsigned preview_h;
+    unsigned preview_fps;
+    unsigned jpeg_quality;
+    int flip_x;
+    int flip_y;
+    int base_rotate;
+    int effective_flip_x;
+    int effective_flip_y;
+    pid_t pid;
+    const char *ui_role;
+    const char *target_path;
+
+    if(!role || !role[0]) {
+        return;
+    }
+    if(lora_flrc_video_process_running()) {
+        lora_flrc_set_status("Video stream already running");
+        return;
+    }
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    freq = lora_flrc_freq_mhz;
+    br = lora_flrc_bitrate_kbps;
+    preview_w = lora_flrc_camera_preview_w;
+    preview_h = lora_flrc_camera_preview_h;
+    preview_fps = lora_flrc_camera_preview_fps;
+    jpeg_quality = lora_flrc_camera_jpeg_quality;
+    flip_x = lora_flrc_camera_flip_x;
+    flip_y = lora_flrc_camera_flip_y;
+    lora_flrc_video_mbps = 0.0;
+    lora_flrc_video_file_mbps = 0.0;
+    lora_flrc_video_packets = 0;
+    lora_flrc_video_bytes = 0;
+    lora_flrc_video_errors = 0;
+    lora_flrc_video_frames = 0;
+    lora_flrc_video_dropped = 0;
+    lora_flrc_video_elapsed_ms = 0;
+    pthread_mutex_unlock(&lora_flrc_lock);
+
+    base_rotate = ui_is_landscape() ? 0 : 90;
+    effective_flip_x = flip_x;
+    effective_flip_y = flip_y;
+    if(ui_is_landscape()) {
+        effective_flip_y = !effective_flip_y;
+    }
+    snprintf(camera_transform, sizeof(camera_transform), "--camera-rotate %d%s%s",
+             base_rotate,
+             effective_flip_x ? " --camera-flip-x" : "",
+             effective_flip_y ? " --camera-flip-y" : "");
+
+    lora_flrc_release_app_radio();
+    unlink(LORA_FLRC_VIDEO_LOG_PATH);
+    unlink(LORA_FLRC_CAMERA_STOP_FILE);
+    unlink(LORA_FLRC_CAMERA_PREVIEW_FILE);
+    unlink(LORA_FLRC_CAMERA_PREVIEW_META);
+    mkdir(LORA_FLRC_VIDEO_OUT_DIR, 0755);
+
+    ui_role = "RX";
+    if(strcmp(role, "stream-tx") == 0) {
+        ui_role = "TX";
+        snprintf(cmd, sizeof(cmd),
+                 "cd /root/app/k230_phone_ui && exec %s --role stream-tx --file '%s' --freq %.1f --br %u --len %u --spi-hz %u --power %d --rx-poll-us %u --retries %u --ack-wait-ms %u > '%s' 2>&1",
+                 LORA_FLRC_VIDEO_BIN, LORA_FLRC_VIDEO_FILE, freq, br,
+                 (unsigned)LORA_FLRC_PAYLOAD_LEN, (unsigned)LORA_FLRC_VIDEO_SPI_HZ,
+                 LORA_FLRC_DEFAULT_POWER, (unsigned)LORA_FLRC_VIDEO_RX_POLL_US,
+                 (unsigned)LORA_FLRC_VIDEO_RETRIES,
+                 (unsigned)LORA_FLRC_VIDEO_ACK_WAIT_MS,
+                 LORA_FLRC_VIDEO_LOG_PATH);
+    } else if(strcmp(role, "stream-rx") == 0) {
+        ui_role = "RX";
+        snprintf(cmd, sizeof(cmd),
+                 "mkdir -p '%s'; cd /root/app/k230_phone_ui && exec %s --role stream-rx --freq %.1f --br %u --duration 180 --len %u --spi-hz %u --power %d --rx-poll-us %u --retries %u --ack-wait-ms %u --out-dir '%s' > '%s' 2>&1",
+                 LORA_FLRC_VIDEO_OUT_DIR, LORA_FLRC_VIDEO_BIN, freq, br,
+                 (unsigned)LORA_FLRC_PAYLOAD_LEN, (unsigned)LORA_FLRC_VIDEO_SPI_HZ,
+                 LORA_FLRC_DEFAULT_POWER, (unsigned)LORA_FLRC_VIDEO_RX_POLL_US,
+                 (unsigned)LORA_FLRC_VIDEO_RETRIES,
+                 (unsigned)LORA_FLRC_VIDEO_ACK_WAIT_MS,
+                 LORA_FLRC_VIDEO_OUT_DIR, LORA_FLRC_VIDEO_LOG_PATH);
+    } else if(strcmp(role, "camera-tx") == 0) {
+        ui_role = "CAM TX";
+        snprintf(cmd, sizeof(cmd),
+                 "cd /root/app/k230_phone_ui && exec %s --role tx --duration 3600 --stream-format image --codec h265 --capture-width 320 --capture-height 240 --encode-width %u --encode-height %u --jpeg-quality %u --segment 1 --preview-width %u --preview-height %u --preview-fps %u --preview-buffer 1 --compressed-image-stream %s --freq %.1f --br %u --spi-hz %u > '%s' 2>&1",
+                 LORA_FLRC_CAMERA_STREAM_BIN, preview_w, preview_h,
+                 jpeg_quality, preview_w, preview_h, preview_fps,
+                 camera_transform, freq, br,
+                 (unsigned)LORA_FLRC_VIDEO_SPI_HZ,
+                 LORA_FLRC_VIDEO_LOG_PATH);
+    } else if(strcmp(role, "camera-rx") == 0) {
+        ui_role = "CAM RX";
+        snprintf(cmd, sizeof(cmd),
+                 "cd /root/app/k230_phone_ui && exec %s --role rx --duration 3600 --preview-width %u --preview-height %u --preview-fps %u --preview-buffer 1 --no-tile-stream --fast-frame --freq %.1f --br %u --spi-hz %u > '%s' 2>&1",
+                 LORA_FLRC_CAMERA_STREAM_BIN, preview_w, preview_h,
+                 preview_fps, freq, br,
+                 (unsigned)LORA_FLRC_VIDEO_SPI_HZ,
+                 LORA_FLRC_VIDEO_LOG_PATH);
+    } else {
+        lora_flrc_set_status("Unknown video role");
+        return;
+    }
+    target_path = (strcmp(role, "stream-tx") == 0) ? LORA_FLRC_VIDEO_FILE :
+                  ((strcmp(role, "stream-rx") == 0) ? LORA_FLRC_VIDEO_OUT_DIR :
+                   "camera-segments");
+
+    pid = fork();
+    if(pid < 0) {
+        lora_flrc_set_status("Video process start failed");
+        lora_flrc_append_log("fork failed: %s", strerror(errno));
+        return;
+    }
+    if(pid == 0) {
+        setpgid(0, 0);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    lora_flrc_video_pid = pid;
+    snprintf(lora_flrc_video_role, sizeof(lora_flrc_video_role), "%s", ui_role);
+    lora_flrc_set_status("Video %s started", lora_flrc_video_role);
+    lora_flrc_append_log("Video %s start freq=%.1f br=%u spi=%u target=%s %ux%u jpeg_q=%u fps=%u",
+                         lora_flrc_video_role, freq, br,
+                         (unsigned)LORA_FLRC_VIDEO_SPI_HZ, target_path,
+                         preview_w, preview_h, jpeg_quality, preview_fps);
+}
+
+static void lora_flrc_freq_event_cb(lv_event_t *event)
+{
+    float freq = (float)(intptr_t)lv_event_get_user_data(event);
+
+    if(freq < 2000.0f) {
+        freq = LORA_FLRC_DEFAULT_FREQ;
+    }
+    pthread_mutex_lock(&lora_flrc_lock);
+    lora_flrc_freq_mhz = freq;
+    pthread_mutex_unlock(&lora_flrc_lock);
+}
+
+static void lora_flrc_bitrate_event_cb(lv_event_t *event)
+{
+    unsigned br = (unsigned)(uintptr_t)lv_event_get_user_data(event);
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    lora_flrc_bitrate_kbps = br;
+    pthread_mutex_unlock(&lora_flrc_lock);
+}
+
+static void lora_flrc_camera_preset_event_cb(lv_event_t *event)
+{
+    unsigned index = (unsigned)(uintptr_t)lv_event_get_user_data(event);
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    lora_flrc_apply_camera_preset(index);
+    pthread_mutex_unlock(&lora_flrc_lock);
+    lora_flrc_append_log("Camera preset %s",
+                         lora_flrc_camera_presets[
+                             lora_flrc_camera_preset_index].name);
+}
+
+static void lora_flrc_camera_flip_event_cb(lv_event_t *event)
+{
+    unsigned which = (unsigned)(uintptr_t)lv_event_get_user_data(event);
+    int flip_x;
+    int flip_y;
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    if(which == 0U) {
+        lora_flrc_camera_flip_x = !lora_flrc_camera_flip_x;
+    } else {
+        lora_flrc_camera_flip_y = !lora_flrc_camera_flip_y;
+    }
+    flip_x = lora_flrc_camera_flip_x;
+    flip_y = lora_flrc_camera_flip_y;
+    pthread_mutex_unlock(&lora_flrc_lock);
+    lora_flrc_append_log("Camera transform rotate=90 flip_x=%d flip_y=%d",
+                         flip_x, flip_y);
+}
+
+static void lora_flrc_tx_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_video_stop();
+    lora_flrc_start(LORA_FLRC_MODE_TX);
+}
+
+static void lora_flrc_rx_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_video_stop();
+    lora_flrc_start(LORA_FLRC_MODE_RX);
+}
+
+static void lora_flrc_stop_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_request_stop();
+    lora_flrc_video_stop();
+    lora_flrc_set_status("Stopping");
+}
+
+static void lora_flrc_video_tx_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_video_start("stream-tx");
+}
+
+static void lora_flrc_video_rx_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_video_start("stream-rx");
+}
+
+static void lora_flrc_camera_tx_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_video_start("camera-tx");
+}
+
+static void lora_flrc_camera_rx_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_video_start("camera-rx");
+}
+
+static void lora_flrc_settings_close(void)
+{
+    if(lora_flrc_settings_overlay &&
+       lv_obj_is_valid(lora_flrc_settings_overlay)) {
+        lv_obj_delete(lora_flrc_settings_overlay);
+    }
+    lora_flrc_settings_overlay = NULL;
+    memset(lora_flrc_freq_btn, 0, sizeof(lora_flrc_freq_btn));
+    memset(lora_flrc_br_btn, 0, sizeof(lora_flrc_br_btn));
+    memset(lora_flrc_camera_preset_btn, 0,
+           sizeof(lora_flrc_camera_preset_btn));
+    memset(lora_flrc_camera_flip_btn, 0, sizeof(lora_flrc_camera_flip_btn));
+}
+
+static void lora_flrc_settings_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_settings_close();
+}
+
+static void lora_flrc_settings_tx_event_cb(lv_event_t *event)
+{
+    lora_flrc_tx_event_cb(event);
+    lora_flrc_settings_close();
+}
+
+static void lora_flrc_settings_rx_event_cb(lv_event_t *event)
+{
+    lora_flrc_rx_event_cb(event);
+    lora_flrc_settings_close();
+}
+
+static void lora_flrc_settings_video_tx_event_cb(lv_event_t *event)
+{
+    lora_flrc_video_tx_event_cb(event);
+    lora_flrc_settings_close();
+}
+
+static void lora_flrc_settings_video_rx_event_cb(lv_event_t *event)
+{
+    lora_flrc_video_rx_event_cb(event);
+    lora_flrc_settings_close();
+}
+
+static void lora_flrc_create_settings_overlay(void)
+{
+    lv_obj_t *card;
+    lv_obj_t *title;
+    lv_obj_t *section;
+    lv_obj_t *btn;
+    int sw = ui_screen_width();
+    int sh = ui_screen_height();
+    int landscape = ui_is_landscape();
+    int card_w = landscape ? 720 : 520;
+    int card_h = landscape ? 420 : 660;
+    int pad = 22;
+    int gap = 12;
+    int col_w;
+    int y;
+
+    if(card_w > sw - 80) {
+        card_w = sw - 80;
+    }
+    if(card_h > sh - 80) {
+        card_h = sh - 80;
+    }
+    if(card_w < 360) {
+        card_w = 360;
+    }
+    if(card_h < 360) {
+        card_h = 360;
+    }
+
+    lora_flrc_settings_close();
+    lora_flrc_settings_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(lora_flrc_settings_overlay);
+    lv_obj_set_style_bg_color(lora_flrc_settings_overlay,
+                              lv_color_hex(0x05080C), 0);
+    lv_obj_set_style_bg_opa(lora_flrc_settings_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(lora_flrc_settings_overlay, 0, 0);
+    lv_obj_clear_flag(lora_flrc_settings_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    card = ui_panel(lora_flrc_settings_overlay, (sw - card_w) / 2,
+                    (sh - card_h) / 2, card_w, card_h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x111821), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x2A3B4F), 0);
+    lv_obj_set_style_pad_all(card, pad, 0);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(card, LV_DIR_VER);
+
+    title = ui_label(card, "FLRC Settings", &lv_font_montserrat_26, 0xF2F5F8);
+    lv_obj_set_pos(title, 0, 0);
+
+    btn = ui_command_button(card, card_w - pad * 2 - 92, 0, 92, "Close",
+                            0xF2F5F8);
+    lv_obj_add_event_cb(btn, lora_flrc_settings_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    section = ui_label(card, "Frequency", &lv_font_montserrat_18, 0x9AA4AF);
+    lv_obj_set_pos(section, 0, 58);
+    col_w = (card_w - pad * 2 - gap) / 2;
+    if(col_w < 140) {
+        col_w = 140;
+    }
+    y = 92;
+    lora_flrc_freq_btn[0] = ui_command_button(card, 0, y, col_w, "2400 MHz",
+                                              0xF2F5F8);
+    lv_obj_add_event_cb(lora_flrc_freq_btn[0], lora_flrc_freq_event_cb,
+                        LV_EVENT_CLICKED, (void *)(intptr_t)2400);
+    lora_flrc_freq_btn[1] =
+        ui_command_button(card, col_w + gap, y, col_w, "2450 MHz",
+                          0xF2F5F8);
+    lv_obj_add_event_cb(lora_flrc_freq_btn[1], lora_flrc_freq_event_cb,
+                        LV_EVENT_CLICKED, (void *)(intptr_t)2450);
+
+    section = ui_label(card, "Bitrate", &lv_font_montserrat_18, 0x9AA4AF);
+    lv_obj_set_pos(section, 0, y + 82);
+    y += 116;
+    col_w = (card_w - pad * 2 - gap * 2) / 3;
+    if(col_w < 100) {
+        col_w = 100;
+    }
+    lora_flrc_br_btn[0] = ui_command_button(card, 0, y, col_w, "650k",
+                                            0xF2F5F8);
+    lv_obj_add_event_cb(lora_flrc_br_btn[0], lora_flrc_bitrate_event_cb,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)650U);
+    lora_flrc_br_btn[1] = ui_command_button(card, col_w + gap, y, col_w,
+                                            "1.3M", 0xF2F5F8);
+    lv_obj_add_event_cb(lora_flrc_br_btn[1], lora_flrc_bitrate_event_cb,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)1300U);
+    lora_flrc_br_btn[2] =
+        ui_command_button(card, (col_w + gap) * 2, y, col_w, "2.6M",
+                          0xF2F5F8);
+    lv_obj_add_event_cb(lora_flrc_br_btn[2], lora_flrc_bitrate_event_cb,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)2600U);
+
+    section = ui_label(card, "Camera Preset", &lv_font_montserrat_18,
+                       0x9AA4AF);
+    lv_obj_set_pos(section, 0, y + 82);
+    y += 116;
+    col_w = (card_w - pad * 2 - gap * 2) / 3;
+    if(col_w < 130) {
+        col_w = 130;
+    }
+    for(unsigned i = 0;
+        i < (unsigned)(sizeof(lora_flrc_camera_presets) /
+                       sizeof(lora_flrc_camera_presets[0])); i++) {
+        lora_flrc_camera_preset_btn[i] =
+            ui_command_button(card, (col_w + gap) * (int)i, y, col_w,
+                              lora_flrc_camera_presets[i].name, 0xF2F5F8);
+        lv_obj_add_event_cb(lora_flrc_camera_preset_btn[i],
+                            lora_flrc_camera_preset_event_cb,
+                            LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+    }
+
+    section = ui_label(card, "Camera Transform", &lv_font_montserrat_18,
+                       0x9AA4AF);
+    lv_obj_set_pos(section, 0, y + 82);
+    y += 116;
+    col_w = (card_w - pad * 2 - gap) / 2;
+    if(col_w < 140) {
+        col_w = 140;
+    }
+    lora_flrc_camera_flip_btn[0] =
+        ui_command_button(card, 0, y, col_w, "H Flip", 0xF2F5F8);
+    lv_obj_add_event_cb(lora_flrc_camera_flip_btn[0],
+                        lora_flrc_camera_flip_event_cb,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)0U);
+    lora_flrc_camera_flip_btn[1] =
+        ui_command_button(card, col_w + gap, y, col_w, "V Flip", 0xF2F5F8);
+    lv_obj_add_event_cb(lora_flrc_camera_flip_btn[1],
+                        lora_flrc_camera_flip_event_cb,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)1U);
+
+    section = ui_label(card, "Tools", &lv_font_montserrat_18, 0x9AA4AF);
+    lv_obj_set_pos(section, 0, y + 82);
+    y += 116;
+    btn = ui_command_button(card, 0, y, col_w, "Raw TX", 0x25C281);
+    lv_obj_add_event_cb(btn, lora_flrc_settings_tx_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    btn = ui_command_button(card, col_w + gap, y, col_w, "Raw RX", 0x3DA5FF);
+    lv_obj_add_event_cb(btn, lora_flrc_settings_rx_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    y += 72;
+    btn = ui_command_button(card, 0, y, col_w, "File TX", 0x25C281);
+    lv_obj_add_event_cb(btn, lora_flrc_settings_video_tx_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(card, col_w + gap, y, col_w, "File RX", 0x3DA5FF);
+    lv_obj_add_event_cb(btn, lora_flrc_settings_video_rx_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    lora_flrc_timer_cb(NULL);
+}
+
+static void lora_flrc_settings_event_cb(lv_event_t *event)
+{
+    (void)event;
+    lora_flrc_create_settings_overlay();
+}
+
+static int lora_flrc_load_preview_pixels(void)
+{
+    FILE *fp;
+    struct stat st;
+    size_t bytes_read;
+    uint64_t sig;
+    size_t expected;
+
+    if(stat(LORA_FLRC_CAMERA_PREVIEW_FILE, &st) != 0) {
+        return 0;
+    }
+    for(unsigned i = 0;
+        i < (unsigned)(sizeof(lora_flrc_camera_presets) /
+                       sizeof(lora_flrc_camera_presets[0])); i++) {
+        size_t bytes = (size_t)lora_flrc_camera_presets[i].width *
+                       (size_t)lora_flrc_camera_presets[i].height * 2U;
+
+        if(st.st_size == (off_t)bytes) {
+            lora_flrc_camera_preview_w = lora_flrc_camera_presets[i].width;
+            lora_flrc_camera_preview_h = lora_flrc_camera_presets[i].height;
+            break;
+        }
+    }
+    expected = lora_flrc_preview_bytes();
+    if(st.st_size != (off_t)expected ||
+       lora_flrc_camera_preview_w > LORA_FLRC_CAMERA_PREVIEW_W_MAX ||
+       lora_flrc_camera_preview_h > LORA_FLRC_CAMERA_PREVIEW_H_MAX) {
+        return 0;
+    }
+
+#if defined(__linux__)
+    sig = ((uint64_t)st.st_mtim.tv_sec * 1000000000ULL) ^
+          (uint64_t)st.st_mtim.tv_nsec ^
+          (uint64_t)st.st_size;
+#else
+    sig = ((uint64_t)st.st_mtime << 32) ^ (uint64_t)st.st_size;
+#endif
+    if(sig == lora_flrc_preview_sig && lora_flrc_preview_dsc.data) {
+        return 1;
+    }
+
+    if(!lora_flrc_preview_pixels ||
+       lora_flrc_preview_dsc.data_size != expected) {
+        free(lora_flrc_preview_pixels);
+        lora_flrc_preview_pixels = (uint8_t *)malloc(expected);
+        if(!lora_flrc_preview_pixels) {
+            lora_flrc_append_log("preview alloc failed");
+            return 0;
+        }
+        memset(&lora_flrc_preview_dsc, 0, sizeof(lora_flrc_preview_dsc));
+    }
+
+    fp = fopen(LORA_FLRC_CAMERA_PREVIEW_FILE, "rb");
+    if(!fp) {
+        return 0;
+    }
+    bytes_read = fread(lora_flrc_preview_pixels, 1, expected, fp);
+    fclose(fp);
+    if(bytes_read != expected) {
+        return 0;
+    }
+
+    memset(&lora_flrc_preview_dsc, 0, sizeof(lora_flrc_preview_dsc));
+    lora_flrc_preview_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    lora_flrc_preview_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    lora_flrc_preview_dsc.header.w = lora_flrc_camera_preview_w;
+    lora_flrc_preview_dsc.header.h = lora_flrc_camera_preview_h;
+    lora_flrc_preview_dsc.header.stride = lora_flrc_camera_preview_w * 2U;
+    lora_flrc_preview_dsc.data_size = expected;
+    lora_flrc_preview_dsc.data = lora_flrc_preview_pixels;
+    lora_flrc_preview_sig = sig;
+    return 1;
+}
+
+static void lora_flrc_set_preview_hint(const char *text)
+{
+    if(lora_flrc_preview_placeholder &&
+       lv_obj_is_valid(lora_flrc_preview_placeholder)) {
+        lv_obj_clear_flag(lora_flrc_preview_placeholder, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(lora_flrc_preview_placeholder_label &&
+       lv_obj_is_valid(lora_flrc_preview_placeholder_label)) {
+        lv_label_set_text(lora_flrc_preview_placeholder_label, ui_tr(text));
+    }
+    if(lora_flrc_preview_image && lv_obj_is_valid(lora_flrc_preview_image)) {
+        lv_obj_add_flag(lora_flrc_preview_image, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void lora_flrc_update_preview(int camera_preview_active)
+{
+    uint32_t scale_x;
+    uint32_t scale_y;
+    uint32_t scale;
+    int avail_w;
+    int avail_h;
+    int have_frame;
+
+    if(!lora_flrc_preview_image ||
+       !lv_obj_is_valid(lora_flrc_preview_image)) {
+        return;
+    }
+
+    have_frame = lora_flrc_load_preview_pixels();
+    if(!camera_preview_active && !have_frame) {
+        lora_flrc_set_preview_hint("Start Cam TX/RX to preview camera video");
+        return;
+    }
+
+    if(!have_frame) {
+        lora_flrc_set_preview_hint("Waiting for FLRC camera frames");
+        return;
+    }
+
+    avail_w = lora_flrc_preview_panel_w - 24;
+    avail_h = lora_flrc_preview_panel_h - 24;
+    if(avail_w < 120) {
+        avail_w = 120;
+    }
+    if(avail_h < 90) {
+        avail_h = 90;
+    }
+    scale_x = (uint32_t)((uint64_t)avail_w * LV_SCALE_NONE /
+                         lora_flrc_camera_preview_w);
+    scale_y = (uint32_t)((uint64_t)avail_h * LV_SCALE_NONE /
+                         lora_flrc_camera_preview_h);
+    scale = scale_x < scale_y ? scale_x : scale_y;
+    if(scale < 64U) {
+        scale = 64U;
+    }
+
+    lv_image_cache_drop(&lora_flrc_preview_dsc);
+    lv_image_set_src(lora_flrc_preview_image, &lora_flrc_preview_dsc);
+    lv_image_set_scale(lora_flrc_preview_image, scale);
+    lv_obj_align(lora_flrc_preview_image, LV_ALIGN_CENTER, 0, 16);
+    lv_obj_clear_flag(lora_flrc_preview_image, LV_OBJ_FLAG_HIDDEN);
+    if(lora_flrc_preview_placeholder &&
+       lv_obj_is_valid(lora_flrc_preview_placeholder)) {
+        lv_obj_add_flag(lora_flrc_preview_placeholder, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_invalidate(lora_flrc_preview_image);
+    app_request_fast_refresh();
+}
+
+static void lora_flrc_style_choice(lv_obj_t *btn, int active, uint32_t color)
+{
+    if(!btn || !lv_obj_is_valid(btn)) {
+        return;
+    }
+    lv_obj_set_style_bg_color(btn, lv_color_hex(active ? color : 0x222832), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(active ? color : 0x2A3037),
+                                  0);
+}
+
+static void lora_flrc_timer_cb(lv_timer_t *timer)
+{
+    char status[160];
+    char log_text[sizeof(lora_flrc_log_text)];
+    uint64_t packets;
+    uint64_t bytes;
+    uint64_t errors;
+    uint64_t start_us;
+    int16_t last_state;
+    float rssi_avg;
+    float rssi_sync;
+    float freq;
+    unsigned br;
+    unsigned preview_w;
+    unsigned preview_h;
+    unsigned preview_fps;
+    unsigned jpeg_quality;
+    int flip_x;
+    int flip_y;
+    double video_mbps;
+    double video_file_mbps;
+    uint64_t video_packets;
+    uint64_t video_bytes;
+    uint64_t video_errors;
+    uint64_t video_frames;
+    uint64_t video_dropped;
+    uint64_t video_elapsed_ms;
+    lora_flrc_mode_t mode;
+    double elapsed_s;
+    double mbps;
+    int video_running;
+    int camera_preview_active;
+    char video_role[16];
+    char video_log[640];
+
+    (void)timer;
+    video_running = lora_flrc_video_process_running();
+    snprintf(video_role, sizeof(video_role), "%s", lora_flrc_video_role);
+    camera_preview_active = video_running &&
+                            (strcmp(video_role, "CAM RX") == 0 ||
+                             strcmp(video_role, "CAM TX") == 0);
+    if(video_running || video_role[0]) {
+        lora_flrc_video_read_log_tail(video_log, sizeof(video_log));
+        lora_flrc_video_parse_log_stats();
+    } else {
+        video_log[0] = '\0';
+    }
+
+    pthread_mutex_lock(&lora_flrc_lock);
+    snprintf(status, sizeof(status), "%s", lora_flrc_status);
+    snprintf(log_text, sizeof(log_text), "%s", lora_flrc_log_text);
+    packets = lora_flrc_packets;
+    bytes = lora_flrc_bytes;
+    errors = lora_flrc_errors;
+    start_us = lora_flrc_start_us;
+    last_state = lora_flrc_last_state;
+    rssi_avg = lora_flrc_last_rssi_avg;
+    rssi_sync = lora_flrc_last_rssi_sync;
+    freq = lora_flrc_freq_mhz;
+    br = lora_flrc_bitrate_kbps;
+    preview_w = lora_flrc_camera_preview_w;
+    preview_h = lora_flrc_camera_preview_h;
+    preview_fps = lora_flrc_camera_preview_fps;
+    jpeg_quality = lora_flrc_camera_jpeg_quality;
+    flip_x = lora_flrc_camera_flip_x;
+    flip_y = lora_flrc_camera_flip_y;
+    video_mbps = lora_flrc_video_mbps;
+    video_file_mbps = lora_flrc_video_file_mbps;
+    video_packets = lora_flrc_video_packets;
+    video_bytes = lora_flrc_video_bytes;
+    video_errors = lora_flrc_video_errors;
+    video_frames = lora_flrc_video_frames;
+    video_dropped = lora_flrc_video_dropped;
+    video_elapsed_ms = lora_flrc_video_elapsed_ms;
+    mode = lora_flrc_mode;
+    pthread_mutex_unlock(&lora_flrc_lock);
+
+    elapsed_s = start_us ? (double)(ui_monotonic_us() - start_us) / 1000000.0 :
+                0.0;
+    mbps = elapsed_s > 0.05 ? ((double)bytes * 8.0) / elapsed_s / 1000000.0 :
+           0.0;
+
+    if(lora_flrc_status_label && lv_obj_is_valid(lora_flrc_status_label)) {
+        if(video_running) {
+            lv_label_set_text_fmt(lora_flrc_status_label, "Video %s running",
+                                  video_role);
+        } else {
+            lv_label_set_text(lora_flrc_status_label, ui_tr(status));
+        }
+    }
+    if(lora_flrc_config_label && lv_obj_is_valid(lora_flrc_config_label)) {
+        lv_label_set_text_fmt(lora_flrc_config_label,
+                              "LR2021 FLRC  %.1f MHz  %u kbps  CR3/4  PWR %d dBm",
+                              freq, br, LORA_FLRC_DEFAULT_POWER);
+    }
+    if(lora_flrc_stats_label && lv_obj_is_valid(lora_flrc_stats_label)) {
+        if(video_running) {
+            if(camera_preview_active) {
+                lv_label_set_text_fmt(lora_flrc_stats_label,
+                                      "JPEG camera %s  %ux%u Q%u @%ufps  Cam H%d V%d\nAir %.3f Mbps  File %.3f Mbps\nFrames %llu  Drop %llu  Err %llu  %.1fs",
+                                      strcmp(video_role, "CAM TX") == 0 ?
+                                      "TX" : "RX",
+                                      preview_w, preview_h, jpeg_quality,
+                                      preview_fps, flip_x, flip_y, video_mbps,
+                                      video_file_mbps,
+                                      (unsigned long long)video_frames,
+                                      (unsigned long long)video_dropped,
+                                      (unsigned long long)video_errors,
+                                      video_elapsed_ms / 1000.0);
+            } else {
+                lv_label_set_text_fmt(lora_flrc_stats_label,
+                                      "Reliable video stream\n%s  file=%s\nCRC32 + NACK repair, retries %u",
+                                      video_role,
+                                      strcmp(video_role, "TX") == 0 ?
+                                      LORA_FLRC_VIDEO_FILE :
+                                      LORA_FLRC_VIDEO_OUT_DIR,
+                                      (unsigned)LORA_FLRC_VIDEO_RETRIES);
+            }
+        } else {
+            lv_label_set_text_fmt(lora_flrc_stats_label,
+                                  "%s  %.2f Mbps\nPackets %llu  Bytes %llu  Errors %llu\nRSSI avg %.1f  sync %.1f  last %d",
+                                  mode == LORA_FLRC_MODE_TX ? "TX" :
+                                  (mode == LORA_FLRC_MODE_RX ? "RX" : "Idle"),
+                                  mbps, (unsigned long long)packets,
+                                  (unsigned long long)bytes,
+                                  (unsigned long long)errors,
+                                  rssi_avg, rssi_sync, last_state);
+        }
+    }
+    if(lora_flrc_log_label && lv_obj_is_valid(lora_flrc_log_label)) {
+        lv_label_set_text(lora_flrc_log_label,
+                          video_running && video_log[0] ? video_log : log_text);
+    }
+
+    lora_flrc_update_preview(camera_preview_active);
+
+    if(mode != LORA_FLRC_MODE_IDLE &&
+       (lora_flrc_last_stats_log_us == 0 ||
+        ui_monotonic_us() - lora_flrc_last_stats_log_us >= 1000000ULL)) {
+        lora_flrc_last_stats_log_us = ui_monotonic_us();
+        lora_flrc_log("STATS mode=%s mbps=%.4f packets=%llu bytes=%llu errors=%llu last=%d freq=%.1f br=%u len=%u",
+                      mode == LORA_FLRC_MODE_TX ? "TX" :
+                      (mode == LORA_FLRC_MODE_RX ? "RX" : "IDLE"),
+                      mbps,
+                      (unsigned long long)packets,
+                      (unsigned long long)bytes,
+                      (unsigned long long)errors,
+                      last_state,
+                      freq,
+                      br,
+                      (unsigned)LORA_FLRC_PAYLOAD_LEN);
+    }
+
+    lora_flrc_style_choice(lora_flrc_freq_btn[0], freq < 2425.0f, 0x7C3AED);
+    lora_flrc_style_choice(lora_flrc_freq_btn[1], freq >= 2425.0f, 0x7C3AED);
+    lora_flrc_style_choice(lora_flrc_br_btn[0], br == 650U, 0x25C281);
+    lora_flrc_style_choice(lora_flrc_br_btn[1], br == 1300U, 0x25C281);
+    lora_flrc_style_choice(lora_flrc_br_btn[2], br == 2600U, 0x25C281);
+    for(unsigned i = 0;
+        i < (unsigned)(sizeof(lora_flrc_camera_preset_btn) /
+                       sizeof(lora_flrc_camera_preset_btn[0])); i++) {
+        lora_flrc_style_choice(lora_flrc_camera_preset_btn[i],
+                               i == lora_flrc_camera_preset_index, 0x3DA5FF);
+    }
+    lora_flrc_style_choice(lora_flrc_camera_flip_btn[0], flip_x, 0x25C281);
+    lora_flrc_style_choice(lora_flrc_camera_flip_btn[1], flip_y, 0x25C281);
+}
+
+void ui_lora_flrc_create(lv_obj_t *scr)
+{
+    lv_obj_t *body;
+    lv_obj_t *preview;
+    lv_obj_t *preview_title;
+    lv_obj_t *preview_icon;
+    lv_obj_t *side;
+    lv_obj_t *btn;
+    int landscape = ui_is_landscape();
+    int screen_w = ui_screen_width();
+    int body_h = ui_body_height(144);
+    int margin = landscape ? 24 : 24;
+    int gap = landscape ? 22 : 18;
+    int body_w = screen_w - margin * 2;
+    int preview_x = margin;
+    int preview_y = landscape ? 20 : 20;
+    int preview_w;
+    int preview_h;
+    int side_x;
+    int side_y;
+    int side_w;
+    int side_h;
+    int side_inner_w;
+    int row_w;
+    int button_y;
+    int log_y;
+
+    memset(lora_flrc_freq_btn, 0, sizeof(lora_flrc_freq_btn));
+    memset(lora_flrc_br_btn, 0, sizeof(lora_flrc_br_btn));
+    memset(lora_flrc_camera_preset_btn, 0,
+           sizeof(lora_flrc_camera_preset_btn));
+    memset(lora_flrc_camera_flip_btn, 0, sizeof(lora_flrc_camera_flip_btn));
+    lora_flrc_apply_camera_preset(lora_flrc_camera_preset_index);
+    lora_flrc_preview_image = NULL;
+    lora_flrc_preview_placeholder = NULL;
+    lora_flrc_preview_placeholder_label = NULL;
+    lora_flrc_preview_panel_w = 0;
+    lora_flrc_preview_panel_h = 0;
+
+    ui_create_header(scr, "LoRa FLRC");
+
+    body = ui_page_body(scr, 144);
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+
+    if(landscape) {
+        preview_h = body_h - 40;
+        if(preview_h < 320) {
+            preview_h = 320;
+        }
+        preview_w = body_w * 58 / 100;
+        if(preview_w > body_w - 360 - gap) {
+            preview_w = body_w - 360 - gap;
+        }
+        if(preview_w < 420) {
+            preview_w = body_w - 340 - gap;
+        }
+        if(preview_w < 320) {
+            preview_w = 320;
+        }
+        side_x = preview_x + preview_w + gap;
+        side_y = preview_y;
+        side_w = screen_w - side_x - margin;
+        side_h = preview_h;
+    } else {
+        preview_w = body_w;
+        preview_h = 420;
+        if(preview_h > body_h / 2) {
+            preview_h = body_h / 2;
+        }
+        if(preview_h < 300) {
+            preview_h = 300;
+        }
+        side_x = margin;
+        side_y = preview_y + preview_h + gap;
+        side_w = preview_w;
+        side_h = body_h - side_y - 32;
+        if(side_h < 470) {
+            side_h = 470;
+        }
+    }
+
+    preview = ui_panel(body, preview_x, preview_y, preview_w, preview_h);
+    lv_obj_set_style_bg_color(preview, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_color(preview, lv_color_hex(0x2A3B4F), 0);
+    lv_obj_set_style_pad_all(preview, 0, 0);
+
+    preview_title = ui_label(preview, "FLRC Preview", &lv_font_montserrat_24,
+                             0xF2F5F8);
+    lv_obj_set_pos(preview_title, 18, 14);
+    lora_flrc_preview_panel_w = preview_w - 32;
+    lora_flrc_preview_panel_h = preview_h - 72;
+
+    lora_flrc_preview_image = lv_image_create(preview);
+    lv_obj_add_flag(lora_flrc_preview_image, LV_OBJ_FLAG_HIDDEN);
+
+    lora_flrc_preview_placeholder = lv_obj_create(preview);
+    lv_obj_set_pos(lora_flrc_preview_placeholder, 16, 56);
+    lv_obj_set_size(lora_flrc_preview_placeholder, preview_w - 32,
+                    preview_h - 72);
+    lv_obj_set_style_bg_color(lora_flrc_preview_placeholder,
+                              lv_color_hex(0x17202B), 0);
+    lv_obj_set_style_bg_opa(lora_flrc_preview_placeholder, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(lora_flrc_preview_placeholder, 0, 0);
+    lv_obj_set_style_radius(lora_flrc_preview_placeholder, 8, 0);
+    lv_obj_clear_flag(lora_flrc_preview_placeholder, LV_OBJ_FLAG_SCROLLABLE);
+    preview_icon = ui_label(lora_flrc_preview_placeholder, LV_SYMBOL_VIDEO,
+                            &lv_font_montserrat_32, 0x3DA5FF);
+    lv_obj_align(preview_icon, LV_ALIGN_CENTER, 0, -36);
+    lora_flrc_preview_placeholder_label =
+        ui_label(lora_flrc_preview_placeholder,
+                 "Start Cam RX to preview received video",
+                 &lv_font_montserrat_18, 0xC9D3DF);
+    lv_obj_set_width(lora_flrc_preview_placeholder_label,
+                     preview_w > 72 ? preview_w - 72 : preview_w);
+    lv_obj_set_style_text_align(lora_flrc_preview_placeholder_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lora_flrc_preview_placeholder_label, LV_ALIGN_CENTER, 0, 28);
+
+    side = ui_panel(body, side_x, side_y, side_w, side_h);
+    lv_obj_set_style_bg_color(side, lv_color_hex(0x151B22), 0);
+    side_inner_w = side_w - 32;
+    if(side_inner_w < 260) {
+        side_inner_w = 260;
+    }
+
+    ui_label(side, "Camera FLRC", &lv_font_montserrat_24, 0xF2F5F8);
+    lora_flrc_status_label =
+        ui_label(side, "Ready", &lv_font_montserrat_18, 0x25C281);
+    lv_obj_set_pos(lora_flrc_status_label, 0, 42);
+    lv_obj_set_width(lora_flrc_status_label, side_inner_w);
+    lv_label_set_long_mode(lora_flrc_status_label, LV_LABEL_LONG_DOT);
+
+    lora_flrc_config_label =
+        ui_label(side, "--", &lv_font_montserrat_16, 0xC9D3DF);
+    lv_obj_set_pos(lora_flrc_config_label, 0, 74);
+    lv_obj_set_width(lora_flrc_config_label, side_inner_w);
+    lv_label_set_long_mode(lora_flrc_config_label, LV_LABEL_LONG_DOT);
+
+    lora_flrc_stats_label =
+        ui_label(side, "--", &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_pos(lora_flrc_stats_label, 0, 104);
+    lv_obj_set_width(lora_flrc_stats_label, side_inner_w);
+    lv_label_set_long_mode(lora_flrc_stats_label, LV_LABEL_LONG_WRAP);
+
+    button_y = landscape ? 180 : 176;
+    row_w = (side_inner_w - gap) / 2;
+    if(row_w < 118) {
+        row_w = 118;
+    }
+    btn = ui_command_button(side, 0, button_y, row_w, "Cam RX", 0x3DA5FF);
+    lv_obj_add_event_cb(btn, lora_flrc_camera_rx_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    btn = ui_command_button(side, row_w + gap, button_y, row_w, "Cam TX",
+                            0x25C281);
+    lv_obj_add_event_cb(btn, lora_flrc_camera_tx_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    button_y += 74;
+    btn = ui_command_button(side, 0, button_y, row_w, "Stop", 0xEF4D5A);
+    lv_obj_add_event_cb(btn, lora_flrc_stop_event_cb, LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(side, row_w + gap, button_y, row_w, "Settings",
+                            0xF2F5F8);
+    lv_obj_add_event_cb(btn, lora_flrc_settings_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    log_y = button_y + 88;
+    if(landscape && log_y < side_h - 130) {
+        log_y = side_h - 130;
+    }
+    lora_flrc_log_label =
+        ui_label(side, lora_flrc_log_text, &lv_font_montserrat_16, 0xC9D3DF);
+    lv_obj_set_pos(lora_flrc_log_label, 0, log_y);
+    lv_obj_set_width(lora_flrc_log_label, side_inner_w);
+    lv_label_set_long_mode(lora_flrc_log_label, LV_LABEL_LONG_WRAP);
+
+    if(!lora_flrc_timer) {
+        lora_flrc_timer = lv_timer_create(lora_flrc_timer_cb, 250, NULL);
+    }
+    lora_flrc_timer_cb(NULL);
+}
+
+void ui_lora_flrc_cleanup(void)
+{
+    if(lora_flrc_timer) {
+        lv_timer_delete(lora_flrc_timer);
+        lora_flrc_timer = NULL;
+    }
+    lora_flrc_video_stop();
+    lora_flrc_stop_wait();
+    lora_flrc_settings_close();
+    lora_delete_radio_objects();
+    if(lora_hal) {
+        delete lora_hal;
+        lora_hal = NULL;
+    }
+    lora_initialized = 0;
+    lora_flrc_status_label = NULL;
+    lora_flrc_config_label = NULL;
+    lora_flrc_stats_label = NULL;
+    lora_flrc_log_label = NULL;
+    lora_flrc_preview_image = NULL;
+    lora_flrc_preview_placeholder = NULL;
+    lora_flrc_preview_placeholder_label = NULL;
+    lora_flrc_settings_overlay = NULL;
+    memset(lora_flrc_freq_btn, 0, sizeof(lora_flrc_freq_btn));
+    memset(lora_flrc_br_btn, 0, sizeof(lora_flrc_br_btn));
+    memset(lora_flrc_camera_preset_btn, 0,
+           sizeof(lora_flrc_camera_preset_btn));
+    memset(lora_flrc_camera_flip_btn, 0, sizeof(lora_flrc_camera_flip_btn));
 }

@@ -157,6 +157,7 @@
 #include "ui_usb_storage.h"
 #include "ui_video_player.h"
 #include "ui_wifi.h"
+#include "ui_wifi_iperf.h"
 
 typedef struct {
     const char *title;
@@ -478,11 +479,13 @@ static const app_item_t app_items[] = {
     {"Record", LV_SYMBOL_STOP, 0xEF4D5A, PAGE_RECORDER},
     {"Mic FFT", LV_SYMBOL_BARS, 0x22D3EE, PAGE_MIC_FFT},
     {"LoRa", LV_SYMBOL_UPLOAD, 0x7C3AED, PAGE_LORA},
+    {"LoRa FLRC", "FLRC", 0xA855F7, PAGE_LORA_FLRC},
     {"LoRaWAN", "WAN", 0x14B8A6, PAGE_LORAWAN},
     {"NES", "NES", 0xF97316, PAGE_NES},
     {"AI", LV_SYMBOL_BARS, 0xFF6B6B, PAGE_AI},
     {"RTSP", LV_SYMBOL_VIDEO, 0x22C55E, PAGE_RTSP},
     {"Wi-Fi", "WiFi", 0x25C281, PAGE_WIFI},
+    {"WiFi Test", "iperf", 0x10B981, PAGE_WIFI_IPERF},
     {"Bluetooth", "BT", 0x3B82F6, PAGE_BLE},
     {"MTP", "MTP", 0x41C7C7, PAGE_FILES},
     {"Gallery", LV_SYMBOL_IMAGE, 0xEC4899, PAGE_GALLERY},
@@ -558,6 +561,8 @@ static const char *page_name(page_id_t page)
         return "Network";
     case PAGE_WIFI:
         return "Wi-Fi";
+    case PAGE_WIFI_IPERF:
+        return "WiFi iperf";
     case PAGE_ETHERNET:
         return "Ethernet";
     case PAGE_BLE:
@@ -574,6 +579,8 @@ static const char *page_name(page_id_t page)
         return "Mic FFT";
     case PAGE_LORA:
         return "LoRa";
+    case PAGE_LORA_FLRC:
+        return "LoRa FLRC";
     case PAGE_LORAWAN:
         return "LoRaWAN";
     case PAGE_NES:
@@ -7989,6 +7996,7 @@ static void cleanup_page_state(void)
 {
     ui_audio_cleanup();
     ui_lorawan_cleanup();
+    ui_lora_flrc_cleanup();
     ui_lora_cleanup();
     ui_nes_cleanup();
     ui_mic_spectrum_cleanup();
@@ -8014,6 +8022,7 @@ static void cleanup_page_state(void)
     camera_rtsp_notice_overlay = NULL;
     ui_input_dialog_close_active();
     ui_wifi_cleanup();
+    ui_wifi_iperf_cleanup();
     ui_ethernet_cleanup();
     if(touch_timer) {
         lv_timer_delete(touch_timer);
@@ -8943,6 +8952,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     case PAGE_WIFI:
         ui_wifi_create(scr);
         break;
+    case PAGE_WIFI_IPERF:
+        ui_wifi_iperf_create(scr);
+        break;
     case PAGE_ETHERNET:
         ui_ethernet_create(scr);
         break;
@@ -8966,6 +8978,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_LORA:
         ui_lora_create(scr);
+        break;
+    case PAGE_LORA_FLRC:
+        ui_lora_flrc_create(scr);
         break;
     case PAGE_LORAWAN:
         ui_lorawan_create(scr);
