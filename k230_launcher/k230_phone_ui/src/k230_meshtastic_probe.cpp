@@ -4188,6 +4188,21 @@ static int16_t begin_chip(chip_type_t chip, PhysicalLayer *radio,
     return state;
 }
 
+static void lora_hard_reset(K230LinuxHal *hal, const char *reason)
+{
+    if(!hal) {
+        return;
+    }
+    printf("LoRa hard reset: %s\n", reason ? reason : "-");
+    hal->digitalWrite(LORA_PIN_POWER, K230_HAL_GPIO_LOW);
+    hal->digitalWrite(LORA_PIN_RST, K230_HAL_GPIO_LOW);
+    hal->delay(20);
+    hal->digitalWrite(LORA_PIN_POWER, K230_HAL_GPIO_HIGH);
+    hal->delay(20);
+    hal->digitalWrite(LORA_PIN_RST, K230_HAL_GPIO_HIGH);
+    hal->delay(80);
+}
+
 static void destroy_radio(PhysicalLayer **radio, SX1262 **sx1262,
                           LR2021 **lr2021, Module **module)
 {
@@ -4211,52 +4226,62 @@ static int probe_candidate(chip_type_t chip, K230LinuxHal *hal,
                            SX1262 **sx_out, LR2021 **lr_out,
                            int16_t *state_out)
 {
-    Module *module = nullptr;
-    SX1262 *sx1262 = nullptr;
-    LR2021 *lr2021 = nullptr;
-    PhysicalLayer *radio = nullptr;
-    int16_t state;
+    const unsigned int attempts = chip == CHIP_LR2021 ? 2U : 1U;
+    int16_t last_state = RADIOLIB_ERR_CHIP_NOT_FOUND;
 
-    module = new Module(hal, RADIOLIB_NC, LORA_PIN_DIO1,
-                        LORA_PIN_RST, LORA_PIN_BUSY);
-    if(!module) {
-        if(state_out) {
-            *state_out = RADIOLIB_ERR_MEMORY_ALLOCATION_FAILED;
-        }
-        return -1;
-    }
-    if(chip == CHIP_SX1262) {
-        sx1262 = new SX1262(module);
-        radio = sx1262;
-    } else if(chip == CHIP_LR2021) {
-        lr2021 = new LR2021(module);
-        lr2021->irqDioNum = LORA_LR2021_IRQ_DIO_NUM;
-        radio = lr2021;
-    }
-    if(!radio) {
-        delete module;
-        if(state_out) {
-            *state_out = RADIOLIB_ERR_MEMORY_ALLOCATION_FAILED;
-        }
-        return -1;
-    }
+    for(unsigned int attempt = 0; attempt < attempts; attempt++) {
+        Module *module = nullptr;
+        SX1262 *sx1262 = nullptr;
+        LR2021 *lr2021 = nullptr;
+        PhysicalLayer *radio = nullptr;
+        int16_t state;
 
-    hal->delay(20);
-    state = begin_chip(chip, radio, sx1262, lr2021, profile);
-    if(state_out) {
-        *state_out = state;
-    }
-    if(state != RADIOLIB_ERR_NONE) {
-        destroy_radio(&radio, &sx1262, &lr2021, &module);
+        if(attempt > 0U) {
+            lora_hard_reset(hal, "retry LR2021 probe");
+        }
+
+        module = new Module(hal, RADIOLIB_NC, LORA_PIN_DIO1,
+                            LORA_PIN_RST, LORA_PIN_BUSY);
+        if(!module) {
+            last_state = RADIOLIB_ERR_MEMORY_ALLOCATION_FAILED;
+            break;
+        }
+        if(chip == CHIP_SX1262) {
+            sx1262 = new SX1262(module);
+            radio = sx1262;
+        } else if(chip == CHIP_LR2021) {
+            lr2021 = new LR2021(module);
+            lr2021->irqDioNum = LORA_LR2021_IRQ_DIO_NUM;
+            radio = lr2021;
+        }
+        if(!radio) {
+            delete module;
+            last_state = RADIOLIB_ERR_MEMORY_ALLOCATION_FAILED;
+            break;
+        }
+
         hal->delay(20);
-        return -1;
+        state = begin_chip(chip, radio, sx1262, lr2021, profile);
+        last_state = state;
+        if(state == RADIOLIB_ERR_NONE) {
+            *radio_out = radio;
+            *module_out = module;
+            *sx_out = sx1262;
+            *lr_out = lr2021;
+            return 0;
+        }
+
+        fprintf(stderr, "%s probe attempt %u/%u failed: %d %s\n",
+                chip_name(chip), attempt + 1U, attempts, state,
+                error_name(state));
+        destroy_radio(&radio, &sx1262, &lr2021, &module);
+        hal->delay(30);
     }
 
-    *radio_out = radio;
-    *module_out = module;
-    *sx_out = sx1262;
-    *lr_out = lr2021;
-    return 0;
+    if(state_out) {
+        *state_out = last_state;
+    }
+    return -1;
 }
 
 static chip_type_t detect_radio(K230LinuxHal *hal, const probe_profile_t *profile,
