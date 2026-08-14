@@ -155,6 +155,7 @@ int ui_path_exists(const char *path);
 void ui_trim_text(char *text);
 int ui_read_file_first_line(const char *path, char *buf, size_t len);
 int ui_read_cmd_first_line(const char *cmd, char *buf, size_t len);
+int ui_read_iface_carrier(const char *iface);
 int ui_read_iface_ip(const char *iface, char *buf, size_t len);
 void ui_read_iface_state(const char *iface, char *buf, size_t len,
                          uint32_t *color);

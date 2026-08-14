@@ -659,13 +659,35 @@ int ui_read_iface_ip(const char *iface, char *buf, size_t len)
     return -1;
 }
 
+int ui_read_iface_carrier(const char *iface)
+{
+    char path[128];
+    char carrier[8];
+
+    if(!iface || !iface[0]) {
+        return -1;
+    }
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s/carrier", iface);
+    if(ui_read_file_first_line(path, carrier, sizeof(carrier)) != 0) {
+        return -1;
+    }
+    if(strcmp(carrier, "1") == 0) {
+        return 1;
+    }
+    if(strcmp(carrier, "0") == 0) {
+        return 0;
+    }
+    return -1;
+}
+
 void ui_read_iface_state(const char *iface, char *buf, size_t len,
                          uint32_t *color)
 {
     char path[128];
     char oper[32];
-    char carrier[8];
     char ip[64];
+    int carrier;
 
     if(!iface || !buf || len == 0) {
         return;
@@ -685,9 +707,13 @@ void ui_read_iface_state(const char *iface, char *buf, size_t len,
         snprintf(oper, sizeof(oper), "unknown");
     }
 
-    snprintf(path, sizeof(path), "/sys/class/net/%s/carrier", iface);
-    if(ui_read_file_first_line(path, carrier, sizeof(carrier)) != 0) {
-        snprintf(carrier, sizeof(carrier), "?");
+    carrier = ui_read_iface_carrier(iface);
+    if(carrier == 0) {
+        snprintf(buf, len, "No link");
+        if(color) {
+            *color = 0x9AA4AF;
+        }
+        return;
     }
 
     if(ui_read_iface_ip(iface, ip, sizeof(ip)) == 0) {
@@ -695,7 +721,7 @@ void ui_read_iface_state(const char *iface, char *buf, size_t len,
         if(color) {
             *color = 0x25C281;
         }
-    } else if(strcmp(carrier, "1") == 0 || strcmp(oper, "up") == 0) {
+    } else if(carrier == 1 || strcmp(oper, "up") == 0) {
         snprintf(buf, len, "%s  no IP", oper);
         if(color) {
             *color = 0xF5A524;

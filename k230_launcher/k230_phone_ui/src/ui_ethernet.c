@@ -428,20 +428,28 @@ static void ethernet_update_page(void)
     char state[96];
     char ip[64];
     char path[128];
-    char carrier[32];
     char mac[64];
     uint32_t color = 0x9AA4AF;
+    uint32_t ip_color = 0x9AA4AF;
+    int carrier;
 
     if(!eth_state_label) {
         return;
     }
 
     ui_read_iface_state(NET_ETH_IFACE, state, sizeof(state), &color);
-    ui_read_iface_ip(NET_ETH_IFACE, ip, sizeof(ip));
-
-    snprintf(path, sizeof(path), "/sys/class/net/%s/carrier", NET_ETH_IFACE);
-    if(ui_read_file_first_line(path, carrier, sizeof(carrier)) != 0) {
-        snprintf(carrier, sizeof(carrier), "--");
+    carrier = ui_read_iface_carrier(NET_ETH_IFACE);
+    if(carrier == 0) {
+        snprintf(ip, sizeof(ip), "No link");
+        ip_color = 0x9AA4AF;
+    } else if(ui_read_iface_ip(NET_ETH_IFACE, ip, sizeof(ip)) == 0) {
+        ip_color = 0x25C281;
+    } else if(carrier == 1) {
+        snprintf(ip, sizeof(ip), "No IP");
+        ip_color = 0xF5A524;
+    } else {
+        snprintf(ip, sizeof(ip), "--");
+        ip_color = 0x9AA4AF;
     }
 
     snprintf(path, sizeof(path), "/sys/class/net/%s/address", NET_ETH_IFACE);
@@ -453,13 +461,15 @@ static void ethernet_update_page(void)
     lv_obj_set_style_text_color(eth_state_label, lv_color_hex(color), 0);
     if(eth_ip_label) {
         lv_label_set_text(eth_ip_label, ip);
+        lv_obj_set_style_text_color(eth_ip_label, lv_color_hex(ip_color), 0);
     }
     if(eth_carrier_label) {
-        lv_label_set_text(eth_carrier_label, strcmp(carrier, "1") == 0 ?
-                          "Link detected" : "No link");
+        lv_label_set_text(eth_carrier_label, carrier == 1 ? "Link detected" :
+                          carrier == 0 ? "No link" : "Unknown");
         lv_obj_set_style_text_color(eth_carrier_label,
-                                    lv_color_hex(strcmp(carrier, "1") == 0 ?
-                                                 0x25C281 : 0x9AA4AF), 0);
+                                    lv_color_hex(carrier == 1 ? 0x25C281 :
+                                                 carrier == 0 ? 0x9AA4AF :
+                                                 0xF5A524), 0);
     }
     if(eth_mac_label) {
         lv_label_set_text(eth_mac_label, mac);

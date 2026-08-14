@@ -606,6 +606,7 @@ static void halow_timer_cb(lv_timer_t *timer)
     uint64_t errors;
     unsigned last_frame;
     int running;
+    int carrier;
 
     (void)timer;
     running = halow_process_running();
@@ -636,7 +637,10 @@ static void halow_timer_cb(lv_timer_t *timer)
                               ui_tr(status), role);
     }
     if(halow_config_label && lv_obj_is_valid(halow_config_label)) {
-        if(ui_read_iface_ip(NET_ETH_IFACE, eth_ip, sizeof(eth_ip)) != 0) {
+        carrier = ui_read_iface_carrier(NET_ETH_IFACE);
+        if(carrier == 0) {
+            snprintf(eth_ip, sizeof(eth_ip), "No link");
+        } else if(ui_read_iface_ip(NET_ETH_IFACE, eth_ip, sizeof(eth_ip)) != 0) {
             snprintf(eth_ip, sizeof(eth_ip), "No eth0 IP");
         }
         lv_label_set_text_fmt(halow_config_label,
