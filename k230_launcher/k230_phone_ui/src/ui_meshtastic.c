@@ -68,6 +68,7 @@ static int mesh_ack_enabled = 1;
 static int mesh_rebroadcast_enabled = 0;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
+static lv_obj_t *mesh_choice_overlay;
 static lv_obj_t *mesh_settings_value_labels[11];
 
 typedef enum {
@@ -84,6 +85,117 @@ typedef enum {
     MESH_FIELD_REBROADCAST,
     MESH_FIELD_COUNT,
 } mesh_setting_field_t;
+
+typedef enum {
+    MESH_PROFILE_STD = 0,
+    MESH_PROFILE_EU868,
+    MESH_PROFILE_LITE,
+    MESH_PROFILE_NARROW,
+} mesh_choice_profile_t;
+
+typedef struct {
+    const char *value;
+    const char *label;
+    mesh_choice_profile_t profile;
+    const char *default_preset;
+} mesh_region_choice_t;
+
+typedef struct {
+    const char *value;
+    const char *label;
+    unsigned profiles;
+} mesh_preset_choice_t;
+
+typedef struct {
+    const char *value;
+    const char *label;
+} mesh_choice_t;
+
+#define MESH_PROFILE_MASK(profile) (1U << (unsigned)(profile))
+
+static const mesh_region_choice_t mesh_region_choices[] = {
+    {"US", "US 902-928", MESH_PROFILE_STD, "LONG_FAST"},
+    {"EU_433", "EU 433", MESH_PROFILE_STD, "LONG_FAST"},
+    {"EU_868", "EU 868", MESH_PROFILE_EU868, "LONG_FAST"},
+    {"EU_866", "EU 866", MESH_PROFILE_LITE, "LITE_FAST"},
+    {"EU_N_868", "EU 868 Narrow", MESH_PROFILE_NARROW, "NARROW_SLOW"},
+    {"CN", "China", MESH_PROFILE_STD, "LONG_FAST"},
+    {"JP", "Japan", MESH_PROFILE_STD, "LONG_FAST"},
+    {"ANZ", "ANZ 915", MESH_PROFILE_STD, "LONG_FAST"},
+    {"ANZ_433", "ANZ 433", MESH_PROFILE_STD, "LONG_FAST"},
+    {"RU", "Russia", MESH_PROFILE_STD, "LONG_FAST"},
+    {"KR", "Korea", MESH_PROFILE_STD, "LONG_FAST"},
+    {"TW", "Taiwan", MESH_PROFILE_STD, "LONG_FAST"},
+    {"IN", "India", MESH_PROFILE_STD, "LONG_FAST"},
+    {"NZ_865", "NZ 865", MESH_PROFILE_STD, "LONG_FAST"},
+    {"TH", "Thailand", MESH_PROFILE_STD, "LONG_FAST"},
+    {"MY_433", "Malaysia 433", MESH_PROFILE_STD, "LONG_FAST"},
+    {"MY_919", "Malaysia 919", MESH_PROFILE_STD, "LONG_FAST"},
+    {"SG_923", "Singapore 923", MESH_PROFILE_STD, "LONG_FAST"},
+    {"PH_433", "Philippines 433", MESH_PROFILE_STD, "LONG_FAST"},
+    {"PH_868", "Philippines 868", MESH_PROFILE_STD, "LONG_FAST"},
+    {"PH_915", "Philippines 915", MESH_PROFILE_STD, "LONG_FAST"},
+    {"BR_902", "Brazil 902", MESH_PROFILE_STD, "LONG_FAST"},
+};
+
+static const mesh_preset_choice_t mesh_preset_choices[] = {
+    {"LONG_FAST", "Long Fast",
+     MESH_PROFILE_MASK(MESH_PROFILE_STD) |
+         MESH_PROFILE_MASK(MESH_PROFILE_EU868)},
+    {"LONG_SLOW", "Long Slow",
+     MESH_PROFILE_MASK(MESH_PROFILE_STD) |
+         MESH_PROFILE_MASK(MESH_PROFILE_EU868)},
+    {"MEDIUM_SLOW", "Medium Slow",
+     MESH_PROFILE_MASK(MESH_PROFILE_STD) |
+         MESH_PROFILE_MASK(MESH_PROFILE_EU868)},
+    {"MEDIUM_FAST", "Medium Fast",
+     MESH_PROFILE_MASK(MESH_PROFILE_STD) |
+         MESH_PROFILE_MASK(MESH_PROFILE_EU868)},
+    {"SHORT_SLOW", "Short Slow",
+     MESH_PROFILE_MASK(MESH_PROFILE_STD) |
+         MESH_PROFILE_MASK(MESH_PROFILE_EU868)},
+    {"SHORT_FAST", "Short Fast",
+     MESH_PROFILE_MASK(MESH_PROFILE_STD) |
+         MESH_PROFILE_MASK(MESH_PROFILE_EU868)},
+    {"LONG_MODERATE", "Long Moderate",
+     MESH_PROFILE_MASK(MESH_PROFILE_STD) |
+         MESH_PROFILE_MASK(MESH_PROFILE_EU868)},
+    {"SHORT_TURBO", "Short Turbo", MESH_PROFILE_MASK(MESH_PROFILE_STD)},
+    {"LONG_TURBO", "Long Turbo", MESH_PROFILE_MASK(MESH_PROFILE_STD)},
+    {"MEDIUM_TURBO", "Medium Turbo", MESH_PROFILE_MASK(MESH_PROFILE_STD)},
+    {"LITE_FAST", "Lite Fast", MESH_PROFILE_MASK(MESH_PROFILE_LITE)},
+    {"LITE_SLOW", "Lite Slow", MESH_PROFILE_MASK(MESH_PROFILE_LITE)},
+    {"NARROW_FAST", "Narrow Fast", MESH_PROFILE_MASK(MESH_PROFILE_NARROW)},
+    {"NARROW_SLOW", "Narrow Slow", MESH_PROFILE_MASK(MESH_PROFILE_NARROW)},
+};
+
+static const mesh_choice_t mesh_power_choices[] = {
+    {"auto", "Auto"},
+    {"-9", "-9 dBm"},
+    {"0", "0 dBm"},
+    {"5", "5 dBm"},
+    {"10", "10 dBm"},
+    {"14", "14 dBm"},
+    {"17", "17 dBm"},
+    {"20", "20 dBm"},
+    {"22", "22 dBm"},
+};
+
+static const mesh_choice_t mesh_hop_choices[] = {
+    {"0", "0 hop"},
+    {"1", "1 hop"},
+    {"2", "2 hops"},
+    {"3", "3 hops"},
+    {"4", "4 hops"},
+    {"5", "5 hops"},
+    {"6", "6 hops"},
+    {"7", "7 hops"},
+};
+
+static const mesh_choice_t mesh_bool_choices[] = {
+    {"1", "On"},
+    {"0", "Off"},
+};
 
 static int mesh_write_all(int fd, const char *data, size_t len)
 {
@@ -1058,6 +1170,51 @@ static void mesh_refresh_event_cb(lv_event_t *event)
     mesh_append_log("refresh: %s", mesh_status_text);
 }
 
+static const mesh_region_choice_t *mesh_find_region_choice(const char *value)
+{
+    if(!value || !value[0]) {
+        return NULL;
+    }
+    for(size_t i = 0; i < sizeof(mesh_region_choices) /
+           sizeof(mesh_region_choices[0]); i++) {
+        if(strcmp(mesh_region_choices[i].value, value) == 0) {
+            return &mesh_region_choices[i];
+        }
+    }
+    return NULL;
+}
+
+static mesh_choice_profile_t mesh_current_profile(void)
+{
+    const mesh_region_choice_t *region = mesh_find_region_choice(mesh_region);
+
+    return region ? region->profile : MESH_PROFILE_EU868;
+}
+
+static const char *mesh_default_preset_for_region(const char *region_value)
+{
+    const mesh_region_choice_t *region = mesh_find_region_choice(region_value);
+
+    return region ? region->default_preset : MESHTASTIC_DEFAULT_UI_PRESET;
+}
+
+static int mesh_profile_supports_ui_preset(mesh_choice_profile_t profile,
+                                           const char *preset)
+{
+    unsigned mask = MESH_PROFILE_MASK(profile);
+
+    if(!preset || !preset[0]) {
+        return 0;
+    }
+    for(size_t i = 0; i < sizeof(mesh_preset_choices) /
+           sizeof(mesh_preset_choices[0]); i++) {
+        if(strcmp(mesh_preset_choices[i].value, preset) == 0) {
+            return (mesh_preset_choices[i].profiles & mask) != 0U;
+        }
+    }
+    return 0;
+}
+
 static const char *mesh_setting_name(mesh_setting_field_t field)
 {
     switch(field) {
@@ -1085,6 +1242,21 @@ static const char *mesh_setting_name(mesh_setting_field_t field)
         return "Rebroadcast";
     default:
         return "Setting";
+    }
+}
+
+static int mesh_setting_uses_choice(mesh_setting_field_t field)
+{
+    switch(field) {
+    case MESH_FIELD_REGION:
+    case MESH_FIELD_PRESET:
+    case MESH_FIELD_POWER:
+    case MESH_FIELD_HOP:
+    case MESH_FIELD_ACK:
+    case MESH_FIELD_REBROADCAST:
+        return 1;
+    default:
+        return 0;
     }
 }
 
@@ -1239,6 +1411,309 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
                     mesh_setting_value(field, tmp, sizeof(tmp)));
 }
 
+static void mesh_choice_close(void)
+{
+    if(mesh_choice_overlay && lv_obj_is_valid(mesh_choice_overlay)) {
+        lv_obj_delete(mesh_choice_overlay);
+    }
+    mesh_choice_overlay = NULL;
+}
+
+static void mesh_choice_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_choice_close();
+}
+
+static int mesh_choice_is_selected(mesh_setting_field_t field,
+                                   const char *value)
+{
+    if(!value) {
+        return 0;
+    }
+    switch(field) {
+    case MESH_FIELD_REGION:
+        return strcmp(mesh_region, value) == 0;
+    case MESH_FIELD_PRESET:
+        return strcmp(mesh_preset, value) == 0;
+    case MESH_FIELD_POWER:
+        if(mesh_power_text_is_auto(value)) {
+            return mesh_power_is_auto();
+        }
+        return strcmp(mesh_tx_power, value) == 0;
+    case MESH_FIELD_HOP:
+        return strcmp(mesh_hop_limit, value) == 0;
+    case MESH_FIELD_ACK:
+        return mesh_ack_enabled == (strcmp(value, "0") != 0);
+    case MESH_FIELD_REBROADCAST:
+        return mesh_rebroadcast_enabled == (strcmp(value, "0") != 0);
+    default:
+        return 0;
+    }
+}
+
+static const char *mesh_choice_value_at(mesh_setting_field_t field, int index)
+{
+    switch(field) {
+    case MESH_FIELD_REGION:
+        if(index >= 0 && index < (int)(sizeof(mesh_region_choices) /
+           sizeof(mesh_region_choices[0]))) {
+            return mesh_region_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_PRESET:
+        if(index >= 0 && index < (int)(sizeof(mesh_preset_choices) /
+           sizeof(mesh_preset_choices[0]))) {
+            return mesh_preset_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_POWER:
+        if(index >= 0 && index < (int)(sizeof(mesh_power_choices) /
+           sizeof(mesh_power_choices[0]))) {
+            return mesh_power_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_HOP:
+        if(index >= 0 && index < (int)(sizeof(mesh_hop_choices) /
+           sizeof(mesh_hop_choices[0]))) {
+            return mesh_hop_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_ACK:
+    case MESH_FIELD_REBROADCAST:
+        if(index >= 0 && index < (int)(sizeof(mesh_bool_choices) /
+           sizeof(mesh_bool_choices[0]))) {
+            return mesh_bool_choices[index].value;
+        }
+        break;
+    default:
+        break;
+    }
+    return NULL;
+}
+
+static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
+{
+    char log_value[32];
+
+    if(!value) {
+        return;
+    }
+    switch(field) {
+    case MESH_FIELD_REGION:
+        mesh_safe_or_default(mesh_region, sizeof(mesh_region), value,
+                             MESHTASTIC_DEFAULT_UI_REGION);
+        if(!mesh_profile_supports_ui_preset(mesh_current_profile(),
+                                            mesh_preset)) {
+            snprintf(mesh_preset, sizeof(mesh_preset), "%s",
+                     mesh_default_preset_for_region(mesh_region));
+            mesh_append_log("preset adjusted for region: %s", mesh_preset);
+        }
+        break;
+    case MESH_FIELD_PRESET:
+        if(!mesh_profile_supports_ui_preset(mesh_current_profile(), value)) {
+            mesh_append_log("invalid preset for %s: %s", mesh_region, value);
+            return;
+        }
+        mesh_safe_or_default(mesh_preset, sizeof(mesh_preset), value,
+                             mesh_default_preset_for_region(mesh_region));
+        break;
+    case MESH_FIELD_POWER:
+        mesh_safe_or_default(mesh_tx_power, sizeof(mesh_tx_power), value,
+                             "auto");
+        mesh_normalize_power();
+        break;
+    case MESH_FIELD_HOP:
+        mesh_safe_or_default(mesh_hop_limit, sizeof(mesh_hop_limit), value,
+                             "3");
+        mesh_normalize_hop();
+        break;
+    case MESH_FIELD_ACK:
+        mesh_ack_enabled = strcmp(value, "0") != 0;
+        break;
+    case MESH_FIELD_REBROADCAST:
+        mesh_rebroadcast_enabled = strcmp(value, "0") != 0;
+        break;
+    default:
+        return;
+    }
+    mesh_save_profile_prefs();
+    mesh_settings_refresh();
+    mesh_append_log("settings saved: %s=%s", mesh_setting_name(field),
+                    mesh_setting_value(field, log_value, sizeof(log_value)));
+}
+
+static void mesh_choice_event_cb(lv_event_t *event)
+{
+    intptr_t code = (intptr_t)lv_event_get_user_data(event);
+    mesh_setting_field_t field =
+        (mesh_setting_field_t)((code >> 16) & 0xffff);
+    int index = (int)(code & 0xffff);
+    const char *value = mesh_choice_value_at(field, index);
+
+    mesh_choice_apply(field, value);
+    mesh_choice_close();
+}
+
+static void mesh_style_choice_button(lv_obj_t *btn, int selected)
+{
+    uint32_t count;
+
+    if(!btn || !lv_obj_is_valid(btn)) {
+        return;
+    }
+    lv_obj_set_style_bg_color(btn,
+                              lv_color_hex(selected ? 0x173B2A : 0x151B22),
+                              0);
+    lv_obj_set_style_border_color(btn,
+                                  lv_color_hex(selected ? 0x25C281 :
+                                                       0x2A3037),
+                                  0);
+    count = lv_obj_get_child_count(btn);
+    for(uint32_t i = 0; i < count; i++) {
+        lv_obj_t *child = lv_obj_get_child(btn, i);
+        lv_obj_set_style_text_color(child,
+                                    lv_color_hex(selected ? 0xFFFFFF :
+                                                          0xD7DEE8),
+                                    0);
+    }
+}
+
+static int mesh_choice_should_show(mesh_setting_field_t field, int index)
+{
+    if(field == MESH_FIELD_PRESET &&
+       index >= 0 && index < (int)(sizeof(mesh_preset_choices) /
+       sizeof(mesh_preset_choices[0]))) {
+        unsigned mask = MESH_PROFILE_MASK(mesh_current_profile());
+        return (mesh_preset_choices[index].profiles & mask) != 0U;
+    }
+    return 1;
+}
+
+static const char *mesh_choice_label_at(mesh_setting_field_t field, int index)
+{
+    switch(field) {
+    case MESH_FIELD_REGION:
+        return mesh_region_choices[index].label;
+    case MESH_FIELD_PRESET:
+        return mesh_preset_choices[index].label;
+    case MESH_FIELD_POWER:
+        return mesh_power_choices[index].label;
+    case MESH_FIELD_HOP:
+        return mesh_hop_choices[index].label;
+    case MESH_FIELD_ACK:
+    case MESH_FIELD_REBROADCAST:
+        return mesh_bool_choices[index].label;
+    default:
+        return "";
+    }
+}
+
+static int mesh_choice_count(mesh_setting_field_t field)
+{
+    switch(field) {
+    case MESH_FIELD_REGION:
+        return (int)(sizeof(mesh_region_choices) / sizeof(mesh_region_choices[0]));
+    case MESH_FIELD_PRESET:
+        return (int)(sizeof(mesh_preset_choices) / sizeof(mesh_preset_choices[0]));
+    case MESH_FIELD_POWER:
+        return (int)(sizeof(mesh_power_choices) / sizeof(mesh_power_choices[0]));
+    case MESH_FIELD_HOP:
+        return (int)(sizeof(mesh_hop_choices) / sizeof(mesh_hop_choices[0]));
+    case MESH_FIELD_ACK:
+    case MESH_FIELD_REBROADCAST:
+        return (int)(sizeof(mesh_bool_choices) / sizeof(mesh_bool_choices[0]));
+    default:
+        return 0;
+    }
+}
+
+static void mesh_choice_open(mesh_setting_field_t field)
+{
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int cols = ui_is_landscape() ? 3 : 2;
+    int gap = 12;
+    int col_w;
+    int row_h = 72;
+    int x;
+    int y = 104;
+    int visible = 0;
+    int total = mesh_choice_count(field);
+
+    if(!mesh_setting_uses_choice(field)) {
+        return;
+    }
+    if(cols < 1) {
+        cols = 1;
+    }
+    col_w = (content_w - gap * (cols - 1)) / cols;
+    if(col_w < 128) {
+        cols = 1;
+        col_w = content_w;
+    }
+
+    mesh_choice_close();
+    mesh_choice_overlay = lv_obj_create(lv_screen_active());
+    ui_set_fullscreen(mesh_choice_overlay);
+    lv_obj_set_style_bg_color(mesh_choice_overlay, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_choice_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mesh_choice_overlay, 0, 0);
+    lv_obj_set_style_border_width(mesh_choice_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_choice_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_choice_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(mesh_choice_overlay);
+
+    panel = ui_scroll_panel(mesh_choice_overlay, 0, 0, screen_w, screen_h);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    title = ui_label(panel, mesh_setting_name(field), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, margin, 22);
+    subtitle = ui_label(panel,
+                        field == MESH_FIELD_PRESET ?
+                        "Preset list is filtered by current region" :
+                        "Select one option",
+                        &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(subtitle, margin, 56);
+    lv_obj_set_width(subtitle, content_w - 112);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96, "Close",
+                            0x374151);
+    lv_obj_add_event_cb(btn, mesh_choice_close_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    for(int i = 0; i < total; i++) {
+        const char *value;
+        const char *label;
+        int selected;
+
+        if(!mesh_choice_should_show(field, i)) {
+            continue;
+        }
+        value = mesh_choice_value_at(field, i);
+        label = mesh_choice_label_at(field, i);
+        selected = mesh_choice_is_selected(field, value);
+        x = margin + (visible % cols) * (col_w + gap);
+        y = 104 + (visible / cols) * row_h;
+        btn = ui_command_button(panel, x, y, col_w, label, 0xD7DEE8);
+        mesh_style_choice_button(btn, selected);
+        lv_obj_add_event_cb(btn, mesh_choice_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)(((int)field << 16) | i));
+        visible++;
+    }
+}
+
 static void mesh_setting_edit_event_cb(lv_event_t *event)
 {
     mesh_setting_field_t field =
@@ -1247,18 +1722,8 @@ static void mesh_setting_edit_event_cb(lv_event_t *event)
     char placeholder[96];
     char value[32];
 
-    if(field == MESH_FIELD_ACK || field == MESH_FIELD_REBROADCAST) {
-        if(field == MESH_FIELD_ACK) {
-            mesh_ack_enabled = !mesh_ack_enabled;
-        } else {
-            mesh_rebroadcast_enabled = !mesh_rebroadcast_enabled;
-        }
-        mesh_save_profile_prefs();
-        mesh_settings_refresh();
-        mesh_append_log("settings saved: %s=%s", mesh_setting_name(field),
-                        field == MESH_FIELD_ACK ?
-                        (mesh_ack_enabled ? "on" : "off") :
-                        (mesh_rebroadcast_enabled ? "on" : "off"));
+    if(mesh_setting_uses_choice(field)) {
+        mesh_choice_open(field);
         return;
     }
 
@@ -1282,6 +1747,7 @@ static void mesh_setting_edit_event_cb(lv_event_t *event)
 
 static void mesh_close_settings_page(void)
 {
+    mesh_choice_close();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
         lv_obj_delete(mesh_settings_overlay);
     }
@@ -1424,13 +1890,12 @@ static void mesh_profile_event_cb(lv_event_t *event)
                                LV_LABEL_LONG_DOT);
         edit = ui_command_button(panel, screen_w - margin - edit_w, y - 2,
                                  edit_w,
-                                 (i == (int)MESH_FIELD_ACK ||
-                                  i == (int)MESH_FIELD_REBROADCAST) ?
-                                 "Toggle" : "Edit",
-                                 (i == (int)MESH_FIELD_ACK ||
-                                  i == (int)MESH_FIELD_REBROADCAST) ?
-                                 0x25C281 :
-                                 0x3DA5FF);
+                                 mesh_setting_uses_choice(
+                                     (mesh_setting_field_t)i) ?
+                                 "Select" : "Edit",
+                                 mesh_setting_uses_choice(
+                                     (mesh_setting_field_t)i) ?
+                                 0x25C281 : 0x3DA5FF);
         lv_obj_add_event_cb(edit, mesh_setting_edit_event_cb,
                             LV_EVENT_CLICKED, (void *)(intptr_t)i);
         y += row_h;
@@ -1687,6 +2152,7 @@ void ui_meshtastic_cleanup(void)
     mesh_chat_scroll = NULL;
     mesh_log_label = NULL;
     mesh_send_button = NULL;
+    mesh_choice_close();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
         lv_obj_delete(mesh_settings_overlay);
     }
@@ -1700,6 +2166,10 @@ void ui_meshtastic_cleanup(void)
 
 int ui_meshtastic_handle_back(void)
 {
+    if(mesh_choice_overlay && lv_obj_is_valid(mesh_choice_overlay)) {
+        mesh_choice_close();
+        return 1;
+    }
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
         mesh_close_settings_page();
         return 1;
