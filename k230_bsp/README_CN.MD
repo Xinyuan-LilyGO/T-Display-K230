@@ -4,6 +4,8 @@
 
 <h1 align = "center">🌟 LilyGo T-Display K230 BSP 🌟</h1>
 
+[English](./README.MD) | [中文](./README_CN.MD)
+
 这个目录是 LILYGO T-Display K230 RM69A10 硬件的板级支持 overlay，
 用于叠加到 Kendryte 官方 K230 Linux SDK。
 

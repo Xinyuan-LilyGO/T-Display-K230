@@ -4,6 +4,13 @@
 
 <h1 align = "center">🌟 LilyGo T-Display K230 🌟</h1>
 
+
+<p align="center">
+  <img src="./images/top.png" alt="LilyGo logo" width="640" />
+</p>
+
+[English](./README.MD) | [中文](./README_CN.MD)
+
 This repository packages the board support files, launcher application, and host
 scripts for building a LILYGO T-Display K230 SD-card image from the
 official Kendryte K230 Linux SDK.
@@ -30,6 +37,8 @@ scripts/           Host setup, SDK overlay, image build, and SSH deployment help
 - [BSP GPIO and hardware map](k230_bsp/docs/HARDWARE_PINMAP.md)
 - [BSP README](k230_bsp/README.MD)
 - [Launcher README](k230_launcher/README.MD)
+- [nRF52840 firmware and related documentation](https://github.com/Xinyuan-LilyGO/T-Display-K230-nRF52840)
+- [nRF9151 & keyboard firmware and related documentation](https://github.com/Xinyuan-LilyGO/T-Display-K230-nRF9151)
 
 ## Build From A Fresh Ubuntu PC
 
@@ -145,7 +154,7 @@ sync
 ### Flash With Rufus On Windows
 
 1. Insert the TF card into the Windows PC.
-2. Open Rufus.
+2. Download [Rufus](https://rufus.ie/en) then open Rufus.
 3. In `Device`, select the TF card.
 4. In `Boot selection`, choose `Disk or ISO image`, then click `SELECT`.
 5. Select `sysimage-sdcard.img` from `k230_bsp/images/`.
@@ -163,14 +172,19 @@ When the board is already running Linux and SSH is reachable, rebuild and deploy
 the launcher without reflashing the card:
 
 ```sh
-./scripts/deploy_launcher.sh 192.168.36.232
+./scripts/deploy_launcher.sh 192.168.1.100
 ```
 
 Deploy the launcher and boot files:
 
 ```sh
-./scripts/deploy_launcher.sh 192.168.36.232 --full --reboot
+./scripts/deploy_launcher.sh 192.168.1.100 --full --reboot
 ```
+
+> [!IMPORTANT]
+>
+> Please replace the above IP addresses with the IP address of your device.
+> 
 
 ## Included Hardware Support
 
@@ -188,3 +202,10 @@ Deploy the launcher and boot files:
 - PMU power key input and K230 thermal sensor support.
 
 Generated image files under `k230_bsp/images/` are local build artifacts.
+
+## Known Issues
+
+- A black obstruction appears at the bottom of the page when swiping in portrait mode.
+- The screen sometimes exhibits slight left-right shaking, which resolves after a power cycle.
+- These issues are classified as software bugs and will be fixed in a future update.
+

@@ -4,6 +4,8 @@
 
 <h1 align = "center">🌟 LilyGo T-Display K230 BSP 🌟</h1>
 
+[English](./README.MD) | [中文](./README_CN.MD)
+
 This directory contains the board support overlay for the LILYGO T-Display K230
 RM69A10 hardware. It is applied on top of the official Kendryte K230 Linux SDK.
 

@@ -4,6 +4,8 @@
 
 <h1 align = "center">🌟 LilyGo T-Display K230 Launcher 🌟</h1>
 
+[English](./README.MD) | [中文](./README_CN.MD)
+
 这个目录存放 LILYGO T-Display K230 手机风格 LVGL 启动器应用。
 
 ## 前置条件

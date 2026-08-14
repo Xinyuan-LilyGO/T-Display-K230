@@ -4,6 +4,8 @@
 
 <h1 align = "center">🌟 LilyGo T-Display K230 Launcher 🌟</h1>
 
+[English](./README.MD) | [中文](./README_CN.MD)
+
 This directory contains the phone-style LVGL launcher application for the
 LILYGO T-Display K230.
 

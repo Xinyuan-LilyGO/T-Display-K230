@@ -4,7 +4,13 @@
 
 <h1 align = "center">🌟 LilyGo T-Display K230 🌟</h1>
 
-本仓库用于从 Kendryte 官方 K230 Linux SDK 构建 LILYGO T-Display K230
+<p align="center">
+  <img src="./images/top.png" alt="LilyGo logo" width="640" />
+</p>
+
+[English](./README.MD) | [中文](./README_CN.MD)
+
+本仓库用于从 Kendryte 官方 K230 Linux SDK 构建 LilyGo T-Display K230
 的 SD 卡镜像，包含板级支持文件、LVGL 启动器应用和主机侧辅助脚本
 
 已验证的上游 SDK：
@@ -29,6 +35,8 @@ scripts/           主机依赖安装、overlay 应用、镜像构建和 SSH 部
 - [BSP GPIO 和硬件连接表](k230_bsp/docs/HARDWARE_PINMAP_CN.md)
 - [BSP README](k230_bsp/README_CN.MD)
 - [Launcher README](k230_launcher/README_CN.MD)
+- [nRF52840 固件和相关文档](https://github.com/Xinyuan-LilyGO/T-Display-K230-nRF52840)
+- [nRF9151 & 键盘固件和相关文档](https://github.com/Xinyuan-LilyGO/T-Display-K230-nRF9151)
 
 ## 从全新 Ubuntu 电脑开始构建
 
@@ -81,8 +89,8 @@ k230_bsp/images/sysimage-sdcard.img
 ## 在 Windows 中通过 WSL2 编译
 
 不建议在原生 Windows 的 CMD、PowerShell、Git Bash、MSYS2 或 Cygwin 中直接
-编译。推荐使用 WSL2 Ubuntu，这样 SDK 可以使用正常的 Linux 文件系统、权限、
-软链接和 shell 环境。
+编译推荐使用 WSL2 Ubuntu，这样 SDK 可以使用正常的 Linux 文件系统、权限、
+软链接和 shell 环境
 
 在管理员 PowerShell 中安装 Ubuntu 22.04：
 
@@ -90,16 +98,16 @@ k230_bsp/images/sysimage-sdcard.img
 wsl --install -d Ubuntu-22.04
 ```
 
-如果 WSL 提示需要重启 Windows，请先重启。然后打开 Ubuntu 终端，安装基础工具：
+如果 WSL 提示需要重启 Windows，请先重启然后打开 Ubuntu 终端，安装基础工具：
 
 ```sh
 sudo apt update
 sudo apt install -y git ca-certificates build-essential make rsync python3
 ```
 
-源码和构建目录请放在 WSL 的 Linux 文件系统内，例如 `~/work`。不要放在
+源码和构建目录请放在 WSL 的 Linux 文件系统内，例如 `~/work`不要放在
 `/mnt/c/Users/...` 下面编译；这个路径速度较慢，也可能影响 SDK 依赖的 Linux
-权限和软链接。
+权限和软链接
 
 ```sh
 mkdir -p ~/work
@@ -142,18 +150,18 @@ sync
 
 ### Windows 使用 Rufus 烧录
 
-1. 将 TF 卡插入 Windows 电脑。
-2. 打开 Rufus。
-3. 在 `设备` 中选择 TF 卡。
-4. 在 `引导类型选择` 中选择 `磁盘或 ISO 镜像`，然后点击 `选择`。
-5. 选择 `k230_bsp/images/` 目录下的 `sysimage-sdcard.img`。
-6. 点击 `开始`。
-7. 如果 Rufus 询问写入模式，选择 `以 DD 镜像模式写入`。
-8. 确认清空 TF 卡的提示，等待 Rufus 写入完成。
-9. 安全弹出 TF 卡，然后插入 T-Display K230。
+1. 将 TF 卡插入 Windows 电脑
+2. 下载 [Rufus](https://rufus.ie/en) 然后打开 Rufus
+3. 在 `设备` 中选择 TF 卡
+4. 在 `引导类型选择` 中选择 `磁盘或 ISO 镜像`，然后点击 `选择`
+5. 选择 `k230_bsp/images/` 目录下的 `sysimage-sdcard.img`
+6. 点击 `开始`
+7. 如果 Rufus 询问写入模式，选择 `以 DD 镜像模式写入`
+8. 确认清空 TF 卡的提示，等待 Rufus 写入完成
+9. 安全弹出 TF 卡，然后插入 T-Display K230
 
-烧录完成后，Windows 可能会提示格式化未知分区。请取消该提示。TF 卡中包含
-K230 镜像使用的 Linux 分区。
+烧录完成后，Windows 可能会提示格式化未知分区请取消该提示TF 卡中包含
+K230 镜像使用的 Linux 分区
 
 ## SSH 快速部署
 
@@ -161,14 +169,19 @@ K230 镜像使用的 Linux 分区。
 Launcher：
 
 ```sh
-./scripts/deploy_launcher.sh 192.168.36.232
+./scripts/deploy_launcher.sh 192.168.1.100
 ```
 
 同时部署 Launcher 和启动文件：
 
 ```sh
-./scripts/deploy_launcher.sh 192.168.36.232 --full --reboot
+./scripts/deploy_launcher.sh 192.168.1.100 --full --reboot
 ```
+
+> [!IMPORTANT]
+>
+> 以上IP地址请替换为设备的IP地址
+>
 
 ## 已包含的硬件支持
 
@@ -186,3 +199,10 @@ Launcher：
 - PMU 电源键 input 和 K230 温度传感器支持
 
 `k230_bsp/images/` 下的镜像文件是本机构建产物
+
+
+## 已知问题
+
+- 竖屏状态下滑动,页面底部会出现黑色阻挡
+- 屏幕有时候会出现轻微左右抖动,断电重启之后正常
+- 以上问题被定义为软件bug,会在后续修复此问题
