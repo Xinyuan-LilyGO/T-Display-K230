@@ -9,6 +9,7 @@ extern "C" {
 
 void ui_ethernet_create(lv_obj_t *scr);
 void ui_ethernet_cleanup(void);
+void ui_ethernet_apply_startup(void);
 
 #ifdef __cplusplus
 }

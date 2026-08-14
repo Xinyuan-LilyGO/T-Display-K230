@@ -9140,6 +9140,7 @@ int main(void)
     ui_time_settings_apply_startup();
     ui_hardware_startup();
     ui_cellular_startup();
+    ui_ethernet_apply_startup();
     init_styles();
     load_runtime_display_orientation();
     page_transition_load_pref();
