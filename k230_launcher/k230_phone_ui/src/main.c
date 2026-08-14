@@ -138,6 +138,7 @@
 #include "ui_display_test.h"
 #include "ui_ethernet.h"
 #include "ui_hardware.h"
+#include "ui_halow.h"
 #include "ui_hdmi_test.h"
 #include "ui_i2c_scan.h"
 #include "ui_i2s_test.h"
@@ -480,6 +481,7 @@ static const app_item_t app_items[] = {
     {"Mic FFT", LV_SYMBOL_BARS, 0x22D3EE, PAGE_MIC_FFT},
     {"LoRa", LV_SYMBOL_UPLOAD, 0x7C3AED, PAGE_LORA},
     {"LoRa FLRC", "FLRC", 0xA855F7, PAGE_LORA_FLRC},
+    {"Halow", "Ha", 0x25C281, PAGE_HALOW},
     {"LoRaWAN", "WAN", 0x14B8A6, PAGE_LORAWAN},
     {"NES", "NES", 0xF97316, PAGE_NES},
     {"AI", LV_SYMBOL_BARS, 0xFF6B6B, PAGE_AI},
@@ -581,6 +583,8 @@ static const char *page_name(page_id_t page)
         return "LoRa";
     case PAGE_LORA_FLRC:
         return "LoRa FLRC";
+    case PAGE_HALOW:
+        return "Halow";
     case PAGE_LORAWAN:
         return "LoRaWAN";
     case PAGE_NES:
@@ -7996,6 +8000,7 @@ static void cleanup_page_state(void)
 {
     ui_audio_cleanup();
     ui_lorawan_cleanup();
+    ui_halow_cleanup();
     ui_lora_flrc_cleanup();
     ui_lora_cleanup();
     ui_nes_cleanup();
@@ -8981,6 +8986,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_LORA_FLRC:
         ui_lora_flrc_create(scr);
+        break;
+    case PAGE_HALOW:
+        ui_halow_create(scr);
         break;
     case PAGE_LORAWAN:
         ui_lorawan_create(scr);

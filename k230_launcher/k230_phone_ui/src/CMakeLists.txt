@@ -81,6 +81,7 @@ set(K230_PHONE_UI_SOURCES
     ui_wifi.c
     ui_wifi_iperf.c
     ui_ethernet.c
+    ui_halow.c
     ui_ble.c
     ui_cellular.c
     ui_usb_modem.c
@@ -115,6 +116,7 @@ add_executable(k230_camera_capture camera_capture.c)
 add_executable(k230_lora_flrc_bench lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_lora_flrc_video lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_lora_flrc_tile_stream lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
+add_executable(k230_halow_udp_stream halow_udp_stream.c)
 add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(drm_motion_probe drm_motion_probe.c)
 add_executable(drm_motion_probe_rgb565 drm_motion_probe.c)
@@ -274,8 +276,21 @@ target_link_libraries(k230_lora_flrc_tile_stream PRIVATE
     pthread
 )
 
-install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_pcm_volume drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
+target_include_directories(k230_halow_udp_stream PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+)
+
+target_link_directories(k230_halow_udp_stream PRIVATE
+    ${CMAKE_SYSROOT}/usr/lib
+)
+
+target_link_libraries(k230_halow_udp_stream PRIVATE
+    jpeg
+)
+
+install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_halow_udp_stream k230_pcm_volume drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
 install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/k230_halow_camera_stream.sh
         DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fonts DESTINATION /root/app/k230_phone_ui)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/models/face_detection_320.kmodel)

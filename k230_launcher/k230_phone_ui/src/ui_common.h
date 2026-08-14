@@ -64,6 +64,7 @@ typedef enum {
     PAGE_MIC_FFT,
     PAGE_LORA,
     PAGE_LORA_FLRC,
+    PAGE_HALOW,
     PAGE_LORAWAN,
     PAGE_NES,
     PAGE_SYSTEM,
