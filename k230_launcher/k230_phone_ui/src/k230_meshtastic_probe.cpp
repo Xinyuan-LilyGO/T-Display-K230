@@ -3202,6 +3202,26 @@ static void append_uint32_field(std::vector<uint8_t> *out, uint32_t field,
     append_varint(out, value);
 }
 
+static uint32_t mesh_zigzag32_encode(int32_t value)
+{
+    return ((uint32_t)value << 1U) ^ (uint32_t)(value >> 31);
+}
+
+static int32_t mesh_zigzag32_decode(uint32_t value)
+{
+    return (int32_t)((value >> 1U) ^ (uint32_t)-(int32_t)(value & 1U));
+}
+
+static void append_sint32_field(std::vector<uint8_t> *out, uint32_t field,
+                                int32_t value)
+{
+    if(!out) {
+        return;
+    }
+    append_varint(out, (field << 3U) | 0U);
+    append_varint(out, mesh_zigzag32_encode(value));
+}
+
 static void append_sfixed32_field(std::vector<uint8_t> *out, uint32_t field,
                                   int32_t value)
 {
@@ -4342,18 +4362,27 @@ static bool encode_telemetry_request_proto(bool environment,
 static bool encode_route_discovery_response_proto(const probe_options_t &opts,
                                                   const mesh_header_t &
                                                       rx_header,
+                                                  float rx_snr,
                                                   std::vector<uint8_t> *out)
 {
+    int32_t snr_q4;
+
+    (void)opts;
+    (void)rx_header;
     if(!out) {
         return false;
     }
     out->clear();
-    append_varint(out, (3U << 3U) | 5U);
-    append_fixed32(out, opts.from_node);
-    if(rx_header.relay_node != 0U) {
-        append_varint(out, (3U << 3U) | 5U);
-        append_fixed32(out, rx_header.from);
+    if(!isfinite(rx_snr)) {
+        rx_snr = 0.0f;
     }
+    snr_q4 = (int32_t)roundf(rx_snr * 4.0f);
+    if(snr_q4 < -128) {
+        snr_q4 = -128;
+    } else if(snr_q4 > 127) {
+        snr_q4 = 127;
+    }
+    append_sint32_field(out, 4U, snr_q4);
     return !out->empty();
 }
 
@@ -4384,16 +4413,7 @@ static bool encode_neighbor_info_proto(const probe_options_t &opts,
         append_bytes_field(out, 4U, entry);
         added++;
     }
-    if(added == 0U) {
-        std::vector<uint8_t> dummy;
-
-        append_uint32_field(&dummy, 1U, 0U);
-        append_float_field(&dummy, 2U, 0.0f);
-        append_varint(&dummy, (3U << 3U) | 5U);
-        append_fixed32(&dummy, now);
-        append_uint32_field(&dummy, 4U, opts.nodeinfo_interval_sec);
-        append_bytes_field(out, 4U, dummy);
-    }
+    (void)added;
     return !out->empty();
 }
 
@@ -9128,14 +9148,32 @@ static void route_append_node(std::string *out, uint32_t node)
     *out += part;
 }
 
+static void route_append_snr(std::string *out, int32_t snr_q4)
+{
+    char part[16];
+
+    if(!out) {
+        return;
+    }
+    if(!out->empty()) {
+        *out += ",";
+    }
+    snprintf(part, sizeof(part), "%.1f", (double)snr_q4 / 4.0);
+    *out += part;
+}
+
 static bool decode_route_discovery_proto(const std::vector<uint8_t> &payload,
                                          std::string *summary)
 {
     size_t pos = 0;
     std::string route;
     std::string route_back;
+    std::string snr_towards;
+    std::string snr_back;
     size_t route_count = 0;
     size_t back_count = 0;
+    size_t snr_towards_count = 0;
+    size_t snr_back_count = 0;
 
     while(pos < payload.size()) {
         uint32_t tag;
@@ -9179,6 +9217,46 @@ static bool decode_route_discovery_proto(const std::vector<uint8_t> &payload,
                 }
             }
             pos = end;
+        } else if((field == 2U || field == 4U) && wire == 0U) {
+            uint32_t raw;
+            int32_t snr_q4;
+
+            if(!read_varint(payload.data(), payload.size(), &pos, &raw)) {
+                return false;
+            }
+            snr_q4 = mesh_zigzag32_decode(raw);
+            if(field == 2U) {
+                route_append_snr(&snr_towards, snr_q4);
+                snr_towards_count++;
+            } else {
+                route_append_snr(&snr_back, snr_q4);
+                snr_back_count++;
+            }
+        } else if((field == 2U || field == 4U) && wire == 2U) {
+            uint32_t l;
+            size_t end;
+
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            end = pos + l;
+            while(pos < end) {
+                uint32_t raw;
+                int32_t snr_q4;
+
+                if(!read_varint(payload.data(), end, &pos, &raw)) {
+                    return false;
+                }
+                snr_q4 = mesh_zigzag32_decode(raw);
+                if(field == 2U) {
+                    route_append_snr(&snr_towards, snr_q4);
+                    snr_towards_count++;
+                } else {
+                    route_append_snr(&snr_back, snr_q4);
+                    snr_back_count++;
+                }
+            }
         } else if(wire == 0U) {
             uint64_t ignored = 0;
             if(!read_varint64(payload.data(), payload.size(), &pos,
@@ -9203,8 +9281,10 @@ static bool decode_route_discovery_proto(const std::vector<uint8_t> &payload,
     if(summary) {
         char counts[64];
 
-        snprintf(counts, sizeof(counts), "route_count=%u back_count=%u",
-                 (unsigned)route_count, (unsigned)back_count);
+        snprintf(counts, sizeof(counts),
+                 "route_count=%u back_count=%u snr=%u/%u",
+                 (unsigned)route_count, (unsigned)back_count,
+                 (unsigned)snr_towards_count, (unsigned)snr_back_count);
         *summary = counts;
         if(!route.empty()) {
             *summary += " route=" + route;
@@ -9212,8 +9292,15 @@ static bool decode_route_discovery_proto(const std::vector<uint8_t> &payload,
         if(!route_back.empty()) {
             *summary += " back=" + route_back;
         }
+        if(!snr_towards.empty()) {
+            *summary += " snr=" + snr_towards;
+        }
+        if(!snr_back.empty()) {
+            *summary += " snr_back=" + snr_back;
+        }
     }
-    return route_count > 0U || back_count > 0U;
+    return route_count > 0U || back_count > 0U ||
+           snr_towards_count > 0U || snr_back_count > 0U;
 }
 
 static bool decode_routing_error_proto(const std::vector<uint8_t> &payload,
@@ -10421,6 +10508,7 @@ static bool build_mesh_remote_request_frame(const probe_options_t &opts,
 static bool build_mesh_want_response_frame(const probe_options_t &opts,
                                            const mesh_header_t &rx_header,
                                            const mesh_data_proto_t &request,
+                                           float rx_snr,
                                            const std::string *psk_override,
                                            tx_frame_t *frame)
 {
@@ -10470,6 +10558,7 @@ static bool build_mesh_want_response_frame(const probe_options_t &opts,
         }
     } else if(request.portnum == MESHTASTIC_TRACEROUTE_APP) {
         if(!encode_route_discovery_response_proto(opts, rx_header,
+                                                  rx_snr,
                                                   &payload)) {
             return false;
         }
@@ -10877,7 +10966,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
 
     if(channel_match && data_ok && decoded.want_response && !duplicate &&
        header.to == opts.from_node && header.from != opts.from_node) {
-        if(build_mesh_want_response_frame(opts, header, decoded,
+        if(build_mesh_want_response_frame(opts, header, decoded, snr,
                                           &channel_info.psk,
                                           rebroadcast_frame)) {
             daemon_event("WantResponse queued port=%u request=0x%08x to=0x%08x",
