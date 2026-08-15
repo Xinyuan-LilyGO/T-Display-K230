@@ -114,6 +114,15 @@ static const ui_input_pinyin_entry_t ui_input_pinyin_table[] = {
     { "guo", { "国", "过", "果", NULL } },
 };
 
+static const ui_input_pinyin_entry_t *ui_input_pinyin_find(const char *key);
+static void ui_input_pinyin_clear(ui_input_dialog_state_t *state);
+static void ui_input_pinyin_insert(ui_input_dialog_state_t *state,
+                                   const char *text);
+static void ui_input_pinyin_commit_best(ui_input_dialog_state_t *state);
+static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
+                                            unsigned int index);
+static void ui_input_hardware_sync_pinyin_mode(ui_input_dialog_state_t *state);
+
 static void ui_input_log(const char *fmt, ...)
 {
     FILE *fp = fopen(UI_INPUT_LOG_PATH, "a");
@@ -233,6 +242,7 @@ static void ui_input_inline_show_state(ui_input_dialog_state_t *state)
         ui_input_pinyin_update_candidates(state);
     } else {
         state->hardware_keyboard = 1;
+        ui_input_hardware_sync_pinyin_mode(state);
         ui_extension_keyboard_set_key_cb(ui_input_hardware_key_cb, state);
     }
     lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
@@ -356,6 +366,7 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
 {
     ui_input_dialog_state_t *state =
         (ui_input_dialog_state_t *)user_data;
+    size_t comp_len;
 
     if(!pressed || !state ||
        (!state->inline_mode && state != active_dialog) ||
@@ -365,10 +376,17 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
         return;
     }
 
-    ui_input_log("hardware-key title-textarea code=%d key=0x%08X", code, key);
+    ui_input_hardware_sync_pinyin_mode(state);
+    comp_len = strlen(state->pinyin_comp);
+    ui_input_log("hardware-key title-textarea code=%d key=0x%08X mode=%d comp=%s",
+                 code, key, state->keyboard_mode, state->pinyin_comp);
 
     switch(key) {
     case LV_KEY_ENTER:
+        if(state->keyboard_mode == UI_INPUT_KBD_PINYIN && comp_len > 0U) {
+            ui_input_pinyin_commit_best(state);
+            return;
+        }
         lv_async_call(ui_input_submit_async, state);
         return;
     case LV_KEY_ESC:
@@ -376,14 +394,52 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
         return;
     case LV_KEY_BACKSPACE:
     case LV_KEY_DEL:
-        lv_textarea_delete_char(state->textarea);
+        if(state->keyboard_mode == UI_INPUT_KBD_PINYIN && comp_len > 0U) {
+            state->pinyin_comp[comp_len - 1U] = '\0';
+            ui_input_pinyin_update_candidates(state);
+        } else {
+            lv_textarea_delete_char(state->textarea);
+        }
         app_request_fast_refresh();
         return;
     default:
         break;
     }
 
-    if(key >= 32U && key <= 126U) {
+    if(state->keyboard_mode == UI_INPUT_KBD_PINYIN) {
+        if(key == ' ') {
+            if(comp_len > 0U) {
+                ui_input_pinyin_commit_best(state);
+            } else {
+                lv_textarea_add_char(state->textarea, ' ');
+                app_request_fast_refresh();
+            }
+            return;
+        }
+        if(comp_len > 0U && key >= '1' && key <= '6' &&
+           ui_input_pinyin_commit_candidate(state, (unsigned int)(key - '1'))) {
+            return;
+        }
+        if(key >= 32U && key <= 126U &&
+           isalpha((unsigned char)key)) {
+            if(comp_len + 1U < sizeof(state->pinyin_comp)) {
+                state->pinyin_comp[comp_len] =
+                    (char)tolower((unsigned char)key);
+                state->pinyin_comp[comp_len + 1U] = '\0';
+                ui_input_pinyin_update_candidates(state);
+                app_request_fast_refresh();
+            }
+            return;
+        }
+        if(key >= 32U && key <= 126U) {
+            if(comp_len > 0U) {
+                ui_input_pinyin_commit_best(state);
+            }
+            lv_textarea_add_char(state->textarea, key);
+            app_request_fast_refresh();
+            return;
+        }
+    } else if(key >= 32U && key <= 126U) {
         lv_textarea_add_char(state->textarea, key);
         app_request_fast_refresh();
     }
@@ -455,31 +511,59 @@ static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
 static void ui_input_keyboard_set_mode(ui_input_dialog_state_t *state,
                                        ui_input_keyboard_mode_t mode)
 {
-    if(!state || !state->keyboard) {
+    if(!state) {
         return;
     }
 
     state->keyboard_mode = mode;
-    switch(mode) {
-    case UI_INPUT_KBD_UPPER:
-        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_upper_map);
-        break;
-    case UI_INPUT_KBD_NUM:
-        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_num_map);
-        break;
-    case UI_INPUT_KBD_SYMBOL:
-        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_symbol_map);
-        break;
-    case UI_INPUT_KBD_PINYIN:
-        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_pinyin_map);
-        break;
-    case UI_INPUT_KBD_LOWER:
-    default:
-        lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_lower_map);
-        break;
+    if(mode != UI_INPUT_KBD_PINYIN) {
+        state->pinyin_comp[0] = '\0';
+    }
+    if(state->hardware_keyboard && ui_extension_keyboard_active()) {
+        ui_extension_keyboard_set_pinyin_enabled(mode == UI_INPUT_KBD_PINYIN);
+    }
+    if(state->keyboard) {
+        switch(mode) {
+        case UI_INPUT_KBD_UPPER:
+            lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_upper_map);
+            break;
+        case UI_INPUT_KBD_NUM:
+            lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_num_map);
+            break;
+        case UI_INPUT_KBD_SYMBOL:
+            lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_symbol_map);
+            break;
+        case UI_INPUT_KBD_PINYIN:
+            lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_pinyin_map);
+            break;
+        case UI_INPUT_KBD_LOWER:
+        default:
+            lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_lower_map);
+            break;
+        }
     }
     ui_input_pinyin_update_candidates(state);
     ui_input_align_dialog(state);
+    app_request_fast_refresh();
+}
+
+static void ui_input_hardware_sync_pinyin_mode(ui_input_dialog_state_t *state)
+{
+    ui_input_keyboard_mode_t mode;
+
+    if(!state || !state->hardware_keyboard) {
+        return;
+    }
+    mode = ui_extension_keyboard_pinyin_enabled() ?
+           UI_INPUT_KBD_PINYIN : UI_INPUT_KBD_LOWER;
+    if(state->keyboard_mode == mode) {
+        return;
+    }
+    state->keyboard_mode = mode;
+    if(mode != UI_INPUT_KBD_PINYIN) {
+        state->pinyin_comp[0] = '\0';
+    }
+    ui_input_pinyin_update_candidates(state);
     app_request_fast_refresh();
 }
 
@@ -522,6 +606,33 @@ static void ui_input_pinyin_commit_best(ui_input_dialog_state_t *state)
     } else {
         ui_input_pinyin_insert(state, state->pinyin_comp);
     }
+}
+
+static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
+                                            unsigned int index)
+{
+    const ui_input_pinyin_entry_t *entry;
+    unsigned int count = 0;
+
+    if(!state || !state->pinyin_comp[0]) {
+        return 0;
+    }
+    entry = ui_input_pinyin_find(state->pinyin_comp);
+    if(!entry) {
+        if(index == 0U) {
+            ui_input_pinyin_insert(state, state->pinyin_comp);
+            return 1;
+        }
+        return 0;
+    }
+    while(count < 6U && entry->candidates[count]) {
+        if(count == index) {
+            ui_input_pinyin_insert(state, entry->candidates[count]);
+            return 1;
+        }
+        count++;
+    }
+    return 0;
 }
 
 static void ui_input_keyboard_send_button(ui_input_dialog_state_t *state,
@@ -933,6 +1044,7 @@ void ui_input_dialog_open(const ui_input_dialog_config_t *config)
         ui_input_keyboard_set_mode(state, UI_INPUT_KBD_LOWER);
     } else {
         state->hardware_keyboard = 1;
+        ui_input_hardware_sync_pinyin_mode(state);
         ui_extension_keyboard_set_key_cb(ui_input_hardware_key_cb, state);
         lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
     }
@@ -1026,6 +1138,7 @@ ui_input_inline_t *ui_input_inline_create(lv_obj_t *textarea,
         ui_input_inline_apply_layout(state, 0);
     } else {
         state->hardware_keyboard = 1;
+        ui_input_hardware_sync_pinyin_mode(state);
     }
 
     ui_input_log("inline create soft=%d hw_active=%d",

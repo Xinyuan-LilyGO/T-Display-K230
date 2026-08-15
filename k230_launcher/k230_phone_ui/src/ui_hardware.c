@@ -441,6 +441,7 @@ static int extension_keyboard_requested;
 static int extension_keyboard_active;
 static int extension_keyboard_fail_count;
 static int extension_keyboard_caps;
+static int extension_keyboard_pinyin;
 static int extension_keyboard_repeat_code;
 static uint32_t extension_keyboard_repeat_key;
 static uint64_t extension_keyboard_repeat_next_us;
@@ -3315,6 +3316,15 @@ static void extension_keyboard_enqueue_tca_event(int code, int pressed)
         extension_keyboard_repeat_clear();
         return;
     }
+    if((code == 5 || code == 14) && extension_keyboard_fn_pressed()) {
+        ui_extension_keyboard_toggle_pinyin();
+        if(extension_keyboard_key_cb) {
+            extension_keyboard_key_cb(code, 0, pressed,
+                                      extension_keyboard_key_user_data);
+        }
+        extension_keyboard_repeat_clear();
+        return;
+    }
     if(extension_keyboard_is_modifier_code(code)) {
         if(extension_keyboard_key_cb) {
             extension_keyboard_key_cb(code, 0, pressed,
@@ -3854,10 +3864,12 @@ static void extension_keyboard_disable_runtime(const char *reason, int save_pref
     tca8418_irq_stop_thread();
     keyboard_tca8418_ready = 0;
     extension_keyboard_caps = 0;
+    extension_keyboard_pinyin = 0;
     extension_keyboard_repeat_clear();
     extension_keyboard_queue_clear();
     tca8418_raw_queue_clear();
     xl9555_set_led(0, 0);
+    xl9555_set_led(1, 0);
     ui_input_set_soft_keyboard_enabled(1);
     if(save_pref) {
         ui_prefs_set(PREF_EXTENSION_KEYBOARD, "0");
@@ -3896,10 +3908,12 @@ static int extension_keyboard_enable_runtime(int save_pref)
     extension_keyboard_active = 1;
     extension_keyboard_fail_count = 0;
     extension_keyboard_caps = 0;
+    extension_keyboard_pinyin = 0;
     extension_keyboard_repeat_clear();
     extension_keyboard_queue_clear();
     tca8418_raw_queue_clear();
     xl9555_set_led(0, 0);
+    xl9555_set_led(1, 0);
     ui_input_set_soft_keyboard_enabled(0);
     if(save_pref) {
         ui_prefs_set(PREF_EXTENSION_KEYBOARD, "1");
@@ -4107,6 +4121,27 @@ void ui_extension_keyboard_set_key_cb(ui_extension_keyboard_key_cb_t cb,
 {
     extension_keyboard_key_cb = cb;
     extension_keyboard_key_user_data = user_data;
+}
+
+int ui_extension_keyboard_pinyin_enabled(void)
+{
+    return extension_keyboard_pinyin;
+}
+
+void ui_extension_keyboard_set_pinyin_enabled(int enabled)
+{
+    int next = enabled ? 1 : 0;
+    int rc;
+
+    extension_keyboard_pinyin = next;
+    rc = xl9555_set_led(1, next);
+    fprintf(stderr, "[extension-keyboard] pinyin=%d led_p04_rc=%d\n",
+            next, rc);
+}
+
+void ui_extension_keyboard_toggle_pinyin(void)
+{
+    ui_extension_keyboard_set_pinyin_enabled(!extension_keyboard_pinyin);
 }
 
 static int xl9555_read_regs(uint8_t *input0, uint8_t *output0,

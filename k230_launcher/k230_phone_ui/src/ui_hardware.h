@@ -29,6 +29,9 @@ const char *ui_extension_keyboard_status(void);
 void ui_extension_keyboard_focus_obj(lv_obj_t *obj);
 void ui_extension_keyboard_set_key_cb(ui_extension_keyboard_key_cb_t cb,
                                       void *user_data);
+int ui_extension_keyboard_pinyin_enabled(void);
+void ui_extension_keyboard_set_pinyin_enabled(int enabled);
+void ui_extension_keyboard_toggle_pinyin(void);
 int ui_audio_output_set_external(int external);
 int ui_audio_output_is_external(void);
 int ui_audio_input_route_enter(const char *owner);
