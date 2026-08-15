@@ -94,6 +94,11 @@
 #define OVERRIDE_SLOT_PRESET_HASH -1
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
+static bool meshtastic_node_is_broadcast(uint32_t node)
+{
+    return node == MESHTASTIC_NODENUM_BROADCAST;
+}
+
 static const uint32_t lr2021_16e8_rf_switch_dio_pins[] = {
     RADIOLIB_LR2021_DIO6, RADIOLIB_LR2021_DIO7,
     RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC,
@@ -6189,7 +6194,7 @@ static bool build_mesh_frame(const probe_options_t &opts,
     header.flags = (opts.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
                    ((opts.hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
                     MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
-    if(opts.want_ack) {
+    if(opts.want_ack && !meshtastic_node_is_broadcast(header.to)) {
         header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
     }
     channel_name = effective_mesh_channel_name(opts);
@@ -6261,7 +6266,7 @@ static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
     header.flags = (hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
                    ((hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
                     MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
-    if(tx.want_ack) {
+    if(tx.want_ack && !meshtastic_node_is_broadcast(header.to)) {
         header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
     }
     channel_name = effective_mesh_channel_name(opts);
@@ -8101,9 +8106,12 @@ int main(int argc, char **argv)
     }
     default_node_name(&opts.node_name);
     default_from_node(&opts);
-    if(opts.mesh_mode && !opts.want_ack_set &&
-       opts.to_node != MESHTASTIC_NODENUM_BROADCAST) {
-        opts.want_ack = true;
+    if(opts.mesh_mode) {
+        if(meshtastic_node_is_broadcast(opts.to_node)) {
+            opts.want_ack = false;
+        } else if(!opts.want_ack_set) {
+            opts.want_ack = true;
+        }
     }
     if(!apply_meshtastic_profile(&opts)) {
         return 2;

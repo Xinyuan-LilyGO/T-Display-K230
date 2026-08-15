@@ -92,7 +92,7 @@ static char mesh_node_name[48] = "k230-t-display";
 static char mesh_from_node[24] = "0";
 static char mesh_to_node[24] = "0xffffffff";
 static char mesh_hop_limit[8] = "3";
-static int mesh_ack_enabled = 1;
+static int mesh_ack_enabled = 0;
 static int mesh_rebroadcast_enabled = 0;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
@@ -829,7 +829,17 @@ static int mesh_to_text_is_broadcast(const char *text)
 {
     return !text || !text[0] || strcasecmp(text, "broadcast") == 0 ||
            strcasecmp(text, "default") == 0 || strcmp(text, "-") == 0 ||
-           strcasecmp(text, "0xffffffff") == 0;
+           strcasecmp(text, "0xffffffff") == 0 ||
+           strcasecmp(text, "0x000000ff") == 0 ||
+           strcasecmp(text, "0xff") == 0;
+}
+
+static void mesh_normalize_target_ack(void)
+{
+    if(mesh_to_text_is_broadcast(mesh_to_node)) {
+        snprintf(mesh_to_node, sizeof(mesh_to_node), "0xffffffff");
+        mesh_ack_enabled = 0;
+    }
 }
 
 static void mesh_update_profile_label(void)
@@ -872,7 +882,7 @@ static void mesh_load_profile_prefs(void)
                  sizeof(mesh_hop_limit), "3");
     {
         char ack[8];
-        ui_prefs_get(MESHTASTIC_PREF_ACK, ack, sizeof(ack), "1");
+        ui_prefs_get(MESHTASTIC_PREF_ACK, ack, sizeof(ack), "0");
         mesh_ack_enabled = strcmp(ack, "0") != 0;
     }
     {
@@ -884,6 +894,7 @@ static void mesh_load_profile_prefs(void)
     mesh_normalize_power();
     mesh_normalize_hop();
     mesh_normalize_slot();
+    mesh_normalize_target_ack();
 }
 
 static void mesh_save_profile_prefs(void)
@@ -1788,6 +1799,8 @@ static void mesh_start_event_cb(lv_event_t *event)
     mesh_safe_or_default(node_arg, sizeof(node_arg), mesh_node_name,
                          "k230-t-display");
     mesh_safe_or_default(from_arg, sizeof(from_arg), mesh_from_node, "0");
+    mesh_normalize_target_ack();
+    mesh_save_profile_prefs();
     mesh_safe_or_default(to_arg, sizeof(to_arg), mesh_to_node, "0xffffffff");
     mesh_normalize_hop();
     mesh_safe_or_default(hop_arg, sizeof(hop_arg), mesh_hop_limit, "3");
@@ -2092,6 +2105,7 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
         mesh_safe_or_default(tmp, sizeof(tmp), text, "broadcast");
         if(mesh_to_text_is_broadcast(tmp)) {
             snprintf(mesh_to_node, sizeof(mesh_to_node), "0xffffffff");
+            mesh_ack_enabled = 0;
             break;
         }
         if(mesh_parse_u32_text(tmp, &value) != 0) {
@@ -2114,6 +2128,7 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
         return;
     }
 
+    mesh_normalize_target_ack();
     mesh_save_profile_prefs();
     mesh_settings_refresh();
     mesh_append_log("settings saved: %s=%s", mesh_setting_name(field),
@@ -2255,6 +2270,7 @@ static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
         break;
     case MESH_FIELD_ACK:
         mesh_ack_enabled = strcmp(value, "0") != 0;
+        mesh_normalize_target_ack();
         break;
     case MESH_FIELD_REBROADCAST:
         mesh_rebroadcast_enabled = strcmp(value, "0") != 0;
