@@ -15,6 +15,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -22,6 +23,8 @@
 #define MESHTASTIC_PROBE_PATH "/root/app/k230_phone_ui/k230_meshtastic_probe"
 #define MESHTASTIC_SOCKET_PATH "/tmp/k230_meshtastic.sock"
 #define MESHTASTIC_DAEMON_LOG "/tmp/k230_meshtastic_daemon_ui.log"
+#define MESHTASTIC_CHANNEL_DIR "/root/meshtastic"
+#define MESHTASTIC_CHANNEL_URL_FILE MESHTASTIC_CHANNEL_DIR "/channel_url.txt"
 #define MESHTASTIC_UI_LOG_MAX 4096
 #define MESHTASTIC_UI_NODE_SELECT_MAX 24
 #define MESHTASTIC_UI_NODE_LINE_MAX 768
@@ -75,9 +78,13 @@ static int mesh_rebroadcast_enabled = 0;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_choice_overlay;
+static lv_obj_t *mesh_channel_overlay;
+static lv_obj_t *mesh_channel_url_label;
+static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_pairing_overlay;
 static lv_obj_t *mesh_settings_value_labels[11];
 static char mesh_last_pairing_code[16];
+static char mesh_channel_url_text[1024];
 
 typedef enum {
     MESH_FIELD_REGION = 0,
@@ -2149,6 +2156,239 @@ static void mesh_close_nodes_page(void)
     mesh_nodes_overlay = NULL;
 }
 
+static void mesh_close_channel_page(void)
+{
+    if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
+        lv_obj_delete(mesh_channel_overlay);
+    }
+    mesh_channel_overlay = NULL;
+    mesh_channel_url_label = NULL;
+    mesh_channel_status_label = NULL;
+}
+
+static void mesh_channel_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_close_channel_page();
+}
+
+static int mesh_channel_url_fetch(char *out, size_t out_len,
+                                  char *status, size_t status_len)
+{
+    char response[1280];
+    const char *prefix = "OK channel_url=";
+    const char *url;
+
+    if(out && out_len > 0U) {
+        out[0] = '\0';
+    }
+    if(status && status_len > 0U) {
+        status[0] = '\0';
+    }
+    if(mesh_ipc_command("CHANNEL_URL\n", response, sizeof(response)) != 0) {
+        ui_trim_text(response);
+        if(status && status_len > 0U) {
+            snprintf(status, status_len, "%s",
+                     response[0] ? response : "Channel URL unavailable");
+        }
+        return -1;
+    }
+    ui_trim_text(response);
+    if(strncmp(response, prefix, strlen(prefix)) != 0) {
+        if(status && status_len > 0U) {
+            snprintf(status, status_len, "%s", response);
+        }
+        return -1;
+    }
+    url = response + strlen(prefix);
+    if(!url[0]) {
+        if(status && status_len > 0U) {
+            snprintf(status, status_len, "%s", "Empty channel URL");
+        }
+        return -1;
+    }
+    snprintf(out, out_len, "%s", url);
+    if(status && status_len > 0U) {
+        snprintf(status, status_len, "%s", "Channel URL ready");
+    }
+    return 0;
+}
+
+static void mesh_channel_save_event_cb(lv_event_t *event)
+{
+    FILE *fp;
+
+    (void)event;
+    if(!mesh_channel_url_text[0]) {
+        if(mesh_channel_status_label &&
+           lv_obj_is_valid(mesh_channel_status_label)) {
+            lv_label_set_text(mesh_channel_status_label,
+                              ui_tr("No channel URL to save"));
+            lv_obj_set_style_text_color(mesh_channel_status_label,
+                                        lv_color_hex(0xF5A524), 0);
+        }
+        return;
+    }
+    if(mkdir(MESHTASTIC_CHANNEL_DIR, 0755) != 0 && errno != EEXIST) {
+        if(mesh_channel_status_label &&
+           lv_obj_is_valid(mesh_channel_status_label)) {
+            lv_label_set_text(mesh_channel_status_label,
+                              ui_tr("Save failed"));
+            lv_obj_set_style_text_color(mesh_channel_status_label,
+                                        lv_color_hex(0xEF4D5A), 0);
+        }
+        mesh_append_log("channel URL mkdir failed: %s", strerror(errno));
+        return;
+    }
+    fp = fopen(MESHTASTIC_CHANNEL_URL_FILE, "w");
+    if(!fp) {
+        if(mesh_channel_status_label &&
+           lv_obj_is_valid(mesh_channel_status_label)) {
+            lv_label_set_text(mesh_channel_status_label,
+                              ui_tr("Save failed"));
+            lv_obj_set_style_text_color(mesh_channel_status_label,
+                                        lv_color_hex(0xEF4D5A), 0);
+        }
+        mesh_append_log("channel URL save failed: %s", strerror(errno));
+        return;
+    }
+    fprintf(fp, "%s\n", mesh_channel_url_text);
+    fclose(fp);
+    if(mesh_channel_status_label && lv_obj_is_valid(mesh_channel_status_label)) {
+        lv_label_set_text(mesh_channel_status_label,
+                          ui_tr("Saved to /root/meshtastic/channel_url.txt"));
+        lv_obj_set_style_text_color(mesh_channel_status_label,
+                                    lv_color_hex(0x25C281), 0);
+    }
+    mesh_append_log("channel URL saved: %s", MESHTASTIC_CHANNEL_URL_FILE);
+}
+
+static void mesh_channel_refresh_event_cb(lv_event_t *event)
+{
+    char status[160];
+    int ok;
+
+    (void)event;
+    mesh_channel_url_text[0] = '\0';
+    ok = mesh_channel_url_fetch(mesh_channel_url_text,
+                                sizeof(mesh_channel_url_text),
+                                status, sizeof(status)) == 0;
+    if(mesh_channel_url_label && lv_obj_is_valid(mesh_channel_url_label)) {
+        lv_label_set_text(mesh_channel_url_label,
+                          mesh_channel_url_text[0] ? mesh_channel_url_text :
+                          ui_tr("Channel URL unavailable"));
+        lv_obj_set_style_text_color(mesh_channel_url_label,
+                                    lv_color_hex(ok ? 0xD7DEE8 : 0xF5A524),
+                                    0);
+    }
+    if(mesh_channel_status_label &&
+       lv_obj_is_valid(mesh_channel_status_label)) {
+        lv_label_set_text(mesh_channel_status_label,
+                          status[0] ? ui_tr(status) : ui_tr("Ready"));
+        lv_obj_set_style_text_color(mesh_channel_status_label,
+                                    lv_color_hex(ok ? 0x25C281 : 0xF5A524),
+                                    0);
+    }
+}
+
+static void mesh_channel_event_cb(lv_event_t *event)
+{
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *card;
+    lv_obj_t *label;
+    lv_obj_t *btn;
+    char status[160];
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int card_h = ui_is_landscape() ? 210 : 280;
+    int button_w;
+    int y;
+
+    (void)event;
+    if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
+        lv_obj_delete(mesh_channel_overlay);
+    }
+
+    mesh_channel_url_text[0] = '\0';
+    (void)mesh_channel_url_fetch(mesh_channel_url_text,
+                                 sizeof(mesh_channel_url_text),
+                                 status, sizeof(status));
+
+    mesh_channel_overlay = lv_obj_create(lv_screen_active());
+    ui_set_fullscreen(mesh_channel_overlay);
+    lv_obj_set_style_bg_color(mesh_channel_overlay, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_channel_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mesh_channel_overlay, 0, 0);
+    lv_obj_set_style_border_width(mesh_channel_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_channel_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_channel_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(mesh_channel_overlay);
+
+    panel = ui_scroll_panel(mesh_channel_overlay, 0, 0, screen_w, screen_h);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    title = ui_label(panel, "Channel share", &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, margin, 22);
+    lv_obj_set_width(title, content_w - 120);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    subtitle = ui_label(panel, "Meshtastic official channel URL",
+                        &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(subtitle, margin, 56);
+    lv_obj_set_width(subtitle, content_w - 120);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96, "Close",
+                            0x374151);
+    lv_obj_add_event_cb(btn, mesh_channel_close_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    card = ui_panel(panel, margin, 104, content_w, card_h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x243044), 0);
+    lv_obj_set_style_pad_all(card, 16, 0);
+
+    mesh_channel_url_label =
+        ui_label(card,
+                 mesh_channel_url_text[0] ? mesh_channel_url_text :
+                 "Channel URL unavailable",
+                 &lv_font_montserrat_16,
+                 mesh_channel_url_text[0] ? 0xD7DEE8 : 0xF5A524);
+    lv_obj_set_width(mesh_channel_url_label, content_w - 32);
+    lv_label_set_long_mode(mesh_channel_url_label, LV_LABEL_LONG_WRAP);
+
+    y = 104 + card_h + 22;
+    mesh_channel_status_label = ui_label(panel, status[0] ? status : "Ready",
+                                         &lv_font_montserrat_16,
+                                         mesh_channel_url_text[0] ?
+                                         0x25C281 : 0xF5A524);
+    lv_obj_set_pos(mesh_channel_status_label, margin, y);
+    lv_obj_set_width(mesh_channel_status_label, content_w);
+    lv_label_set_long_mode(mesh_channel_status_label, LV_LABEL_LONG_DOT);
+
+    y += 42;
+    button_w = (content_w - 16) / 2;
+    if(button_w < 128) {
+        button_w = 128;
+    }
+    btn = ui_command_button(panel, margin, y, button_w, "Save URL",
+                            0x25C281);
+    lv_obj_add_event_cb(btn, mesh_channel_save_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    btn = ui_command_button(panel, margin + button_w + 16, y, button_w,
+                            "Refresh", 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_channel_refresh_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+}
+
 static void mesh_settings_close_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -2564,7 +2804,7 @@ static void mesh_profile_event_cb(lv_event_t *event)
                        0xF2F5F8);
     lv_obj_set_pos(section, margin, y);
     y += 34;
-    button_w = (content_w - button_gap * 3) / 4;
+    button_w = (content_w - button_gap * 4) / 5;
     if(button_w < 86) {
         button_w = 86;
     }
@@ -2579,6 +2819,9 @@ static void mesh_profile_event_cb(lv_event_t *event)
     btn = ui_command_button(panel, margin + (button_w + button_gap) * 3, y,
                             button_w, "Nodes", 0x25C281);
     lv_obj_add_event_cb(btn, mesh_nodes_event_cb, LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(panel, margin + (button_w + button_gap) * 4, y,
+                            button_w, "Share", 0xA78BFA);
+    lv_obj_add_event_cb(btn, mesh_channel_event_cb, LV_EVENT_CLICKED, NULL);
 
     y += 78;
     status = ui_label(panel, mesh_status_text, &lv_font_montserrat_14,
@@ -2928,6 +3171,12 @@ void ui_meshtastic_cleanup(void)
         lv_obj_delete(mesh_nodes_overlay);
     }
     mesh_nodes_overlay = NULL;
+    if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
+        lv_obj_delete(mesh_channel_overlay);
+    }
+    mesh_channel_overlay = NULL;
+    mesh_channel_url_label = NULL;
+    mesh_channel_status_label = NULL;
 }
 
 int ui_meshtastic_handle_back(void)
@@ -2938,6 +3187,10 @@ int ui_meshtastic_handle_back(void)
     }
     if(mesh_choice_overlay && lv_obj_is_valid(mesh_choice_overlay)) {
         mesh_choice_close();
+        return 1;
+    }
+    if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
+        mesh_close_channel_page();
         return 1;
     }
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
