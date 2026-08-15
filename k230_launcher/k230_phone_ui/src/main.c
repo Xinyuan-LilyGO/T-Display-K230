@@ -3774,9 +3774,9 @@ static lv_obj_t *chip(lv_obj_t *parent, const char *text, uint32_t color)
 
 static void create_status_bar(lv_obj_t *scr)
 {
-    const int status_chip_w = 64;
-    const int status_chip_h = 30;
-    const int status_chip_gap = 10;
+    const int status_chip_w = 52;
+    const int status_chip_h = 24;
+    const int status_chip_gap = 6;
     const int status_chip_count = 4;
     const int status_group_w =
         status_chip_w * status_chip_count + status_chip_gap * (status_chip_count - 1);
@@ -3791,7 +3791,7 @@ static void create_status_bar(lv_obj_t *scr)
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
     time_label = label(bar, "--:--", &lv_font_montserrat_20, 0xF2F5F8);
-    lv_obj_align(time_label, LV_ALIGN_LEFT_MID, 24, 0);
+    lv_obj_align(time_label, LV_ALIGN_CENTER, 0, 0);
 
     lv_obj_t *status_group = lv_obj_create(bar);
     lv_obj_set_size(status_group, status_group_w, status_chip_h);
@@ -3811,7 +3811,7 @@ static void create_status_bar(lv_obj_t *scr)
     lv_obj_set_style_pad_all(ble, 0, 0);
     lv_obj_clear_flag(ble, LV_OBJ_FLAG_SCROLLABLE);
     status_ble_label = label(ble, "BLE", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 10, 0);
+    lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 6, 0);
     status_ble_led = lv_obj_create(ble);
     lv_obj_set_size(status_ble_led, 9, 9);
     lv_obj_set_style_radius(status_ble_led, LV_RADIUS_CIRCLE, 0);
