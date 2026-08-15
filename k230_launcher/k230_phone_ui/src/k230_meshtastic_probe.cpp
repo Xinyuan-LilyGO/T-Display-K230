@@ -890,6 +890,9 @@ typedef struct {
     char neighbor_summary[160] = {0};
     bool has_route_info = false;
     char route_summary[160] = {0};
+    bool is_favorite = false;
+    bool is_ignored = false;
+    bool is_muted = false;
 } mesh_node_entry_t;
 
 typedef struct {
@@ -1731,6 +1734,19 @@ static void mesh_nodedb_mark_dirty(void)
     }
 }
 
+static mesh_node_entry_t *mesh_node_find(uint32_t node)
+{
+    if(node == 0U) {
+        return nullptr;
+    }
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        if(mesh_nodes[i].node == node) {
+            return &mesh_nodes[i];
+        }
+    }
+    return nullptr;
+}
+
 static mesh_node_entry_t *mesh_node_get_or_create(uint32_t node)
 {
     size_t slot = MESHTASTIC_NODE_CACHE_SIZE;
@@ -1758,6 +1774,80 @@ static mesh_node_entry_t *mesh_node_get_or_create(uint32_t node)
         mesh_nodes[slot].hw_model = -1;
     }
     return &mesh_nodes[slot];
+}
+
+static bool mesh_node_remove_by_num(uint32_t node)
+{
+    mesh_node_entry_t *found;
+    size_t i;
+
+    if(node == 0U) {
+        return false;
+    }
+    found = mesh_node_find(node);
+    if(!found) {
+        return false;
+    }
+    i = (size_t)(found - mesh_nodes);
+    for(size_t j = i + 1U; j < mesh_node_count; j++) {
+        mesh_nodes[j - 1U] = mesh_nodes[j];
+    }
+    if(mesh_node_count > 0U) {
+        mesh_node_count--;
+        memset(&mesh_nodes[mesh_node_count], 0,
+               sizeof(mesh_nodes[mesh_node_count]));
+    }
+    mesh_nodedb_mark_dirty();
+    return true;
+}
+
+static bool mesh_node_set_local_flag(uint32_t node, bool favorite_valid,
+                                     bool favorite, bool ignored_valid,
+                                     bool ignored, bool toggle_muted)
+{
+    mesh_node_entry_t *entry = mesh_node_get_or_create(node);
+    bool changed = false;
+
+    if(!entry) {
+        return false;
+    }
+    mesh_node_touch_timestamp(entry);
+    if(favorite_valid && entry->is_favorite != favorite) {
+        entry->is_favorite = favorite;
+        changed = true;
+    }
+    if(ignored_valid && entry->is_ignored != ignored) {
+        entry->is_ignored = ignored;
+        changed = true;
+    }
+    if(toggle_muted) {
+        entry->is_muted = !entry->is_muted;
+        changed = true;
+    }
+    if(changed) {
+        mesh_nodedb_mark_dirty();
+    }
+    return true;
+}
+
+static void mesh_nodedb_reset_preserve_favorites(void)
+{
+    size_t out = 0U;
+
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        if(!mesh_nodes[i].is_favorite) {
+            continue;
+        }
+        if(out != i) {
+            mesh_nodes[out] = mesh_nodes[i];
+        }
+        out++;
+    }
+    for(size_t i = out; i < mesh_node_count; i++) {
+        memset(&mesh_nodes[i], 0, sizeof(mesh_nodes[i]));
+    }
+    mesh_node_count = out;
+    mesh_nodedb_mark_dirty();
 }
 
 static void mesh_node_seen(uint32_t node, float rssi, float snr)
@@ -2098,7 +2188,7 @@ static bool mesh_nodedb_save(void)
         return false;
     }
 
-    fprintf(fp, "# k230 meshtastic nodedb v1\n");
+    fprintf(fp, "# k230 meshtastic nodedb v3\n");
     for(size_t i = 0; i < mesh_node_count; i++) {
         const mesh_node_entry_t &node = mesh_nodes[i];
         std::string long_hex;
@@ -2118,11 +2208,11 @@ static bool mesh_nodedb_save(void)
         route_hex = mesh_hex_encode_text(node.route_summary,
                                          sizeof(node.route_summary));
         fprintf(fp,
-                "v2\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
+                "v3\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
                 "%u\t%u\t%u\t%u\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t"
                 "%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t"
                 "%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%u\t"
-                "%u\t%u\t%u\t%u\t%u\t%s\t%u\t%s\n",
+                "%u\t%u\t%u\t%u\t%u\t%s\t%u\t%s\t%u\t%u\t%u\n",
                 node.node, mesh_node_last_seen_epoch(node),
                 node.rssi_dbm, node.snr, node.rx_count,
                 long_hex.c_str(), short_hex.c_str(), node.hw_model,
@@ -2155,7 +2245,10 @@ static bool mesh_nodedb_save(void)
                 node.neighbor_node_id, node.neighbor_last_sent_by_id,
                 node.neighbor_broadcast_interval_secs,
                 node.neighbor_count, neighbor_hex.c_str(),
-                node.has_route_info ? 1U : 0U, route_hex.c_str());
+                node.has_route_info ? 1U : 0U, route_hex.c_str(),
+                node.is_favorite ? 1U : 0U,
+                node.is_ignored ? 1U : 0U,
+                node.is_muted ? 1U : 0U);
     }
     if(fclose(fp) != 0) {
         unlink(K230_MESH_NODEDB_TMP_FILE);
@@ -2224,7 +2317,8 @@ static bool mesh_nodedb_load(void)
         }
         mesh_split_tsv(line, &fields);
         if(fields.size() < 49U ||
-           (strcmp(fields[0], "v1") != 0 && strcmp(fields[0], "v2") != 0)) {
+           (strcmp(fields[0], "v1") != 0 && strcmp(fields[0], "v2") != 0 &&
+            strcmp(fields[0], "v3") != 0)) {
             skipped++;
             continue;
         }
@@ -2330,7 +2424,8 @@ static bool mesh_nodedb_load(void)
         } else {
             ok = false;
         }
-        if(ok && strcmp(fields[0], "v2") == 0) {
+        if(ok && (strcmp(fields[0], "v2") == 0 ||
+                  strcmp(fields[0], "v3") == 0)) {
             NODEDB_GET_BOOL(tmp.has_route_info);
             if(ok && idx < fields.size()) {
                 mesh_hex_decode_text(fields[idx++], tmp.route_summary,
@@ -2338,6 +2433,11 @@ static bool mesh_nodedb_load(void)
             } else {
                 ok = false;
             }
+        }
+        if(ok && strcmp(fields[0], "v3") == 0) {
+            NODEDB_GET_BOOL(tmp.is_favorite);
+            NODEDB_GET_BOOL(tmp.is_ignored);
+            NODEDB_GET_BOOL(tmp.is_muted);
         }
 
 #undef NODEDB_GET_U32
@@ -5032,6 +5132,15 @@ static bool encode_phoneapi_cached_node_info(const mesh_node_entry_t &node,
         append_bytes_field(out, 6U, metrics);
     }
     append_uint32_field(out, 9U, 0U);
+    if(node.is_favorite) {
+        append_bool_field(out, 10U, true);
+    }
+    if(node.is_ignored) {
+        append_bool_field(out, 11U, true);
+    }
+    if(node.is_muted) {
+        append_bool_field(out, 13U, true);
+    }
     return true;
 }
 
@@ -5150,6 +5259,19 @@ typedef struct {
     std::string set_canned_message_module_messages;
     bool has_set_ringtone_message = false;
     std::string set_ringtone_message;
+    bool has_remove_by_nodenum = false;
+    uint32_t remove_by_nodenum = 0;
+    bool has_set_favorite_node = false;
+    uint32_t set_favorite_node = 0;
+    bool has_remove_favorite_node = false;
+    uint32_t remove_favorite_node = 0;
+    bool has_set_ignored_node = false;
+    uint32_t set_ignored_node = 0;
+    bool has_remove_ignored_node = false;
+    uint32_t remove_ignored_node = 0;
+    bool has_toggle_muted_node = false;
+    uint32_t toggle_muted_node = 0;
+    bool nodedb_reset = false;
 } phoneapi_admin_request_t;
 
 static bool phoneapi_proto_skip(const uint8_t *data, size_t len, size_t *pos,
@@ -5366,6 +5488,48 @@ static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
                                              pos, l);
             pos += l;
             out->has_set_ringtone_message = true;
+        } else if(field == 38U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->remove_by_nodenum)) {
+                return false;
+            }
+            out->has_remove_by_nodenum = true;
+        } else if(field == 39U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->set_favorite_node)) {
+                return false;
+            }
+            out->has_set_favorite_node = true;
+        } else if(field == 40U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->remove_favorite_node)) {
+                return false;
+            }
+            out->has_remove_favorite_node = true;
+        } else if(field == 47U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->set_ignored_node)) {
+                return false;
+            }
+            out->has_set_ignored_node = true;
+        } else if(field == 48U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->remove_ignored_node)) {
+                return false;
+            }
+            out->has_remove_ignored_node = true;
+        } else if(field == 49U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->toggle_muted_node)) {
+                return false;
+            }
+            out->has_toggle_muted_node = true;
+        } else if(field == 100U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->nodedb_reset = value != 0U;
         } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
                                        wire)) {
             return false;
@@ -7117,6 +7281,91 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
                      ok ? "yes" : "no");
         ok_all = ok_all && ok;
         handled = true;
+    }
+    if(admin.has_remove_by_nodenum) {
+        bool valid = admin.remove_by_nodenum != 0U;
+        bool removed = valid &&
+            mesh_node_remove_by_num(admin.remove_by_nodenum);
+
+        daemon_event("PhoneAPI local admin remove_node id=0x%08x node=0x%08x removed=%s valid=%s",
+                     tx.packet_id, admin.remove_by_nodenum,
+                     removed ? "yes" : "no", valid ? "yes" : "no");
+        ok_all = ok_all && valid;
+        handled = true;
+    }
+    if(admin.has_set_favorite_node) {
+        bool ok = mesh_node_set_local_flag(admin.set_favorite_node,
+                                           true, true, false, false,
+                                           false);
+
+        daemon_event("PhoneAPI local admin favorite_node id=0x%08x node=0x%08x ok=%s",
+                     tx.packet_id, admin.set_favorite_node,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.has_remove_favorite_node) {
+        bool ok = mesh_node_set_local_flag(admin.remove_favorite_node,
+                                           true, false, false, false,
+                                           false);
+
+        daemon_event("PhoneAPI local admin unfavorite_node id=0x%08x node=0x%08x ok=%s",
+                     tx.packet_id, admin.remove_favorite_node,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.has_set_ignored_node) {
+        bool ok = mesh_node_set_local_flag(admin.set_ignored_node,
+                                           false, false, true, true,
+                                           false);
+
+        daemon_event("PhoneAPI local admin ignore_node id=0x%08x node=0x%08x ok=%s",
+                     tx.packet_id, admin.set_ignored_node,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.has_remove_ignored_node) {
+        bool ok = mesh_node_set_local_flag(admin.remove_ignored_node,
+                                           false, false, true, false,
+                                           false);
+
+        daemon_event("PhoneAPI local admin unignore_node id=0x%08x node=0x%08x ok=%s",
+                     tx.packet_id, admin.remove_ignored_node,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.has_toggle_muted_node) {
+        bool ok = mesh_node_set_local_flag(admin.toggle_muted_node,
+                                           false, false, false, false,
+                                           true);
+
+        daemon_event("PhoneAPI local admin toggle_muted_node id=0x%08x node=0x%08x ok=%s",
+                     tx.packet_id, admin.toggle_muted_node,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.nodedb_reset) {
+        size_t before = mesh_node_count;
+
+        mesh_nodedb_reset_preserve_favorites();
+        daemon_event("PhoneAPI local admin nodedb_reset id=0x%08x before=%u after=%u",
+                     tx.packet_id, (unsigned)before,
+                     (unsigned)mesh_node_count);
+        handled = true;
+    }
+    if(admin.has_remove_by_nodenum || admin.has_set_favorite_node ||
+       admin.has_remove_favorite_node || admin.has_set_ignored_node ||
+       admin.has_remove_ignored_node || admin.has_toggle_muted_node ||
+       admin.nodedb_reset) {
+        bool save_ok = mesh_nodedb_save();
+
+        daemon_event("PhoneAPI local admin nodedb_write id=0x%08x ok=%s",
+                     tx.packet_id, save_ok ? "yes" : "no");
+        ok_all = ok_all && save_ok;
     }
     if(admin.has_set_owner || admin.has_set_channel || admin.has_set_config ||
        admin.has_set_module_config) {
