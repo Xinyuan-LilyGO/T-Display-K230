@@ -26,7 +26,7 @@ LV_LOG_PRINTF 1
 
 # Enable sysmon to track performance
 LV_USE_SYSMON              1
-LV_USE_PERF_MONITOR        1
+LV_USE_PERF_MONITOR        0
 LV_SYSMON_PROC_IDLE_AVAILABLE 1
 
 # Vector graphics

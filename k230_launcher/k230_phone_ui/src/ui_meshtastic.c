@@ -21,6 +21,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <lvgl/src/misc/cache/instance/lv_image_cache.h>
+
 #include "qrcodegen.h"
 
 #define MESHTASTIC_PROBE_PATH "/root/app/k230_phone_ui/k230_meshtastic_probe"
@@ -46,8 +48,14 @@
 #define MESHTASTIC_PREF_HOP "meshtastic.hop"
 #define MESHTASTIC_PREF_ACK "meshtastic.ack"
 #define MESHTASTIC_PREF_REBROADCAST "meshtastic.rebroadcast"
+#define MESHTASTIC_PREF_AUTOSTART "meshtastic.autostart"
 #define MESHTASTIC_DEFAULT_UI_REGION "EU_868"
 #define MESHTASTIC_DEFAULT_UI_PRESET "LONG_FAST"
+#define MESHTASTIC_QR_PREVIEW_FILE "/tmp/k230_mesh_qr_preview.rgb565"
+#define MESHTASTIC_QR_PREVIEW_TMP MESHTASTIC_QR_PREVIEW_FILE ".tmp"
+#define MESHTASTIC_QR_PREVIEW_W 384
+#define MESHTASTIC_QR_PREVIEW_H 216
+#define MESHTASTIC_QR_PREVIEW_BYTES (MESHTASTIC_QR_PREVIEW_W * MESHTASTIC_QR_PREVIEW_H * 2)
 
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
@@ -61,6 +69,7 @@ static lv_obj_t *mesh_input_panel;
 static lv_obj_t *mesh_textarea;
 static ui_input_inline_t *mesh_inline_input;
 static lv_timer_t *mesh_timer;
+static lv_timer_t *mesh_background_timer;
 static char mesh_status_text[512] = "Not running";
 static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
 static char mesh_last_chat_text[3072];
@@ -97,6 +106,16 @@ static char mesh_channel_url_text[1024];
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
 static lv_timer_t *mesh_channel_scan_timer;
+static lv_obj_t *mesh_channel_scan_overlay;
+static lv_obj_t *mesh_channel_scan_preview_image;
+static lv_obj_t *mesh_channel_scan_preview_placeholder;
+static lv_obj_t *mesh_channel_scan_preview_status_label;
+static int mesh_channel_scan_preview_panel_w;
+static int mesh_channel_scan_preview_panel_h;
+static uint8_t *mesh_channel_scan_preview_pixels;
+static lv_image_dsc_t mesh_channel_scan_preview_dsc;
+static lv_obj_t *mesh_notification_toast;
+static lv_timer_t *mesh_notification_timer;
 static pthread_mutex_t mesh_channel_scan_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t mesh_channel_scan_thread;
 static int mesh_channel_scan_running;
@@ -862,6 +881,19 @@ static void mesh_save_profile_prefs(void)
                  mesh_rebroadcast_enabled ? "1" : "0");
 }
 
+int ui_meshtastic_autostart_enabled(void)
+{
+    char value[8];
+
+    ui_prefs_get(MESHTASTIC_PREF_AUTOSTART, value, sizeof(value), "1");
+    return strcmp(value, "0") != 0;
+}
+
+void ui_meshtastic_set_autostart_enabled(int enabled)
+{
+    ui_prefs_set(MESHTASTIC_PREF_AUTOSTART, enabled ? "1" : "0");
+}
+
 static int mesh_status_value_truthy(const char *value)
 {
     return value && (strcmp(value, "1") == 0 ||
@@ -1341,18 +1373,141 @@ static int mesh_chat_has_new_rx(const char *old_text, const char *new_text)
     return 0;
 }
 
-static void mesh_refresh_chat(void)
+static void mesh_chat_latest_new_rx(const char *old_text, const char *new_text,
+                                    char *out, size_t out_len)
+{
+    char copy[3072];
+    char *save = NULL;
+    char *line;
+
+    if(out && out_len > 0U) {
+        out[0] = '\0';
+    }
+    if(!old_text || !old_text[0] || !new_text || !new_text[0] ||
+       !out || out_len == 0U) {
+        return;
+    }
+
+    snprintf(copy, sizeof(copy), "%s", new_text);
+    line = strtok_r(copy, "\n", &save);
+    while(line) {
+        ui_trim_text(line);
+        if(strncmp(line, "RX ", 3) == 0 &&
+           !mesh_chat_line_exists(old_text, line)) {
+            snprintf(out, out_len, "%s", line);
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+}
+
+static void mesh_notification_close(void)
+{
+    if(mesh_notification_timer) {
+        lv_timer_delete(mesh_notification_timer);
+        mesh_notification_timer = NULL;
+    }
+    if(mesh_notification_toast && lv_obj_is_valid(mesh_notification_toast)) {
+        lv_obj_delete(mesh_notification_toast);
+    }
+    mesh_notification_toast = NULL;
+}
+
+static void mesh_notification_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    mesh_notification_close();
+}
+
+static void mesh_notification_open_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_notification_close();
+    app_nav_to_page(PAGE_MESHTASTIC);
+}
+
+static void mesh_show_incoming_notification(const char *line)
+{
+    lv_obj_t *toast;
+    lv_obj_t *accent;
+    lv_obj_t *title;
+    lv_obj_t *body;
+    lv_anim_t anim;
+    int screen_w = ui_screen_width();
+    int w = screen_w - 32;
+    int h = ui_is_landscape() ? 72 : 84;
+    int y = ui_is_landscape() ? 44 : 54;
+
+    if(app_current_page_is(PAGE_MESHTASTIC)) {
+        return;
+    }
+    if(w < 280) {
+        w = screen_w - 16;
+    }
+    mesh_notification_close();
+
+    toast = ui_panel(lv_layer_top(), 16, -h - 8, w, h);
+    mesh_notification_toast = toast;
+    lv_obj_set_style_bg_color(toast, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(toast, lv_color_hex(0x1F3B2E), 0);
+    lv_obj_set_style_border_width(toast, 1, 0);
+    lv_obj_set_style_shadow_width(toast, 18, 0);
+    lv_obj_set_style_shadow_color(toast, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(toast, LV_OPA_40, 0);
+    lv_obj_set_style_pad_all(toast, 12, 0);
+    lv_obj_add_flag(toast, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(toast, mesh_notification_open_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(toast);
+
+    accent = lv_obj_create(toast);
+    lv_obj_set_size(accent, 4, h - 24);
+    lv_obj_align(accent, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(accent, 2, 0);
+    lv_obj_set_style_border_width(accent, 0, 0);
+    lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+    ui_make_click_forwarder(accent);
+
+    title = ui_label(toast, "Meshtastic", &lv_font_montserrat_18, 0xF2F5F8);
+    lv_obj_set_pos(title, 18, 4);
+    lv_obj_set_width(title, w - 44);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    ui_make_click_forwarder(title);
+
+    body = ui_label(toast,
+                    line && line[0] ? line : ui_tr("Incoming Meshtastic message"),
+                    &lv_font_montserrat_14, 0xCBD5E1);
+    lv_obj_set_pos(body, 18, 34);
+    lv_obj_set_width(body, w - 44);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_DOT);
+    ui_make_click_forwarder(body);
+
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, toast);
+    lv_anim_set_values(&anim, -h - 8, y);
+    lv_anim_set_time(&anim, 220);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_exec_cb(&anim, (lv_anim_exec_xcb_t)lv_obj_set_y);
+    lv_anim_start(&anim);
+
+    mesh_notification_timer = lv_timer_create(mesh_notification_timer_cb,
+                                              4200, NULL);
+    lv_timer_set_repeat_count(mesh_notification_timer, 1);
+    app_request_fast_refresh();
+}
+
+static void mesh_refresh_chat_common(int update_ui, int notify_background)
 {
     char response[3072];
     const char *shown;
     const char *append_lines = NULL;
+    char latest_rx[256];
     int has_new_rx;
     int can_append;
     int was_near_bottom;
 
-    if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll)) {
-        return;
-    }
     if(mesh_ipc_command("CHAT\n", response, sizeof(response)) != 0) {
         return;
     }
@@ -1361,21 +1516,32 @@ static void mesh_refresh_chat(void)
         shown = response + 8;
     }
     if(strcmp(mesh_last_chat_text, shown) == 0) {
+        if(update_ui && mesh_chat_scroll && lv_obj_is_valid(mesh_chat_scroll) &&
+           lv_obj_get_child_count(mesh_chat_scroll) <= 1) {
+            mesh_chat_rebuild(shown);
+        }
         return;
     }
     has_new_rx = mesh_chat_has_new_rx(mesh_last_chat_text, shown);
-    was_near_bottom = mesh_chat_near_bottom();
+    mesh_chat_latest_new_rx(mesh_last_chat_text, shown, latest_rx,
+                            sizeof(latest_rx));
+    was_near_bottom = update_ui ? mesh_chat_near_bottom() : 0;
     can_append = mesh_chat_append_tail(mesh_last_chat_text, shown,
                                        &append_lines);
     snprintf(mesh_last_chat_text, sizeof(mesh_last_chat_text), "%s", shown);
-    if(can_append &&
-       mesh_chat_append_lines(append_lines, was_near_bottom) > 0) {
-        app_request_fast_refresh();
-    } else {
-        mesh_chat_rebuild(shown);
+    if(update_ui && mesh_chat_scroll && lv_obj_is_valid(mesh_chat_scroll)) {
+        if(can_append &&
+           mesh_chat_append_lines(append_lines, was_near_bottom) > 0) {
+            app_request_fast_refresh();
+        } else {
+            mesh_chat_rebuild(shown);
+        }
     }
     if(has_new_rx) {
         ui_audio_play_notification();
+        if(notify_background) {
+            mesh_show_incoming_notification(latest_rx);
+        }
     }
 }
 
@@ -1511,7 +1677,9 @@ static void mesh_refresh_status(void)
         }
     }
     if(online) {
-        mesh_refresh_chat();
+        int in_mesh_page = app_current_page_is(PAGE_MESHTASTIC);
+
+        mesh_refresh_chat_common(in_mesh_page, !in_mesh_page);
         mesh_refresh_daemon_log();
     }
 }
@@ -1520,6 +1688,23 @@ static void mesh_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
     mesh_refresh_status();
+}
+
+static void mesh_background_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if(app_current_page_is(PAGE_MESHTASTIC)) {
+        return;
+    }
+    mesh_refresh_status();
+}
+
+static void mesh_background_monitor_start(void)
+{
+    if(!mesh_background_timer) {
+        mesh_background_timer = lv_timer_create(mesh_background_timer_cb,
+                                                3000, NULL);
+    }
 }
 
 static void mesh_start_event_cb(lv_event_t *event)
@@ -1549,6 +1734,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     if(mesh_ipc_command("STATUS\n", mesh_status_text,
                         sizeof(mesh_status_text)) == 0) {
         mesh_append_log("daemon already running");
+        mesh_background_monitor_start();
         mesh_refresh_status();
         return;
     }
@@ -1607,6 +1793,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
                     MESHTASTIC_DAEMON_LOG);
     usleep(250000);
+    mesh_background_monitor_start();
     mesh_refresh_status();
 }
 
@@ -2286,12 +2473,27 @@ static void mesh_close_nodes_page(void)
     mesh_nodes_overlay = NULL;
 }
 
+static void mesh_channel_scan_overlay_close(void)
+{
+    if(mesh_channel_scan_overlay &&
+       lv_obj_is_valid(mesh_channel_scan_overlay)) {
+        lv_obj_delete(mesh_channel_scan_overlay);
+    }
+    mesh_channel_scan_overlay = NULL;
+    mesh_channel_scan_preview_image = NULL;
+    mesh_channel_scan_preview_placeholder = NULL;
+    mesh_channel_scan_preview_status_label = NULL;
+    mesh_channel_scan_preview_panel_w = 0;
+    mesh_channel_scan_preview_panel_h = 0;
+}
+
 static void mesh_close_channel_page(void)
 {
     if(mesh_channel_scan_timer) {
         lv_timer_delete(mesh_channel_scan_timer);
         mesh_channel_scan_timer = NULL;
     }
+    mesh_channel_scan_overlay_close();
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
         lv_obj_delete(mesh_channel_overlay);
     }
@@ -2305,6 +2507,159 @@ static void mesh_channel_close_event_cb(lv_event_t *event)
 {
     (void)event;
     mesh_close_channel_page();
+}
+
+static void mesh_channel_scan_overlay_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_channel_scan_overlay_close();
+}
+
+static void mesh_channel_scan_preview_update(void)
+{
+    FILE *fp;
+    size_t n;
+    int scale_w;
+    int scale_h;
+    int scale;
+
+    if(!mesh_channel_scan_preview_image ||
+       !lv_obj_is_valid(mesh_channel_scan_preview_image)) {
+        return;
+    }
+    if(!mesh_channel_scan_preview_pixels) {
+        mesh_channel_scan_preview_pixels = malloc(MESHTASTIC_QR_PREVIEW_BYTES);
+        if(!mesh_channel_scan_preview_pixels) {
+            return;
+        }
+    }
+
+    fp = fopen(MESHTASTIC_QR_PREVIEW_FILE, "rb");
+    if(!fp) {
+        return;
+    }
+    n = fread(mesh_channel_scan_preview_pixels, 1,
+              MESHTASTIC_QR_PREVIEW_BYTES, fp);
+    fclose(fp);
+    if(n != MESHTASTIC_QR_PREVIEW_BYTES) {
+        return;
+    }
+
+    memset(&mesh_channel_scan_preview_dsc, 0,
+           sizeof(mesh_channel_scan_preview_dsc));
+    mesh_channel_scan_preview_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    mesh_channel_scan_preview_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    mesh_channel_scan_preview_dsc.header.w = MESHTASTIC_QR_PREVIEW_W;
+    mesh_channel_scan_preview_dsc.header.h = MESHTASTIC_QR_PREVIEW_H;
+    mesh_channel_scan_preview_dsc.header.stride = MESHTASTIC_QR_PREVIEW_W * 2;
+    mesh_channel_scan_preview_dsc.data_size = MESHTASTIC_QR_PREVIEW_BYTES;
+    mesh_channel_scan_preview_dsc.data = mesh_channel_scan_preview_pixels;
+
+    lv_image_cache_drop(&mesh_channel_scan_preview_dsc);
+    lv_image_set_src(mesh_channel_scan_preview_image,
+                     &mesh_channel_scan_preview_dsc);
+    scale_w = mesh_channel_scan_preview_panel_w > 0 ?
+              mesh_channel_scan_preview_panel_w * 256 /
+              MESHTASTIC_QR_PREVIEW_W : 256;
+    scale_h = mesh_channel_scan_preview_panel_h > 0 ?
+              mesh_channel_scan_preview_panel_h * 256 /
+              MESHTASTIC_QR_PREVIEW_H : 256;
+    scale = scale_w < scale_h ? scale_w : scale_h;
+    if(scale < 128) {
+        scale = 128;
+    }
+    if(scale > 512) {
+        scale = 512;
+    }
+    lv_image_set_scale(mesh_channel_scan_preview_image, scale);
+    lv_obj_center(mesh_channel_scan_preview_image);
+    lv_obj_clear_flag(mesh_channel_scan_preview_image, LV_OBJ_FLAG_HIDDEN);
+    if(mesh_channel_scan_preview_placeholder &&
+       lv_obj_is_valid(mesh_channel_scan_preview_placeholder)) {
+        lv_obj_add_flag(mesh_channel_scan_preview_placeholder,
+                        LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void mesh_channel_scan_overlay_show(void)
+{
+    lv_obj_t *panel;
+    lv_obj_t *preview;
+    lv_obj_t *title;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int title_y = ui_is_landscape() ? 18 : 28;
+    int preview_y = ui_is_landscape() ? 72 : 92;
+    int status_y;
+    int preview_h = screen_h - preview_y - 112;
+
+    if(preview_h < 220) {
+        preview_h = 220;
+    }
+    if(preview_h > screen_h - preview_y - 84) {
+        preview_h = screen_h - preview_y - 84;
+    }
+
+    mesh_channel_scan_overlay_close();
+    mesh_channel_scan_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_channel_scan_overlay);
+    lv_obj_set_style_bg_color(mesh_channel_scan_overlay,
+                              lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_channel_scan_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(mesh_channel_scan_overlay, 0, 0);
+    lv_obj_set_style_radius(mesh_channel_scan_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_channel_scan_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_channel_scan_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(mesh_channel_scan_overlay);
+
+    title = ui_label(mesh_channel_scan_overlay, ui_tr("Scan channel QR"),
+                     &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, margin, title_y);
+    lv_obj_set_width(title, content_w - 116);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(mesh_channel_scan_overlay,
+                            screen_w - margin - 96, title_y - 4,
+                            96, ui_tr("Close"), 0x374151);
+    lv_obj_add_event_cb(btn, mesh_channel_scan_overlay_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    preview = ui_panel(mesh_channel_scan_overlay, margin, preview_y,
+                       content_w, preview_h);
+    lv_obj_set_style_bg_color(preview, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_color(preview, lv_color_hex(0x243044), 0);
+    lv_obj_set_style_pad_all(preview, 0, 0);
+    lv_obj_clear_flag(preview, LV_OBJ_FLAG_SCROLLABLE);
+
+    mesh_channel_scan_preview_panel_w = content_w - 24;
+    mesh_channel_scan_preview_panel_h = preview_h - 24;
+    mesh_channel_scan_preview_image = lv_image_create(preview);
+    lv_obj_add_flag(mesh_channel_scan_preview_image, LV_OBJ_FLAG_HIDDEN);
+
+    mesh_channel_scan_preview_placeholder =
+        ui_label(preview, ui_tr("Point camera at Meshtastic QR"),
+                 &lv_font_montserrat_20, 0x94A3B8);
+    lv_obj_set_width(mesh_channel_scan_preview_placeholder,
+                     content_w - 48);
+    lv_label_set_long_mode(mesh_channel_scan_preview_placeholder,
+                           LV_LABEL_LONG_WRAP);
+    lv_obj_center(mesh_channel_scan_preview_placeholder);
+
+    status_y = preview_y + preview_h + 16;
+    if(status_y > screen_h - 40) {
+        status_y = screen_h - 40;
+    }
+    panel = mesh_channel_scan_overlay;
+    mesh_channel_scan_preview_status_label =
+        ui_label(panel, ui_tr("Scanning channel QR..."),
+                 &lv_font_montserrat_16, 0xF5A524);
+    lv_obj_set_pos(mesh_channel_scan_preview_status_label, margin, status_y);
+    lv_obj_set_width(mesh_channel_scan_preview_status_label, content_w);
+    lv_label_set_long_mode(mesh_channel_scan_preview_status_label,
+                           LV_LABEL_LONG_DOT);
 }
 
 static int mesh_channel_url_fetch(char *out, size_t out_len,
@@ -2463,8 +2818,13 @@ static void *mesh_channel_scan_worker(void *arg)
     url[0] = '\0';
     response[0] = '\0';
 
-    fp = popen(MESHTASTIC_QR_SCAN_PATH
-               " --preview --timeout-sec 18 2>/tmp/k230_qr_scan.log", "r");
+    snprintf(command, sizeof(command),
+             MESHTASTIC_QR_SCAN_PATH
+             " --timeout-sec 18 --preview-file " MESHTASTIC_QR_PREVIEW_FILE
+             " --preview-width %d --preview-height %d "
+             "--preview-interval-ms 100 2>/tmp/k230_qr_scan.log",
+             MESHTASTIC_QR_PREVIEW_W, MESHTASTIC_QR_PREVIEW_H);
+    fp = popen(command, "r");
     if(fp) {
         if(fgets(url, sizeof(url), fp)) {
             ui_trim_text(url);
@@ -2500,6 +2860,7 @@ static void mesh_channel_scan_timer_cb(lv_timer_t *timer)
     int qr_px;
 
     (void)timer;
+    mesh_channel_scan_preview_update();
     pthread_mutex_lock(&mesh_channel_scan_mutex);
     ready = mesh_channel_scan_ready;
     ok = mesh_channel_scan_ok;
@@ -2530,9 +2891,17 @@ static void mesh_channel_scan_timer_cb(lv_timer_t *timer)
                                      fetch_status, sizeof(fetch_status));
         mesh_channel_refresh_view(1, ui_tr("Channel imported"), qr_px);
         mesh_append_log("channel QR import: %s", status);
+        mesh_channel_scan_overlay_close();
     } else {
         mesh_channel_set_status(status[0] ? status : ui_tr("QR scan failed"),
                                 0xEF4D5A);
+        if(mesh_channel_scan_preview_status_label &&
+           lv_obj_is_valid(mesh_channel_scan_preview_status_label)) {
+            lv_label_set_text(mesh_channel_scan_preview_status_label,
+                              status[0] ? status : ui_tr("QR scan failed"));
+            lv_obj_set_style_text_color(mesh_channel_scan_preview_status_label,
+                                        lv_color_hex(0xEF4D5A), 0);
+        }
         mesh_append_log("channel QR import failed: %s", status);
     }
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
@@ -2560,9 +2929,16 @@ static void mesh_channel_scan_event_cb(lv_event_t *event)
     pthread_mutex_unlock(&mesh_channel_scan_mutex);
 
     if(running) {
+        if(!mesh_channel_scan_overlay ||
+           !lv_obj_is_valid(mesh_channel_scan_overlay)) {
+            mesh_channel_scan_overlay_show();
+        }
         mesh_channel_set_status(ui_tr("Scanning channel QR..."), 0xF5A524);
         return;
     }
+    unlink(MESHTASTIC_QR_PREVIEW_FILE);
+    unlink(MESHTASTIC_QR_PREVIEW_TMP);
+    mesh_channel_scan_overlay_show();
     mesh_channel_set_status(ui_tr("Scanning channel QR..."), 0xF5A524);
     if(pthread_create(&mesh_channel_scan_thread, NULL,
                       mesh_channel_scan_worker, NULL) != 0) {
@@ -3440,6 +3816,18 @@ static lv_obj_t *mesh_panel_title(lv_obj_t *parent, const char *title,
     return label;
 }
 
+void ui_meshtastic_startup(void)
+{
+    if(!ui_meshtastic_autostart_enabled()) {
+        mesh_append_log("autostart disabled");
+        return;
+    }
+
+    mesh_load_profile_prefs();
+    mesh_start_event_cb(NULL);
+    mesh_background_monitor_start();
+}
+
 void ui_meshtastic_create(lv_obj_t *scr)
 {
     lv_obj_t *btn;
@@ -3540,8 +3928,10 @@ void ui_meshtastic_create(lv_obj_t *scr)
         snprintf(mesh_log_text, sizeof(mesh_log_text), "%s\n",
                  "Meshtastic UI ready");
     }
-    mesh_last_chat_text[0] = '\0';
     mesh_update_profile_label();
+    if(mesh_last_chat_text[0]) {
+        mesh_chat_rebuild(mesh_last_chat_text);
+    }
 
     mesh_layout_main();
     mesh_start_event_cb(NULL);
@@ -3578,12 +3968,7 @@ void ui_meshtastic_cleanup(void)
         lv_obj_delete(mesh_nodes_overlay);
     }
     mesh_nodes_overlay = NULL;
-    if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
-        lv_obj_delete(mesh_channel_overlay);
-    }
-    mesh_channel_overlay = NULL;
-    mesh_channel_url_label = NULL;
-    mesh_channel_status_label = NULL;
+    mesh_close_channel_page();
 }
 
 int ui_meshtastic_handle_back(void)
@@ -3594,6 +3979,11 @@ int ui_meshtastic_handle_back(void)
     }
     if(mesh_choice_overlay && lv_obj_is_valid(mesh_choice_overlay)) {
         mesh_choice_close();
+        return 1;
+    }
+    if(mesh_channel_scan_overlay &&
+       lv_obj_is_valid(mesh_channel_scan_overlay)) {
+        mesh_channel_scan_overlay_close();
         return 1;
     }
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {

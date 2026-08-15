@@ -19,6 +19,10 @@
 #define QR_SCAN_DEFAULT_HEIGHT 360
 #define QR_SCAN_DEFAULT_TIMEOUT 15
 #define QR_SCAN_DEFAULT_SKIP 4
+#define QR_SCAN_PREVIEW_PATH_MAX 256
+#define QR_SCAN_DEFAULT_PREVIEW_WIDTH 384
+#define QR_SCAN_DEFAULT_PREVIEW_HEIGHT 216
+#define QR_SCAN_DEFAULT_PREVIEW_INTERVAL_MS 120
 
 typedef enum {
     QR_SCAN_FORMAT_NV12 = 0,
@@ -33,6 +37,10 @@ typedef struct {
     unsigned skip_frames;
     qr_scan_format_t format;
     bool preview;
+    char preview_file[QR_SCAN_PREVIEW_PATH_MAX];
+    unsigned preview_width;
+    unsigned preview_height;
+    unsigned preview_interval_ms;
 } qr_scan_options_t;
 
 static uint64_t monotonic_ms(void)
@@ -80,7 +88,8 @@ static void usage(const char *argv0)
 {
     fprintf(stderr,
             "Usage: %s [-d video] [-w width] [-h height] [-f NV12|NV16] "
-            "[--timeout-sec N] [--skip N] [--preview]\n",
+            "[--timeout-sec N] [--skip N] [--preview] "
+            "[--preview-file path --preview-width W --preview-height H]\n",
             argv0);
 }
 
@@ -92,6 +101,10 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
         {"timeout-sec", required_argument, NULL, 1000},
         {"skip", required_argument, NULL, 1001},
         {"preview", no_argument, NULL, 1002},
+        {"preview-file", required_argument, NULL, 1003},
+        {"preview-width", required_argument, NULL, 1004},
+        {"preview-height", required_argument, NULL, 1005},
+        {"preview-interval-ms", required_argument, NULL, 1006},
         {0, 0, 0, 0},
     };
 
@@ -105,6 +118,10 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
     opts->skip_frames = QR_SCAN_DEFAULT_SKIP;
     opts->format = QR_SCAN_FORMAT_NV16;
     opts->preview = false;
+    opts->preview_file[0] = '\0';
+    opts->preview_width = QR_SCAN_DEFAULT_PREVIEW_WIDTH;
+    opts->preview_height = QR_SCAN_DEFAULT_PREVIEW_HEIGHT;
+    opts->preview_interval_ms = QR_SCAN_DEFAULT_PREVIEW_INTERVAL_MS;
 
     while((ch = getopt_long(argc, argv, "d:w:h:f:", long_options,
                             &option_index)) != -1) {
@@ -142,11 +159,86 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
         case 1002:
             opts->preview = true;
             break;
+        case 1003:
+            snprintf(opts->preview_file, sizeof(opts->preview_file), "%s",
+                     optarg ? optarg : "");
+            break;
+        case 1004:
+            if(parse_uint(optarg, &opts->preview_width, 1920) != 0) {
+                return -1;
+            }
+            break;
+        case 1005:
+            if(parse_uint(optarg, &opts->preview_height, 1080) != 0) {
+                return -1;
+            }
+            break;
+        case 1006:
+            if(parse_uint(optarg, &opts->preview_interval_ms, 5000) != 0) {
+                return -1;
+            }
+            break;
         default:
             return -1;
         }
     }
     if(opts->width == 0 || opts->height == 0 || opts->timeout_s == 0) {
+        return -1;
+    }
+    if(opts->preview_file[0] &&
+       (opts->preview_width == 0 || opts->preview_height == 0 ||
+        opts->preview_interval_ms == 0)) {
+        return -1;
+    }
+    return 0;
+}
+
+static uint16_t gray_to_rgb565(uint8_t gray)
+{
+    return (uint16_t)(((uint16_t)(gray & 0xf8U) << 8U) |
+                      ((uint16_t)(gray & 0xfcU) << 3U) |
+                      ((uint16_t)gray >> 3U));
+}
+
+static int write_preview_frame(const qr_scan_options_t *opts,
+                               const uint8_t *y_plane,
+                               uint16_t *preview_buf)
+{
+    char tmp_path[QR_SCAN_PREVIEW_PATH_MAX + 8];
+    FILE *fp;
+    size_t count;
+
+    if(!opts || !y_plane || !preview_buf || !opts->preview_file[0]) {
+        return -1;
+    }
+
+    for(unsigned y = 0; y < opts->preview_height; y++) {
+        unsigned src_y = (unsigned)(((uint64_t)y * opts->height) /
+                                    opts->preview_height);
+        const uint8_t *src_row = y_plane + (size_t)src_y * opts->width;
+
+        for(unsigned x = 0; x < opts->preview_width; x++) {
+            unsigned src_x = (unsigned)(((uint64_t)x * opts->width) /
+                                        opts->preview_width);
+            preview_buf[(size_t)y * opts->preview_width + x] =
+                gray_to_rgb565(src_row[src_x]);
+        }
+    }
+
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", opts->preview_file);
+    fp = fopen(tmp_path, "wb");
+    if(!fp) {
+        return -1;
+    }
+    count = fwrite(preview_buf, sizeof(uint16_t),
+                   (size_t)opts->preview_width * opts->preview_height, fp);
+    if(fclose(fp) != 0 ||
+       count != (size_t)opts->preview_width * opts->preview_height) {
+        unlink(tmp_path);
+        return -1;
+    }
+    if(rename(tmp_path, opts->preview_file) != 0) {
+        unlink(tmp_path);
         return -1;
     }
     return 0;
@@ -324,6 +416,8 @@ static int scan_camera(const qr_scan_options_t *opts)
     uint64_t deadline_ms;
     unsigned skipped = 0;
     char result[1024];
+    uint16_t *preview_buf = NULL;
+    uint64_t last_preview_ms = 0;
     int rc = 1;
 
     if(!opts) {
@@ -332,9 +426,18 @@ static int scan_camera(const qr_scan_options_t *opts)
     if(opts->preview) {
         return scan_camera_preview(opts);
     }
+    if(opts->preview_file[0]) {
+        preview_buf = malloc((size_t)opts->preview_width *
+                             opts->preview_height * sizeof(uint16_t));
+        if(!preview_buf) {
+            fprintf(stderr, "preview allocation failed\n");
+            return 2;
+        }
+    }
     qr = quirc_new();
     if(!qr) {
         fprintf(stderr, "quirc allocation failed\n");
+        free(preview_buf);
         return 2;
     }
 
@@ -352,12 +455,14 @@ static int scan_camera(const qr_scan_options_t *opts)
     if(v4l2_drm_setup(&ctx, 1, NULL) != 0) {
         fprintf(stderr, "v4l2 setup failed for /dev/video%u\n", opts->device);
         quirc_destroy(qr);
+        free(preview_buf);
         return 2;
     }
     if(v4l2_drm_start(&ctx) != 0) {
         fprintf(stderr, "stream start failed: %s\n", strerror(errno));
         v4l2_drm_stop(&ctx);
         quirc_destroy(qr);
+        free(preview_buf);
         return 2;
     }
 
@@ -377,6 +482,15 @@ static int scan_camera(const qr_scan_options_t *opts)
             continue;
         }
         frame = (const uint8_t *)ctx.buffers[ctx.vbuffer.index].mmap;
+        if(preview_buf) {
+            uint64_t now_ms = monotonic_ms();
+
+            if(last_preview_ms == 0 ||
+               now_ms - last_preview_ms >= opts->preview_interval_ms) {
+                (void)write_preview_frame(opts, frame, preview_buf);
+                last_preview_ms = now_ms;
+            }
+        }
         if(skipped < opts->skip_frames) {
             skipped++;
             v4l2_drm_dump_release(&ctx);
@@ -397,6 +511,7 @@ static int scan_camera(const qr_scan_options_t *opts)
     ioctl(ctx.video_fd, VIDIOC_STREAMOFF, &type);
     v4l2_drm_stop(&ctx);
     quirc_destroy(qr);
+    free(preview_buf);
     if(rc != 0) {
         fprintf(stderr, "no Meshtastic QR code found\n");
     }

@@ -76,6 +76,7 @@ typedef enum {
     PAGE_AUDIO_SETTINGS,
     PAGE_AUDIO_OUTPUT,
     PAGE_NOTIFICATION_SETTINGS,
+    PAGE_APP_STARTUP,
     PAGE_I2S_TEST,
     PAGE_I2C_SCAN,
     PAGE_HDMI_TEST,
@@ -109,6 +110,7 @@ void app_nav_back(void);
 void app_take_screenshot(void);
 void app_request_fast_refresh(void);
 void app_refresh_current_page(void);
+int app_current_page_is(page_id_t page);
 void app_set_ble_status(const char *state);
 void app_note_user_activity(void);
 int app_edge_back_enabled(void);

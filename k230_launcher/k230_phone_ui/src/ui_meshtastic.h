@@ -10,6 +10,9 @@ extern "C" {
 void ui_meshtastic_create(lv_obj_t *scr);
 void ui_meshtastic_cleanup(void);
 int ui_meshtastic_handle_back(void);
+void ui_meshtastic_startup(void);
+int ui_meshtastic_autostart_enabled(void);
+void ui_meshtastic_set_autostart_enabled(int enabled);
 
 #ifdef __cplusplus
 }

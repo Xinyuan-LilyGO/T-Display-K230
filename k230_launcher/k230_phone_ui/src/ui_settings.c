@@ -1,6 +1,7 @@
 #include "ui_settings.h"
 
 #include "ui_hardware.h"
+#include "ui_meshtastic.h"
 
 static lv_obj_t *settings_notice_overlay;
 static lv_obj_t *settings_body;
@@ -113,6 +114,13 @@ static void edge_back_switch_event_cb(lv_event_t *event)
 {
     lv_obj_t *sw = lv_event_get_target(event);
     app_set_edge_back_enabled(lv_obj_has_state(sw, LV_STATE_CHECKED));
+}
+
+static void meshtastic_autostart_switch_event_cb(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target(event);
+    ui_meshtastic_set_autostart_enabled(lv_obj_has_state(sw,
+                                                         LV_STATE_CHECKED));
 }
 
 static int settings_section_header(lv_obj_t *parent, int y, const char *title,
@@ -277,6 +285,10 @@ void ui_settings_create(lv_obj_t *scr)
 
     y = settings_section_header(body, y, "System & about",
                                 "Device information and diagnostics");
+    ui_settings_nav_row(body, y, LV_SYMBOL_PLAY, "Startup apps",
+                        "Launch selected services at boot", 0x10B981,
+                        PAGE_APP_STARTUP);
+    y = settings_next_row_y(y);
     ui_settings_nav_row(body, y, LV_SYMBOL_LIST, "System",
                         "Kernel, CPU, memory, storage", 0xF5A524,
                         PAGE_SYSTEM);
@@ -291,4 +303,30 @@ void ui_settings_create(lv_obj_t *scr)
         settings_restore_scroll_on_create = 0;
         lv_obj_scroll_to_y(body, 0, LV_ANIM_OFF);
     }
+}
+
+void ui_startup_settings_create(lv_obj_t *scr)
+{
+    lv_obj_t *body;
+    lv_obj_t *label;
+    int y = 8;
+
+    ui_create_header(scr, "Startup apps");
+    body = ui_page_body(scr, ui_is_landscape() ? 64 : 144);
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x0B1016), 0);
+
+    y = settings_section_header(body, y, "Startup apps",
+                                "Choose services that start automatically");
+    settings_switch_row(body, y, "MESH", "Meshtastic autostart",
+                        "Start Mesh daemon when launcher opens", 0x10B981,
+                        ui_meshtastic_autostart_enabled(),
+                        meshtastic_autostart_switch_event_cb);
+    y = settings_next_row_y(y) + 14;
+
+    label = ui_label(body,
+                     "Autostart keeps the mesh daemon online for Bluetooth and message notifications.",
+                     &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(label, 32, y);
+    lv_obj_set_width(label, ui_fit_width(body, 32, 504));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 }

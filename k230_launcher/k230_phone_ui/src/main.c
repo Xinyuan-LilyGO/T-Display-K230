@@ -22,6 +22,7 @@
 
 #include <lvgl/lvgl.h>
 #include <lvgl/src/core/lv_refr.h>
+#include <lvgl/src/debugging/sysmon/lv_sysmon.h>
 #include <lvgl/src/drivers/display/drm/lv_linux_drm.h>
 #include <lvgl/src/drivers/evdev/lv_evdev.h>
 #include <lvgl/src/libs/lodepng/lodepng.h>
@@ -614,6 +615,8 @@ static const char *page_name(page_id_t page)
         return "Audio output";
     case PAGE_NOTIFICATION_SETTINGS:
         return "Notifications";
+    case PAGE_APP_STARTUP:
+        return "Startup apps";
     case PAGE_I2S_TEST:
         return "I2S Test";
     case PAGE_I2C_SCAN:
@@ -3081,6 +3084,11 @@ void app_refresh_current_page(void)
     render_page(current_page, LV_SCREEN_LOAD_ANIM_NONE, 0);
 }
 
+int app_current_page_is(page_id_t page)
+{
+    return current_page == page;
+}
+
 static int display_logical_width(void)
 {
     return main_display ? (int)lv_display_get_horizontal_resolution(main_display) :
@@ -3325,6 +3333,7 @@ static page_id_t nav_fallback_parent(page_id_t page)
 {
     switch(page) {
     case PAGE_KEYBOARD_SETTINGS:
+    case PAGE_APP_STARTUP:
         return PAGE_SETTINGS;
     default:
         return PAGE_HOME;
@@ -5058,6 +5067,20 @@ static void render_r59_persistent_page(lv_obj_t *scr, page_id_t page)
         r59_set_info(2, "Input", find_input_event() ? find_input_event() : "None",
                      find_input_event() ? 0xF2F5F8 : 0xF5A524);
         r59_set_info(3, "UI refresh", "Small-area", 0x8B5CF6);
+        break;
+    case PAGE_APP_STARTUP:
+        state = ui_meshtastic_autostart_enabled() ? "Autostart on" :
+                                                     "Autostart off";
+        state_color = ui_meshtastic_autostart_enabled() ? 0x25C281 :
+                                                          0xF5A524;
+        snprintf(detail, sizeof(detail), "Startup services");
+        r59_set_info(0, "Meshtastic",
+                     ui_meshtastic_autostart_enabled() ? "Enabled" :
+                                                         "Disabled",
+                     state_color);
+        r59_set_info(1, "Daemon", "Background capable", 0x3DA5FF);
+        r59_set_info(2, "Notifications", "Top banner", 0xA78BFA);
+        r59_set_info(3, "Control", "Settings page", 0xF2F5F8);
         break;
     case PAGE_MOTION:
         snprintf(detail, sizeof(detail), "Motion page kept in safe panel mode");
@@ -9171,6 +9194,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     case PAGE_NOTIFICATION_SETTINGS:
         ui_notification_settings_create(scr);
         break;
+    case PAGE_APP_STARTUP:
+        ui_startup_settings_create(scr);
+        break;
     case PAGE_I2S_TEST:
         ui_i2s_test_create(scr);
         break;
@@ -9309,6 +9335,9 @@ int main(void)
         fprintf(stderr, "failed to create DRM display\n");
         return 1;
     }
+#if LV_USE_SYSMON && LV_USE_PERF_MONITOR
+    lv_sysmon_hide_performance(disp);
+#endif
     lv_display_add_event_cb(disp, display_trace_event_cb, LV_EVENT_REFR_START, NULL);
     lv_display_add_event_cb(disp, display_trace_event_cb, LV_EVENT_RENDER_START, NULL);
     lv_display_add_event_cb(disp, display_trace_event_cb, LV_EVENT_RENDER_READY, NULL);
@@ -9352,6 +9381,7 @@ int main(void)
     render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
     lv_timer_create(update_time_labels, 1000, NULL);
     ui_wifi_autoconnect_start();
+    ui_meshtastic_startup();
 
     while(running) {
         uint64_t loop_start_us = monotonic_us();
