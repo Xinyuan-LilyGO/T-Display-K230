@@ -1116,12 +1116,34 @@ static void mesh_refresh_status(void)
                                     0);
     }
     if(mesh_detail_label && lv_obj_is_valid(mesh_detail_label)) {
-        char detail[180];
-        snprintf(detail, sizeof(detail), "%s -> %s  ACK %s",
+        char detail[260];
+        char ack_pending[16];
+        char ack_rx[16];
+        char nak_rx[16];
+        char ack_retry[16];
+        char ack_timeout[16];
+        char ack_drop[16];
+
+        mesh_status_field(mesh_status_text, "ack_pending", ack_pending,
+                          sizeof(ack_pending), "0");
+        mesh_status_field(mesh_status_text, "ack_rx", ack_rx, sizeof(ack_rx),
+                          "0");
+        mesh_status_field(mesh_status_text, "nak_rx", nak_rx, sizeof(nak_rx),
+                          "0");
+        mesh_status_field(mesh_status_text, "ack_retry", ack_retry,
+                          sizeof(ack_retry), "0");
+        mesh_status_field(mesh_status_text, "ack_timeout", ack_timeout,
+                          sizeof(ack_timeout), "0");
+        mesh_status_field(mesh_status_text, "ack_drop", ack_drop,
+                          sizeof(ack_drop), "0");
+        snprintf(detail, sizeof(detail),
+                 "%s -> %s  ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
                  mesh_node_name,
                  mesh_to_text_is_broadcast(mesh_to_node) ? "broadcast" :
                  mesh_to_node,
-                 mesh_ack_enabled ? "on" : "off");
+                 mesh_ack_enabled ? "on" : "off",
+                 ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
+                 ack_drop);
         lv_label_set_text(mesh_detail_label, detail);
     }
     if(mesh_send_button && lv_obj_is_valid(mesh_send_button)) {
