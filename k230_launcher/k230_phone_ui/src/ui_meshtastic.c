@@ -223,6 +223,8 @@ static const mesh_choice_t mesh_bool_choices[] = {
     {"0", "Off"},
 };
 
+static void mesh_settings_refresh(void);
+
 static int mesh_write_all(int fd, const char *data, size_t len)
 {
     while(len > 0U) {
@@ -644,6 +646,138 @@ static void mesh_save_profile_prefs(void)
     ui_prefs_set(MESHTASTIC_PREF_ACK, mesh_ack_enabled ? "1" : "0");
     ui_prefs_set(MESHTASTIC_PREF_REBROADCAST,
                  mesh_rebroadcast_enabled ? "1" : "0");
+}
+
+static int mesh_status_value_truthy(const char *value)
+{
+    return value && (strcmp(value, "1") == 0 ||
+                     strcasecmp(value, "on") == 0 ||
+                     strcasecmp(value, "true") == 0 ||
+                     strcasecmp(value, "yes") == 0);
+}
+
+static int mesh_status_copy_if_changed(char *dst, size_t dst_len,
+                                       const char *value)
+{
+    char clean[96];
+
+    if(!dst || dst_len == 0U || !value || !value[0] ||
+       strcmp(value, "-") == 0) {
+        return 0;
+    }
+    mesh_safe_arg(clean, sizeof(clean), value);
+    if(strcmp(clean, "-") == 0 || strcmp(dst, clean) == 0) {
+        return 0;
+    }
+    snprintf(dst, dst_len, "%s", clean);
+    return 1;
+}
+
+static int mesh_status_sync_channel(const char *value)
+{
+    char clean[96];
+
+    if(!value || !value[0]) {
+        return 0;
+    }
+    if(strcmp(value, "-") == 0 || strcasecmp(value, "default") == 0 ||
+       strcasecmp(value, "<preset>") == 0) {
+        if(mesh_channel_name[0]) {
+            mesh_channel_name[0] = '\0';
+            return 1;
+        }
+        return 0;
+    }
+    mesh_safe_arg(clean, sizeof(clean), value);
+    if(strcmp(clean, "-") == 0 || strcmp(mesh_channel_name, clean) == 0) {
+        return 0;
+    }
+    snprintf(mesh_channel_name, sizeof(mesh_channel_name), "%s", clean);
+    return 1;
+}
+
+static void mesh_sync_profile_from_status(const char *status, int online)
+{
+    char value[96];
+    int changed = 0;
+
+    if(!online || !status) {
+        return;
+    }
+    if((mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) ||
+       (mesh_choice_overlay && lv_obj_is_valid(mesh_choice_overlay))) {
+        return;
+    }
+
+    mesh_status_field(status, "region", value, sizeof(value), "");
+    changed |= mesh_status_copy_if_changed(mesh_region, sizeof(mesh_region),
+                                           value);
+    mesh_status_field(status, "preset", value, sizeof(value), "");
+    changed |= mesh_status_copy_if_changed(mesh_preset, sizeof(mesh_preset),
+                                           value);
+    mesh_status_field(status, "channel", value, sizeof(value), "");
+    changed |= mesh_status_sync_channel(value);
+    mesh_status_field(status, "node", value, sizeof(value), "");
+    changed |= mesh_status_copy_if_changed(mesh_node_name,
+                                           sizeof(mesh_node_name), value);
+    mesh_status_field(status, "from", value, sizeof(value), "");
+    changed |= mesh_status_copy_if_changed(mesh_from_node,
+                                           sizeof(mesh_from_node), value);
+    mesh_status_field(status, "to", value, sizeof(value), "");
+    changed |= mesh_status_copy_if_changed(mesh_to_node,
+                                           sizeof(mesh_to_node), value);
+
+    mesh_status_field(status, "want_ack", value, sizeof(value), "");
+    if(value[0]) {
+        int ack = mesh_status_value_truthy(value);
+        if(mesh_ack_enabled != ack) {
+            mesh_ack_enabled = ack;
+            changed = 1;
+        }
+    }
+    mesh_status_field(status, "relay", value, sizeof(value), "");
+    if(value[0]) {
+        int relay = mesh_status_value_truthy(value);
+        if(mesh_rebroadcast_enabled != relay) {
+            mesh_rebroadcast_enabled = relay;
+            changed = 1;
+        }
+    }
+
+    mesh_status_field(status, "manual_power", value, sizeof(value), "");
+    if(value[0]) {
+        int manual_power = mesh_status_value_truthy(value);
+        char power_text[16];
+
+        if(!manual_power) {
+            if(strcmp(mesh_tx_power, "auto") != 0) {
+                snprintf(mesh_tx_power, sizeof(mesh_tx_power), "%s", "auto");
+                changed = 1;
+            }
+        } else {
+            long power;
+
+            mesh_status_field(status, "power", power_text,
+                              sizeof(power_text), "");
+            if(mesh_parse_i32_text(power_text, &power) == 0 &&
+               power >= -9L && power <= 22L) {
+                char normalized[8];
+
+                snprintf(normalized, sizeof(normalized), "%ld", power);
+                if(strcmp(mesh_tx_power, normalized) != 0) {
+                    snprintf(mesh_tx_power, sizeof(mesh_tx_power), "%s",
+                             normalized);
+                    changed = 1;
+                }
+            }
+        }
+    }
+
+    if(changed) {
+        mesh_save_profile_prefs();
+        mesh_settings_refresh();
+        mesh_append_log("profile synced from daemon status");
+    }
 }
 
 static void mesh_refresh_daemon_log(void)
@@ -1106,6 +1240,7 @@ static void mesh_refresh_status(void)
     ui_trim_text(mesh_status_text);
     online = mesh_status_is_online(mesh_status_text);
     mesh_apply_ble_status(mesh_status_text, online);
+    mesh_sync_profile_from_status(mesh_status_text, online);
 
     if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
         lv_label_set_text(mesh_status_label,
