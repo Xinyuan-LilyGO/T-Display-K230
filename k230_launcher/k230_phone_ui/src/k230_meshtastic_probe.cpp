@@ -2851,6 +2851,42 @@ static bool phoneapi_send_from_payload(int fd, uint32_t field,
     return true;
 }
 
+static bool encode_phoneapi_queue_status(uint32_t packet_id, uint32_t res,
+                                         uint32_t free_slots,
+                                         uint32_t max_slots,
+                                         std::vector<uint8_t> *out)
+{
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_uint32_field(out, 1U, res);
+    append_uint32_field(out, 2U, free_slots);
+    append_uint32_field(out, 3U, max_slots);
+    append_uint32_field(out, 4U, packet_id);
+    return true;
+}
+
+static bool phoneapi_send_queue_status(int fd, uint32_t packet_id,
+                                       uint32_t res, uint32_t free_slots,
+                                       const char *reason)
+{
+    std::vector<uint8_t> payload;
+    const uint32_t max_slots = 1U;
+    bool ok;
+
+    if(!encode_phoneapi_queue_status(packet_id, res, free_slots, max_slots,
+                                     &payload)) {
+        return false;
+    }
+    ok = phoneapi_send_from_payload(fd, 11U, payload, "queue_status");
+    daemon_event("PhoneAPI queue_status id=0x%08x res=%u free=%u reason=%s ok=%s",
+                 packet_id, res, free_slots,
+                 reason && reason[0] ? reason : "-",
+                 ok ? "yes" : "no");
+    return ok;
+}
+
 static bool phoneapi_send_config_complete(int fd, uint32_t nonce)
 {
     std::vector<uint8_t> frame;
@@ -2939,17 +2975,24 @@ static void phoneapi_process_toradio(int fd, const char *hex, size_t hex_len)
                 daemon_event("PhoneAPI ToRadio packet queued len=%u port=%u to=0x%08x ack=%s",
                              (unsigned)msg.packet_len, tx.data.portnum,
                              tx.to_node, tx.want_ack ? "on" : "off");
+                (void)phoneapi_send_queue_status(fd, tx.packet_id, 0U, 1U,
+                                                  "queued");
             } else {
                 daemon_event("PhoneAPI ToRadio packet dropped queue busy len=%u",
                              (unsigned)msg.packet_len);
+                (void)phoneapi_send_queue_status(fd, tx.packet_id, 1U, 0U,
+                                                  "busy");
             }
         } else {
             daemon_event("PhoneAPI ToRadio packet unsupported len=%u",
                          (unsigned)msg.packet_len);
+            (void)phoneapi_send_queue_status(fd, 0U, 1U, 0U,
+                                              "unsupported");
         }
     }
     if(msg.heartbeat) {
         daemon_event("PhoneAPI heartbeat");
+        (void)phoneapi_send_queue_status(fd, 0U, 0U, 1U, "heartbeat");
     }
     if(msg.disconnect) {
         daemon_event("PhoneAPI disconnect");
