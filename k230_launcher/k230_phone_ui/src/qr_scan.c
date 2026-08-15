@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <linux/videodev2.h>
+#include <drm_fourcc.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -31,6 +32,7 @@ typedef struct {
     unsigned timeout_s;
     unsigned skip_frames;
     qr_scan_format_t format;
+    bool preview;
 } qr_scan_options_t;
 
 static uint64_t monotonic_ms(void)
@@ -78,7 +80,7 @@ static void usage(const char *argv0)
 {
     fprintf(stderr,
             "Usage: %s [-d video] [-w width] [-h height] [-f NV12|NV16] "
-            "[--timeout-sec N] [--skip N]\n",
+            "[--timeout-sec N] [--skip N] [--preview]\n",
             argv0);
 }
 
@@ -89,6 +91,7 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
     static const struct option long_options[] = {
         {"timeout-sec", required_argument, NULL, 1000},
         {"skip", required_argument, NULL, 1001},
+        {"preview", no_argument, NULL, 1002},
         {0, 0, 0, 0},
     };
 
@@ -101,6 +104,7 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
     opts->timeout_s = QR_SCAN_DEFAULT_TIMEOUT;
     opts->skip_frames = QR_SCAN_DEFAULT_SKIP;
     opts->format = QR_SCAN_FORMAT_NV16;
+    opts->preview = false;
 
     while((ch = getopt_long(argc, argv, "d:w:h:f:", long_options,
                             &option_index)) != -1) {
@@ -134,6 +138,9 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
             if(parse_uint(optarg, &opts->skip_frames, 60) != 0) {
                 return -1;
             }
+            break;
+        case 1002:
+            opts->preview = true;
             break;
         default:
             return -1;
@@ -203,6 +210,111 @@ static int decode_frame(struct quirc *qr, const uint8_t *y_plane,
     return -1;
 }
 
+typedef struct {
+    const qr_scan_options_t *opts;
+    struct quirc *qr;
+    uint64_t deadline_ms;
+    unsigned skipped;
+    unsigned last_frame_count;
+    int rc;
+} qr_scan_runtime_t;
+
+static qr_scan_runtime_t *g_scan_runtime;
+
+static int scan_preview_handler(struct v4l2_drm_context *ctx, bool displayed)
+{
+    qr_scan_runtime_t *rt = g_scan_runtime;
+    const uint8_t *frame;
+    char result[1024];
+
+    (void)displayed;
+    if(!rt || !ctx || !rt->opts || !rt->qr) {
+        return 'q';
+    }
+    if(monotonic_ms() >= rt->deadline_ms) {
+        rt->rc = 1;
+        return 'q';
+    }
+    if(ctx->frame_count == rt->last_frame_count) {
+        return 0;
+    }
+    rt->last_frame_count = ctx->frame_count;
+    if(!ctx->buffers || ctx->vbuffer.index >= ctx->buffer_num ||
+       !ctx->buffers[ctx->vbuffer.index].mmap) {
+        return 0;
+    }
+    if(rt->skipped < rt->opts->skip_frames) {
+        rt->skipped++;
+        return 0;
+    }
+
+    frame = (const uint8_t *)ctx->buffers[ctx->vbuffer.index].mmap;
+    result[0] = '\0';
+    if(decode_frame(rt->qr, frame, rt->opts->width, rt->opts->height,
+                    result, sizeof(result)) == 0) {
+        printf("%s\n", result);
+        fflush(stdout);
+        rt->rc = 0;
+        return 'q';
+    }
+    return 0;
+}
+
+static int scan_camera_preview(const qr_scan_options_t *opts)
+{
+    struct v4l2_drm_context ctx;
+    struct display *display = NULL;
+    struct quirc *qr;
+    qr_scan_runtime_t runtime;
+    uint32_t v4l2_format;
+
+    if(!opts) {
+        return 2;
+    }
+    qr = quirc_new();
+    if(!qr) {
+        fprintf(stderr, "quirc allocation failed\n");
+        return 2;
+    }
+
+    memset(&ctx, 0, sizeof(ctx));
+    v4l2_drm_default_context(&ctx);
+    ctx.device = opts->device;
+    ctx.width = opts->width;
+    ctx.height = opts->height;
+    v4l2_format = opts->format == QR_SCAN_FORMAT_NV12 ? V4L2_PIX_FMT_NV12 :
+                                                        V4L2_PIX_FMT_NV16;
+    ctx.video_format = v4l2_format;
+    ctx.display_format = opts->format == QR_SCAN_FORMAT_NV12 ? DRM_FORMAT_NV12 :
+                                                            DRM_FORMAT_NV16;
+    ctx.display = true;
+    ctx.buffer_num = 5;
+
+    if(v4l2_drm_setup(&ctx, 1, &display) != 0) {
+        fprintf(stderr, "v4l2 preview setup failed for /dev/video%u\n",
+                opts->device);
+        quirc_destroy(qr);
+        return 2;
+    }
+
+    memset(&runtime, 0, sizeof(runtime));
+    runtime.opts = opts;
+    runtime.qr = qr;
+    runtime.deadline_ms = monotonic_ms() + (uint64_t)opts->timeout_s * 1000ULL;
+    runtime.rc = 1;
+    g_scan_runtime = &runtime;
+    (void)v4l2_drm_run(&ctx, 1, scan_preview_handler);
+    g_scan_runtime = NULL;
+    if(display) {
+        display_exit(display);
+    }
+    quirc_destroy(qr);
+    if(runtime.rc != 0) {
+        fprintf(stderr, "no Meshtastic QR code found\n");
+    }
+    return runtime.rc;
+}
+
 static int scan_camera(const qr_scan_options_t *opts)
 {
     struct v4l2_drm_context ctx;
@@ -216,6 +328,9 @@ static int scan_camera(const qr_scan_options_t *opts)
 
     if(!opts) {
         return 2;
+    }
+    if(opts->preview) {
+        return scan_camera_preview(opts);
     }
     qr = quirc_new();
     if(!qr) {

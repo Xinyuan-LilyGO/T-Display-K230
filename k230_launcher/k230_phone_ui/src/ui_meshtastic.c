@@ -37,6 +37,7 @@
 #define MESHTASTIC_PREF_REGION "meshtastic.region"
 #define MESHTASTIC_PREF_PRESET "meshtastic.preset"
 #define MESHTASTIC_PREF_CHANNEL "meshtastic.channel"
+#define MESHTASTIC_PREF_SLOT "meshtastic.slot"
 #define MESHTASTIC_PREF_PSK "meshtastic.psk"
 #define MESHTASTIC_PREF_POWER "meshtastic.power"
 #define MESHTASTIC_PREF_NODE "meshtastic.node"
@@ -73,6 +74,7 @@ static int mesh_chat_gap;
 static char mesh_region[24] = MESHTASTIC_DEFAULT_UI_REGION;
 static char mesh_preset[32] = MESHTASTIC_DEFAULT_UI_PRESET;
 static char mesh_channel_name[64] = "";
+static char mesh_frequency_slot[8] = "auto";
 static char mesh_psk[80] = "default";
 static char mesh_tx_power[8] = "auto";
 static char mesh_node_name[48] = "k230-t-display";
@@ -89,7 +91,7 @@ static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
 static lv_obj_t *mesh_pairing_overlay;
-static lv_obj_t *mesh_settings_value_labels[11];
+static lv_obj_t *mesh_settings_value_labels[12];
 static char mesh_last_pairing_code[16];
 static char mesh_channel_url_text[1024];
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
@@ -106,6 +108,7 @@ typedef enum {
     MESH_FIELD_REGION = 0,
     MESH_FIELD_PRESET,
     MESH_FIELD_CHANNEL,
+    MESH_FIELD_SLOT,
     MESH_FIELD_PSK,
     MESH_FIELD_POWER,
     MESH_FIELD_NODE,
@@ -230,6 +233,30 @@ static const mesh_choice_t mesh_power_choices[] = {
     {"17", "17 dBm"},
     {"20", "20 dBm"},
     {"22", "22 dBm"},
+};
+
+static const mesh_choice_t mesh_slot_choices[] = {
+    {"auto", "Auto (name hash)"},
+    {"1", "Slot 1"},
+    {"2", "Slot 2"},
+    {"3", "Slot 3"},
+    {"4", "Slot 4"},
+    {"5", "Slot 5"},
+    {"6", "Slot 6"},
+    {"7", "Slot 7"},
+    {"8", "Slot 8"},
+    {"9", "Slot 9"},
+    {"10", "Slot 10"},
+    {"11", "Slot 11"},
+    {"12", "Slot 12"},
+    {"13", "Slot 13"},
+    {"14", "Slot 14"},
+    {"15", "Slot 15"},
+    {"16", "Slot 16"},
+    {"17", "Slot 17"},
+    {"18", "Slot 18"},
+    {"19", "Slot 19"},
+    {"20", "Slot 20"},
 };
 
 static const mesh_choice_t mesh_hop_choices[] = {
@@ -695,6 +722,34 @@ static void mesh_normalize_hop(void)
     snprintf(mesh_hop_limit, sizeof(mesh_hop_limit), "%lu", hop);
 }
 
+static int mesh_slot_text_is_auto(const char *text)
+{
+    return !text || !text[0] || strcasecmp(text, "auto") == 0 ||
+           strcasecmp(text, "default") == 0 || strcmp(text, "-") == 0 ||
+           strcmp(text, "0") == 0;
+}
+
+static int mesh_slot_is_auto(void)
+{
+    return mesh_slot_text_is_auto(mesh_frequency_slot);
+}
+
+static void mesh_normalize_slot(void)
+{
+    unsigned long slot;
+
+    if(mesh_slot_is_auto()) {
+        snprintf(mesh_frequency_slot, sizeof(mesh_frequency_slot), "auto");
+        return;
+    }
+    if(mesh_parse_u32_text(mesh_frequency_slot, &slot) != 0 ||
+       slot < 1UL || slot > 255UL) {
+        snprintf(mesh_frequency_slot, sizeof(mesh_frequency_slot), "auto");
+        return;
+    }
+    snprintf(mesh_frequency_slot, sizeof(mesh_frequency_slot), "%lu", slot);
+}
+
 static int mesh_power_text_is_auto(const char *text)
 {
     return !text || !text[0] || strcasecmp(text, "auto") == 0 ||
@@ -741,9 +796,10 @@ static void mesh_update_profile_label(void)
     char text[180];
 
     snprintf(text, sizeof(text),
-             "%s  %s  %s",
+             "%s  %s  %s  slot:%s",
              mesh_region, mesh_preset,
-             mesh_channel_name[0] ? mesh_channel_name : "default");
+             mesh_channel_name[0] ? mesh_channel_name : "default",
+             mesh_slot_is_auto() ? "auto" : mesh_frequency_slot);
     if(mesh_profile_label && lv_obj_is_valid(mesh_profile_label)) {
         lv_label_set_text(mesh_profile_label, text);
     }
@@ -757,6 +813,8 @@ static void mesh_load_profile_prefs(void)
                  MESHTASTIC_DEFAULT_UI_PRESET);
     ui_prefs_get(MESHTASTIC_PREF_CHANNEL, mesh_channel_name,
                  sizeof(mesh_channel_name), "");
+    ui_prefs_get(MESHTASTIC_PREF_SLOT, mesh_frequency_slot,
+                 sizeof(mesh_frequency_slot), "auto");
     ui_prefs_get(MESHTASTIC_PREF_PSK, mesh_psk, sizeof(mesh_psk), "default");
     ui_prefs_get(MESHTASTIC_PREF_POWER, mesh_tx_power,
                  sizeof(mesh_tx_power), "auto");
@@ -784,6 +842,7 @@ static void mesh_load_profile_prefs(void)
     }
     mesh_normalize_power();
     mesh_normalize_hop();
+    mesh_normalize_slot();
 }
 
 static void mesh_save_profile_prefs(void)
@@ -791,6 +850,7 @@ static void mesh_save_profile_prefs(void)
     ui_prefs_set(MESHTASTIC_PREF_REGION, mesh_region);
     ui_prefs_set(MESHTASTIC_PREF_PRESET, mesh_preset);
     ui_prefs_set(MESHTASTIC_PREF_CHANNEL, mesh_channel_name);
+    ui_prefs_set(MESHTASTIC_PREF_SLOT, mesh_frequency_slot);
     ui_prefs_set(MESHTASTIC_PREF_PSK, mesh_psk);
     ui_prefs_set(MESHTASTIC_PREF_POWER, mesh_tx_power);
     ui_prefs_set(MESHTASTIC_PREF_NODE, mesh_node_name);
@@ -871,6 +931,13 @@ static void mesh_sync_profile_from_status(const char *status, int online)
                                            value);
     mesh_status_field(status, "channel", value, sizeof(value), "");
     changed |= mesh_status_sync_channel(value);
+    mesh_status_field(status, "slot", value, sizeof(value), "");
+    if(value[0] && strcmp(value, "-") != 0 &&
+       strcmp(mesh_frequency_slot, value) != 0) {
+        snprintf(mesh_frequency_slot, sizeof(mesh_frequency_slot), "%s", value);
+        mesh_normalize_slot();
+        changed = 1;
+    }
     mesh_status_field(status, "node", value, sizeof(value), "");
     changed |= mesh_status_copy_if_changed(mesh_node_name,
                                            sizeof(mesh_node_name), value);
@@ -1460,6 +1527,8 @@ static void mesh_start_event_cb(lv_event_t *event)
     char region_arg[32];
     char preset_arg[40];
     char channel_arg[80];
+    char slot_arg[16];
+    char slot_option[32];
     char psk_arg[96];
     char power_arg[16];
     char power_option[32];
@@ -1487,6 +1556,12 @@ static void mesh_start_event_cb(lv_event_t *event)
     mesh_safe_arg(region_arg, sizeof(region_arg), mesh_region);
     mesh_safe_arg(preset_arg, sizeof(preset_arg), mesh_preset);
     mesh_safe_arg(channel_arg, sizeof(channel_arg), mesh_channel_name);
+    mesh_normalize_slot();
+    slot_option[0] = '\0';
+    if(!mesh_slot_is_auto()) {
+        mesh_safe_arg(slot_arg, sizeof(slot_arg), mesh_frequency_slot);
+        snprintf(slot_option, sizeof(slot_option), "--slot %s ", slot_arg);
+    }
     mesh_safe_arg(psk_arg, sizeof(psk_arg), mesh_psk);
     mesh_normalize_power();
     power_option[0] = '\0';
@@ -1513,18 +1588,18 @@ static void mesh_start_event_cb(lv_event_t *event)
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--channel-name %s --psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s"
+                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
-                 region_arg, preset_arg, channel_arg, psk_arg,
+                 region_arg, preset_arg, channel_arg, slot_option, psk_arg,
                  power_option, node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option);
     } else {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s"
+                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
-                 region_arg, preset_arg, psk_arg, power_option,
+                 region_arg, preset_arg, slot_option, psk_arg, power_option,
                  node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option);
     }
@@ -1630,7 +1705,9 @@ static const char *mesh_setting_name(mesh_setting_field_t field)
     case MESH_FIELD_PRESET:
         return "Preset";
     case MESH_FIELD_CHANNEL:
-        return "Channel";
+        return "Channel name";
+    case MESH_FIELD_SLOT:
+        return "Frequency slot";
     case MESH_FIELD_PSK:
         return "PSK";
     case MESH_FIELD_POWER:
@@ -1658,6 +1735,7 @@ static int mesh_setting_uses_choice(mesh_setting_field_t field)
     case MESH_FIELD_REGION:
     case MESH_FIELD_PRESET:
     case MESH_FIELD_POWER:
+    case MESH_FIELD_SLOT:
     case MESH_FIELD_HOP:
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
@@ -1677,6 +1755,13 @@ static const char *mesh_setting_value(mesh_setting_field_t field,
         return mesh_preset;
     case MESH_FIELD_CHANNEL:
         return mesh_channel_name[0] ? mesh_channel_name : "<preset>";
+    case MESH_FIELD_SLOT:
+        if(mesh_slot_is_auto()) {
+            snprintf(buf, len, "Auto");
+            return buf;
+        }
+        snprintf(buf, len, "Slot %s", mesh_frequency_slot);
+        return buf;
     case MESH_FIELD_PSK:
         return mesh_psk;
     case MESH_FIELD_POWER:
@@ -1753,6 +1838,11 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
         } else {
             mesh_safe_arg(mesh_channel_name, sizeof(mesh_channel_name), text);
         }
+        break;
+    case MESH_FIELD_SLOT:
+        mesh_safe_or_default(mesh_frequency_slot, sizeof(mesh_frequency_slot),
+                             text, "auto");
+        mesh_normalize_slot();
         break;
     case MESH_FIELD_PSK:
         mesh_safe_or_default(mesh_psk, sizeof(mesh_psk), text, "default");
@@ -1848,6 +1938,11 @@ static int mesh_choice_is_selected(mesh_setting_field_t field,
             return mesh_power_is_auto();
         }
         return strcmp(mesh_tx_power, value) == 0;
+    case MESH_FIELD_SLOT:
+        if(mesh_slot_text_is_auto(value)) {
+            return mesh_slot_is_auto();
+        }
+        return strcmp(mesh_frequency_slot, value) == 0;
     case MESH_FIELD_HOP:
         return strcmp(mesh_hop_limit, value) == 0;
     case MESH_FIELD_ACK:
@@ -1878,6 +1973,12 @@ static const char *mesh_choice_value_at(mesh_setting_field_t field, int index)
         if(index >= 0 && index < (int)(sizeof(mesh_power_choices) /
            sizeof(mesh_power_choices[0]))) {
             return mesh_power_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_SLOT:
+        if(index >= 0 && index < (int)(sizeof(mesh_slot_choices) /
+           sizeof(mesh_slot_choices[0]))) {
+            return mesh_slot_choices[index].value;
         }
         break;
     case MESH_FIELD_HOP:
@@ -1929,6 +2030,11 @@ static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
         mesh_safe_or_default(mesh_tx_power, sizeof(mesh_tx_power), value,
                              "auto");
         mesh_normalize_power();
+        break;
+    case MESH_FIELD_SLOT:
+        mesh_safe_or_default(mesh_frequency_slot, sizeof(mesh_frequency_slot),
+                             value, "auto");
+        mesh_normalize_slot();
         break;
     case MESH_FIELD_HOP:
         mesh_safe_or_default(mesh_hop_limit, sizeof(mesh_hop_limit), value,
@@ -2006,6 +2112,8 @@ static const char *mesh_choice_label_at(mesh_setting_field_t field, int index)
         return mesh_preset_choices[index].label;
     case MESH_FIELD_POWER:
         return mesh_power_choices[index].label;
+    case MESH_FIELD_SLOT:
+        return mesh_slot_choices[index].label;
     case MESH_FIELD_HOP:
         return mesh_hop_choices[index].label;
     case MESH_FIELD_ACK:
@@ -2025,6 +2133,8 @@ static int mesh_choice_count(mesh_setting_field_t field)
         return (int)(sizeof(mesh_preset_choices) / sizeof(mesh_preset_choices[0]));
     case MESH_FIELD_POWER:
         return (int)(sizeof(mesh_power_choices) / sizeof(mesh_power_choices[0]));
+    case MESH_FIELD_SLOT:
+        return (int)(sizeof(mesh_slot_choices) / sizeof(mesh_slot_choices[0]));
     case MESH_FIELD_HOP:
         return (int)(sizeof(mesh_hop_choices) / sizeof(mesh_hop_choices[0]));
     case MESH_FIELD_ACK:
@@ -2083,19 +2193,22 @@ static void mesh_choice_open(mesh_setting_field_t field)
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
 
-    title = ui_label(panel, mesh_setting_name(field), &lv_font_montserrat_24,
+    title = ui_label(panel, ui_tr(mesh_setting_name(field)), &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_pos(title, margin, 22);
     subtitle = ui_label(panel,
-                        field == MESH_FIELD_PRESET ?
+                        ui_tr(field == MESH_FIELD_PRESET ?
                         "Preset list is filtered by current region" :
-                        "Select one option",
+                        field == MESH_FIELD_SLOT ?
+                        "Auto derives frequency from channel name" :
+                        "Select one option"),
                         &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_pos(subtitle, margin, 56);
     lv_obj_set_width(subtitle, content_w - 112);
     lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
 
-    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96, "Close",
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"),
                             0x374151);
     lv_obj_add_event_cb(btn, mesh_choice_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
@@ -2113,7 +2226,7 @@ static void mesh_choice_open(mesh_setting_field_t field)
         selected = mesh_choice_is_selected(field, value);
         x = margin + (visible % cols) * (col_w + gap);
         y = 104 + (visible / cols) * row_h;
-        btn = ui_command_button(panel, x, y, col_w, label, 0xD7DEE8);
+        btn = ui_command_button(panel, x, y, col_w, ui_tr(label), 0xD7DEE8);
         mesh_style_choice_button(btn, selected);
         lv_obj_add_event_cb(btn, mesh_choice_event_cb, LV_EVENT_CLICKED,
                             (void *)(intptr_t)(((int)field << 16) | i));
@@ -2141,14 +2254,15 @@ static void mesh_setting_edit_event_cb(lv_event_t *event)
     }
 
     memset(&config, 0, sizeof(config));
-    config.title = mesh_setting_name(field);
+    config.title = ui_tr(mesh_setting_name(field));
     config.placeholder = placeholder;
     config.password_mode = field == MESH_FIELD_PSK;
-    config.max_length = field == MESH_FIELD_PSK ? 80 : 64;
+    config.max_length = field == MESH_FIELD_PSK ? 80 :
+                        field == MESH_FIELD_CHANNEL ? 12 : 64;
     config.submit_cb = mesh_setting_submit_cb;
     config.user_data = (void *)(intptr_t)field;
-    config.submit_text = "Save";
-    config.cancel_text = "Cancel";
+    config.submit_text = ui_tr("Save");
+    config.cancel_text = ui_tr("Cancel");
     ui_input_dialog_open(&config);
 }
 
@@ -2350,7 +2464,7 @@ static void *mesh_channel_scan_worker(void *arg)
     response[0] = '\0';
 
     fp = popen(MESHTASTIC_QR_SCAN_PATH
-               " --timeout-sec 18 2>/tmp/k230_qr_scan.log", "r");
+               " --preview --timeout-sec 18 2>/tmp/k230_qr_scan.log", "r");
     if(fp) {
         if(fgets(url, sizeof(url), fp)) {
             ui_trim_text(url);
@@ -2414,12 +2528,15 @@ static void mesh_channel_scan_timer_cb(lv_timer_t *timer)
         (void)mesh_channel_url_fetch(mesh_channel_url_text,
                                      sizeof(mesh_channel_url_text),
                                      fetch_status, sizeof(fetch_status));
-        mesh_channel_refresh_view(1, "Channel imported", qr_px);
+        mesh_channel_refresh_view(1, ui_tr("Channel imported"), qr_px);
         mesh_append_log("channel QR import: %s", status);
     } else {
-        mesh_channel_set_status(status[0] ? status : "QR scan failed",
+        mesh_channel_set_status(status[0] ? status : ui_tr("QR scan failed"),
                                 0xEF4D5A);
         mesh_append_log("channel QR import failed: %s", status);
+    }
+    if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
+        lv_obj_invalidate(mesh_channel_overlay);
     }
     if(mesh_channel_scan_timer) {
         lv_timer_delete(mesh_channel_scan_timer);
@@ -2443,10 +2560,10 @@ static void mesh_channel_scan_event_cb(lv_event_t *event)
     pthread_mutex_unlock(&mesh_channel_scan_mutex);
 
     if(running) {
-        mesh_channel_set_status("Scanning channel QR...", 0xF5A524);
+        mesh_channel_set_status(ui_tr("Scanning channel QR..."), 0xF5A524);
         return;
     }
-    mesh_channel_set_status("Scanning channel QR...", 0xF5A524);
+    mesh_channel_set_status(ui_tr("Scanning channel QR..."), 0xF5A524);
     if(pthread_create(&mesh_channel_scan_thread, NULL,
                       mesh_channel_scan_worker, NULL) != 0) {
         pthread_mutex_lock(&mesh_channel_scan_mutex);
@@ -2597,19 +2714,20 @@ static void mesh_channel_event_cb(lv_event_t *event)
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
 
-    title = ui_label(panel, "Channel share", &lv_font_montserrat_24,
+    title = ui_label(panel, ui_tr("Channel share"), &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_pos(title, margin, 22);
     lv_obj_set_width(title, content_w - 120);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
 
-    subtitle = ui_label(panel, "Meshtastic official channel URL",
+    subtitle = ui_label(panel, ui_tr("Meshtastic official channel URL"),
                         &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_pos(subtitle, margin, 56);
     lv_obj_set_width(subtitle, content_w - 120);
     lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
 
-    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96, "Close",
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"),
                             0x374151);
     lv_obj_add_event_cb(btn, mesh_channel_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
@@ -2633,7 +2751,7 @@ static void mesh_channel_event_cb(lv_event_t *event)
         text_y = qr_px + 34;
     }
 
-    label = ui_label(card, "Show this QR to Meshtastic app",
+    label = ui_label(card, ui_tr("Show this QR to Meshtastic app"),
                      &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_pos(label, text_x, text_y);
     lv_obj_set_width(label, text_w);
@@ -2642,7 +2760,7 @@ static void mesh_channel_event_cb(lv_event_t *event)
     mesh_channel_url_label =
         ui_label(card,
                  mesh_channel_url_text[0] ? mesh_channel_url_text :
-                 "Channel URL unavailable",
+                 ui_tr("Channel URL unavailable"),
                  &lv_font_montserrat_16,
                  mesh_channel_url_text[0] ? 0xD7DEE8 : 0xF5A524);
     lv_obj_set_pos(mesh_channel_url_label, text_x, text_y + 34);
@@ -2663,16 +2781,16 @@ static void mesh_channel_event_cb(lv_event_t *event)
     if(button_w < 112) {
         button_w = 112;
     }
-    btn = ui_command_button(panel, margin, y, button_w, "Save URL",
+    btn = ui_command_button(panel, margin, y, button_w, ui_tr("Save URL"),
                             0x25C281);
     lv_obj_add_event_cb(btn, mesh_channel_save_event_cb, LV_EVENT_CLICKED,
                         NULL);
     btn = ui_command_button(panel, margin + button_w + 12, y, button_w,
-                            "Refresh", 0x3DA5FF);
+                            ui_tr("Refresh"), 0x3DA5FF);
     lv_obj_add_event_cb(btn, mesh_channel_refresh_event_cb, LV_EVENT_CLICKED,
                         NULL);
     btn = ui_command_button(panel, margin + (button_w + 12) * 2, y,
-                            button_w, "Scan QR", 0x8B5CF6);
+                            button_w, ui_tr("Scan QR"), 0x8B5CF6);
     lv_obj_add_event_cb(btn, mesh_channel_scan_event_cb, LV_EVENT_CLICKED,
                         NULL);
 }
@@ -2960,7 +3078,6 @@ static void mesh_add_node_card(lv_obj_t *panel, const char *line,
     char rssi[24];
     char snr[24];
     char pos[96];
-    char tel[128];
     char detail[260];
     char meta[160];
 
@@ -2979,7 +3096,6 @@ static void mesh_add_node_card(lv_obj_t *panel, const char *line,
     mesh_node_line_value(line, "rssi=", rssi, sizeof(rssi));
     mesh_node_line_value(line, "snr=", snr, sizeof(snr));
     mesh_node_line_segment(line, "pos=", " tel=", pos, sizeof(pos));
-    mesh_node_line_segment(line, "tel=", " nbr=", tel, sizeof(tel));
 
     if(strcmp(name, "-") == 0 && strcmp(short_name, "-") != 0) {
         snprintf(name, sizeof(name), "%s", short_name);
@@ -3015,16 +3131,16 @@ static void mesh_add_node_card(lv_obj_t *panel, const char *line,
     lv_obj_set_width(meta_label, w - 28);
     lv_label_set_long_mode(meta_label, LV_LABEL_LONG_DOT);
 
-    snprintf(detail, sizeof(detail), "HW %s  Pos %s\n%s",
-             hw, pos, tel);
+    snprintf(detail, sizeof(detail), "HW %s  Pos %s",
+             hw, (pos[0] && strcmp(pos, "-") != 0) ? pos : "-");
     detail_label = ui_label(card, detail, &lv_font_montserrat_14, 0xCBD5E1);
     lv_obj_set_pos(detail_label, 14, 94);
     lv_obj_set_width(detail_label, w - 28);
-    lv_label_set_long_mode(detail_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(detail_label, LV_LABEL_LONG_DOT);
 
-    hint_label = ui_label(card, "Tap for details",
+    hint_label = ui_label(card, ui_tr("Tap for details"),
                           &lv_font_montserrat_14, 0x3DA5FF);
-    lv_obj_set_pos(hint_label, 14, h - 28);
+    lv_obj_set_pos(hint_label, 14, h - 36);
     lv_obj_set_width(hint_label, w - 28);
     lv_label_set_long_mode(hint_label, LV_LABEL_LONG_DOT);
 }
@@ -3126,7 +3242,8 @@ static void mesh_profile_event_cb(lv_event_t *event)
 
     for(int i = 0; i < (int)MESH_FIELD_COUNT; i++) {
         char value[32];
-        lv_obj_t *name = ui_label(panel, mesh_setting_name((mesh_setting_field_t)i),
+        lv_obj_t *name = ui_label(panel,
+                                  ui_tr(mesh_setting_name((mesh_setting_field_t)i)),
                                   &lv_font_montserrat_16, 0x9AA4AF);
         lv_obj_t *edit;
         lv_obj_set_pos(name, margin, y + 8);
@@ -3146,7 +3263,7 @@ static void mesh_profile_event_cb(lv_event_t *event)
                                  edit_w,
                                  mesh_setting_uses_choice(
                                      (mesh_setting_field_t)i) ?
-                                 "Select" : "Edit",
+                                 ui_tr("Select") : ui_tr("Edit"),
                                  mesh_setting_uses_choice(
                                      (mesh_setting_field_t)i) ?
                                  0x25C281 : 0x3DA5FF);
@@ -3189,7 +3306,7 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     int columns = landscape ? 2 : 1;
     int gap = 12;
     int card_w = columns == 2 ? (content_w - gap) / 2 : content_w;
-    int card_h = landscape ? 154 : 166;
+    int card_h = landscape ? 178 : 190;
     int y = 98;
     int node_index = 1;
     int shown_count = 0;
@@ -3222,12 +3339,13 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     lv_obj_set_style_border_width(panel, 0, 0);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
-    title = ui_label(panel, "Meshtastic nodes", &lv_font_montserrat_24,
+    title = ui_label(panel, ui_tr("Nearby nodes"), &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_pos(title, margin, 22);
     lv_obj_set_width(title, content_w - 230);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    subtitle = ui_label(panel, "Tap a node to make it the direct-message target",
+    subtitle = ui_label(panel,
+                        ui_tr("Recently heard mesh nodes; tap one for direct messages"),
                         &lv_font_montserrat_14, 0x94A3B8);
     lv_obj_set_pos(subtitle, margin, 56);
     lv_obj_set_width(subtitle, content_w);
@@ -3235,10 +3353,11 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     snprintf(mesh_node_select_ids[0], sizeof(mesh_node_select_ids[0]),
              "0xffffffff");
     btn = ui_command_button(panel, screen_w - margin - 206, 18, 100,
-                            "Broadcast", 0x25C281);
+                            ui_tr("Broadcast"), 0x25C281);
     lv_obj_add_event_cb(btn, mesh_select_node_target_event_cb,
                         LV_EVENT_CLICKED, mesh_node_select_ids[0]);
-    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96, "Close",
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"),
                             0x374151);
     lv_obj_add_event_cb(btn, mesh_nodes_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
