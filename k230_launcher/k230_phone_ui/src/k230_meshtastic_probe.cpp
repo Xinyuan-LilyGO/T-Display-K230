@@ -2202,6 +2202,139 @@ static bool encode_phoneapi_metadata(std::vector<uint8_t> *out)
     return true;
 }
 
+static void append_phoneapi_region_preset_group(
+    std::vector<uint8_t> *out, const uint32_t *presets, size_t preset_count,
+    uint32_t default_preset, bool licensed_only)
+{
+    std::vector<uint8_t> group;
+
+    if(!out || !presets || preset_count == 0U) {
+        return;
+    }
+    for(size_t i = 0; i < preset_count; i++) {
+        append_uint32_field(&group, 1U, presets[i]);
+    }
+    append_uint32_field(&group, 2U, default_preset);
+    append_bool_field(&group, 3U, licensed_only);
+    append_bytes_field(out, 1U, group);
+}
+
+static void append_phoneapi_region_group(std::vector<uint8_t> *out,
+                                         uint32_t region,
+                                         uint32_t group_index)
+{
+    std::vector<uint8_t> entry;
+
+    if(!out) {
+        return;
+    }
+    append_uint32_field(&entry, 1U, region);
+    append_uint32_field(&entry, 2U, group_index);
+    append_bytes_field(out, 2U, entry);
+}
+
+static bool encode_phoneapi_region_presets(std::vector<uint8_t> *out)
+{
+    enum {
+        REGION_US = 1U,
+        REGION_EU_433 = 2U,
+        REGION_EU_868 = 3U,
+        REGION_CN = 4U,
+        REGION_JP = 5U,
+        REGION_ANZ = 6U,
+        REGION_KR = 7U,
+        REGION_TW = 8U,
+        REGION_RU = 9U,
+        REGION_IN = 10U,
+        REGION_NZ_865 = 11U,
+        REGION_TH = 12U,
+        REGION_LORA_24 = 13U,
+        REGION_UA_433 = 14U,
+        REGION_MY_433 = 16U,
+        REGION_MY_919 = 17U,
+        REGION_SG_923 = 18U,
+        REGION_PH_433 = 19U,
+        REGION_PH_868 = 20U,
+        REGION_PH_915 = 21U,
+        REGION_ANZ_433 = 22U,
+        REGION_KZ_433 = 23U,
+        REGION_KZ_863 = 24U,
+        REGION_NP_865 = 25U,
+        REGION_BR_902 = 26U,
+        REGION_ITU1_2M = 27U,
+        REGION_ITU2_2M = 28U,
+        REGION_EU_866 = 29U,
+        REGION_EU_N_868 = 32U,
+        REGION_ITU3_2M = 33U,
+        REGION_ITU1_70CM = 34U,
+        REGION_ITU2_70CM = 35U,
+        REGION_ITU3_70CM = 36U,
+        REGION_ITU2_125CM = 37U,
+    };
+    enum {
+        GROUP_STD = 0U,
+        GROUP_EU868 = 1U,
+        GROUP_LITE = 2U,
+        GROUP_EU_NARROW = 3U,
+        GROUP_HAM_20KHZ = 4U,
+        GROUP_HAM_100KHZ = 5U,
+    };
+    static const uint32_t presets_std[] = {0U, 1U, 3U, 4U, 5U,
+                                           6U, 7U, 8U, 9U, 16U};
+    static const uint32_t presets_narrow[] = {12U, 13U};
+    static const uint32_t presets_tiny[] = {14U, 15U};
+    static const uint32_t presets_eu_superset[] = {
+        0U, 1U, 3U, 4U, 5U, 6U, 7U, 10U, 11U, 12U, 13U};
+    static const uint32_t std_regions[] = {
+        REGION_US,      REGION_EU_433, REGION_CN,     REGION_JP,
+        REGION_ANZ,     REGION_KR,     REGION_TW,     REGION_RU,
+        REGION_IN,      REGION_NZ_865, REGION_TH,     REGION_LORA_24,
+        REGION_UA_433,  REGION_MY_433, REGION_MY_919, REGION_SG_923,
+        REGION_PH_433,  REGION_PH_868, REGION_PH_915, REGION_ANZ_433,
+        REGION_KZ_433,  REGION_KZ_863, REGION_NP_865, REGION_BR_902,
+    };
+    static const uint32_t ham20_regions[] = {
+        REGION_ITU1_2M, REGION_ITU2_2M, REGION_ITU3_2M};
+    static const uint32_t ham100_regions[] = {
+        REGION_ITU2_125CM, REGION_ITU1_70CM, REGION_ITU2_70CM,
+        REGION_ITU3_70CM};
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+
+    append_phoneapi_region_preset_group(out, presets_std,
+                                        ARRAY_SIZE(presets_std), 0U, false);
+    append_phoneapi_region_preset_group(out, presets_eu_superset,
+                                        ARRAY_SIZE(presets_eu_superset), 0U,
+                                        false);
+    append_phoneapi_region_preset_group(out, presets_eu_superset,
+                                        ARRAY_SIZE(presets_eu_superset), 10U,
+                                        false);
+    append_phoneapi_region_preset_group(out, presets_eu_superset,
+                                        ARRAY_SIZE(presets_eu_superset), 13U,
+                                        false);
+    append_phoneapi_region_preset_group(out, presets_tiny,
+                                        ARRAY_SIZE(presets_tiny), 14U, true);
+    append_phoneapi_region_preset_group(out, presets_narrow,
+                                        ARRAY_SIZE(presets_narrow), 13U, true);
+
+    for(size_t i = 0; i < ARRAY_SIZE(std_regions); i++) {
+        append_phoneapi_region_group(out, std_regions[i], GROUP_STD);
+    }
+    append_phoneapi_region_group(out, REGION_EU_868, GROUP_EU868);
+    append_phoneapi_region_group(out, REGION_EU_866, GROUP_LITE);
+    append_phoneapi_region_group(out, REGION_EU_N_868, GROUP_EU_NARROW);
+    for(size_t i = 0; i < ARRAY_SIZE(ham20_regions); i++) {
+        append_phoneapi_region_group(out, ham20_regions[i], GROUP_HAM_20KHZ);
+    }
+    for(size_t i = 0; i < ARRAY_SIZE(ham100_regions); i++) {
+        append_phoneapi_region_group(out, ham100_regions[i], GROUP_HAM_100KHZ);
+    }
+    return !out->empty();
+}
+
 static bool encode_phoneapi_config_device(std::vector<uint8_t> *out)
 {
     std::vector<uint8_t> device;
@@ -2747,6 +2880,8 @@ static bool phoneapi_send_config_stage(int fd, const probe_options_t &opts,
          phoneapi_send_from_payload(fd, 3U, payload, "my_info") && ok;
     ok = encode_phoneapi_metadata(&payload) &&
          phoneapi_send_from_payload(fd, 13U, payload, "metadata") && ok;
+    ok = encode_phoneapi_region_presets(&payload) &&
+         phoneapi_send_from_payload(fd, 19U, payload, "region_presets") && ok;
     ok = encode_phoneapi_config_lora(opts, &payload) &&
          phoneapi_send_from_payload(fd, 5U, payload, "config_lora") && ok;
     ok = encode_phoneapi_config_device(&payload) &&
