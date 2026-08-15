@@ -58,6 +58,7 @@
 #define MESHTASTIC_NODEINFO_APP 4U
 #define MESHTASTIC_ROUTING_APP 5U
 #define MESHTASTIC_ADMIN_APP 6U
+#define MESHTASTIC_TEXT_MESSAGE_COMPRESSED_APP 7U
 #define MESHTASTIC_TELEMETRY_APP 67U
 #define MESHTASTIC_TRACEROUTE_APP 70U
 #define MESHTASTIC_NEIGHBORINFO_APP 71U
@@ -153,6 +154,12 @@
 static bool meshtastic_node_is_broadcast(uint32_t node)
 {
     return node == MESHTASTIC_NODENUM_BROADCAST;
+}
+
+static bool meshtastic_port_is_text(uint32_t portnum)
+{
+    return portnum == MESHTASTIC_TEXT_MESSAGE_APP ||
+           portnum == MESHTASTIC_TEXT_MESSAGE_COMPRESSED_APP;
 }
 
 static const uint32_t lr2021_16e8_rf_switch_dio_pins[] = {
@@ -11735,12 +11742,13 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
     }
 
     ack_candidate = secure_match && data_ok &&
-                    decoded.portnum != MESHTASTIC_ROUTING_APP &&
                     header.to == opts.from_node &&
                     header.from != opts.from_node &&
-                    mesh_header_want_ack(header);
+                    mesh_header_want_ack(header) &&
+                    (decoded.portnum != MESHTASTIC_ROUTING_APP ||
+                     decoded.request_id != 0U);
     if(ack_candidate) {
-        ack_wants_ack = false;
+        ack_wants_ack = meshtastic_port_is_text(decoded.portnum);
     }
     if(ack_candidate) {
         mesh_header_t ack_source_header = header;
