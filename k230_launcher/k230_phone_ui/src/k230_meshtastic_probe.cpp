@@ -4442,6 +4442,58 @@ static bool encode_phoneapi_config_position(const probe_options_t &opts,
     return true;
 }
 
+static bool encode_phoneapi_config_power(std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> power;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_bool_field(&power, 1U, false);
+    append_uint32_field(&power, 4U, 60U);
+    append_uint32_field(&power, 7U, 300U);
+    append_uint32_field(&power, 8U, 10U);
+    append_bytes_field(out, 3U, power);
+    return true;
+}
+
+static bool encode_phoneapi_config_network(std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> network;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_bool_field(&network, 1U, false);
+    append_string_field(&network, 5U, "pool.ntp.org", 32U);
+    append_bool_field(&network, 6U, true);
+    append_uint32_field(&network, 7U, 0U);
+    append_bool_field(&network, 11U, false);
+    append_bytes_field(out, 4U, network);
+    return true;
+}
+
+static bool encode_phoneapi_config_display(std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> display;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_uint32_field(&display, 1U, 60U);
+    append_bool_field(&display, 5U, false);
+    append_uint32_field(&display, 6U, 0U);
+    append_uint32_field(&display, 7U, 0U);
+    append_uint32_field(&display, 8U, 3U);
+    append_bool_field(&display, 9U, true);
+    append_bool_field(&display, 10U, true);
+    append_bytes_field(out, 5U, display);
+    return true;
+}
+
 static bool encode_phoneapi_config_bluetooth(std::vector<uint8_t> *out)
 {
     std::vector<uint8_t> bluetooth;
@@ -4453,6 +4505,55 @@ static bool encode_phoneapi_config_bluetooth(std::vector<uint8_t> *out)
     append_bool_field(&bluetooth, 1U, true);
     append_uint32_field(&bluetooth, 2U, 2U);
     append_bytes_field(out, 7U, bluetooth);
+    return true;
+}
+
+static bool encode_phoneapi_config_security(std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> security;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_bool_field(&security, 4U, false);
+    append_bool_field(&security, 5U, false);
+    append_bool_field(&security, 6U, false);
+    append_bool_field(&security, 8U, true);
+    append_uint32_field(&security, 9U, 0U);
+    append_bytes_field(out, 8U, security);
+    return true;
+}
+
+static bool encode_phoneapi_config_sessionkey(std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> sessionkey;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_bytes_field(out, 9U, sessionkey);
+    return true;
+}
+
+static bool encode_phoneapi_config_device_ui(std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> device_ui;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_uint32_field(&device_ui, 1U, 1U);
+    append_uint32_field(&device_ui, 2U, 180U);
+    append_uint32_field(&device_ui, 3U, 60U);
+    append_bool_field(&device_ui, 4U, false);
+    append_bool_field(&device_ui, 5U, false);
+    append_bool_field(&device_ui, 8U, true);
+    append_bool_field(&device_ui, 9U, true);
+    append_uint32_field(&device_ui, 17U, 0x25C281U);
+    append_bytes_field(out, 10U, device_ui);
     return true;
 }
 
@@ -5992,11 +6093,29 @@ static bool encode_phoneapi_admin_config_response(const probe_options_t &opts,
     case 1U:
         ok = encode_phoneapi_config_position(opts, &config);
         break;
+    case 2U:
+        ok = encode_phoneapi_config_power(&config);
+        break;
+    case 3U:
+        ok = encode_phoneapi_config_network(&config);
+        break;
+    case 4U:
+        ok = encode_phoneapi_config_display(&config);
+        break;
     case 5U:
         ok = encode_phoneapi_config_lora(opts, &config);
         break;
     case 6U:
         ok = encode_phoneapi_config_bluetooth(&config);
+        break;
+    case 7U:
+        ok = encode_phoneapi_config_security(&config);
+        break;
+    case 8U:
+        ok = encode_phoneapi_config_sessionkey(&config);
+        break;
+    case 9U:
+        ok = encode_phoneapi_config_device_ui(&config);
         break;
     default:
         config.clear();
