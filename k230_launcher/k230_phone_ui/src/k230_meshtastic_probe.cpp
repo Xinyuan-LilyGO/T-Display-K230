@@ -5,6 +5,9 @@
 #include <linux/i2c-dev.h>
 #include <linux/spi/spidev.h>
 #include <math.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -110,8 +113,10 @@
 #define K230_MESH_NODEDB_TMP_FILE K230_MESH_NODEDB_FILE ".tmp"
 #define K230_MESH_UI_DIR "/root/meshtastic"
 #define K230_MESH_CANNED_MESSAGES_FILE K230_MESH_UI_DIR "/canned_messages.txt"
+#define K230_MESH_RINGTONE_FILE K230_MESH_UI_DIR "/ringtone.rtttl"
 #define K230_MESH_CANNED_MESSAGES_MAX_BYTES 200U
 #define K230_MESH_CANNED_MESSAGES_MAX_ITEMS 8U
+#define K230_MESH_RINGTONE_MAX_BYTES 230U
 #define MESHTASTIC_PHONEAPI_MAX_CHANNELS 8U
 #define MESHTASTIC_CHANNEL_ROLE_DISABLED 0U
 #define MESHTASTIC_CHANNEL_ROLE_PRIMARY 1U
@@ -2960,6 +2965,16 @@ static void append_sfixed32_field(std::vector<uint8_t> *out, uint32_t field,
     append_fixed32(out, (uint32_t)value);
 }
 
+static void append_fixed32_field(std::vector<uint8_t> *out, uint32_t field,
+                                 uint32_t value)
+{
+    if(!out) {
+        return;
+    }
+    append_varint(out, (field << 3U) | 5U);
+    append_fixed32(out, value);
+}
+
 static void append_bool_field(std::vector<uint8_t> *out, uint32_t field,
                               bool value)
 {
@@ -4249,6 +4264,96 @@ static bool encode_phoneapi_metadata(std::vector<uint8_t> *out)
     return true;
 }
 
+static bool phoneapi_get_interface_ipv4(const char *ifname, uint32_t *ip_le)
+{
+    int fd;
+    struct ifreq ifr;
+    struct sockaddr_in *addr;
+
+    if(ip_le) {
+        *ip_le = 0U;
+    }
+    if(!ifname || !ifname[0]) {
+        return false;
+    }
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if(fd < 0) {
+        return false;
+    }
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    if(ioctl(fd, SIOCGIFADDR, &ifr) != 0) {
+        close(fd);
+        return false;
+    }
+    close(fd);
+    addr = (struct sockaddr_in *)&ifr.ifr_addr;
+    if(ip_le) {
+        *ip_le = ntohl(addr->sin_addr.s_addr);
+    }
+    return addr->sin_addr.s_addr != 0U;
+}
+
+static bool encode_phoneapi_network_connection_status(const char *ifname,
+                                                      std::vector<uint8_t> *out)
+{
+    uint32_t ip = 0U;
+    bool connected = phoneapi_get_interface_ipv4(ifname, &ip);
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    if(ip != 0U) {
+        append_fixed32_field(out, 1U, ip);
+    }
+    append_bool_field(out, 2U, connected);
+    append_bool_field(out, 3U, false);
+    append_bool_field(out, 4U, false);
+    return true;
+}
+
+static bool encode_phoneapi_connection_status(std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> network;
+    std::vector<uint8_t> entry;
+    char pair_code[16];
+    phoneapi_bridge_state_t ble_state;
+    bool ble_connected;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+
+    if(encode_phoneapi_network_connection_status("wlan0", &network)) {
+        entry.clear();
+        append_bytes_field(&entry, 1U, network);
+        append_bytes_field(out, 1U, entry);
+    }
+    if(encode_phoneapi_network_connection_status("eth0", &network)) {
+        entry.clear();
+        append_bytes_field(&entry, 1U, network);
+        append_bytes_field(out, 2U, entry);
+    }
+
+    ble_state = phoneapi_bridge_get_state(nullptr, 0);
+    ble_connected = ble_state == PHONEAPI_BRIDGE_CONNECTED;
+    entry.clear();
+    if(phoneapi_bridge_get_pairing_code(pair_code, sizeof(pair_code))) {
+        append_uint32_field(&entry, 1U, (uint32_t)strtoul(pair_code, nullptr,
+                                                          10));
+    }
+    append_bool_field(&entry, 3U, ble_connected);
+    append_bytes_field(out, 3U, entry);
+
+    entry.clear();
+    append_uint32_field(&entry, 1U, 115200U);
+    append_bool_field(&entry, 2U, phoneapi_bridge_can_send());
+    append_bytes_field(out, 4U, entry);
+    return true;
+}
+
 static void append_phoneapi_region_preset_group(
     std::vector<uint8_t> *out, const uint32_t *presets, size_t preset_count,
     uint32_t default_preset, bool licensed_only)
@@ -5027,6 +5132,10 @@ typedef struct {
     uint32_t get_module_config_request = 0;
     bool get_canned_message_module_messages_request = false;
     bool get_device_metadata_request = false;
+    bool get_ringtone_request = false;
+    bool get_device_connection_status_request = false;
+    bool begin_edit_settings = false;
+    bool commit_edit_settings = false;
     bool has_set_time_only = false;
     uint32_t set_time_only = 0;
     bool has_set_owner = false;
@@ -5039,6 +5148,8 @@ typedef struct {
     std::vector<uint8_t> set_module_config;
     bool has_set_canned_message_module_messages = false;
     std::string set_canned_message_module_messages;
+    bool has_set_ringtone_message = false;
+    std::string set_ringtone_message;
 } phoneapi_admin_request_t;
 
 static bool phoneapi_proto_skip(const uint8_t *data, size_t len, size_t *pos,
@@ -5180,11 +5291,35 @@ static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
                 return false;
             }
             out->get_device_metadata_request = value != 0U;
+        } else if(field == 14U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->get_ringtone_request = value != 0U;
+        } else if(field == 16U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->get_device_connection_status_request = value != 0U;
         } else if(field == 43U && wire == 5U &&
                   pos + 4U <= payload.size()) {
             out->set_time_only = get_le32(payload.data() + pos);
             out->has_set_time_only = true;
             pos += 4U;
+        } else if(field == 64U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->begin_edit_settings = value != 0U;
+        } else if(field == 65U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->commit_edit_settings = value != 0U;
         } else if((field == 32U || field == 33U || field == 34U ||
                    field == 35U) && wire == 2U) {
             uint32_t l;
@@ -5221,6 +5356,16 @@ static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
                 (const char *)payload.data() + pos, l);
             pos += l;
             out->has_set_canned_message_module_messages = true;
+        } else if(field == 37U && wire == 2U) {
+            uint32_t l;
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            out->set_ringtone_message.assign((const char *)payload.data() +
+                                             pos, l);
+            pos += l;
+            out->has_set_ringtone_message = true;
         } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
                                        wire)) {
             return false;
@@ -6300,6 +6445,17 @@ static bool encode_phoneapi_admin_metadata_response(const probe_options_t &opts,
     return encode_phoneapi_admin_response_bytes(opts, 13U, metadata, out);
 }
 
+static bool encode_phoneapi_admin_connection_status_response(
+    const probe_options_t &opts, std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> status;
+
+    if(!out || !encode_phoneapi_connection_status(&status)) {
+        return false;
+    }
+    return encode_phoneapi_admin_response_bytes(opts, 17U, status, out);
+}
+
 #define K230_PHONE_UI_PREFS_FILE K230_PHONE_UI_PREFS_DIR "/settings.conf"
 #define K230_PHONE_UI_PREFS_LOCK K230_PHONE_UI_PREFS_DIR "/settings.conf.lock"
 #define K230_MESH_PREF_REGION "meshtastic.region"
@@ -6577,6 +6733,63 @@ static bool phoneapi_canned_messages_save(const std::string &messages)
     }
     daemon_event("Canned messages saved count=%u bytes=%u",
                  (unsigned)count, (unsigned)clipped.size());
+    return true;
+}
+
+static bool phoneapi_ringtone_load(std::string *out)
+{
+    FILE *fp;
+    char buf[K230_MESH_RINGTONE_MAX_BYTES + 1U];
+    size_t n;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    fp = fopen(K230_MESH_RINGTONE_FILE, "r");
+    if(!fp) {
+        return true;
+    }
+    n = fread(buf, 1U, K230_MESH_RINGTONE_MAX_BYTES, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    *out = mesh_clean_text(buf);
+    return true;
+}
+
+static bool phoneapi_ringtone_save(const std::string &ringtone)
+{
+    char tmp_path[sizeof(K230_MESH_RINGTONE_FILE) + 8];
+    std::string clean = mesh_clean_text(ringtone);
+    FILE *fp;
+
+    if(clean.size() > K230_MESH_RINGTONE_MAX_BYTES) {
+        clean.resize(K230_MESH_RINGTONE_MAX_BYTES);
+    }
+    if(mkdir(K230_MESH_UI_DIR, 0755) != 0 && errno != EEXIST) {
+        daemon_event("Ringtone mkdir failed: %s", strerror(errno));
+        return false;
+    }
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp",
+             K230_MESH_RINGTONE_FILE);
+    fp = fopen(tmp_path, "w");
+    if(!fp) {
+        daemon_event("Ringtone save open failed: %s", strerror(errno));
+        return false;
+    }
+    if(!clean.empty()) {
+        fprintf(fp, "%s\n", clean.c_str());
+    }
+    if(fclose(fp) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+    if(rename(tmp_path, K230_MESH_RINGTONE_FILE) != 0) {
+        unlink(tmp_path);
+        daemon_event("Ringtone save rename failed: %s", strerror(errno));
+        return false;
+    }
+    daemon_event("Ringtone saved bytes=%u", (unsigned)clean.size());
     return true;
 }
 
@@ -6875,12 +7088,32 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
                      admin.set_time_only, tx.packet_id);
         handled = true;
     }
+    if(admin.begin_edit_settings) {
+        daemon_event("PhoneAPI local admin begin_edit_settings id=0x%08x",
+                     tx.packet_id);
+        handled = true;
+    }
+    if(admin.commit_edit_settings) {
+        daemon_event("PhoneAPI local admin commit_edit_settings id=0x%08x",
+                     tx.packet_id);
+        handled = true;
+    }
     if(admin.has_set_canned_message_module_messages) {
         bool ok = phoneapi_canned_messages_save(
                       admin.set_canned_message_module_messages);
         daemon_event("PhoneAPI local admin set_canned_messages id=0x%08x bytes=%u ok=%s",
                      tx.packet_id,
                      (unsigned)admin.set_canned_message_module_messages.size(),
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.has_set_ringtone_message) {
+        bool ok = phoneapi_ringtone_save(admin.set_ringtone_message);
+
+        daemon_event("PhoneAPI local admin set_ringtone id=0x%08x bytes=%u ok=%s",
+                     tx.packet_id,
+                     (unsigned)admin.set_ringtone_message.size(),
                      ok ? "yes" : "no");
         ok_all = ok_all && ok;
         handled = true;
@@ -6979,6 +7212,26 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
         ok_all = ok_all && ok;
         handled = true;
     }
+    if(admin.get_ringtone_request) {
+        std::string ringtone;
+        std::vector<uint8_t> ringtone_bytes;
+        std::vector<uint8_t> response;
+        bool ok = phoneapi_ringtone_load(&ringtone);
+
+        if(ok) {
+            ringtone_bytes.assign(ringtone.begin(), ringtone.end());
+            ok = encode_phoneapi_admin_response_bytes(runtime_opts, 15U,
+                                                      ringtone_bytes,
+                                                      &response) &&
+                 phoneapi_send_local_admin_response(fd, tx, response,
+                                                    "admin_ringtone");
+        }
+        daemon_event("PhoneAPI local admin ringtone_response id=0x%08x bytes=%u ok=%s",
+                     tx.packet_id, (unsigned)ringtone.size(),
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
     if(admin.get_device_metadata_request) {
         std::vector<uint8_t> response;
         bool ok = encode_phoneapi_admin_metadata_response(runtime_opts,
@@ -6986,6 +7239,17 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
                   phoneapi_send_local_admin_response(fd, tx, response,
                                                      "admin_metadata");
         daemon_event("PhoneAPI local admin metadata_response id=0x%08x ok=%s",
+                     tx.packet_id, ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.get_device_connection_status_request) {
+        std::vector<uint8_t> response;
+        bool ok = encode_phoneapi_admin_connection_status_response(
+                      runtime_opts, &response) &&
+                  phoneapi_send_local_admin_response(fd, tx, response,
+                                                     "admin_connection_status");
+        daemon_event("PhoneAPI local admin connection_status_response id=0x%08x ok=%s",
                      tx.packet_id, ok ? "yes" : "no");
         ok_all = ok_all && ok;
         handled = true;
