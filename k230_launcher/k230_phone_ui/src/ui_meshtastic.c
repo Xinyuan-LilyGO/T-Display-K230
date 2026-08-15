@@ -4069,8 +4069,12 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     int right_x = landscape ? margin + left_w + 18 : margin;
     int right_w = landscape ? content_w - left_w - 18 : content_w;
     int request_gap = 8;
-    int request_area_w = content_w > 560 ? 560 : content_w;
-    int request_w = (request_area_w - request_gap * 2) / 3;
+    int request_cols = landscape ? 5 : 3;
+    int request_rows = landscape ? 1 : 2;
+    int request_area_w = content_w > (landscape ? 760 : 560) ?
+                         (landscape ? 760 : 560) : content_w;
+    int request_w = (request_area_w - request_gap * (request_cols - 1)) /
+                    request_cols;
     int y;
     char node_id[24];
     char name[64];
@@ -4143,20 +4147,25 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     lv_obj_add_event_cb(btn, mesh_node_detail_back_event_cb,
                         LV_EVENT_CLICKED, NULL);
 
-    btn = ui_command_button(panel, margin, 88, request_w,
-                            ui_tr("Node info"), 0x25C281);
-    lv_obj_add_event_cb(btn, mesh_node_remote_request_event_cb,
-                        LV_EVENT_CLICKED, "REQUEST_NODEINFO");
-    btn = ui_command_button(panel, margin + request_w + request_gap, 88,
-                            request_w, ui_tr("Position"), 0x3DA5FF);
-    lv_obj_add_event_cb(btn, mesh_node_remote_request_event_cb,
-                        LV_EVENT_CLICKED, "REQUEST_POSITION");
-    btn = ui_command_button(panel, margin + (request_w + request_gap) * 2,
-                            88, request_w, ui_tr("Telemetry"), 0xA78BFA);
-    lv_obj_add_event_cb(btn, mesh_node_remote_request_event_cb,
-                        LV_EVENT_CLICKED, "REQUEST_TELEMETRY");
+#define MESH_NODE_REQ_BUTTON(index, label, command, color) \
+    do { \
+        int bx = margin + ((index) % request_cols) * \
+                 (request_w + request_gap); \
+        int by = 88 + ((index) / request_cols) * 46; \
+        btn = ui_command_button(panel, bx, by, request_w, ui_tr(label), \
+                                color); \
+        lv_obj_add_event_cb(btn, mesh_node_remote_request_event_cb, \
+                            LV_EVENT_CLICKED, command); \
+    } while(0)
 
-    y = 146;
+    MESH_NODE_REQ_BUTTON(0, "Node info", "REQUEST_NODEINFO", 0x25C281);
+    MESH_NODE_REQ_BUTTON(1, "Position", "REQUEST_POSITION", 0x3DA5FF);
+    MESH_NODE_REQ_BUTTON(2, "Telemetry", "REQUEST_TELEMETRY", 0xA78BFA);
+    MESH_NODE_REQ_BUTTON(3, "Trace", "REQUEST_TRACEROUTE", 0xF59E0B);
+    MESH_NODE_REQ_BUTTON(4, "Neighbors", "REQUEST_NEIGHBORINFO", 0x14B8A6);
+#undef MESH_NODE_REQ_BUTTON
+
+    y = 88 + request_rows * 46 + 12;
     snprintf(summary, sizeof(summary),
              "RSSI %s\nSNR %s\nPackets %s\nLast seen %s\nHardware %s",
              rssi, snr, rx, age, hw);
