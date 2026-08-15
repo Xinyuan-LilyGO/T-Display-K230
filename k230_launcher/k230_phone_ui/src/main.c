@@ -3789,11 +3789,12 @@ static void create_status_bar(lv_obj_t *scr)
 
     lv_obj_t *ble = lv_obj_create(bar);
     lv_obj_add_style(ble, &style_chip, 0);
-    lv_obj_set_size(ble, 82, 30);
+    lv_obj_set_size(ble, 96, 30);
+    lv_obj_set_style_pad_all(ble, 0, 0);
     lv_obj_clear_flag(ble, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(ble, LV_ALIGN_RIGHT_MID, -226, 0);
+    lv_obj_align(ble, LV_ALIGN_RIGHT_MID, -238, 0);
     status_ble_label = label(ble, "BLE", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(status_ble_label, 42);
+    lv_obj_set_width(status_ble_label, 52);
     lv_label_set_long_mode(status_ble_label, LV_LABEL_LONG_DOT);
     lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 12, 0);
     status_ble_led = lv_obj_create(ble);
@@ -3803,7 +3804,7 @@ static void create_status_bar(lv_obj_t *scr)
     lv_obj_set_style_bg_opa(status_ble_led, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(0x59616C), 0);
     lv_obj_clear_flag(status_ble_led, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(status_ble_led, LV_ALIGN_RIGHT_MID, -14, 0);
+    lv_obj_align(status_ble_led, LV_ALIGN_RIGHT_MID, -18, 0);
 
     lv_obj_t *wifi = chip(bar, "WiFi", path_exists("/sys/class/net/wlan0") ? 0x25C281 : 0x9AA4AF);
     lv_obj_align(wifi, LV_ALIGN_RIGHT_MID, -156, 0);
@@ -3819,29 +3820,25 @@ static void create_status_bar(lv_obj_t *scr)
 
 void app_set_ble_status(const char *state)
 {
-    uint32_t color = 0x9AA4AF;
+    uint32_t color = 0xEF4D5A;
     const char *value = state && state[0] ? state : "offline";
 
     snprintf(status_ble_state, sizeof(status_ble_state), "%s", value);
-    if(strcmp(value, "ready") == 0 || strcmp(value, "connected") == 0) {
+    if(strcmp(value, "connected") == 0) {
         color = 0x25C281;
     } else if(strcmp(value, "probing") == 0 ||
-              strcmp(value, "starting") == 0 ||
-              strcmp(value, "unsupported") == 0 ||
-              strcmp(value, "error") == 0) {
+              strcmp(value, "starting") == 0) {
         color = 0xF5A524;
     }
     if(status_ble_label && lv_obj_is_valid(status_ble_label)) {
         lv_obj_set_style_text_color(status_ble_label, lv_color_hex(color), 0);
     }
     if(status_ble_led && lv_obj_is_valid(status_ble_led)) {
-        uint32_t led_color = 0x59616C;
+        uint32_t led_color = 0xEF4D5A;
         if(strcmp(value, "connected") == 0) {
             led_color = 0x25C281;
         } else if(strcmp(value, "probing") == 0 ||
-                  strcmp(value, "starting") == 0 ||
-                  strcmp(value, "unsupported") == 0 ||
-                  strcmp(value, "error") == 0) {
+                  strcmp(value, "starting") == 0) {
             led_color = 0xF5A524;
         }
         lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(led_color), 0);
