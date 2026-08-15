@@ -56,6 +56,7 @@ overlay/buildroot-overlay/linux/rejected/0044-drm-canaan-use-wc-allocation-for-d
 overlay/buildroot-overlay/package/Config_canaan.in
 overlay/buildroot-overlay/package/lvgl/59dc7e436ae97a25e32656739ea6a943f9f11b6a/0001-lvgl-preprocess-use-pcpp-python-fallback.patch
 overlay/buildroot-overlay/package/lvgl/59dc7e436ae97a25e32656739ea6a943f9f11b6a/0002-lvgl-linux-drm-add-k230-plane-rotation.patch
+overlay/buildroot-overlay/package/lvgl/59dc7e436ae97a25e32656739ea6a943f9f11b6a/0003-lvgl-freetype-scale-fixed-color-bitmaps.patch
 overlay/buildroot-overlay/package/lvgl/59dc7e436ae97a25e32656739ea6a943f9f11b6a/CMakeLists.txt
 overlay/buildroot-overlay/package/lvgl/59dc7e436ae97a25e32656739ea6a943f9f11b6a/lv_conf.defaults
 overlay/buildroot-overlay/package/lvgl/lvgl.mk
