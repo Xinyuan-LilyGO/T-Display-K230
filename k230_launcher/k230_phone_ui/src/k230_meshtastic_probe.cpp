@@ -100,6 +100,7 @@
 #define MESHTASTIC_ENV_TELEMETRY_INTERVAL_US (5ULL * 60ULL * 1000000ULL)
 #define MESHTASTIC_TELEMETRY_RETRY_US (60ULL * 1000000ULL)
 #define MESHTASTIC_PHONEAPI_UART_DEV "/dev/ttyS1"
+#define MESHTASTIC_PHONEAPI_FROM_SEND_GAP_US 120000U
 #define MESHTASTIC_NRF9151_UART_DEV "/dev/ttyS3"
 #define MESHTASTIC_NRF9151_UART_BAUD B115200
 #define MESHTASTIC_NRF9151_PROBE_TIMEOUT_US 500000ULL
@@ -7076,7 +7077,7 @@ static bool phoneapi_send_from_payload(int fd, uint32_t field,
     }
     daemon_event("PhoneAPI send %s bytes=%u", label ? label : "payload",
                  (unsigned)frame.size());
-    usleep(25000);
+    usleep(MESHTASTIC_PHONEAPI_FROM_SEND_GAP_US);
     return true;
 }
 
@@ -8359,7 +8360,7 @@ static bool phoneapi_send_config_complete(int fd, uint32_t nonce)
         return false;
     }
     daemon_event("PhoneAPI config_complete nonce=%u", nonce);
-    usleep(25000);
+    usleep(MESHTASTIC_PHONEAPI_FROM_SEND_GAP_US);
     return true;
 }
 
