@@ -2790,11 +2790,11 @@ static void phoneapi_process_toradio(int fd, const char *hex, size_t hex_len)
         } else if(msg.want_config_id == MESHTASTIC_PHONEAPI_NODEINFO_NONCE) {
             (void)phoneapi_send_nodeinfo_stage(fd, phoneapi_opts,
                                                msg.want_config_id);
+        } else if(msg.want_config_id == 0U) {
+            daemon_event("PhoneAPI ignoring empty want_config_id=0");
         } else {
-            daemon_event("PhoneAPI unknown want_config_id=%u",
+            daemon_event("PhoneAPI ignoring unknown want_config_id=%u",
                          msg.want_config_id);
-            (void)phoneapi_send_config_stage(fd, phoneapi_opts,
-                                             msg.want_config_id);
         }
     }
     if(msg.packet_len > 0U) {
