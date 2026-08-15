@@ -6808,6 +6808,16 @@ static bool phoneapi_take_mesh_tx(phoneapi_mesh_tx_t *tx)
     return found;
 }
 
+static bool phoneapi_pending_mesh_tx_wants_ack(void)
+{
+    bool wants_ack = false;
+
+    pthread_mutex_lock(&phoneapi_tx_mutex);
+    wants_ack = phoneapi_pending_tx.active && phoneapi_pending_tx.want_ack;
+    pthread_mutex_unlock(&phoneapi_tx_mutex);
+    return wants_ack;
+}
+
 static bool encode_phoneapi_mesh_packet_decoded(const mesh_header_t &header,
                                                 const std::vector<uint8_t> &decoded,
                                                 uint32_t channel_index,
@@ -8561,7 +8571,7 @@ static void phoneapi_process_toradio(int fd, const char *hex, size_t hex_len)
     }
 }
 
-static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
+static void phoneapi_process_uart_record(int fd, const std::string &raw_line)
 {
     std::string line = raw_line;
 
@@ -8669,6 +8679,43 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
     if(line.rfind("+MESH:", 0) == 0 || line.rfind("+ERR", 0) == 0 ||
        line.rfind("ERR", 0) == 0) {
         daemon_event("PhoneAPI UART %s", line.c_str());
+    }
+}
+
+static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
+{
+    std::string line = raw_line;
+    unsigned int parts = 0;
+
+    while(!line.empty() && (line.back() == '\r' || line.back() == '\n' ||
+                            isspace((unsigned char)line.back()))) {
+        line.pop_back();
+    }
+    while(!line.empty()) {
+        size_t event_pos = line.find("+MESH:");
+        if(event_pos != std::string::npos && event_pos > 0U) {
+            std::string prefix = line.substr(0, event_pos);
+            phoneapi_process_uart_record(fd, prefix);
+            parts++;
+            line.erase(0, event_pos);
+            continue;
+        }
+
+        size_t next_pos = line.find("+MESH:", 1U);
+        if(next_pos == std::string::npos) {
+            phoneapi_process_uart_record(fd, line);
+            parts++;
+            break;
+        }
+
+        phoneapi_process_uart_record(fd, line.substr(0, next_pos));
+        parts++;
+        line.erase(0, next_pos);
+    }
+
+    if(parts > 1U) {
+        daemon_event("PhoneAPI UART split merged line parts=%u",
+                     parts);
     }
 }
 
@@ -14023,6 +14070,7 @@ int main(int argc, char **argv)
     chip_type_t chip = CHIP_NONE;
     uint64_t start_us;
     uint64_t last_tx_us = 0;
+    uint64_t last_reliable_hold_log_us = 0;
     bool send_once_started = false;
     bool send_once_finished = false;
     bool send_once_awaiting_ack = false;
@@ -14465,51 +14513,67 @@ int main(int argc, char **argv)
             tx_frame_t frame;
             mesh_send_request_t request = pending_daemon_sends.front();
             probe_options_t tx_opts = opts;
-            pending_daemon_sends.pop_front();
             if(request.has_to_node) {
                 tx_opts.to_node = request.to_node;
             }
             if(request.has_want_ack) {
                 tx_opts.want_ack = request.want_ack;
             }
-            daemon_event("Daemon SEND dequeue depth=%u slot=%u target=0x%08x ack=%s len=%u",
-                         (unsigned)pending_daemon_sends.size(),
-                         request.channel_index,
-                         tx_opts.to_node,
-                         tx_opts.want_ack ? "yes" : "no",
-                         (unsigned)request.message.size());
-            if(build_tx_frame(tx_opts, request.message, request.channel_index,
-                              &frame)) {
-                if(start_tx(radio, frame) == 0 && tx_opts.mesh_mode) {
-                    bool ack_tracked = true;
-                    if(frame.want_ack) {
-                        ack_tracked = mesh_ack_track_frame(frame);
-                    }
-                    std::string clean = mesh_clean_text(request.message);
-                    if(!clean.empty()) {
-                        daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",
-                                    opts.from_node, frame.packet_id,
-                                    request.channel_index,
-                                    frame.want_ack ?
-                                    (ack_tracked ? "pending" : "dropped") :
-                                    "air",
-                                    clean.c_str());
+            if(tx_opts.want_ack && mesh_ack_pending_count() > 0U) {
+                if(now - last_reliable_hold_log_us > 2000000ULL) {
+                    daemon_event("Reliable daemon SEND held pending_ack=%u depth=%u",
+                                 mesh_ack_pending_count(),
+                                 (unsigned)pending_daemon_sends.size());
+                    last_reliable_hold_log_us = now;
+                }
+            } else {
+                pending_daemon_sends.pop_front();
+                daemon_event("Daemon SEND dequeue depth=%u slot=%u target=0x%08x ack=%s len=%u",
+                             (unsigned)pending_daemon_sends.size(),
+                             request.channel_index,
+                             tx_opts.to_node,
+                             tx_opts.want_ack ? "yes" : "no",
+                             (unsigned)request.message.size());
+                if(build_tx_frame(tx_opts, request.message,
+                                  request.channel_index, &frame)) {
+                    if(start_tx(radio, frame) == 0 && tx_opts.mesh_mode) {
+                        bool ack_tracked = true;
+                        if(frame.want_ack) {
+                            ack_tracked = mesh_ack_track_frame(frame);
+                        }
+                        std::string clean = mesh_clean_text(request.message);
+                        if(!clean.empty()) {
+                            daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",
+                                        opts.from_node, frame.packet_id,
+                                        request.channel_index,
+                                        frame.want_ack ?
+                                        (ack_tracked ? "pending" : "dropped") :
+                                        "air",
+                                        clean.c_str());
+                        }
+                    } else {
+                        daemon_event("Daemon SEND start failed slot=%u len=%u",
+                                     request.channel_index,
+                                     (unsigned)request.message.size());
                     }
                 } else {
-                    daemon_event("Daemon SEND start failed slot=%u len=%u",
+                    daemon_event("Daemon SEND build failed slot=%u len=%u",
                                  request.channel_index,
                                  (unsigned)request.message.size());
                 }
-            } else {
-                daemon_event("Daemon SEND build failed slot=%u len=%u",
-                             request.channel_index,
-                             (unsigned)request.message.size());
             }
         }
 
         if(active_op != OP_TX) {
             phoneapi_mesh_tx_t phoneapi_tx;
-            if(phoneapi_take_mesh_tx(&phoneapi_tx)) {
+            if(phoneapi_pending_mesh_tx_wants_ack() &&
+               mesh_ack_pending_count() > 0U) {
+                if(now - last_reliable_hold_log_us > 2000000ULL) {
+                    daemon_event("Reliable PhoneAPI TX held pending_ack=%u",
+                                 mesh_ack_pending_count());
+                    last_reliable_hold_log_us = now;
+                }
+            } else if(phoneapi_take_mesh_tx(&phoneapi_tx)) {
                 tx_frame_t frame;
                 if(build_phoneapi_mesh_data_frame(opts, phoneapi_tx, &frame)) {
                     if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
