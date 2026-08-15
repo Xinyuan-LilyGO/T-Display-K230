@@ -3979,6 +3979,64 @@ static bool encode_telemetry_request_proto(bool environment,
     return true;
 }
 
+static bool encode_route_discovery_response_proto(const probe_options_t &opts,
+                                                  const mesh_header_t &
+                                                      rx_header,
+                                                  std::vector<uint8_t> *out)
+{
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_varint(out, (3U << 3U) | 5U);
+    append_fixed32(out, opts.from_node);
+    if(rx_header.relay_node != 0U) {
+        append_varint(out, (3U << 3U) | 5U);
+        append_fixed32(out, rx_header.from);
+    }
+    return !out->empty();
+}
+
+static bool encode_neighbor_info_proto(const probe_options_t &opts,
+                                       std::vector<uint8_t> *out)
+{
+    uint32_t now = (uint32_t)time(nullptr);
+    size_t added = 0;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_uint32_field(out, 1U, opts.from_node);
+    append_uint32_field(out, 2U, opts.from_node);
+    append_uint32_field(out, 3U, opts.nodeinfo_interval_sec);
+    for(size_t i = 0; i < mesh_node_count && added < 8U; i++) {
+        std::vector<uint8_t> entry;
+
+        if(mesh_nodes[i].node == 0U || mesh_nodes[i].node == opts.from_node) {
+            continue;
+        }
+        append_uint32_field(&entry, 1U, mesh_nodes[i].node);
+        append_float_field(&entry, 2U, mesh_nodes[i].snr);
+        append_varint(&entry, (3U << 3U) | 5U);
+        append_fixed32(&entry, now);
+        append_uint32_field(&entry, 4U, opts.nodeinfo_interval_sec);
+        append_bytes_field(out, 4U, entry);
+        added++;
+    }
+    if(added == 0U) {
+        std::vector<uint8_t> dummy;
+
+        append_uint32_field(&dummy, 1U, 0U);
+        append_float_field(&dummy, 2U, 0.0f);
+        append_varint(&dummy, (3U << 3U) | 5U);
+        append_fixed32(&dummy, now);
+        append_uint32_field(&dummy, 4U, opts.nodeinfo_interval_sec);
+        append_bytes_field(out, 4U, dummy);
+    }
+    return !out->empty();
+}
+
 static uint32_t phoneapi_region_enum(const std::string &name)
 {
     struct region_map_t {
@@ -8895,6 +8953,15 @@ static bool build_mesh_want_response_frame(const probe_options_t &opts,
             return false;
         }
         if(!encode_telemetry_proto(telemetry, environment, &payload)) {
+            return false;
+        }
+    } else if(request.portnum == MESHTASTIC_TRACEROUTE_APP) {
+        if(!encode_route_discovery_response_proto(opts, rx_header,
+                                                  &payload)) {
+            return false;
+        }
+    } else if(request.portnum == MESHTASTIC_NEIGHBORINFO_APP) {
+        if(!encode_neighbor_info_proto(opts, &payload)) {
             return false;
         }
     } else {
