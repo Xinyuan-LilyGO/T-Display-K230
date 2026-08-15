@@ -753,6 +753,9 @@ typedef struct {
     bool client_nodes = false;
     bool client_channel_url = false;
     bool client_quit = false;
+    bool client_publish_nodeinfo = false;
+    bool client_publish_position = false;
+    bool client_publish_telemetry = false;
     bool rebroadcast = true;
     bool advertise_nodeinfo = true;
     bool position_enabled = true;
@@ -1136,13 +1139,17 @@ static uint32_t mesh_ack_drop_count;
 static uint32_t mesh_nodeinfo_tx_count;
 static uint32_t mesh_nodeinfo_drop_count;
 static uint64_t mesh_next_nodeinfo_us;
+static bool mesh_manual_nodeinfo_requested;
 static uint32_t mesh_position_tx_count;
 static uint32_t mesh_position_drop_count;
 static uint64_t mesh_next_position_us;
+static bool mesh_manual_position_requested;
 static uint32_t mesh_telemetry_tx_count;
 static uint32_t mesh_telemetry_drop_count;
 static uint64_t mesh_next_device_telemetry_us;
 static uint64_t mesh_next_environment_telemetry_us;
+static bool mesh_manual_device_telemetry_requested;
+static bool mesh_manual_environment_telemetry_requested;
 static nrf9151_gnss_state_t mesh_gnss;
 static LR2021 *active_lr2021;
 static mesh_history_entry_t mesh_history[MESHTASTIC_PACKET_HISTORY_SIZE];
@@ -9368,6 +9375,32 @@ static std::string handle_daemon_command(const std::string &line,
        line == "CHANNELURL" || line == "channelurl") {
         return daemon_channel_url_response(opts);
     }
+    if(line == "PUBLISH_NODEINFO" || line == "publish_nodeinfo") {
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        mesh_manual_nodeinfo_requested = true;
+        daemon_event("Manual NodeInfo publish queued");
+        return "OK nodeinfo queued\n";
+    }
+    if(line == "PUBLISH_POSITION" || line == "publish_position") {
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        mesh_manual_position_requested = true;
+        daemon_event("Manual Position publish queued gps=%s/%s",
+                     mesh_gnss.modem_state, mesh_gnss.gps_state);
+        return "OK position queued\n";
+    }
+    if(line == "PUBLISH_TELEMETRY" || line == "publish_telemetry") {
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        mesh_manual_device_telemetry_requested = true;
+        mesh_manual_environment_telemetry_requested = true;
+        daemon_event("Manual Telemetry publish queued");
+        return "OK telemetry queued\n";
+    }
     if(line.compare(0, 19, "IMPORT_CHANNEL_URL ") == 0 ||
        line.compare(0, 19, "import_channel_url ") == 0) {
         message = trim_ipc_line(line.c_str() + 19);
@@ -9470,6 +9503,12 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "NODES\n";
     } else if(opts.client_channel_url) {
         command = "CHANNEL_URL\n";
+    } else if(opts.client_publish_nodeinfo) {
+        command = "PUBLISH_NODEINFO\n";
+    } else if(opts.client_publish_position) {
+        command = "PUBLISH_POSITION\n";
+    } else if(opts.client_publish_telemetry) {
+        command = "PUBLISH_TELEMETRY\n";
     } else if(opts.client_quit) {
         command = "QUIT\n";
     } else if(opts.client_send_requested) {
@@ -9541,7 +9580,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-send \"hello\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-send \"hello\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -9550,6 +9589,9 @@ static void print_usage(const char *argv0)
             "  --cmd-chat      Query recent decoded text messages and exit\n"
             "  --cmd-nodes     Query recently seen mesh nodes and exit\n"
             "  --cmd-channel-url Query Meshtastic channel sharing URL and exit\n"
+            "  --cmd-publish-nodeinfo  Ask daemon to publish this node info now\n"
+            "  --cmd-publish-position  Ask daemon to publish current GNSS position now\n"
+            "  --cmd-publish-telemetry Ask daemon to publish device and environment telemetry now\n"
             "  --cmd-send MSG  Ask running daemon to transmit MSG and exit\n"
             "  --cmd-quit      Ask running daemon to exit\n\n"
             "Profile options:\n"
@@ -9692,6 +9734,12 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_nodes = true;
         } else if(strcmp(arg, "--cmd-channel-url") == 0) {
             opts->client_channel_url = true;
+        } else if(strcmp(arg, "--cmd-publish-nodeinfo") == 0) {
+            opts->client_publish_nodeinfo = true;
+        } else if(strcmp(arg, "--cmd-publish-position") == 0) {
+            opts->client_publish_position = true;
+        } else if(strcmp(arg, "--cmd-publish-telemetry") == 0) {
+            opts->client_publish_telemetry = true;
         } else if(strcmp(arg, "--cmd-quit") == 0) {
             opts->client_quit = true;
         } else if(strcmp(arg, "--cmd-send") == 0 && i + 1 < argc) {
@@ -10273,6 +10321,9 @@ int main(int argc, char **argv)
                               (opts.client_chat ? 1 : 0) +
                               (opts.client_nodes ? 1 : 0) +
                               (opts.client_channel_url ? 1 : 0) +
+                              (opts.client_publish_nodeinfo ? 1 : 0) +
+                              (opts.client_publish_position ? 1 : 0) +
+                              (opts.client_publish_telemetry ? 1 : 0) +
                               (opts.client_quit ? 1 : 0) +
                               (opts.client_send_requested ? 1 : 0);
         if(client_commands > 1) {
@@ -10471,129 +10522,175 @@ int main(int argc, char **argv)
             nrf9151_gnss_poll(opts, now);
         }
 
-        if(mesh_next_nodeinfo_us != 0ULL && now >= mesh_next_nodeinfo_us &&
+        if((mesh_manual_nodeinfo_requested ||
+            (mesh_next_nodeinfo_us != 0ULL && now >= mesh_next_nodeinfo_us)) &&
            active_op != OP_TX) {
             tx_frame_t frame;
+            bool manual_publish = mesh_manual_nodeinfo_requested;
             uint64_t interval_us =
                 (uint64_t)opts.nodeinfo_interval_sec * 1000000ULL;
+
+            mesh_manual_nodeinfo_requested = false;
             if(build_mesh_nodeinfo_frame(opts, &frame)) {
                 if(start_tx(radio, frame) == 0) {
                     mesh_nodeinfo_tx_count++;
-                    mesh_next_nodeinfo_us = now + interval_us;
-                    daemon_event("NodeInfo TX start node=%s from=0x%08x",
-                                 opts.node_name.c_str(), opts.from_node);
+                    mesh_next_nodeinfo_us = opts.advertise_nodeinfo ?
+                                           now + interval_us : 0ULL;
+                    daemon_event("NodeInfo TX start node=%s from=0x%08x manual=%s",
+                                 opts.node_name.c_str(), opts.from_node,
+                                 manual_publish ? "yes" : "no");
                 } else {
                     mesh_nodeinfo_drop_count++;
-                    mesh_next_nodeinfo_us = now + MESHTASTIC_NODEINFO_RETRY_US;
-                    daemon_event("NodeInfo TX start failed node=%s",
-                                 opts.node_name.c_str());
+                    mesh_next_nodeinfo_us = opts.advertise_nodeinfo ?
+                                           now + MESHTASTIC_NODEINFO_RETRY_US :
+                                           0ULL;
+                    daemon_event("NodeInfo TX start failed node=%s manual=%s",
+                                 opts.node_name.c_str(),
+                                 manual_publish ? "yes" : "no");
                 }
             } else {
                 mesh_nodeinfo_drop_count++;
-                mesh_next_nodeinfo_us = now + MESHTASTIC_NODEINFO_RETRY_US;
-                daemon_event("NodeInfo build failed node=%s",
-                             opts.node_name.c_str());
+                mesh_next_nodeinfo_us = opts.advertise_nodeinfo ?
+                                       now + MESHTASTIC_NODEINFO_RETRY_US :
+                                       0ULL;
+                daemon_event("NodeInfo build failed node=%s manual=%s",
+                             opts.node_name.c_str(),
+                             manual_publish ? "yes" : "no");
             }
         }
 
-        if(mesh_next_position_us != 0ULL && now >= mesh_next_position_us &&
+        if((mesh_manual_position_requested ||
+            (mesh_next_position_us != 0ULL && now >= mesh_next_position_us)) &&
            active_op != OP_TX) {
             tx_frame_t frame;
+            bool manual_publish = mesh_manual_position_requested;
             uint64_t interval_us =
                 (uint64_t)opts.position_interval_sec * 1000000ULL;
+
+            mesh_manual_position_requested = false;
             if(!mesh_gnss.present || !mesh_gnss.has_fix) {
                 mesh_position_drop_count++;
-                mesh_next_position_us = now + MESHTASTIC_POSITION_RETRY_US;
-                daemon_event("Position TX skipped nrf9151=%s gps=%s",
-                             mesh_gnss.modem_state, mesh_gnss.gps_state);
+                mesh_next_position_us = opts.position_enabled ?
+                                       now + MESHTASTIC_POSITION_RETRY_US :
+                                       0ULL;
+                daemon_event("Position TX skipped nrf9151=%s gps=%s manual=%s",
+                             mesh_gnss.modem_state, mesh_gnss.gps_state,
+                             manual_publish ? "yes" : "no");
             } else if(build_mesh_position_frame(opts, mesh_gnss.position,
                                                 &frame)) {
                 if(start_tx(radio, frame) == 0) {
                     mesh_position_tx_count++;
-                    mesh_next_position_us = now + interval_us;
+                    mesh_next_position_us = opts.position_enabled ?
+                                           now + interval_us : 0ULL;
                     mesh_node_update_position(opts.from_node,
                                               mesh_gnss.position);
-                    daemon_event("Position TX start from=0x%08x lat=%.7f lon=%.7f sats=%u",
+                    daemon_event("Position TX start from=0x%08x lat=%.7f lon=%.7f sats=%u manual=%s",
                                  opts.from_node,
                                  mesh_gnss.position.latitude_i * 1e-7,
                                  mesh_gnss.position.longitude_i * 1e-7,
-                                 mesh_gnss.position.sats_in_view);
+                                 mesh_gnss.position.sats_in_view,
+                                 manual_publish ? "yes" : "no");
                 } else {
                     mesh_position_drop_count++;
-                    mesh_next_position_us = now + MESHTASTIC_POSITION_RETRY_US;
-                    daemon_event("Position TX start failed from=0x%08x",
-                                 opts.from_node);
+                    mesh_next_position_us = opts.position_enabled ?
+                                           now + MESHTASTIC_POSITION_RETRY_US :
+                                           0ULL;
+                    daemon_event("Position TX start failed from=0x%08x manual=%s",
+                                 opts.from_node,
+                                 manual_publish ? "yes" : "no");
                 }
             } else {
                 mesh_position_drop_count++;
-                mesh_next_position_us = now + MESHTASTIC_POSITION_RETRY_US;
-                daemon_event("Position build failed from=0x%08x",
-                             opts.from_node);
+                mesh_next_position_us = opts.position_enabled ?
+                                       now + MESHTASTIC_POSITION_RETRY_US :
+                                       0ULL;
+                daemon_event("Position build failed from=0x%08x manual=%s",
+                             opts.from_node,
+                             manual_publish ? "yes" : "no");
             }
         }
 
-        if(mesh_next_device_telemetry_us != 0ULL &&
-           now >= mesh_next_device_telemetry_us && active_op != OP_TX) {
+        if((mesh_manual_device_telemetry_requested ||
+            (mesh_next_device_telemetry_us != 0ULL &&
+             now >= mesh_next_device_telemetry_us)) &&
+           active_op != OP_TX) {
             tx_frame_t frame;
             mesh_telemetry_info_t telemetry;
+            bool manual_publish = mesh_manual_device_telemetry_requested;
             uint64_t interval_us =
                 (uint64_t)opts.telemetry_device_interval_sec * 1000000ULL;
 
+            mesh_manual_device_telemetry_requested = false;
             if(mesh_collect_device_telemetry(&telemetry) &&
                build_mesh_telemetry_frame(opts, telemetry, false, &frame)) {
                 if(start_tx(radio, frame) == 0) {
                     mesh_telemetry_tx_count++;
-                    mesh_next_device_telemetry_us = now + interval_us;
+                    mesh_next_device_telemetry_us = opts.telemetry_enabled ?
+                                                   now + interval_us : 0ULL;
                     mesh_node_update_telemetry(opts.from_node, telemetry);
-                    daemon_event("Telemetry TX start type=device from=0x%08x %s",
+                    daemon_event("Telemetry TX start type=device from=0x%08x manual=%s %s",
                                  opts.from_node,
+                                 manual_publish ? "yes" : "no",
                                  telemetry_summary(telemetry).c_str());
                 } else {
                     mesh_telemetry_drop_count++;
-                    mesh_next_device_telemetry_us =
-                        now + MESHTASTIC_TELEMETRY_RETRY_US;
-                    daemon_event("Telemetry TX start failed type=device from=0x%08x",
-                                 opts.from_node);
+                    mesh_next_device_telemetry_us = opts.telemetry_enabled ?
+                        now + MESHTASTIC_TELEMETRY_RETRY_US : 0ULL;
+                    daemon_event("Telemetry TX start failed type=device from=0x%08x manual=%s",
+                                 opts.from_node,
+                                 manual_publish ? "yes" : "no");
                 }
             } else {
                 mesh_telemetry_drop_count++;
-                mesh_next_device_telemetry_us =
-                    now + MESHTASTIC_TELEMETRY_RETRY_US;
-                daemon_event("Telemetry build failed type=device from=0x%08x",
-                             opts.from_node);
+                mesh_next_device_telemetry_us = opts.telemetry_enabled ?
+                    now + MESHTASTIC_TELEMETRY_RETRY_US : 0ULL;
+                daemon_event("Telemetry build failed type=device from=0x%08x manual=%s",
+                             opts.from_node,
+                             manual_publish ? "yes" : "no");
             }
         }
 
-        if(mesh_next_environment_telemetry_us != 0ULL &&
-           now >= mesh_next_environment_telemetry_us && active_op != OP_TX) {
+        if((mesh_manual_environment_telemetry_requested ||
+            (mesh_next_environment_telemetry_us != 0ULL &&
+             now >= mesh_next_environment_telemetry_us)) &&
+           active_op != OP_TX) {
             tx_frame_t frame;
             mesh_telemetry_info_t telemetry;
+            bool manual_publish = mesh_manual_environment_telemetry_requested;
             uint64_t interval_us =
                 (uint64_t)opts.telemetry_environment_interval_sec *
                 1000000ULL;
 
+            mesh_manual_environment_telemetry_requested = false;
             if(mesh_collect_environment_telemetry(&telemetry) &&
                build_mesh_telemetry_frame(opts, telemetry, true, &frame)) {
                 if(start_tx(radio, frame) == 0) {
                     mesh_telemetry_tx_count++;
-                    mesh_next_environment_telemetry_us = now + interval_us;
+                    mesh_next_environment_telemetry_us =
+                        opts.environment_telemetry_enabled ? now + interval_us :
+                        0ULL;
                     mesh_node_update_telemetry(opts.from_node, telemetry);
-                    daemon_event("Telemetry TX start type=environment from=0x%08x %s",
+                    daemon_event("Telemetry TX start type=environment from=0x%08x manual=%s %s",
                                  opts.from_node,
+                                 manual_publish ? "yes" : "no",
                                  telemetry_summary(telemetry).c_str());
                 } else {
                     mesh_telemetry_drop_count++;
                     mesh_next_environment_telemetry_us =
-                        now + MESHTASTIC_TELEMETRY_RETRY_US;
-                    daemon_event("Telemetry TX start failed type=environment from=0x%08x",
-                                 opts.from_node);
+                        opts.environment_telemetry_enabled ?
+                        now + MESHTASTIC_TELEMETRY_RETRY_US : 0ULL;
+                    daemon_event("Telemetry TX start failed type=environment from=0x%08x manual=%s",
+                                 opts.from_node,
+                                 manual_publish ? "yes" : "no");
                 }
             } else {
                 mesh_telemetry_drop_count++;
                 mesh_next_environment_telemetry_us =
-                    now + MESHTASTIC_TELEMETRY_RETRY_US;
-                daemon_event("Telemetry build skipped type=environment from=0x%08x",
-                             opts.from_node);
+                    opts.environment_telemetry_enabled ?
+                    now + MESHTASTIC_TELEMETRY_RETRY_US : 0ULL;
+                daemon_event("Telemetry build skipped type=environment from=0x%08x manual=%s",
+                             opts.from_node,
+                             manual_publish ? "yes" : "no");
             }
         }
 

@@ -1989,6 +1989,24 @@ static void mesh_restart_daemon_if_online(void)
     mesh_start_event_cb(NULL);
 }
 
+static void mesh_publish_event_cb(lv_event_t *event)
+{
+    const char *command = (const char *)lv_event_get_user_data(event);
+    char response[256];
+
+    if(!command || !command[0]) {
+        return;
+    }
+    if(mesh_ipc_command(command, response, sizeof(response)) == 0) {
+        ui_trim_text(response);
+        mesh_append_log("publish: %s", response);
+    } else {
+        ui_trim_text(response);
+        mesh_append_log("publish failed: %s", response);
+    }
+    mesh_refresh_status();
+}
+
 static int mesh_channel_profile_ensure_dir(void)
 {
     if(mkdir(MESHTASTIC_CHANNEL_DIR, 0755) != 0 && errno != EEXIST) {
@@ -4279,6 +4297,7 @@ static void mesh_profile_event_cb(lv_event_t *event)
     int button_gap = 10;
     int button_cols = ui_is_landscape() ? 6 : 3;
     int button_row_h = 56;
+    int publish_w;
     int y = 0;
 
     (void)event;
@@ -4351,6 +4370,28 @@ static void mesh_profile_event_cb(lv_event_t *event)
     lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
 
     y += ui_is_landscape() ? 70 : 104;
+    section = ui_label(panel, ui_tr("Publish now"), &lv_font_montserrat_18,
+                       0xF2F5F8);
+    lv_obj_set_pos(section, margin, y);
+    y += 34;
+    publish_w = (content_w - button_gap * 2) / 3;
+    if(publish_w < 112) {
+        publish_w = 112;
+    }
+    btn = ui_command_button(panel, margin, y, publish_w,
+                            ui_tr("Node info"), 0x25C281);
+    lv_obj_add_event_cb(btn, mesh_publish_event_cb, LV_EVENT_CLICKED,
+                        "PUBLISH_NODEINFO\n");
+    btn = ui_command_button(panel, margin + publish_w + button_gap, y,
+                            publish_w, ui_tr("Position"), 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_publish_event_cb, LV_EVENT_CLICKED,
+                        "PUBLISH_POSITION\n");
+    btn = ui_command_button(panel, margin + (publish_w + button_gap) * 2, y,
+                            publish_w, ui_tr("Telemetry"), 0xA78BFA);
+    lv_obj_add_event_cb(btn, mesh_publish_event_cb, LV_EVENT_CLICKED,
+                        "PUBLISH_TELEMETRY\n");
+
+    y += button_row_h + 22;
     section = ui_label(panel, "Radio profile", &lv_font_montserrat_18,
                        0xF2F5F8);
     lv_obj_set_pos(section, margin, y);
