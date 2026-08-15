@@ -34,11 +34,13 @@
 #define MESHTASTIC_CHANNEL_DIR "/root/meshtastic"
 #define MESHTASTIC_CHANNEL_URL_FILE MESHTASTIC_CHANNEL_DIR "/channel_url.txt"
 #define MESHTASTIC_CHANNEL_PROFILE_DIR MESHTASTIC_CHANNEL_DIR "/channels"
+#define MESHTASTIC_CANNED_FILE MESHTASTIC_CHANNEL_DIR "/canned_messages.txt"
 #define MESHTASTIC_QR_SCAN_PATH "/root/app/k230_phone_ui/k230_qr_scan"
 #define MESHTASTIC_UI_LOG_MAX 4096
 #define MESHTASTIC_UI_NODE_SELECT_MAX 24
 #define MESHTASTIC_UI_NODE_LINE_MAX 768
 #define MESHTASTIC_CHANNEL_PROFILE_MAX 24
+#define MESHTASTIC_CANNED_MAX 16
 #define MESHTASTIC_CHANNEL_QR_MAX 280
 #define MESHTASTIC_CHANNEL_QR_BORDER 4
 #define MESHTASTIC_PREF_REGION "meshtastic.region"
@@ -74,6 +76,7 @@ static lv_obj_t *mesh_profile_label;
 static lv_obj_t *mesh_chat_scroll;
 static lv_obj_t *mesh_log_label;
 static lv_obj_t *mesh_send_button;
+static lv_obj_t *mesh_canned_button;
 static lv_obj_t *mesh_body;
 static lv_obj_t *mesh_status_panel;
 static lv_obj_t *mesh_input_panel;
@@ -117,6 +120,7 @@ static lv_obj_t *mesh_channel_profiles_overlay;
 static lv_obj_t *mesh_channel_profile_delete_overlay;
 static lv_obj_t *mesh_channel_import_overlay;
 static lv_obj_t *mesh_channel_import_status_label;
+static lv_obj_t *mesh_canned_overlay;
 static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
@@ -128,6 +132,7 @@ static char mesh_channel_profile_edit_path[160];
 static char mesh_channel_profile_delete_path[160];
 static char mesh_channel_import_pending_url[1024];
 static char mesh_channel_scan_pending_url[1024];
+static char mesh_canned_messages[MESHTASTIC_CANNED_MAX][160];
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
 static lv_timer_t *mesh_channel_scan_timer;
@@ -1669,6 +1674,8 @@ static void mesh_layout_main(void)
     int chat_y;
     int chat_h;
     int send_w = ui_is_landscape() ? 90 : 82;
+    int canned_w = ui_is_landscape() ? 52 : 56;
+    int input_gap = 8;
     int textarea_w;
 
     if(!mesh_body || !lv_obj_is_valid(mesh_body)) {
@@ -1704,12 +1711,16 @@ static void mesh_layout_main(void)
         lv_obj_set_pos(mesh_input_panel, x, input_y);
         lv_obj_set_size(mesh_input_panel, content_w, input_h);
     }
+    if(mesh_canned_button && lv_obj_is_valid(mesh_canned_button)) {
+        lv_obj_set_pos(mesh_canned_button, 0, 0);
+        lv_obj_set_size(mesh_canned_button, canned_w, input_h - 2);
+    }
     if(mesh_textarea && lv_obj_is_valid(mesh_textarea)) {
-        textarea_w = content_w - send_w - 16;
+        textarea_w = content_w - canned_w - send_w - input_gap * 2;
         if(textarea_w < 180) {
             textarea_w = 180;
         }
-        lv_obj_set_pos(mesh_textarea, 0, 0);
+        lv_obj_set_pos(mesh_textarea, canned_w + input_gap, 0);
         lv_obj_set_size(mesh_textarea, textarea_w, input_h - 2);
     }
     if(mesh_send_button && lv_obj_is_valid(mesh_send_button)) {
@@ -5109,6 +5120,171 @@ static void mesh_send_text_now(const char *text, const char *source,
     app_request_fast_refresh();
 }
 
+static void mesh_canned_close(void)
+{
+    if(mesh_canned_overlay && lv_obj_is_valid(mesh_canned_overlay)) {
+        lv_obj_delete(mesh_canned_overlay);
+    }
+    mesh_canned_overlay = NULL;
+}
+
+static int mesh_canned_load(void)
+{
+    static const char *defaults[] = {
+        "OK",
+        "On my way",
+        "Need help",
+        "At location",
+        "Battery low",
+        "Signal check",
+        "Please repeat",
+        "Stand by",
+    };
+    FILE *fp;
+    char line[192];
+    int count = 0;
+
+    memset(mesh_canned_messages, 0, sizeof(mesh_canned_messages));
+    fp = fopen(MESHTASTIC_CANNED_FILE, "r");
+    if(fp) {
+        while(count < MESHTASTIC_CANNED_MAX &&
+              fgets(line, sizeof(line), fp)) {
+            ui_trim_text(line);
+            if(!line[0] || line[0] == '#') {
+                continue;
+            }
+            snprintf(mesh_canned_messages[count],
+                     sizeof(mesh_canned_messages[count]), "%s", line);
+            count++;
+        }
+        fclose(fp);
+    }
+    if(count == 0) {
+        int n = (int)(sizeof(defaults) / sizeof(defaults[0]));
+
+        if(n > MESHTASTIC_CANNED_MAX) {
+            n = MESHTASTIC_CANNED_MAX;
+        }
+        for(int i = 0; i < n; i++) {
+            snprintf(mesh_canned_messages[count],
+                     sizeof(mesh_canned_messages[count]), "%s", defaults[i]);
+            count++;
+        }
+    }
+    return count;
+}
+
+static void mesh_canned_send_event_cb(lv_event_t *event)
+{
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(index < 0 || index >= MESHTASTIC_CANNED_MAX ||
+       !mesh_canned_messages[index][0]) {
+        return;
+    }
+    mesh_canned_close();
+    mesh_send_text_now(mesh_canned_messages[index], "CANNED", 0);
+}
+
+static void mesh_canned_close_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_canned_close();
+}
+
+static void mesh_canned_event_cb(lv_event_t *event)
+{
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *btn;
+    lv_obj_t *empty;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int columns = ui_is_landscape() ? 3 : 2;
+    int gap = 12;
+    int row_h = 66;
+    int y = 106;
+    int count;
+    int col_w;
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    count = mesh_canned_load();
+    if(columns < 1) {
+        columns = 1;
+    }
+    col_w = (content_w - gap * (columns - 1)) / columns;
+    if(col_w < 132) {
+        columns = 1;
+        col_w = content_w;
+    }
+
+    mesh_canned_close();
+    mesh_canned_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_canned_overlay);
+    lv_obj_set_style_bg_color(mesh_canned_overlay, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_canned_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mesh_canned_overlay, 0, 0);
+    lv_obj_set_style_border_width(mesh_canned_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_canned_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_canned_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(mesh_canned_overlay);
+
+    panel = ui_scroll_panel(mesh_canned_overlay, 0, 0, screen_w, screen_h);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    title = ui_label(panel, ui_tr("Canned messages"),
+                     &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, margin, 22);
+    lv_obj_set_width(title, content_w - 120);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    subtitle = ui_label(panel, ui_tr("Tap to send a canned message"),
+                        &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(subtitle, margin, 56);
+    lv_obj_set_width(subtitle, content_w - 120);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"), 0x374151);
+    lv_obj_add_event_cb(btn, mesh_canned_close_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    if(count <= 0) {
+        empty = ui_label(panel, ui_tr("No canned messages"),
+                         &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(empty, margin, y);
+        lv_obj_set_width(empty, content_w);
+        lv_label_set_long_mode(empty, LV_LABEL_LONG_WRAP);
+        return;
+    }
+
+    for(int i = 0; i < count; i++) {
+        int col = i % columns;
+        int row = i / columns;
+        int x = margin + col * (col_w + gap);
+        int by = y + row * row_h;
+
+        btn = ui_command_button(panel, x, by, col_w,
+                                mesh_canned_messages[i], 0x25C281);
+        lv_obj_set_height(btn, 54);
+        lv_obj_add_event_cb(btn, mesh_canned_send_event_cb,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
+}
+
 static void mesh_send_submit_cb(const char *text, void *user_data)
 {
     (void)user_data;
@@ -5265,6 +5441,11 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_add_event_cb(mesh_textarea, mesh_input_focus_event_cb,
                         LV_EVENT_FOCUSED, NULL);
 
+    mesh_canned_button = ui_command_button(mesh_input_panel, 0, 0, 56,
+                                           LV_SYMBOL_LIST, 0x3DA5FF);
+    lv_obj_add_event_cb(mesh_canned_button, mesh_canned_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
     mesh_send_button = ui_command_button(mesh_input_panel,
                                          content_w - send_w, 0,
                                          send_w, "Send", 0x25C281);
@@ -5309,7 +5490,9 @@ void ui_meshtastic_cleanup(void)
     mesh_chat_scroll = NULL;
     mesh_log_label = NULL;
     mesh_send_button = NULL;
+    mesh_canned_button = NULL;
     mesh_choice_close();
+    mesh_canned_close();
     mesh_channel_profiles_close();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
         lv_obj_delete(mesh_settings_overlay);
@@ -5351,6 +5534,10 @@ int ui_meshtastic_handle_back(void)
     if(mesh_channel_import_overlay &&
        lv_obj_is_valid(mesh_channel_import_overlay)) {
         mesh_channel_import_confirm_close();
+        return 1;
+    }
+    if(mesh_canned_overlay && lv_obj_is_valid(mesh_canned_overlay)) {
+        mesh_canned_close();
         return 1;
     }
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
