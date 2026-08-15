@@ -1280,6 +1280,62 @@ static bool phoneapi_bridge_status_connected(const std::string &line)
            line.find("MESH_CONN=1") != std::string::npos;
 }
 
+static bool phoneapi_status_bool_field(const std::string &line,
+                                       const char *key,
+                                       bool *present)
+{
+    const char *p;
+    size_t key_len;
+
+    if(present) {
+        *present = false;
+    }
+    if(!key || !key[0]) {
+        return false;
+    }
+    key_len = strlen(key);
+    p = line.c_str();
+    while((p = strstr(p, key)) != nullptr) {
+        if((p == line.c_str() || p[-1] == ',' || p[-1] == ' ' ||
+            p[-1] == ':') && p[key_len] == '=') {
+            const char *value = p + key_len + 1U;
+
+            if(present) {
+                *present = true;
+            }
+            return value[0] == '1';
+        }
+        p += key_len;
+    }
+    return false;
+}
+
+static bool phoneapi_bridge_status_advertising(const std::string &line,
+                                               bool *known)
+{
+    bool present = false;
+    bool adv = false;
+
+    if(known) {
+        *known = true;
+    }
+    if(line.rfind("+MESH:ADV,1", 0) == 0 ||
+       line.rfind("+MESH:CONNECTED", 0) == 0) {
+        return true;
+    }
+    if(line.rfind("+MESH:ADV,0", 0) == 0) {
+        return false;
+    }
+    adv = phoneapi_status_bool_field(line, "ADV", &present);
+    if(!present) {
+        adv = phoneapi_status_bool_field(line, "MESH_ADV", &present);
+    }
+    if(known) {
+        *known = present;
+    }
+    return adv;
+}
+
 static std::string phoneapi_default_node_name(const probe_options_t &opts)
 {
     char tmp[24];
@@ -4054,13 +4110,17 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
         return;
     }
     if(phoneapi_bridge_status_line(line)) {
-        phoneapi_bridge_state_t state =
-            phoneapi_bridge_status_connected(line) ?
+        bool connected = phoneapi_bridge_status_connected(line);
+        bool adv_known = false;
+        bool advertising = phoneapi_bridge_status_advertising(line,
+                                                              &adv_known);
+        phoneapi_bridge_state_t state = connected ?
             PHONEAPI_BRIDGE_CONNECTED : PHONEAPI_BRIDGE_READY;
+        const char *detail = connected ? "connected" :
+                             (adv_known && !advertising ? "idle" :
+                              "advertising");
 
-        phoneapi_bridge_set_state(state,
-                                  phoneapi_bridge_status_connected(line) ?
-                                  "connected" : "advertising");
+        phoneapi_bridge_set_state(state, detail);
         if(!phoneapi_init_sent) {
             phoneapi_init_sent = true;
             phoneapi_last_adv_us = 0;
@@ -4070,6 +4130,9 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
             (void)phoneapi_send_adv_start(fd, "init");
         } else {
             daemon_event("PhoneAPI UART %s", line.c_str());
+            if(!connected && adv_known && !advertising) {
+                (void)phoneapi_send_adv_start(fd, "status-idle");
+            }
         }
         return;
     }
