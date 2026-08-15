@@ -133,6 +133,7 @@ static char mesh_channel_profile_delete_path[160];
 static char mesh_channel_import_pending_url[1024];
 static char mesh_channel_scan_pending_url[1024];
 static char mesh_canned_messages[MESHTASTIC_CANNED_MAX][160];
+static int mesh_canned_manage_mode;
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
 static lv_timer_t *mesh_channel_scan_timer;
@@ -5174,6 +5175,45 @@ static int mesh_canned_load(void)
     return count;
 }
 
+static int mesh_canned_save(int count)
+{
+    char tmp_path[192];
+    FILE *fp;
+
+    if(count < 0) {
+        count = 0;
+    }
+    if(count > MESHTASTIC_CANNED_MAX) {
+        count = MESHTASTIC_CANNED_MAX;
+    }
+    if(mkdir(MESHTASTIC_CHANNEL_DIR, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", MESHTASTIC_CANNED_FILE);
+    fp = fopen(tmp_path, "w");
+    if(!fp) {
+        return -1;
+    }
+    fprintf(fp, "# K230 Meshtastic canned messages\n");
+    fprintf(fp, "# One message per line. Empty lines are ignored.\n");
+    for(int i = 0; i < count && i < MESHTASTIC_CANNED_MAX; i++) {
+        if(mesh_canned_messages[i][0]) {
+            fprintf(fp, "%s\n", mesh_canned_messages[i]);
+        }
+    }
+    if(fclose(fp) != 0) {
+        unlink(tmp_path);
+        return -1;
+    }
+    if(rename(tmp_path, MESHTASTIC_CANNED_FILE) != 0) {
+        unlink(tmp_path);
+        return -1;
+    }
+    return 0;
+}
+
+static void mesh_canned_open(int manage_mode);
+
 static void mesh_canned_send_event_cb(lv_event_t *event)
 {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
@@ -5189,6 +5229,96 @@ static void mesh_canned_send_event_cb(lv_event_t *event)
     mesh_send_text_now(mesh_canned_messages[index], "CANNED", 0);
 }
 
+static void mesh_canned_edit_submit_cb(const char *text, void *user_data)
+{
+    char clean[160];
+    int edit_index = (int)(intptr_t)user_data;
+    int count;
+
+    snprintf(clean, sizeof(clean), "%s", text ? text : "");
+    ui_trim_text(clean);
+    if(!clean[0]) {
+        mesh_append_log("canned message skipped: empty");
+        return;
+    }
+    count = mesh_canned_load();
+    if(edit_index >= 0 && edit_index < count) {
+        snprintf(mesh_canned_messages[edit_index],
+                 sizeof(mesh_canned_messages[edit_index]), "%s", clean);
+    } else {
+        if(count >= MESHTASTIC_CANNED_MAX) {
+            mesh_append_log("canned message list full");
+            return;
+        }
+        snprintf(mesh_canned_messages[count],
+                 sizeof(mesh_canned_messages[count]), "%s", clean);
+        count++;
+    }
+    if(mesh_canned_save(count) == 0) {
+        mesh_append_log("canned messages saved");
+    } else {
+        mesh_append_log("canned messages save failed");
+    }
+    mesh_canned_open(1);
+}
+
+static void mesh_canned_edit_event_cb(lv_event_t *event)
+{
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+    ui_input_dialog_config_t config;
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_canned_load();
+    memset(&config, 0, sizeof(config));
+    config.title = ui_tr(index >= 0 ? "Edit message" : "Add message");
+    config.placeholder = ui_tr("Message");
+    config.initial_text = (index >= 0 && index < MESHTASTIC_CANNED_MAX) ?
+                          mesh_canned_messages[index] : "";
+    config.max_length = 140;
+    config.min_length = 1;
+    config.min_length_text = ui_tr("Message is empty");
+    config.submit_cb = mesh_canned_edit_submit_cb;
+    config.user_data = (void *)(intptr_t)index;
+    config.submit_text = ui_tr("Save");
+    config.cancel_text = ui_tr("Cancel");
+    ui_input_dialog_open(&config);
+}
+
+static void mesh_canned_delete_event_cb(lv_event_t *event)
+{
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+    int count;
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    count = mesh_canned_load();
+    if(index < 0 || index >= count) {
+        return;
+    }
+    for(int i = index; i + 1 < count; i++) {
+        snprintf(mesh_canned_messages[i], sizeof(mesh_canned_messages[i]),
+                 "%s", mesh_canned_messages[i + 1]);
+    }
+    mesh_canned_messages[count - 1][0] = '\0';
+    if(mesh_canned_save(count - 1) == 0) {
+        mesh_append_log("canned message deleted");
+    } else {
+        mesh_append_log("canned message delete failed");
+    }
+    mesh_canned_open(1);
+}
+
+static void mesh_canned_manage_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_canned_open(1);
+}
+
 static void mesh_canned_close_event_cb(lv_event_t *event)
 {
     if(event) {
@@ -5197,7 +5327,7 @@ static void mesh_canned_close_event_cb(lv_event_t *event)
     mesh_canned_close();
 }
 
-static void mesh_canned_event_cb(lv_event_t *event)
+static void mesh_canned_open(int manage_mode)
 {
     lv_obj_t *panel;
     lv_obj_t *title;
@@ -5211,19 +5341,21 @@ static void mesh_canned_event_cb(lv_event_t *event)
     int columns = ui_is_landscape() ? 3 : 2;
     int gap = 12;
     int row_h = 66;
-    int y = 106;
+    int y = 112;
     int count;
     int col_w;
 
-    if(event) {
-        lv_event_stop_processing(event);
-    }
+    mesh_canned_manage_mode = manage_mode ? 1 : 0;
     count = mesh_canned_load();
     if(columns < 1) {
         columns = 1;
     }
     col_w = (content_w - gap * (columns - 1)) / columns;
     if(col_w < 132) {
+        columns = 1;
+        col_w = content_w;
+    }
+    if(mesh_canned_manage_mode && col_w < 240) {
         columns = 1;
         col_w = content_w;
     }
@@ -5254,9 +5386,20 @@ static void mesh_canned_event_cb(lv_event_t *event)
     subtitle = ui_label(panel, ui_tr("Tap to send a canned message"),
                         &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_pos(subtitle, margin, 56);
-    lv_obj_set_width(subtitle, content_w - 120);
+    lv_obj_set_width(subtitle, content_w - 230);
     lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
 
+    if(!mesh_canned_manage_mode) {
+        btn = ui_command_button(panel, screen_w - margin - 206, 18, 100,
+                                ui_tr("Manage"), 0x3DA5FF);
+        lv_obj_add_event_cb(btn, mesh_canned_manage_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+    } else {
+        btn = ui_command_button(panel, screen_w - margin - 206, 18, 100,
+                                ui_tr("Add"), 0x25C281);
+        lv_obj_add_event_cb(btn, mesh_canned_edit_event_cb,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+    }
     btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
                             ui_tr("Close"), 0x374151);
     lv_obj_add_event_cb(btn, mesh_canned_close_event_cb, LV_EVENT_CLICKED,
@@ -5276,13 +5419,33 @@ static void mesh_canned_event_cb(lv_event_t *event)
         int row = i / columns;
         int x = margin + col * (col_w + gap);
         int by = y + row * row_h;
+        int action_w = mesh_canned_manage_mode ? 72 : 0;
+        int label_w = mesh_canned_manage_mode ? col_w - action_w - gap : col_w;
 
-        btn = ui_command_button(panel, x, by, col_w,
+        btn = ui_command_button(panel, x, by, label_w,
                                 mesh_canned_messages[i], 0x25C281);
         lv_obj_set_height(btn, 54);
-        lv_obj_add_event_cb(btn, mesh_canned_send_event_cb,
+        lv_obj_add_event_cb(btn,
+                            mesh_canned_manage_mode ?
+                            mesh_canned_edit_event_cb :
+                            mesh_canned_send_event_cb,
                             LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        if(mesh_canned_manage_mode) {
+            btn = ui_command_button(panel, x + label_w + gap, by,
+                                    action_w, ui_tr("Delete"), 0xEF4444);
+            lv_obj_set_height(btn, 54);
+            lv_obj_add_event_cb(btn, mesh_canned_delete_event_cb,
+                                LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        }
     }
+}
+
+static void mesh_canned_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_canned_open(0);
 }
 
 static void mesh_send_submit_cb(const char *text, void *user_data)
