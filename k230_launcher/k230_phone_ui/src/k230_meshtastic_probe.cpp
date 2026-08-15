@@ -1149,6 +1149,8 @@ static volatile unsigned int radio_event_count;
 static radio_op_t active_op = OP_IDLE;
 static uint64_t active_op_start_us;
 static size_t active_tx_len;
+static tx_frame_t active_tx_frame;
+static bool active_tx_frame_valid;
 static uint32_t tx_count;
 static uint32_t rx_count;
 static uint32_t seq_count;
@@ -1596,6 +1598,43 @@ static void daemon_chat(const char *fmt, ...)
                  MESHTASTIC_CHAT_LOG_LINE_LEN, "%s", line);
     }
     pthread_mutex_unlock(&daemon_log_mutex);
+}
+
+static bool daemon_chat_update_tx_status(uint32_t packet_id,
+                                         const char *status)
+{
+    char id_text[24];
+    char updated[MESHTASTIC_CHAT_LOG_LINE_LEN];
+
+    if(packet_id == 0U || !status || !status[0]) {
+        return false;
+    }
+    snprintf(id_text, sizeof(id_text), "id=0x%08x", packet_id);
+
+    pthread_mutex_lock(&daemon_log_mutex);
+    for(size_t i = 0; i < daemon_chat_log_count; i++) {
+        char *line = daemon_chat_log[i];
+        char *ack;
+        char *colon;
+        size_t prefix_len;
+
+        if(strncmp(line, "TX ", 3) != 0 || !strstr(line, id_text)) {
+            continue;
+        }
+        ack = strstr(line, "ack=");
+        colon = strstr(line, ": ");
+        if(!ack || !colon || ack > colon) {
+            continue;
+        }
+        prefix_len = (size_t)(ack - line);
+        snprintf(updated, sizeof(updated), "%.*sack=%s%s",
+                 (int)prefix_len, line, status, colon);
+        snprintf(line, MESHTASTIC_CHAT_LOG_LINE_LEN, "%s", updated);
+        pthread_mutex_unlock(&daemon_log_mutex);
+        return true;
+    }
+    pthread_mutex_unlock(&daemon_log_mutex);
+    return false;
 }
 
 static bool mesh_config_dir_ensure(void)
@@ -8266,12 +8305,14 @@ static bool mesh_ack_complete(uint32_t from_node, uint32_t packet_id,
         }
         if(error_reason == MESHTASTIC_ROUTING_ERROR_NONE) {
             mesh_ack_rx_count++;
+            (void)daemon_chat_update_tx_status(packet_id, "ack");
             daemon_event("Mesh ACK received id=0x%08x from=0x%08x ack=%lu pending=%u",
                          packet_id, from_node,
                          (unsigned long)mesh_ack_rx_count,
                          mesh_ack_pending_count());
         } else {
             mesh_nak_rx_count++;
+            (void)daemon_chat_update_tx_status(packet_id, "nak");
             daemon_event("Mesh NAK received id=0x%08x from=0x%08x err=%u nak=%lu pending=%u",
                          packet_id, from_node, error_reason,
                          (unsigned long)mesh_nak_rx_count,
@@ -8295,6 +8336,7 @@ static bool mesh_ack_complete_implicit(uint32_t relay_from_node,
         mesh_ack_retry_queue[i].active = false;
         mesh_ack_retry_queue[i].due_us = 0;
         mesh_ack_rx_count++;
+        (void)daemon_chat_update_tx_status(header.id, "relayed");
         if(mesh_ack_retry_queue[i].frame.phoneapi_origin) {
             (void)phoneapi_notify_routing_result(
                 relay_from_node, header.id, MESHTASTIC_ROUTING_ERROR_NONE,
@@ -10894,6 +10936,7 @@ static int start_tx(PhysicalLayer *radio, const tx_frame_t &frame)
     if(!radio) {
         return -1;
     }
+    active_tx_frame_valid = false;
     if(len == 0U || len > MESHTASTIC_MAX_LORA_PAYLOAD_LEN) {
         fprintf(stderr, "TX frame length invalid: %u\n", (unsigned)len);
         return -1;
@@ -10921,6 +10964,8 @@ static int start_tx(PhysicalLayer *radio, const tx_frame_t &frame)
 
     active_op = OP_TX;
     active_tx_len = len;
+    active_tx_frame = frame;
+    active_tx_frame_valid = true;
     active_op_start_us = monotonic_us();
     mesh_history_remember_tx(frame);
     daemon_event("TX start len=%u: %s", (unsigned)len,
@@ -11000,9 +11045,18 @@ static void handle_tx_event(PhysicalLayer *radio)
     if(state == RADIOLIB_ERR_NONE) {
         tx_count++;
         daemon_event("TX done: %lu", (unsigned long)tx_count);
+        if(active_tx_frame_valid && !active_tx_frame.want_ack) {
+            (void)daemon_chat_update_tx_status(active_tx_frame.packet_id,
+                                               "sent");
+        }
     } else {
         fprintf(stderr, "TX finish failed: %d %s\n", state, error_name(state));
+        if(active_tx_frame_valid) {
+            (void)daemon_chat_update_tx_status(active_tx_frame.packet_id,
+                                               "tx-failed");
+        }
     }
+    active_tx_frame_valid = false;
     (void)start_rx(radio);
 }
 
@@ -11066,6 +11120,8 @@ static void handle_ack_retry(PhysicalLayer *radio, uint64_t now_us)
     }
     if(mesh_ack_retry_queue[best].retries_left == 0U) {
         mesh_ack_timeout_count++;
+        (void)daemon_chat_update_tx_status(
+            mesh_ack_retry_queue[best].packet_id, "timeout");
         if(mesh_ack_retry_queue[best].frame.phoneapi_origin) {
             (void)phoneapi_notify_routing_result(
                 mesh_ack_retry_queue[best].to_node,
@@ -11087,6 +11143,8 @@ static void handle_ack_retry(PhysicalLayer *radio, uint64_t now_us)
     mesh_ack_retry_queue[best].due_us =
         now_us + MESHTASTIC_ACK_RETRY_TIMEOUT_US;
     mesh_ack_retry_count++;
+    (void)daemon_chat_update_tx_status(mesh_ack_retry_queue[best].packet_id,
+                                       "retry");
     daemon_event("Mesh ACK retry id=0x%08x to=0x%08x retries_left=%u retry=%lu",
                  mesh_ack_retry_queue[best].packet_id,
                  mesh_ack_retry_queue[best].to_node,
@@ -11544,12 +11602,17 @@ int main(int argc, char **argv)
                          (unsigned)message.size());
             if(build_tx_frame(opts, message, &frame)) {
                 if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
+                    bool ack_tracked = true;
                     if(frame.want_ack) {
-                        (void)mesh_ack_track_frame(frame);
+                        ack_tracked = mesh_ack_track_frame(frame);
                     }
                     std::string clean = mesh_clean_text(message);
                     if(!clean.empty()) {
-                        daemon_chat("TX 0x%08x: %s", opts.from_node,
+                        daemon_chat("TX 0x%08x id=0x%08x ack=%s: %s",
+                                    opts.from_node, frame.packet_id,
+                                    frame.want_ack ?
+                                    (ack_tracked ? "pending" : "dropped") :
+                                    "air",
                                     clean.c_str());
                     }
                 } else {
@@ -11568,8 +11631,9 @@ int main(int argc, char **argv)
                 tx_frame_t frame;
                 if(build_phoneapi_mesh_data_frame(opts, phoneapi_tx, &frame)) {
                     if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
+                        bool ack_tracked = true;
                         if(frame.want_ack) {
-                            (void)mesh_ack_track_frame(frame);
+                            ack_tracked = mesh_ack_track_frame(frame);
                         }
                         if(phoneapi_tx.data.portnum ==
                            MESHTASTIC_TEXT_MESSAGE_APP &&
@@ -11579,7 +11643,12 @@ int main(int argc, char **argv)
                                 phoneapi_tx.data.payload.size());
                             std::string clean = mesh_clean_text(text);
                             if(!clean.empty()) {
-                                daemon_chat("TX 0x%08x: %s", opts.from_node,
+                                daemon_chat("TX 0x%08x id=0x%08x ack=%s: %s",
+                                            opts.from_node, frame.packet_id,
+                                            frame.want_ack ?
+                                            (ack_tracked ? "pending" :
+                                             "dropped") :
+                                            "air",
                                             clean.c_str());
                             }
                         }

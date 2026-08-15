@@ -1171,9 +1171,129 @@ static void mesh_refresh_daemon_log(void)
     lv_label_set_text(mesh_log_label, shown);
 }
 
+static int mesh_chat_extract_meta_field(const char *meta, const char *key,
+                                        char *out, size_t out_len)
+{
+    const char *p;
+    size_t key_len;
+    size_t i = 0;
+
+    if(out && out_len > 0U) {
+        out[0] = '\0';
+    }
+    if(!meta || !key || !key[0] || !out || out_len == 0U) {
+        return 0;
+    }
+    key_len = strlen(key);
+    p = strstr(meta, key);
+    if(!p) {
+        return 0;
+    }
+    p += key_len;
+    while(*p && !isspace((unsigned char)*p) && *p != ':' &&
+          i + 1U < out_len) {
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return out[0] != '\0';
+}
+
+static const char *mesh_chat_status_text(const char *status)
+{
+    if(!status || !status[0]) {
+        return "";
+    }
+    if(strcmp(status, "air") == 0) {
+        return ui_tr("Sending");
+    }
+    if(strcmp(status, "sent") == 0) {
+        return ui_tr("Sent");
+    }
+    if(strcmp(status, "pending") == 0) {
+        return ui_tr("Waiting ACK");
+    }
+    if(strncmp(status, "retry", 5) == 0) {
+        return ui_tr("Retrying");
+    }
+    if(strcmp(status, "ack") == 0) {
+        return ui_tr("ACK");
+    }
+    if(strcmp(status, "relayed") == 0) {
+        return ui_tr("Relayed");
+    }
+    if(strcmp(status, "timeout") == 0) {
+        return ui_tr("Timeout");
+    }
+    if(strcmp(status, "nak") == 0) {
+        return ui_tr("NAK");
+    }
+    if(strcmp(status, "dropped") == 0) {
+        return ui_tr("Dropped");
+    }
+    if(strcmp(status, "tx-failed") == 0) {
+        return ui_tr("TX failed");
+    }
+    return status;
+}
+
+static uint32_t mesh_chat_status_color(const char *status, int sent)
+{
+    if(!sent) {
+        return 0x94A3B8;
+    }
+    if(!status || !status[0]) {
+        return 0xDDFCE8;
+    }
+    if(strcmp(status, "ack") == 0 ||
+       strcmp(status, "relayed") == 0 ||
+       strcmp(status, "sent") == 0) {
+        return 0xDDFCE8;
+    }
+    if(strcmp(status, "timeout") == 0 ||
+       strcmp(status, "nak") == 0 ||
+       strcmp(status, "dropped") == 0 ||
+       strcmp(status, "tx-failed") == 0) {
+        return 0xFCA5A5;
+    }
+    return 0xFDE68A;
+}
+
+static void mesh_chat_format_tx_meta(char *meta, size_t meta_len,
+                                     char *status, size_t status_len,
+                                     uint32_t *footer_color)
+{
+    char raw[128];
+    char id[24];
+    char ack[24];
+    const char *status_text;
+
+    if(status && status_len > 0U) {
+        status[0] = '\0';
+    }
+    if(!meta || meta_len == 0U) {
+        return;
+    }
+
+    snprintf(raw, sizeof(raw), "%s", meta);
+    if(!mesh_chat_extract_meta_field(raw, "id=", id, sizeof(id)) ||
+       !mesh_chat_extract_meta_field(raw, "ack=", ack, sizeof(ack))) {
+        return;
+    }
+    status_text = mesh_chat_status_text(ack);
+    snprintf(meta, meta_len, "%s - %s", id, status_text);
+    if(status && status_len > 0U) {
+        snprintf(status, status_len, "%s", ack);
+    }
+    if(footer_color) {
+        *footer_color = mesh_chat_status_color(ack, 1);
+    }
+}
+
 static void mesh_chat_parse_line(const char *line, int *sent,
                                  char *meta, size_t meta_len,
-                                 char *body, size_t body_len)
+                                 char *body, size_t body_len,
+                                 char *status, size_t status_len,
+                                 uint32_t *footer_color)
 {
     const char *colon;
     size_t prefix_len;
@@ -1186,6 +1306,12 @@ static void mesh_chat_parse_line(const char *line, int *sent,
     }
     if(body && body_len > 0U) {
         body[0] = '\0';
+    }
+    if(status && status_len > 0U) {
+        status[0] = '\0';
+    }
+    if(footer_color) {
+        *footer_color = 0x94A3B8;
     }
     if(!line || !line[0] || !body || body_len == 0U) {
         return;
@@ -1200,6 +1326,8 @@ static void mesh_chat_parse_line(const char *line, int *sent,
             prefix_len = (size_t)(colon - line);
             if(meta && meta_len > 0U) {
                 snprintf(meta, meta_len, "%.*s", (int)prefix_len, line);
+                mesh_chat_format_tx_meta(meta, meta_len, status,
+                                         status_len, footer_color);
             }
             snprintf(body, body_len, "%s", colon + 2);
             return;
@@ -1266,18 +1394,21 @@ static void mesh_chat_add_bubble(const char *line)
     int sent = 0;
     char meta[96];
     char body[256];
+    char status[24];
     lv_obj_t *row;
     lv_obj_t *bubble;
     lv_obj_t *text;
     lv_obj_t *footer;
     int page_w;
     int bubble_w;
+    uint32_t footer_color = 0x94A3B8;
 
     if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll) ||
        !line || !line[0]) {
         return;
     }
-    mesh_chat_parse_line(line, &sent, meta, sizeof(meta), body, sizeof(body));
+    mesh_chat_parse_line(line, &sent, meta, sizeof(meta), body, sizeof(body),
+                         status, sizeof(status), &footer_color);
     ui_trim_text(body);
     ui_trim_text(meta);
     if(!body[0]) {
@@ -1329,7 +1460,7 @@ static void mesh_chat_add_bubble(const char *line)
 
     footer = ui_label(bubble, meta[0] ? meta : (sent ? "TX" : "RX"),
                       &lv_font_montserrat_14,
-                      sent ? 0xDDFCE8 : 0x94A3B8);
+                      footer_color);
     lv_obj_set_width(footer, bubble_w - 20);
     lv_label_set_long_mode(footer, LV_LABEL_LONG_DOT);
 }
