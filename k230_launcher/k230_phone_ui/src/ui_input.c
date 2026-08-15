@@ -122,6 +122,7 @@ static void ui_input_pinyin_commit_best(ui_input_dialog_state_t *state);
 static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
                                             unsigned int index);
 static void ui_input_hardware_sync_pinyin_mode(ui_input_dialog_state_t *state);
+static void ui_input_position_hardware_candidate_bar(ui_input_dialog_state_t *state);
 static lv_obj_t *ui_input_create_candidate_bar(lv_obj_t *parent, int height,
                                                int landscape,
                                                ui_input_dialog_state_t *state);
@@ -165,6 +166,12 @@ void ui_input_dialog_close_active(void)
         ui_extension_keyboard_set_key_cb(NULL, NULL);
         state->hardware_keyboard = 0;
     }
+    if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar) &&
+       (!state->overlay ||
+        lv_obj_get_parent(state->candidate_bar) != state->overlay)) {
+        lv_obj_delete(state->candidate_bar);
+        state->candidate_bar = NULL;
+    }
     if(state->overlay && lv_obj_is_valid(state->overlay)) {
         lv_obj_delete(state->overlay);
     }
@@ -203,6 +210,7 @@ static void ui_input_inline_apply_layout(ui_input_dialog_state_t *state,
     if(state && state->layout_cb) {
         state->layout_cb(active, reserved_h, state->layout_user_data);
     }
+    ui_input_position_hardware_candidate_bar(state);
     app_request_fast_refresh();
 }
 
@@ -524,6 +532,66 @@ static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
     state->candidate_map[map_i++] = "Input";
     state->candidate_map[map_i] = "";
     lv_buttonmatrix_set_map(state->candidate_bar, state->candidate_map);
+    ui_input_position_hardware_candidate_bar(state);
+}
+
+static void ui_input_position_hardware_candidate_bar(ui_input_dialog_state_t *state)
+{
+    lv_area_t area;
+    int screen_w;
+    int screen_h;
+    int bar_w;
+    int bar_h;
+    int x;
+    int y;
+
+    if(!state || !state->hardware_keyboard || state->keyboard ||
+       !state->candidate_bar || !lv_obj_is_valid(state->candidate_bar) ||
+       lv_obj_has_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN) ||
+       !state->textarea || !lv_obj_is_valid(state->textarea)) {
+        return;
+    }
+
+    screen_w = ui_screen_width();
+    screen_h = ui_screen_height();
+    lv_obj_update_layout(state->textarea);
+    lv_obj_update_layout(state->candidate_bar);
+    lv_obj_get_coords(state->textarea, &area);
+
+    bar_w = (int)(area.x2 - area.x1 + 1);
+    bar_h = lv_obj_get_height(state->candidate_bar);
+    if(bar_h < 36) {
+        bar_h = ui_is_landscape() ? 42 : 52;
+    }
+    if(bar_w < 280) {
+        bar_w = 280;
+    }
+    if(bar_w > screen_w - 24) {
+        bar_w = screen_w - 24;
+    }
+
+    x = (int)area.x1;
+    if(x + bar_w > screen_w - 12) {
+        x = screen_w - 12 - bar_w;
+    }
+    if(x < 12) {
+        x = 12;
+    }
+
+    y = (int)area.y1 - bar_h - 6;
+    if(y < 8) {
+        y = (int)area.y2 + 6;
+    }
+    if(y + bar_h > screen_h - 8) {
+        y = screen_h - 8 - bar_h;
+    }
+    if(y < 8) {
+        y = 8;
+    }
+
+    lv_obj_set_size(state->candidate_bar, bar_w, bar_h);
+    lv_obj_set_pos(state->candidate_bar, x, y);
+    lv_obj_move_foreground(state->candidate_bar);
 }
 
 static void ui_input_keyboard_set_mode(ui_input_dialog_state_t *state,
@@ -1081,10 +1149,10 @@ void ui_input_dialog_open(const ui_input_dialog_config_t *config)
         ui_input_keyboard_set_mode(state, UI_INPUT_KBD_LOWER);
     } else {
         state->candidate_bar =
-            ui_input_create_candidate_bar(state->overlay, candidate_h,
+            ui_input_create_candidate_bar(lv_layer_top(), candidate_h,
                                           landscape, state);
         if(state->candidate_bar) {
-            lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+            lv_obj_set_pos(state->candidate_bar, 0, 0);
         }
         state->hardware_keyboard = 1;
         ui_input_hardware_sync_pinyin_mode(state);
@@ -1169,10 +1237,10 @@ ui_input_inline_t *ui_input_inline_create(lv_obj_t *textarea,
         ui_input_inline_apply_layout(state, 0);
     } else {
         state->candidate_bar =
-            ui_input_create_candidate_bar(state->keyboard_parent, candidate_h,
+            ui_input_create_candidate_bar(lv_layer_top(), candidate_h,
                                           landscape, state);
         if(state->candidate_bar) {
-            lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+            lv_obj_set_pos(state->candidate_bar, 0, 0);
         }
         state->hardware_keyboard = 1;
         ui_input_hardware_sync_pinyin_mode(state);
