@@ -10,6 +10,8 @@
 #include <stdarg.h>
 
 #define UI_INPUT_LOG_PATH "/tmp/k230_input_dialog.log"
+#define UI_INPUT_PINYIN_DICT_PATH "/root/app/k230_phone_ui/data/pinyin_common.txt"
+#define UI_INPUT_PINYIN_DICT_LINE_MAX 4096
 #define UI_INPUT_PINYIN_PAGE_SIZE 9U
 
 typedef enum {
@@ -96,6 +98,21 @@ typedef struct {
     const char *candidates[20];
 } ui_input_pinyin_entry_t;
 
+typedef struct {
+    const char *const *items;
+    unsigned int count;
+} ui_input_pinyin_candidates_t;
+
+typedef struct {
+    char *key;
+    char **candidates;
+    unsigned int count;
+} ui_input_pinyin_dict_entry_t;
+
+static ui_input_pinyin_dict_entry_t *ui_input_pinyin_dict;
+static size_t ui_input_pinyin_dict_count;
+static int ui_input_pinyin_dict_loaded;
+
 static const ui_input_pinyin_entry_t ui_input_pinyin_table[] = {
     { "ai", { "爱", "矮", "哎", "挨", "碍", NULL } },
     { "ba", { "吧", "八", "把", "爸", "巴", "拔", "罢", NULL } },
@@ -126,8 +143,8 @@ static const ui_input_pinyin_entry_t ui_input_pinyin_table[] = {
 };
 
 static const ui_input_pinyin_entry_t *ui_input_pinyin_find(const char *key);
-static unsigned int ui_input_pinyin_candidate_count(
-    const ui_input_pinyin_entry_t *entry);
+static int ui_input_pinyin_lookup(const char *key,
+                                  ui_input_pinyin_candidates_t *out);
 static void ui_input_pinyin_clear(ui_input_dialog_state_t *state);
 static void ui_input_pinyin_insert(ui_input_dialog_state_t *state,
                                    const char *text);
@@ -513,11 +530,172 @@ static const ui_input_pinyin_entry_t *ui_input_pinyin_find(const char *key)
     return NULL;
 }
 
-static unsigned int ui_input_pinyin_candidate_count(
-    const ui_input_pinyin_entry_t *entry)
+static char *ui_input_strdup_local(const char *src)
 {
+    size_t len;
+    char *copy;
+
+    if(!src) {
+        return NULL;
+    }
+    len = strlen(src);
+    copy = malloc(len + 1U);
+    if(copy) {
+        memcpy(copy, src, len + 1U);
+    }
+    return copy;
+}
+
+static void ui_input_pinyin_dict_append(ui_input_pinyin_dict_entry_t entry)
+{
+    ui_input_pinyin_dict_entry_t *next;
+
+    next = realloc(ui_input_pinyin_dict,
+                   (ui_input_pinyin_dict_count + 1U) *
+                   sizeof(*ui_input_pinyin_dict));
+    if(!next) {
+        free(entry.key);
+        for(unsigned int i = 0; i < entry.count; i++) {
+            free(entry.candidates[i]);
+        }
+        free(entry.candidates);
+        return;
+    }
+    ui_input_pinyin_dict = next;
+    ui_input_pinyin_dict[ui_input_pinyin_dict_count++] = entry;
+}
+
+static int ui_input_pinyin_dict_add_candidate(ui_input_pinyin_dict_entry_t *entry,
+                                              const char *candidate)
+{
+    char **next;
+
+    if(!entry || !candidate || !candidate[0]) {
+        return -1;
+    }
+    next = realloc(entry->candidates,
+                   (entry->count + 1U) * sizeof(*entry->candidates));
+    if(!next) {
+        return -1;
+    }
+    entry->candidates = next;
+    entry->candidates[entry->count] = ui_input_strdup_local(candidate);
+    if(!entry->candidates[entry->count]) {
+        return -1;
+    }
+    entry->count++;
+    return 0;
+}
+
+static void ui_input_pinyin_load_dict(void)
+{
+    FILE *fp;
+    char line[UI_INPUT_PINYIN_DICT_LINE_MAX];
+    unsigned int line_no = 0;
+
+    if(ui_input_pinyin_dict_loaded) {
+        return;
+    }
+    ui_input_pinyin_dict_loaded = 1;
+
+    fp = fopen(UI_INPUT_PINYIN_DICT_PATH, "r");
+    if(!fp) {
+        ui_input_log("pinyin dict missing path=%s", UI_INPUT_PINYIN_DICT_PATH);
+        return;
+    }
+
+    while(fgets(line, sizeof(line), fp)) {
+        ui_input_pinyin_dict_entry_t entry = {0};
+        char *tab;
+        char *saveptr = NULL;
+        char *token;
+        size_t len;
+
+        line_no++;
+        len = strlen(line);
+        while(len > 0U &&
+              (line[len - 1U] == '\n' || line[len - 1U] == '\r')) {
+            line[--len] = '\0';
+        }
+        if(!line[0] || line[0] == '#') {
+            continue;
+        }
+        tab = strchr(line, '\t');
+        if(!tab) {
+            continue;
+        }
+        *tab = '\0';
+        entry.key = ui_input_strdup_local(line);
+        if(!entry.key) {
+            continue;
+        }
+        token = strtok_r(tab + 1, " ", &saveptr);
+        while(token) {
+            if(ui_input_pinyin_dict_add_candidate(&entry, token) != 0) {
+                break;
+            }
+            token = strtok_r(NULL, " ", &saveptr);
+        }
+        if(entry.count > 0U) {
+            ui_input_pinyin_dict_append(entry);
+        } else {
+            free(entry.key);
+            free(entry.candidates);
+        }
+    }
+    fclose(fp);
+    ui_input_log("pinyin dict loaded path=%s keys=%u lines=%u",
+                 UI_INPUT_PINYIN_DICT_PATH,
+                 (unsigned)ui_input_pinyin_dict_count, line_no);
+}
+
+static const ui_input_pinyin_dict_entry_t *
+ui_input_pinyin_dict_find(const char *key)
+{
+    size_t left = 0;
+    size_t right;
+
+    ui_input_pinyin_load_dict();
+    right = ui_input_pinyin_dict_count;
+    while(left < right) {
+        size_t mid = left + (right - left) / 2U;
+        int cmp = strcmp(key, ui_input_pinyin_dict[mid].key);
+
+        if(cmp == 0) {
+            return &ui_input_pinyin_dict[mid];
+        }
+        if(cmp < 0) {
+            right = mid;
+        } else {
+            left = mid + 1U;
+        }
+    }
+    return NULL;
+}
+
+static int ui_input_pinyin_lookup(const char *key,
+                                  ui_input_pinyin_candidates_t *out)
+{
+    const ui_input_pinyin_dict_entry_t *dict_entry;
+    const ui_input_pinyin_entry_t *entry;
     unsigned int count = 0;
 
+    if(out) {
+        out->items = NULL;
+        out->count = 0;
+    }
+    if(!key || !key[0] || !out) {
+        return 0;
+    }
+
+    dict_entry = ui_input_pinyin_dict_find(key);
+    if(dict_entry && dict_entry->count > 0U) {
+        out->items = (const char *const *)dict_entry->candidates;
+        out->count = dict_entry->count;
+        return 1;
+    }
+
+    entry = ui_input_pinyin_find(key);
     if(!entry) {
         return 0;
     }
@@ -526,12 +704,17 @@ static unsigned int ui_input_pinyin_candidate_count(
           entry->candidates[count]) {
         count++;
     }
-    return count;
+    if(count > 0U) {
+        out->items = entry->candidates;
+        out->count = count;
+        return 1;
+    }
+    return 0;
 }
 
 static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
 {
-    const ui_input_pinyin_entry_t *entry;
+    ui_input_pinyin_candidates_t candidates;
     unsigned int count;
     unsigned int start;
     unsigned int shown = 0;
@@ -551,8 +734,8 @@ static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
         return;
     }
 
-    entry = ui_input_pinyin_find(state->pinyin_comp);
-    count = ui_input_pinyin_candidate_count(entry);
+    ui_input_pinyin_lookup(state->pinyin_comp, &candidates);
+    count = candidates.count;
     if(!count && state->pinyin_comp[0]) {
         count = 1;
     }
@@ -572,7 +755,7 @@ static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
              "%s", state->pinyin_comp[0] ? state->pinyin_comp : "Pinyin");
     state->candidate_map[map_i++] = state->candidate_text[text_i++];
 
-    if(entry) {
+    if(candidates.count > 0U) {
         for(unsigned int i = start;
             i < count && shown < UI_INPUT_PINYIN_PAGE_SIZE &&
             map_i < (sizeof(state->candidate_map) /
@@ -582,7 +765,7 @@ static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
             i++, shown++) {
             snprintf(state->candidate_text[text_i],
                      sizeof(state->candidate_text[text_i]), "%u %s",
-                     shown + 1U, entry->candidates[i]);
+                     shown + 1U, candidates.items[i]);
             state->candidate_map[map_i++] = state->candidate_text[text_i++];
         }
     } else if(state->pinyin_comp[0] && map_i < 7) {
@@ -756,14 +939,14 @@ static void ui_input_pinyin_insert(ui_input_dialog_state_t *state,
 
 static void ui_input_pinyin_commit_best(ui_input_dialog_state_t *state)
 {
-    const ui_input_pinyin_entry_t *entry;
+    ui_input_pinyin_candidates_t candidates;
 
     if(!state || !state->pinyin_comp[0]) {
         return;
     }
-    entry = ui_input_pinyin_find(state->pinyin_comp);
-    if(entry && entry->candidates[0]) {
-        ui_input_pinyin_insert(state, entry->candidates[0]);
+    ui_input_pinyin_lookup(state->pinyin_comp, &candidates);
+    if(candidates.count > 0U && candidates.items[0]) {
+        ui_input_pinyin_insert(state, candidates.items[0]);
     } else {
         ui_input_pinyin_insert(state, state->pinyin_comp);
     }
@@ -772,25 +955,23 @@ static void ui_input_pinyin_commit_best(ui_input_dialog_state_t *state)
 static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
                                             unsigned int index)
 {
-    const ui_input_pinyin_entry_t *entry;
-    unsigned int count;
+    ui_input_pinyin_candidates_t candidates;
     unsigned int real_index;
 
     if(!state || !state->pinyin_comp[0]) {
         return 0;
     }
-    entry = ui_input_pinyin_find(state->pinyin_comp);
-    if(!entry) {
+    ui_input_pinyin_lookup(state->pinyin_comp, &candidates);
+    if(candidates.count == 0U) {
         if(index == 0U) {
             ui_input_pinyin_insert(state, state->pinyin_comp);
             return 1;
         }
         return 0;
     }
-    count = ui_input_pinyin_candidate_count(entry);
     real_index = state->pinyin_page * UI_INPUT_PINYIN_PAGE_SIZE + index;
-    if(real_index < count && entry->candidates[real_index]) {
-        ui_input_pinyin_insert(state, entry->candidates[real_index]);
+    if(real_index < candidates.count && candidates.items[real_index]) {
+        ui_input_pinyin_insert(state, candidates.items[real_index]);
         return 1;
     }
     return 0;
@@ -798,15 +979,15 @@ static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
 
 static int ui_input_pinyin_page(ui_input_dialog_state_t *state, int delta)
 {
-    const ui_input_pinyin_entry_t *entry;
+    ui_input_pinyin_candidates_t candidates;
     unsigned int count;
     unsigned int max_page;
 
     if(!state || !state->pinyin_comp[0]) {
         return 0;
     }
-    entry = ui_input_pinyin_find(state->pinyin_comp);
-    count = ui_input_pinyin_candidate_count(entry);
+    ui_input_pinyin_lookup(state->pinyin_comp, &candidates);
+    count = candidates.count;
     if(count <= UI_INPUT_PINYIN_PAGE_SIZE) {
         return 0;
     }
