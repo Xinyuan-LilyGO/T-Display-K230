@@ -3778,6 +3778,7 @@ static void create_status_bar(lv_obj_t *scr)
     const int status_chip_h = 24;
     const int status_chip_gap = 5;
     const int status_chip_count = 4;
+    const int status_group_right_inset = 18;
     const int status_group_w =
         status_chip_w * status_chip_count + status_chip_gap * (status_chip_count - 1);
     lv_obj_t *bar = lv_obj_create(scr);
@@ -3803,7 +3804,7 @@ static void create_status_bar(lv_obj_t *scr)
     lv_obj_set_flex_align(status_group, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(status_group, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(status_group, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_obj_align(status_group, LV_ALIGN_RIGHT_MID, -status_group_right_inset, 0);
 
     lv_obj_t *ble = lv_obj_create(status_group);
     lv_obj_add_style(ble, &style_chip, 0);
