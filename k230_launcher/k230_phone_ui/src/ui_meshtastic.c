@@ -75,7 +75,9 @@ static int mesh_rebroadcast_enabled = 0;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_choice_overlay;
+static lv_obj_t *mesh_pairing_overlay;
 static lv_obj_t *mesh_settings_value_labels[11];
+static char mesh_last_pairing_code[16];
 
 typedef enum {
     MESH_FIELD_REGION = 0,
@@ -456,6 +458,135 @@ static void mesh_apply_ble_status(const char *status, int online)
         mesh_append_log("BLE bridge: %s", ble_state);
         snprintf(mesh_last_ble_state, sizeof(mesh_last_ble_state), "%s",
                  ble_state);
+    }
+}
+
+static void mesh_pairing_notice_close_cb(lv_event_t *event)
+{
+    (void)event;
+    if(mesh_pairing_overlay && lv_obj_is_valid(mesh_pairing_overlay)) {
+        lv_obj_delete(mesh_pairing_overlay);
+    }
+    mesh_pairing_overlay = NULL;
+    app_request_fast_refresh();
+}
+
+static void mesh_close_pairing_notice(void)
+{
+    if(mesh_pairing_overlay && lv_obj_is_valid(mesh_pairing_overlay)) {
+        lv_obj_delete(mesh_pairing_overlay);
+    }
+    mesh_pairing_overlay = NULL;
+}
+
+static int mesh_pairing_code_is_valid(const char *code)
+{
+    size_t len;
+
+    if(!code || !code[0] || strcmp(code, "-") == 0) {
+        return 0;
+    }
+    len = strlen(code);
+    if(len != 6U) {
+        return 0;
+    }
+    for(size_t i = 0; i < len; i++) {
+        if(!isdigit((unsigned char)code[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void mesh_show_pairing_notice(const char *code)
+{
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *detail;
+    lv_obj_t *passkey;
+    lv_obj_t *hint;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int panel_w = ui_is_landscape() ? 500 : ui_fit_width(lv_layer_top(), 24, 420);
+    int panel_h = ui_is_landscape() ? 268 : 304;
+
+    if(!mesh_pairing_code_is_valid(code)) {
+        return;
+    }
+    if(strcmp(mesh_last_pairing_code, code) == 0) {
+        return;
+    }
+    snprintf(mesh_last_pairing_code, sizeof(mesh_last_pairing_code), "%s", code);
+    mesh_close_pairing_notice();
+
+    if(panel_w > screen_w - 48) {
+        panel_w = screen_w - 48;
+    }
+    if(panel_w < 300) {
+        panel_w = screen_w - 24;
+    }
+    if(panel_h > screen_h - 48) {
+        panel_h = screen_h - 48;
+    }
+
+    mesh_pairing_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_pairing_overlay);
+    lv_obj_set_style_bg_color(mesh_pairing_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_pairing_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(mesh_pairing_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_pairing_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_pairing_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    panel = ui_panel(mesh_pairing_overlay, 0, 0, panel_w, panel_h);
+    lv_obj_center(panel);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x263342), 0);
+    lv_obj_set_style_pad_all(panel, 22, 0);
+
+    title = ui_label(panel, ui_tr("BLE Pairing"), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_width(title, panel_w - 44);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    detail = ui_label(panel, ui_tr("Enter this code in the Meshtastic app"),
+                      &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(detail, panel_w - 44);
+    lv_label_set_long_mode(detail, LV_LABEL_LONG_WRAP);
+    lv_obj_align(detail, LV_ALIGN_TOP_LEFT, 0, 48);
+
+    passkey = ui_label(panel, code, &lv_font_montserrat_32, 0x25C281);
+    lv_obj_set_width(passkey, panel_w - 44);
+    lv_obj_set_style_text_align(passkey, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(passkey, LV_ALIGN_TOP_LEFT, 0, 100);
+
+    hint = ui_label(panel, ui_tr("If the app does not prompt again, forget the old Bluetooth device and reconnect."),
+                    &lv_font_montserrat_14, 0x64748B);
+    lv_obj_set_width(hint, panel_w - 44);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 0, 154);
+
+    btn = ui_command_button(panel, (panel_w - 156) / 2, panel_h - 74, 156,
+                            ui_tr("OK"), 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_pairing_notice_close_cb, LV_EVENT_CLICKED,
+                        NULL);
+    app_request_fast_refresh();
+}
+
+static void mesh_check_pairing_code(const char *status, int online)
+{
+    char code[16];
+    char ble_state[32];
+
+    mesh_status_field(status, "ble_pair", code, sizeof(code), "-");
+    if(online && mesh_pairing_code_is_valid(code)) {
+        mesh_show_pairing_notice(code);
+        return;
+    }
+    mesh_status_field(status, "ble", ble_state, sizeof(ble_state), "offline");
+    if(!online || strcmp(ble_state, "offline") == 0) {
+        mesh_last_pairing_code[0] = '\0';
+        mesh_close_pairing_notice();
     }
 }
 
@@ -1240,6 +1371,7 @@ static void mesh_refresh_status(void)
     ui_trim_text(mesh_status_text);
     online = mesh_status_is_online(mesh_status_text);
     mesh_apply_ble_status(mesh_status_text, online);
+    mesh_check_pairing_code(mesh_status_text, online);
     mesh_sync_profile_from_status(mesh_status_text, online);
 
     if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
@@ -2000,6 +2132,7 @@ static void mesh_setting_edit_event_cb(lv_event_t *event)
 static void mesh_close_settings_page(void)
 {
     mesh_choice_close();
+    mesh_close_pairing_notice();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
         lv_obj_delete(mesh_settings_overlay);
     }
@@ -2799,6 +2932,10 @@ void ui_meshtastic_cleanup(void)
 
 int ui_meshtastic_handle_back(void)
 {
+    if(mesh_pairing_overlay && lv_obj_is_valid(mesh_pairing_overlay)) {
+        mesh_pairing_notice_close_cb(NULL);
+        return 1;
+    }
     if(mesh_choice_overlay && lv_obj_is_valid(mesh_choice_overlay)) {
         mesh_choice_close();
         return 1;

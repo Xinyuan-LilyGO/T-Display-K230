@@ -3789,11 +3789,13 @@ static void create_status_bar(lv_obj_t *scr)
 
     lv_obj_t *ble = lv_obj_create(bar);
     lv_obj_add_style(ble, &style_chip, 0);
-    lv_obj_set_size(ble, 66, 30);
+    lv_obj_set_size(ble, 82, 30);
     lv_obj_clear_flag(ble, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(ble, LV_ALIGN_RIGHT_MID, -226, 0);
     status_ble_label = label(ble, "BLE", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 10, 0);
+    lv_obj_set_width(status_ble_label, 42);
+    lv_label_set_long_mode(status_ble_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 12, 0);
     status_ble_led = lv_obj_create(ble);
     lv_obj_set_size(status_ble_led, 9, 9);
     lv_obj_set_style_radius(status_ble_led, LV_RADIUS_CIRCLE, 0);
@@ -3801,7 +3803,7 @@ static void create_status_bar(lv_obj_t *scr)
     lv_obj_set_style_bg_opa(status_ble_led, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(0x59616C), 0);
     lv_obj_clear_flag(status_ble_led, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(status_ble_led, LV_ALIGN_RIGHT_MID, -9, 0);
+    lv_obj_align(status_ble_led, LV_ALIGN_RIGHT_MID, -14, 0);
 
     lv_obj_t *wifi = chip(bar, "WiFi", path_exists("/sys/class/net/wlan0") ? 0x25C281 : 0x9AA4AF);
     lv_obj_align(wifi, LV_ALIGN_RIGHT_MID, -156, 0);

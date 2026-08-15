@@ -1089,6 +1089,8 @@ static phoneapi_bridge_state_t phoneapi_bridge_state = PHONEAPI_BRIDGE_OFFLINE;
 static char phoneapi_bridge_detail[160] = "not-started";
 static bool phoneapi_init_sent;
 static uint64_t phoneapi_last_adv_us;
+static char phoneapi_pairing_code[16];
+static uint64_t phoneapi_pairing_code_us;
 
 static void radio_event_isr(void)
 {
@@ -1105,6 +1107,54 @@ static uint64_t monotonic_us(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+static void phoneapi_bridge_set_pairing_code(const char *code)
+{
+    char clean[sizeof(phoneapi_pairing_code)] = { 0 };
+    size_t out = 0;
+
+    if(code) {
+        for(size_t i = 0; code[i] && out + 1U < sizeof(clean); i++) {
+            if(isdigit((unsigned char)code[i])) {
+                clean[out++] = code[i];
+            }
+        }
+    }
+    pthread_mutex_lock(&phoneapi_state_mutex);
+    snprintf(phoneapi_pairing_code, sizeof(phoneapi_pairing_code), "%s",
+             clean);
+    phoneapi_pairing_code_us = clean[0] ? monotonic_us() : 0ULL;
+    pthread_mutex_unlock(&phoneapi_state_mutex);
+}
+
+static void phoneapi_bridge_clear_pairing_code(void)
+{
+    phoneapi_bridge_set_pairing_code(nullptr);
+}
+
+static bool phoneapi_bridge_get_pairing_code(char *code, size_t code_len)
+{
+    bool valid = false;
+    uint64_t now = monotonic_us();
+
+    if(!code || code_len == 0U) {
+        return false;
+    }
+    code[0] = '\0';
+    pthread_mutex_lock(&phoneapi_state_mutex);
+    if(phoneapi_pairing_code[0] &&
+       phoneapi_pairing_code_us > 0ULL &&
+       now >= phoneapi_pairing_code_us &&
+       now - phoneapi_pairing_code_us < 120000000ULL) {
+        snprintf(code, code_len, "%s", phoneapi_pairing_code);
+        valid = true;
+    } else if(phoneapi_pairing_code[0]) {
+        phoneapi_pairing_code[0] = '\0';
+        phoneapi_pairing_code_us = 0ULL;
+    }
+    pthread_mutex_unlock(&phoneapi_state_mutex);
+    return valid;
 }
 
 static uint64_t tx_poll_finish_delay_us(size_t len)
@@ -4110,6 +4160,42 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
     if(line.empty() || line == "OK") {
         return;
     }
+    if(line.rfind("+MESH:PASSKEY,", 0) == 0) {
+        const char *p = line.c_str() + strlen("+MESH:PASSKEY,");
+        const char *code_start = strchr(p, ',');
+        char code[16] = { 0 };
+
+        if(code_start) {
+            size_t n = 0;
+            code_start++;
+            while(code_start[n] && code_start[n] != ',' &&
+                  n + 1U < sizeof(code)) {
+                code[n] = code_start[n];
+                n++;
+            }
+            code[n] = '\0';
+        }
+        phoneapi_bridge_set_pairing_code(code);
+        phoneapi_bridge_set_state(PHONEAPI_BRIDGE_CONNECTED, "pairing");
+        daemon_event("PhoneAPI BLE pairing code %s",
+                     code[0] ? code : "invalid");
+        return;
+    }
+    if(line.rfind("+MESH:PAIR,", 0) == 0) {
+        phoneapi_bridge_set_state(PHONEAPI_BRIDGE_CONNECTED,
+                                  line.find(",OK") != std::string::npos ?
+                                  "paired" : "pair-failed");
+        daemon_event("PhoneAPI UART %s", line.c_str());
+        return;
+    }
+    if(line.rfind("+MESH:SECURED,", 0) == 0) {
+        phoneapi_bridge_set_state(PHONEAPI_BRIDGE_CONNECTED, "secured");
+        daemon_event("PhoneAPI UART %s", line.c_str());
+        return;
+    }
+    if(line.rfind("+MESH:DISCONNECTED", 0) == 0) {
+        phoneapi_bridge_clear_pairing_code();
+    }
     if(phoneapi_bridge_status_line(line)) {
         bool connected = phoneapi_bridge_status_connected(line);
         bool adv_known = false;
@@ -6202,14 +6288,18 @@ static std::string daemon_status_response(const probe_options_t &opts,
 {
     char buf[1280];
     char ble_detail[160];
+    char ble_pair[16];
     phoneapi_bridge_state_t ble_state;
     const char *queued = pending_send.empty() ? "0" : "1";
     uint64_t now = monotonic_us();
 
     ble_state = phoneapi_bridge_get_state(ble_detail, sizeof(ble_detail));
+    if(!phoneapi_bridge_get_pairing_code(ble_pair, sizeof(ble_pair))) {
+        snprintf(ble_pair, sizeof(ble_pair), "%s", "-");
+    }
     snprintf(buf, sizeof(buf),
              "OK version=%s chip=%s op=%s tx=%lu rx=%lu queued=%s "
-             "ble=%s ble_detail=%s "
+             "ble=%s ble_detail=%s ble_pair=%s "
              "hist=%u dup=%lu rebroadcast=%lu rebroadcast_drop=%lu "
              "delayed=%u next_rebroadcast_ms=%u "
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
@@ -6219,7 +6309,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
              (unsigned long)tx_count, (unsigned long)rx_count, queued,
-             phoneapi_bridge_state_name(ble_state), ble_detail,
+             phoneapi_bridge_state_name(ble_state), ble_detail, ble_pair,
              (unsigned)mesh_history_count,
              (unsigned long)mesh_duplicate_count,
              (unsigned long)mesh_rebroadcast_count,
