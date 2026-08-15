@@ -873,6 +873,10 @@ typedef struct {
     int rssi_dbm = 0;
     float snr = 0.0f;
     uint32_t rx_count = 0;
+    bool has_channel = false;
+    uint32_t channel_index = 0;
+    bool has_hops_away = false;
+    uint32_t hops_away = 0;
     char long_name[40] = {0};
     char short_name[8] = {0};
     int hw_model = -1;
@@ -1893,6 +1897,31 @@ static void mesh_node_seen(uint32_t node, float rssi, float snr)
     mesh_nodedb_mark_dirty();
 }
 
+static bool mesh_node_update_link_info(uint32_t node, uint32_t channel_index,
+                                       uint8_t hop_start, uint8_t hop_limit)
+{
+    mesh_node_entry_t *entry = mesh_node_get_or_create(node);
+    uint32_t hops_away = 0U;
+    bool changed;
+
+    if(!entry) {
+        return false;
+    }
+    if(hop_start >= hop_limit) {
+        hops_away = (uint32_t)(hop_start - hop_limit);
+    }
+    changed = !entry->has_channel || entry->channel_index != channel_index ||
+              !entry->has_hops_away || entry->hops_away != hops_away;
+    entry->has_channel = true;
+    entry->channel_index = channel_index;
+    entry->has_hops_away = true;
+    entry->hops_away = hops_away;
+    if(changed) {
+        mesh_nodedb_mark_dirty();
+    }
+    return changed;
+}
+
 static void mesh_node_update_user(uint32_t node, const mesh_user_info_t &user)
 {
     mesh_node_entry_t *entry = mesh_node_get_or_create(node);
@@ -2216,7 +2245,7 @@ static bool mesh_nodedb_save(void)
         return false;
     }
 
-    fprintf(fp, "# k230 meshtastic nodedb v3\n");
+    fprintf(fp, "# k230 meshtastic nodedb v4\n");
     for(size_t i = 0; i < mesh_node_count; i++) {
         const mesh_node_entry_t &node = mesh_nodes[i];
         std::string long_hex;
@@ -2236,11 +2265,11 @@ static bool mesh_nodedb_save(void)
         route_hex = mesh_hex_encode_text(node.route_summary,
                                          sizeof(node.route_summary));
         fprintf(fp,
-                "v3\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
+                "v4\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
                 "%u\t%u\t%u\t%u\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t"
                 "%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t"
                 "%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%u\t"
-                "%u\t%u\t%u\t%u\t%u\t%s\t%u\t%s\t%u\t%u\t%u\n",
+                "%u\t%u\t%u\t%u\t%u\t%s\t%u\t%s\t%u\t%u\t%u\t%u\t%u\t%u\t%u\n",
                 node.node, mesh_node_last_seen_epoch(node),
                 node.rssi_dbm, node.snr, node.rx_count,
                 long_hex.c_str(), short_hex.c_str(), node.hw_model,
@@ -2276,7 +2305,9 @@ static bool mesh_nodedb_save(void)
                 node.has_route_info ? 1U : 0U, route_hex.c_str(),
                 node.is_favorite ? 1U : 0U,
                 node.is_ignored ? 1U : 0U,
-                node.is_muted ? 1U : 0U);
+                node.is_muted ? 1U : 0U,
+                node.has_channel ? 1U : 0U, node.channel_index,
+                node.has_hops_away ? 1U : 0U, node.hops_away);
     }
     if(fclose(fp) != 0) {
         unlink(K230_MESH_NODEDB_TMP_FILE);
@@ -2453,7 +2484,8 @@ static bool mesh_nodedb_load(void)
             ok = false;
         }
         if(ok && (strcmp(fields[0], "v2") == 0 ||
-                  strcmp(fields[0], "v3") == 0)) {
+                  strcmp(fields[0], "v3") == 0 ||
+                  strcmp(fields[0], "v4") == 0)) {
             NODEDB_GET_BOOL(tmp.has_route_info);
             if(ok && idx < fields.size()) {
                 mesh_hex_decode_text(fields[idx++], tmp.route_summary,
@@ -2462,10 +2494,17 @@ static bool mesh_nodedb_load(void)
                 ok = false;
             }
         }
-        if(ok && strcmp(fields[0], "v3") == 0) {
+        if(ok && (strcmp(fields[0], "v3") == 0 ||
+                  strcmp(fields[0], "v4") == 0)) {
             NODEDB_GET_BOOL(tmp.is_favorite);
             NODEDB_GET_BOOL(tmp.is_ignored);
             NODEDB_GET_BOOL(tmp.is_muted);
+        }
+        if(ok && strcmp(fields[0], "v4") == 0) {
+            NODEDB_GET_BOOL(tmp.has_channel);
+            NODEDB_GET_U32(tmp.channel_index);
+            NODEDB_GET_BOOL(tmp.has_hops_away);
+            NODEDB_GET_U32(tmp.hops_away);
         }
 
 #undef NODEDB_GET_U32
@@ -5289,7 +5328,12 @@ static bool encode_phoneapi_cached_node_info(const mesh_node_entry_t &node,
     if(encode_phoneapi_cached_device_metrics_proto(node, &metrics)) {
         append_bytes_field(out, 6U, metrics);
     }
-    append_uint32_field(out, 9U, 0U);
+    if(node.has_channel && node.channel_index != 0U) {
+        append_uint32_field(out, 7U, node.channel_index);
+    }
+    if(node.has_hops_away) {
+        append_uint32_field(out, 9U, node.hops_away);
+    }
     if(node.is_favorite) {
         append_bool_field(out, 10U, true);
     }
@@ -10648,6 +10692,12 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                      channel_info.index, channel_info.role,
                      channel_info.name.empty() ? "<empty>" :
                      channel_info.name.c_str(), channel_info.hash);
+        if(channel_match && header.from != opts.from_node) {
+            if(mesh_node_update_link_info(header.from, channel_info.index,
+                                          hop_start, hop_limit)) {
+                phoneapi_notify_node_update(header.from, "link");
+            }
+        }
         if(channel_match && !duplicate && header.from != opts.from_node) {
             phoneapi_notify_mesh_rx(header, payload, rssi, snr);
         }
