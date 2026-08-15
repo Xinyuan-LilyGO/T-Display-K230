@@ -9732,54 +9732,132 @@ static bool meshtastic_parse_channel_url(const std::string &url,
     return found;
 }
 
-static std::string daemon_import_channel_url_response(const std::string &url,
-                                                      const probe_options_t &opts)
+static bool daemon_prepare_channel_url_import(const std::string &url,
+                                              const probe_options_t &opts,
+                                              probe_options_t *imported,
+                                              bool *request_reconfigure,
+                                              std::string *error)
 {
     phoneapi_channel_update_t channel;
     phoneapi_config_update_t config;
-    probe_options_t imported = opts;
-    char buf[512];
-    bool request_reconfigure = false;
+
+    if(imported) {
+        *imported = opts;
+    }
+    if(request_reconfigure) {
+        *request_reconfigure = false;
+    }
 
     if(!meshtastic_parse_channel_url(url, &channel, &config)) {
-        daemon_event("channel URL import failed: parse");
-        return "ERR invalid-channel-url\n";
+        if(error) {
+            *error = "invalid-channel-url";
+        }
+        return false;
     }
+    if(!imported || !request_reconfigure) {
+        return true;
+    }
+
     if(channel.has_name) {
-        imported.channel_name = mesh_clean_text(channel.name);
-        request_reconfigure = true;
+        imported->channel_name = mesh_clean_text(channel.name);
+        *request_reconfigure = true;
     }
     if(channel.has_psk) {
-        imported.psk = channel.psk;
-        request_reconfigure = true;
+        imported->psk = channel.psk;
+        *request_reconfigure = true;
     }
     if(config.has_region && config.region != "UNSET") {
-        imported.region = config.region;
-        request_reconfigure = true;
+        imported->region = config.region;
+        *request_reconfigure = true;
     }
     if(config.has_preset) {
-        imported.preset = config.preset;
-        request_reconfigure = true;
+        imported->preset = config.preset;
+        *request_reconfigure = true;
     }
     if(config.has_hop_limit) {
-        imported.hop_limit = config.hop_limit;
-        request_reconfigure = true;
+        imported->hop_limit = config.hop_limit;
+        *request_reconfigure = true;
     }
     if(config.has_tx_power && config.tx_power >= -9 &&
        config.tx_power <= MESHTASTIC_MAX_K230_TX_POWER_DBM) {
-        imported.profile.power = (int8_t)config.tx_power;
-        imported.manual_power = config.tx_power != 0;
-        request_reconfigure = true;
+        imported->profile.power = (int8_t)config.tx_power;
+        imported->manual_power = config.tx_power != 0;
+        *request_reconfigure = true;
     }
     if(config.has_channel_num) {
-        imported.frequency_slot = config.channel_num;
-        request_reconfigure = true;
+        imported->frequency_slot = config.channel_num;
+        *request_reconfigure = true;
     }
-    if(request_reconfigure && !apply_meshtastic_profile(&imported)) {
-        daemon_event("channel URL import failed: unsupported region=%s preset=%s slot=%u",
-                     imported.region.c_str(), imported.preset.c_str(),
-                     imported.frequency_slot);
-        return "ERR unsupported-channel-config\n";
+    if(*request_reconfigure && !apply_meshtastic_profile(imported)) {
+        if(error) {
+            *error = "unsupported-channel-config";
+        }
+        return false;
+    }
+    return true;
+}
+
+static std::string daemon_channel_url_summary(const char *prefix,
+                                              const probe_options_t &opts)
+{
+    char buf[640];
+    const char *region = !opts.region.empty() ? opts.region.c_str() :
+                         (!opts.resolved_region.empty() ?
+                          opts.resolved_region.c_str() :
+                          MESHTASTIC_DEFAULT_REGION);
+    const char *preset = !opts.preset.empty() ? opts.preset.c_str() :
+                         (!opts.resolved_preset.empty() ?
+                          opts.resolved_preset.c_str() :
+                          MESHTASTIC_DEFAULT_PRESET);
+    uint32_t slot = opts.frequency_slot != 0U ? opts.frequency_slot :
+                    opts.resolved_slot;
+
+    snprintf(buf, sizeof(buf),
+             "%s region=%s preset=%s channel=%s psk=%s hop=%u slot=%u freq=%.6f bw=%.1f sf=%u cr=%u power=%d\n",
+             prefix, region, preset,
+             opts.channel_name.empty() ? "<preset>" :
+             opts.channel_name.c_str(), opts.psk.c_str(),
+             opts.hop_limit, slot, opts.profile.freq,
+             opts.profile.bandwidth, opts.profile.sf, opts.profile.cr,
+             opts.profile.power);
+    return std::string(buf);
+}
+
+static std::string daemon_preview_channel_url_response(const std::string &url,
+                                                       const probe_options_t &opts)
+{
+    probe_options_t imported;
+    bool request_reconfigure = false;
+    std::string error;
+
+    if(!daemon_prepare_channel_url_import(url, opts, &imported,
+                                          &request_reconfigure, &error)) {
+        daemon_event("channel URL preview failed: %s",
+                     error.empty() ? "parse" : error.c_str());
+        return "ERR " + (error.empty() ? std::string("invalid-channel-url") :
+                         error) + "\n";
+    }
+    daemon_event("channel URL preview region=%s preset=%s channel=%s psk=%s hop=%u slot=%u",
+                 imported.region.c_str(), imported.preset.c_str(),
+                 imported.channel_name.empty() ? "<preset>" :
+                 imported.channel_name.c_str(), imported.psk.c_str(),
+                 imported.hop_limit, imported.frequency_slot);
+    return daemon_channel_url_summary("OK preview", imported);
+}
+
+static std::string daemon_import_channel_url_response(const std::string &url,
+                                                      const probe_options_t &opts)
+{
+    probe_options_t imported;
+    bool request_reconfigure = false;
+    std::string error;
+
+    if(!daemon_prepare_channel_url_import(url, opts, &imported,
+                                          &request_reconfigure, &error)) {
+        daemon_event("channel URL import failed: %s",
+                     error.empty() ? "parse" : error.c_str());
+        return "ERR " + (error.empty() ? std::string("invalid-channel-url") :
+                         error) + "\n";
     }
     if(!phoneapi_persist_meshtastic_opts(imported)) {
         daemon_event("channel URL import failed: persist");
@@ -9793,13 +9871,7 @@ static std::string daemon_import_channel_url_response(const std::string &url,
                  imported.channel_name.empty() ? "<preset>" :
                  imported.channel_name.c_str(), imported.psk.c_str(),
                  imported.hop_limit, imported.frequency_slot);
-    snprintf(buf, sizeof(buf),
-             "OK imported region=%s preset=%s channel=%s psk=%s hop=%u slot=%u\n",
-             imported.region.c_str(), imported.preset.c_str(),
-             imported.channel_name.empty() ? "<preset>" :
-             imported.channel_name.c_str(), imported.psk.c_str(),
-             imported.hop_limit, imported.frequency_slot);
-    return std::string(buf);
+    return daemon_channel_url_summary("OK imported", imported);
 }
 
 static std::string daemon_event_log_response(void)
@@ -10100,6 +10172,14 @@ static std::string handle_daemon_command(const std::string &line,
             return "ERR empty-channel-url\n";
         }
         return daemon_import_channel_url_response(message, opts);
+    }
+    if(line.compare(0, 20, "PREVIEW_CHANNEL_URL ") == 0 ||
+       line.compare(0, 20, "preview_channel_url ") == 0) {
+        message = trim_ipc_line(line.c_str() + 20);
+        if(message.empty()) {
+            return "ERR empty-channel-url\n";
+        }
+        return daemon_preview_channel_url_response(message, opts);
     }
     if(line == "QUIT" || line == "quit") {
         running = 0;
