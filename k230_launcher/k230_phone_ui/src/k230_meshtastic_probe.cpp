@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -3467,6 +3468,216 @@ static bool encode_phoneapi_admin_metadata_response(const probe_options_t &opts,
     return encode_phoneapi_admin_response_bytes(opts, 13U, metadata, out);
 }
 
+#define K230_PHONE_UI_PREFS_DIR "/root/.config/k230_phone_ui"
+#define K230_PHONE_UI_PREFS_FILE K230_PHONE_UI_PREFS_DIR "/settings.conf"
+#define K230_PHONE_UI_PREFS_LOCK K230_PHONE_UI_PREFS_DIR "/settings.conf.lock"
+#define K230_MESH_PREF_REGION "meshtastic.region"
+#define K230_MESH_PREF_PRESET "meshtastic.preset"
+#define K230_MESH_PREF_CHANNEL "meshtastic.channel"
+#define K230_MESH_PREF_PSK "meshtastic.psk"
+#define K230_MESH_PREF_POWER "meshtastic.power"
+#define K230_MESH_PREF_NODE "meshtastic.node"
+#define K230_MESH_PREF_FROM "meshtastic.from"
+#define K230_MESH_PREF_TO "meshtastic.to"
+#define K230_MESH_PREF_HOP "meshtastic.hop"
+#define K230_MESH_PREF_ACK "meshtastic.ack"
+#define K230_MESH_PREF_REBROADCAST "meshtastic.rebroadcast"
+#define K230_PHONE_UI_PREF_VALUE_MAX 159U
+
+typedef struct {
+    std::string key;
+    std::string value;
+} phoneapi_pref_entry_t;
+
+static std::string phoneapi_trim_copy(const char *text)
+{
+    const char *start = text ? text : "";
+    const char *end;
+
+    while(*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+    end = start + strlen(start);
+    while(end > start && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    return std::string(start, (size_t)(end - start));
+}
+
+static bool phoneapi_pref_key_valid(const std::string &key)
+{
+    if(key.empty() || key.size() >= 64U) {
+        return false;
+    }
+    for(char c : key) {
+        unsigned char ch = (unsigned char)c;
+
+        if(isspace(ch) || ch == '=' || ch == '#') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static std::string phoneapi_pref_value_clip(const std::string &value)
+{
+    if(value.size() <= K230_PHONE_UI_PREF_VALUE_MAX) {
+        return value;
+    }
+    return value.substr(0, K230_PHONE_UI_PREF_VALUE_MAX);
+}
+
+static bool phoneapi_pref_load(std::vector<phoneapi_pref_entry_t> *entries)
+{
+    FILE *fp;
+    char line[512];
+
+    if(!entries) {
+        return false;
+    }
+    entries->clear();
+    fp = fopen(K230_PHONE_UI_PREFS_FILE, "r");
+    if(!fp) {
+        return errno == ENOENT;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        char *sep;
+        std::string key;
+        std::string value;
+
+        line[strcspn(line, "\r\n")] = '\0';
+        sep = strchr(line, '=');
+        if(!sep) {
+            continue;
+        }
+        *sep++ = '\0';
+        key = phoneapi_trim_copy(line);
+        value = phoneapi_trim_copy(sep);
+        if(!phoneapi_pref_key_valid(key)) {
+            continue;
+        }
+        entries->push_back({key, phoneapi_pref_value_clip(value)});
+        if(entries->size() >= 96U) {
+            break;
+        }
+    }
+    fclose(fp);
+    return true;
+}
+
+static void phoneapi_pref_set(std::vector<phoneapi_pref_entry_t> *entries,
+                              const char *key, const std::string &value)
+{
+    std::string clipped = phoneapi_pref_value_clip(value);
+
+    if(!entries || !key || !phoneapi_pref_key_valid(key)) {
+        return;
+    }
+    for(size_t i = 0; i < entries->size(); i++) {
+        if((*entries)[i].key == key) {
+            (*entries)[i].value = clipped;
+            return;
+        }
+    }
+    entries->push_back({key, clipped});
+}
+
+static bool phoneapi_pref_write(const std::vector<phoneapi_pref_entry_t> &entries)
+{
+    char tmp_path[sizeof(K230_PHONE_UI_PREFS_FILE) + 8];
+    FILE *fp;
+
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp",
+             K230_PHONE_UI_PREFS_FILE);
+    fp = fopen(tmp_path, "w");
+    if(!fp) {
+        return false;
+    }
+    fprintf(fp, "# k230_phone_ui persistent settings\n");
+    for(size_t i = 0; i < entries.size(); i++) {
+        if(phoneapi_pref_key_valid(entries[i].key)) {
+            fprintf(fp, "%s=%s\n", entries[i].key.c_str(),
+                    phoneapi_pref_value_clip(entries[i].value).c_str());
+        }
+    }
+    if(fclose(fp) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+    if(rename(tmp_path, K230_PHONE_UI_PREFS_FILE) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+    return true;
+}
+
+static bool phoneapi_persist_meshtastic_opts(const probe_options_t &opts)
+{
+    std::vector<phoneapi_pref_entry_t> entries;
+    char value[64];
+    int lock_fd;
+    bool ok = false;
+    std::string region = opts.region.empty() ? opts.resolved_region :
+                         opts.region;
+    std::string preset = opts.preset.empty() ? opts.resolved_preset :
+                         opts.preset;
+
+    if(region.empty()) {
+        region = MESHTASTIC_DEFAULT_REGION;
+    }
+    if(preset.empty()) {
+        preset = MESHTASTIC_DEFAULT_PRESET;
+    }
+    if(mkdir("/root/.config", 0755) != 0 && errno != EEXIST) {
+        daemon_event("PhoneAPI prefs mkdir /root/.config failed: %s",
+                     strerror(errno));
+        return false;
+    }
+    if(mkdir(K230_PHONE_UI_PREFS_DIR, 0755) != 0 && errno != EEXIST) {
+        daemon_event("PhoneAPI prefs mkdir failed: %s", strerror(errno));
+        return false;
+    }
+    lock_fd = open(K230_PHONE_UI_PREFS_LOCK,
+                   O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+    if(lock_fd < 0) {
+        daemon_event("PhoneAPI prefs lock open failed: %s", strerror(errno));
+        return false;
+    }
+    if(flock(lock_fd, LOCK_EX) != 0) {
+        daemon_event("PhoneAPI prefs lock failed: %s", strerror(errno));
+        close(lock_fd);
+        return false;
+    }
+    if(phoneapi_pref_load(&entries)) {
+        phoneapi_pref_set(&entries, K230_MESH_PREF_REGION, region);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_PRESET, preset);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_CHANNEL,
+                          opts.channel_name);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_PSK, opts.psk);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_POWER,
+                          opts.manual_power ?
+                          std::to_string((int)opts.profile.power) : "auto");
+        phoneapi_pref_set(&entries, K230_MESH_PREF_NODE, opts.node_name);
+        snprintf(value, sizeof(value), "0x%08x", opts.from_node);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_FROM, value);
+        snprintf(value, sizeof(value), "0x%08x", opts.to_node);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_TO, value);
+        snprintf(value, sizeof(value), "%u", opts.hop_limit);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_HOP, value);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_ACK,
+                          opts.want_ack ? "1" : "0");
+        phoneapi_pref_set(&entries, K230_MESH_PREF_REBROADCAST,
+                          opts.rebroadcast ? "1" : "0");
+        ok = phoneapi_pref_write(entries);
+    }
+    if(!ok) {
+        daemon_event("PhoneAPI prefs persist failed");
+    }
+    (void)flock(lock_fd, LOCK_UN);
+    close(lock_fd);
+    return ok;
+}
+
 static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
                                         probe_options_t *opts,
                                         bool *request_reconfigure,
@@ -3618,20 +3829,27 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
     }
     if(admin.has_set_owner || admin.has_set_channel || admin.has_set_config ||
        admin.has_set_module_config) {
+        bool persist_required = admin.has_set_owner || admin.has_set_channel ||
+                                admin.has_set_config;
+        bool persist_ok = true;
         bool ok = phoneapi_apply_admin_writes(admin, &runtime_opts,
                                               &request_reconfigure,
                                               &request_adv_refresh);
         if(ok) {
             phoneapi_store_runtime_opts(runtime_opts, request_reconfigure);
+            if(persist_required) {
+                persist_ok = phoneapi_persist_meshtastic_opts(runtime_opts);
+            }
             if(request_adv_refresh) {
                 (void)phoneapi_send_adv_start(fd, "admin-update");
             }
         }
-        daemon_event("PhoneAPI local admin write id=0x%08x ok=%s reconfig=%s adv=%s",
+        daemon_event("PhoneAPI local admin write id=0x%08x ok=%s reconfig=%s adv=%s persist=%s",
                      tx.packet_id, ok ? "yes" : "no",
                      request_reconfigure ? "yes" : "no",
-                     request_adv_refresh ? "yes" : "no");
-        ok_all = ok_all && ok;
+                     request_adv_refresh ? "yes" : "no",
+                     persist_ok ? "yes" : "no");
+        ok_all = ok_all && ok && persist_ok;
         handled = true;
     }
     if(admin.get_owner_request) {
