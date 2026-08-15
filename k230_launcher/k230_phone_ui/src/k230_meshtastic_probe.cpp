@@ -46,6 +46,7 @@
 #define MESHTASTIC_POSITION_APP 3U
 #define MESHTASTIC_NODEINFO_APP 4U
 #define MESHTASTIC_ROUTING_APP 5U
+#define MESHTASTIC_ADMIN_APP 6U
 #define MESHTASTIC_TELEMETRY_APP 67U
 #define MESHTASTIC_NEIGHBORINFO_APP 71U
 #define MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK 0x07U
@@ -849,6 +850,7 @@ typedef struct {
 typedef struct {
     bool active = false;
     uint32_t to_node = MESHTASTIC_NODENUM_BROADCAST;
+    uint32_t from_node = 0;
     uint32_t packet_id = 0;
     uint8_t hop_limit = 3;
     bool want_ack = false;
@@ -2514,6 +2516,12 @@ typedef struct {
     std::vector<uint8_t> packet;
 } phoneapi_to_radio_t;
 
+typedef struct {
+    bool get_owner_request = false;
+    bool has_set_time_only = false;
+    uint32_t set_time_only = 0;
+} phoneapi_admin_request_t;
+
 static bool phoneapi_proto_skip(const uint8_t *data, size_t len, size_t *pos,
                                 uint32_t wire)
 {
@@ -2598,6 +2606,44 @@ static bool phoneapi_parse_to_radio(const uint8_t *data, size_t len,
     return true;
 }
 
+static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
+                                         phoneapi_admin_request_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
+    }
+    *out = phoneapi_admin_request_t();
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 3U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->get_owner_request = value != 0U;
+        } else if(field == 43U && wire == 5U &&
+                  pos + 4U <= payload.size()) {
+            out->set_time_only = get_le32(payload.data() + pos);
+            out->has_set_time_only = true;
+            pos += 4U;
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool phoneapi_parse_mesh_packet(const std::vector<uint8_t> &packet,
                                        phoneapi_mesh_tx_t *out)
 {
@@ -2618,7 +2664,10 @@ static bool phoneapi_parse_mesh_packet(const std::vector<uint8_t> &packet,
         }
         field = tag >> 3U;
         wire = tag & 0x07U;
-        if(field == 2U && wire == 5U && pos + 4U <= packet.size()) {
+        if(field == 1U && wire == 5U && pos + 4U <= packet.size()) {
+            found.from_node = get_le32(packet.data() + pos);
+            pos += 4U;
+        } else if(field == 2U && wire == 5U && pos + 4U <= packet.size()) {
             found.to_node = get_le32(packet.data() + pos);
             pos += 4U;
         } else if(field == 4U && wire == 2U) {
@@ -2887,6 +2936,107 @@ static bool phoneapi_send_queue_status(int fd, uint32_t packet_id,
     return ok;
 }
 
+static void phoneapi_session_passkey(const probe_options_t &opts,
+                                     uint8_t passkey[8])
+{
+    uint32_t name_hash = djb2_hash(opts.node_name.c_str());
+
+    put_le32(passkey, opts.from_node);
+    put_le32(passkey + 4, name_hash);
+}
+
+static bool encode_phoneapi_admin_owner_response(const probe_options_t &opts,
+                                                 std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> user;
+    uint8_t passkey[8];
+
+    if(!out || !encode_phoneapi_user_proto(opts, &user)) {
+        return false;
+    }
+    phoneapi_session_passkey(opts, passkey);
+    out->clear();
+    append_bytes_field(out, 4U, user);
+    append_bytes_field(out, 101U, passkey, sizeof(passkey));
+    return true;
+}
+
+static bool phoneapi_send_local_admin_response(int fd,
+                                               const phoneapi_mesh_tx_t &tx,
+                                               const std::vector<uint8_t> &admin_payload,
+                                               const char *label)
+{
+    std::vector<uint8_t> decoded;
+    std::vector<uint8_t> packet;
+    mesh_header_t header;
+
+    if(!encode_data_proto(MESHTASTIC_ADMIN_APP, admin_payload,
+                          tx.packet_id, 0U, &decoded)) {
+        return false;
+    }
+    memset(&header, 0, sizeof(header));
+    header.from = phoneapi_opts.from_node;
+    header.to = tx.from_node != 0U ? tx.from_node : phoneapi_opts.from_node;
+    header.id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+    if(header.id == 0U) {
+        header.id = 1U;
+    }
+    if(!encode_phoneapi_mesh_packet_decoded(header, decoded, 0.0f, 0.0f,
+                                            &packet)) {
+        return false;
+    }
+    return phoneapi_send_from_payload(fd, 2U, packet,
+                                      label ? label : "admin_response");
+}
+
+static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
+                                        bool *accepted)
+{
+    phoneapi_admin_request_t admin;
+    bool handled = false;
+    bool ok_all = true;
+
+    if(accepted) {
+        *accepted = false;
+    }
+
+    if(tx.data.portnum != MESHTASTIC_ADMIN_APP) {
+        return false;
+    }
+    if(tx.to_node != 0U && tx.to_node != phoneapi_opts.from_node) {
+        return false;
+    }
+    if(!phoneapi_parse_admin_request(tx.data.payload, &admin)) {
+        daemon_event("PhoneAPI local admin parse failed id=0x%08x payload=%u",
+                     tx.packet_id, (unsigned)tx.data.payload.size());
+        return true;
+    }
+    if(admin.has_set_time_only) {
+        daemon_event("PhoneAPI local admin set_time_only=%u id=0x%08x",
+                     admin.set_time_only, tx.packet_id);
+        handled = true;
+    }
+    if(admin.get_owner_request) {
+        std::vector<uint8_t> response;
+        bool ok = encode_phoneapi_admin_owner_response(phoneapi_opts,
+                                                       &response) &&
+                  phoneapi_send_local_admin_response(fd, tx, response,
+                                                     "admin_owner");
+        daemon_event("PhoneAPI local admin owner_response id=0x%08x ok=%s",
+                     tx.packet_id, ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(!handled) {
+        daemon_event("PhoneAPI local admin unsupported id=0x%08x payload=%u",
+                     tx.packet_id, (unsigned)tx.data.payload.size());
+    }
+    if(accepted) {
+        *accepted = handled && ok_all;
+    }
+    return true;
+}
+
 static bool phoneapi_send_config_complete(int fd, uint32_t nonce)
 {
     std::vector<uint8_t> frame;
@@ -2971,7 +3121,16 @@ static void phoneapi_process_toradio(int fd, const char *hex, size_t hex_len)
     if(msg.packet_len > 0U) {
         phoneapi_mesh_tx_t tx;
         if(phoneapi_parse_mesh_packet(msg.packet, &tx)) {
-            if(phoneapi_queue_mesh_tx(tx)) {
+            bool local_admin_ok = false;
+            if(phoneapi_handle_local_admin(fd, tx, &local_admin_ok)) {
+                daemon_event("PhoneAPI ToRadio local admin handled len=%u id=0x%08x ok=%s",
+                             (unsigned)msg.packet_len, tx.packet_id,
+                             local_admin_ok ? "yes" : "no");
+                (void)phoneapi_send_queue_status(
+                    fd, tx.packet_id, local_admin_ok ? 0U : 1U,
+                    local_admin_ok ? 1U : 0U,
+                    local_admin_ok ? "local-admin" : "local-admin-failed");
+            } else if(phoneapi_queue_mesh_tx(tx)) {
                 daemon_event("PhoneAPI ToRadio packet queued len=%u port=%u to=0x%08x ack=%s",
                              (unsigned)msg.packet_len, tx.data.portnum,
                              tx.to_node, tx.want_ack ? "on" : "off");
