@@ -51,6 +51,8 @@
 #define MESHTASTIC_PREF_ACK "meshtastic.ack"
 #define MESHTASTIC_PREF_REBROADCAST "meshtastic.rebroadcast"
 #define MESHTASTIC_PREF_AUTOSTART "meshtastic.autostart"
+#define MESHTASTIC_PREF_POSITION "meshtastic.position"
+#define MESHTASTIC_PREF_POSITION_INTERVAL "meshtastic.position_interval"
 #define MESHTASTIC_DEFAULT_UI_REGION "EU_868"
 #define MESHTASTIC_DEFAULT_UI_PRESET "LONG_FAST"
 #define MESHTASTIC_QR_PREVIEW_FILE "/tmp/k230_mesh_qr_preview.rgb565"
@@ -72,7 +74,7 @@ static lv_obj_t *mesh_textarea;
 static ui_input_inline_t *mesh_inline_input;
 static lv_timer_t *mesh_timer;
 static lv_timer_t *mesh_background_timer;
-static char mesh_status_text[512] = "Not running";
+static char mesh_status_text[4096] = "Not running";
 static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
 static char mesh_last_chat_text[3072];
 static char mesh_last_ble_state[32] = "offline";
@@ -92,8 +94,10 @@ static char mesh_node_name[48] = "k230-t-display";
 static char mesh_from_node[24] = "0";
 static char mesh_to_node[24] = "0xffffffff";
 static char mesh_hop_limit[8] = "3";
+static char mesh_position_interval[8] = "900";
 static int mesh_ack_enabled = 0;
 static int mesh_rebroadcast_enabled = 0;
+static int mesh_position_enabled = 1;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_choice_overlay;
@@ -102,7 +106,7 @@ static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
 static lv_obj_t *mesh_pairing_overlay;
-static lv_obj_t *mesh_settings_value_labels[12];
+static lv_obj_t *mesh_settings_value_labels[16];
 static char mesh_last_pairing_code[16];
 static char mesh_channel_url_text[1024];
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
@@ -138,6 +142,8 @@ typedef enum {
     MESH_FIELD_HOP,
     MESH_FIELD_ACK,
     MESH_FIELD_REBROADCAST,
+    MESH_FIELD_POSITION,
+    MESH_FIELD_POSITION_INTERVAL,
     MESH_FIELD_COUNT,
 } mesh_setting_field_t;
 
@@ -294,6 +300,13 @@ static const mesh_choice_t mesh_hop_choices[] = {
 static const mesh_choice_t mesh_bool_choices[] = {
     {"1", "On"},
     {"0", "Off"},
+};
+
+static const mesh_choice_t mesh_position_interval_choices[] = {
+    {"300", "5 min"},
+    {"900", "15 min"},
+    {"1800", "30 min"},
+    {"3600", "60 min"},
 };
 
 static void mesh_settings_refresh(void);
@@ -891,6 +904,14 @@ static void mesh_load_profile_prefs(void)
                      sizeof(rebroadcast), "0");
         mesh_rebroadcast_enabled = strcmp(rebroadcast, "0") != 0;
     }
+    {
+        char position[8];
+        ui_prefs_get(MESHTASTIC_PREF_POSITION, position, sizeof(position),
+                     "1");
+        mesh_position_enabled = strcmp(position, "0") != 0;
+    }
+    ui_prefs_get(MESHTASTIC_PREF_POSITION_INTERVAL, mesh_position_interval,
+                 sizeof(mesh_position_interval), "900");
     mesh_normalize_power();
     mesh_normalize_hop();
     mesh_normalize_slot();
@@ -912,6 +933,9 @@ static void mesh_save_profile_prefs(void)
     ui_prefs_set(MESHTASTIC_PREF_ACK, mesh_ack_enabled ? "1" : "0");
     ui_prefs_set(MESHTASTIC_PREF_REBROADCAST,
                  mesh_rebroadcast_enabled ? "1" : "0");
+    ui_prefs_set(MESHTASTIC_PREF_POSITION,
+                 mesh_position_enabled ? "1" : "0");
+    ui_prefs_set(MESHTASTIC_PREF_POSITION_INTERVAL, mesh_position_interval);
 }
 
 int ui_meshtastic_autostart_enabled(void)
@@ -1649,7 +1673,7 @@ static void mesh_inline_layout_cb(int active, int reserved_h, void *user_data)
 
 static void mesh_refresh_status(void)
 {
-    char response[512];
+    char response[4096];
     int online;
 
     if(mesh_ipc_command("STATUS\n", response, sizeof(response)) == 0) {
@@ -1672,7 +1696,7 @@ static void mesh_refresh_status(void)
                                     0);
     }
     if(mesh_detail_label && lv_obj_is_valid(mesh_detail_label)) {
-        char detail[260];
+        char detail[360];
         char ack_pending[16];
         char ack_rx[16];
         char nak_rx[16];
@@ -1680,6 +1704,10 @@ static void mesh_refresh_status(void)
         char ack_timeout[16];
         char ack_drop[16];
         char queued_count[16];
+        char nrf9151[24];
+        char gps[24];
+        char sats[16];
+        char position_tx[16];
 
         mesh_status_field(mesh_status_text, "queued_count", queued_count,
                           sizeof(queued_count), "0");
@@ -1695,11 +1723,18 @@ static void mesh_refresh_status(void)
                           sizeof(ack_timeout), "0");
         mesh_status_field(mesh_status_text, "ack_drop", ack_drop,
                           sizeof(ack_drop), "0");
+        mesh_status_field(mesh_status_text, "nrf9151", nrf9151,
+                          sizeof(nrf9151), "-");
+        mesh_status_field(mesh_status_text, "gps", gps, sizeof(gps), "-");
+        mesh_status_field(mesh_status_text, "sats", sats, sizeof(sats), "0");
+        mesh_status_field(mesh_status_text, "position_tx", position_tx,
+                          sizeof(position_tx), "0");
         snprintf(detail, sizeof(detail),
-                 "%s -> %s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
+                 "%s -> %s  GPS %s/%s S%s TX%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
                  mesh_node_name,
                  mesh_to_text_is_broadcast(mesh_to_node) ? "broadcast" :
                  mesh_to_node,
+                 nrf9151, gps, sats, position_tx,
                  queued_count, mesh_ack_enabled ? "on" : "off",
                  ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
                  ack_drop);
@@ -1758,7 +1793,9 @@ static void mesh_start_event_cb(lv_event_t *event)
     char to_arg[32];
     char hop_arg[16];
     char relay_option[24];
-    char command[1040];
+    char position_option[80];
+    char position_interval_arg[16];
+    char command[1280];
     int rc;
 
     (void)event;
@@ -1808,24 +1845,32 @@ static void mesh_start_event_cb(lv_event_t *event)
     if(!mesh_rebroadcast_enabled) {
         snprintf(relay_option, sizeof(relay_option), "--no-rebroadcast ");
     }
+    mesh_safe_or_default(position_interval_arg,
+                         sizeof(position_interval_arg),
+                         mesh_position_interval, "900");
+    snprintf(position_option, sizeof(position_option), "%s --position-interval %s ",
+             mesh_position_enabled ? "--position" : "--no-position",
+             position_interval_arg);
     if(mesh_channel_name[0]) {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s"
+                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, channel_arg, slot_option, psk_arg,
                  power_option, node_arg, from_arg, to_arg, hop_arg,
-                 mesh_ack_enabled ? "--ack" : "--no-ack", relay_option);
+                 mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
+                 position_option);
     } else {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s"
+                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, slot_option, psk_arg, power_option,
                  node_arg, from_arg, to_arg, hop_arg,
-                 mesh_ack_enabled ? "--ack" : "--no-ack", relay_option);
+                 mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
+                 position_option);
     }
     rc = system(command);
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
@@ -1949,6 +1994,10 @@ static const char *mesh_setting_name(mesh_setting_field_t field)
         return "ACK";
     case MESH_FIELD_REBROADCAST:
         return "Rebroadcast";
+    case MESH_FIELD_POSITION:
+        return "Position";
+    case MESH_FIELD_POSITION_INTERVAL:
+        return "Position interval";
     default:
         return "Setting";
     }
@@ -1964,6 +2013,8 @@ static int mesh_setting_uses_choice(mesh_setting_field_t field)
     case MESH_FIELD_HOP:
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
+    case MESH_FIELD_POSITION:
+    case MESH_FIELD_POSITION_INTERVAL:
         return 1;
     default:
         return 0;
@@ -2016,6 +2067,20 @@ static const char *mesh_setting_value(mesh_setting_field_t field,
         return buf;
     case MESH_FIELD_REBROADCAST:
         snprintf(buf, len, "%s", mesh_rebroadcast_enabled ? "On" : "Off");
+        return buf;
+    case MESH_FIELD_POSITION:
+        snprintf(buf, len, "%s", mesh_position_enabled ? "On" : "Off");
+        return buf;
+    case MESH_FIELD_POSITION_INTERVAL:
+        if(strcmp(mesh_position_interval, "300") == 0) {
+            snprintf(buf, len, "5 min");
+        } else if(strcmp(mesh_position_interval, "1800") == 0) {
+            snprintf(buf, len, "30 min");
+        } else if(strcmp(mesh_position_interval, "3600") == 0) {
+            snprintf(buf, len, "60 min");
+        } else {
+            snprintf(buf, len, "15 min");
+        }
         return buf;
     default:
         return "";
@@ -2124,6 +2189,8 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
         break;
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
+    case MESH_FIELD_POSITION:
+    case MESH_FIELD_POSITION_INTERVAL:
     default:
         return;
     }
@@ -2176,6 +2243,10 @@ static int mesh_choice_is_selected(mesh_setting_field_t field,
         return mesh_ack_enabled == (strcmp(value, "0") != 0);
     case MESH_FIELD_REBROADCAST:
         return mesh_rebroadcast_enabled == (strcmp(value, "0") != 0);
+    case MESH_FIELD_POSITION:
+        return mesh_position_enabled == (strcmp(value, "0") != 0);
+    case MESH_FIELD_POSITION_INTERVAL:
+        return strcmp(mesh_position_interval, value) == 0;
     default:
         return 0;
     }
@@ -2216,9 +2287,16 @@ static const char *mesh_choice_value_at(mesh_setting_field_t field, int index)
         break;
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
+    case MESH_FIELD_POSITION:
         if(index >= 0 && index < (int)(sizeof(mesh_bool_choices) /
            sizeof(mesh_bool_choices[0]))) {
             return mesh_bool_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_POSITION_INTERVAL:
+        if(index >= 0 && index < (int)(sizeof(mesh_position_interval_choices) /
+           sizeof(mesh_position_interval_choices[0]))) {
+            return mesh_position_interval_choices[index].value;
         }
         break;
     default:
@@ -2274,6 +2352,13 @@ static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
         break;
     case MESH_FIELD_REBROADCAST:
         mesh_rebroadcast_enabled = strcmp(value, "0") != 0;
+        break;
+    case MESH_FIELD_POSITION:
+        mesh_position_enabled = strcmp(value, "0") != 0;
+        break;
+    case MESH_FIELD_POSITION_INTERVAL:
+        mesh_safe_or_default(mesh_position_interval,
+                             sizeof(mesh_position_interval), value, "900");
         break;
     default:
         return;
@@ -2346,7 +2431,10 @@ static const char *mesh_choice_label_at(mesh_setting_field_t field, int index)
         return mesh_hop_choices[index].label;
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
+    case MESH_FIELD_POSITION:
         return mesh_bool_choices[index].label;
+    case MESH_FIELD_POSITION_INTERVAL:
+        return mesh_position_interval_choices[index].label;
     default:
         return "";
     }
@@ -2367,7 +2455,11 @@ static int mesh_choice_count(mesh_setting_field_t field)
         return (int)(sizeof(mesh_hop_choices) / sizeof(mesh_hop_choices[0]));
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
+    case MESH_FIELD_POSITION:
         return (int)(sizeof(mesh_bool_choices) / sizeof(mesh_bool_choices[0]));
+    case MESH_FIELD_POSITION_INTERVAL:
+        return (int)(sizeof(mesh_position_interval_choices) /
+                     sizeof(mesh_position_interval_choices[0]));
     default:
         return 0;
     }

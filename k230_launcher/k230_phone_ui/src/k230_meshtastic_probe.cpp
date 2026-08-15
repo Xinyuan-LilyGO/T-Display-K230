@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -31,7 +32,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.22"
+#define PROBE_VERSION "0.23"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 8U
@@ -84,7 +85,27 @@
 #define MESHTASTIC_ACK_RETRY_MAX 3U
 #define MESHTASTIC_NODEINFO_INTERVAL_US (10ULL * 60ULL * 1000000ULL)
 #define MESHTASTIC_NODEINFO_RETRY_US (60ULL * 1000000ULL)
+#define MESHTASTIC_POSITION_INTERVAL_US (15ULL * 60ULL * 1000000ULL)
+#define MESHTASTIC_POSITION_RETRY_US (30ULL * 1000000ULL)
 #define MESHTASTIC_PHONEAPI_UART_DEV "/dev/ttyS1"
+#define MESHTASTIC_NRF9151_UART_DEV "/dev/ttyS3"
+#define MESHTASTIC_NRF9151_UART_BAUD B115200
+#define MESHTASTIC_NRF9151_PROBE_TIMEOUT_US 500000ULL
+#define MESHTASTIC_NRF9151_CMD_TIMEOUT_US 1800000ULL
+#define MESHTASTIC_NRF9151_LINE_MAX 256U
+#define MESHTASTIC_NRF9151_RESPONSE_MAX 1024U
+#define K230_MESH_IOMUX_BASE 0x91105000UL
+#define K230_MESH_IOMUX_SIZE 0x1000UL
+#define K230_MESH_IOMUX_IO28_OFFSET (28U * 4U)
+#define K230_MESH_IOMUX_IO29_OFFSET (29U * 4U)
+#define K230_MESH_IOMUX_IO50_OFFSET (50U * 4U)
+#define K230_MESH_IOMUX_IO51_OFFSET (51U * 4U)
+#define K230_MESH_IOMUX_FUNC_ALT0 (0U << 11)
+#define K230_MESH_IOMUX_FUNC_ALT2 (2U << 11)
+#define K230_MESH_IOMUX_IE_BIT (1U << 8)
+#define K230_MESH_IOMUX_OE_BIT (1U << 7)
+#define K230_MESH_IOMUX_ST_BIT (1U << 0)
+#define K230_MESH_IOMUX_DS_8MA (8U << 1)
 #define MESHTASTIC_PHONEAPI_ADV_REFRESH_US (15ULL * 1000000ULL)
 #define MESHTASTIC_PHONEAPI_CONFIG_NONCE 69420U
 #define MESHTASTIC_PHONEAPI_NODEINFO_NONCE 69421U
@@ -707,6 +728,7 @@ typedef struct {
     std::string channel_name;
     std::string psk = "default";
     std::string socket_path = MESHTASTIC_DEFAULT_SOCKET_PATH;
+    std::string gps_uart_path = MESHTASTIC_NRF9151_UART_DEV;
     std::string client_send;
     bool auto_tx = false;
     bool mesh_mode = false;
@@ -720,6 +742,7 @@ typedef struct {
     bool client_quit = false;
     bool rebroadcast = true;
     bool advertise_nodeinfo = true;
+    bool position_enabled = true;
     bool want_ack = false;
     bool want_ack_set = false;
     uint32_t from_node = 0;
@@ -730,6 +753,8 @@ typedef struct {
     uint32_t duration_sec = 0;
     uint32_t nodeinfo_interval_sec =
         (uint32_t)(MESHTASTIC_NODEINFO_INTERVAL_US / 1000000ULL);
+    uint32_t position_interval_sec =
+        (uint32_t)(MESHTASTIC_POSITION_INTERVAL_US / 1000000ULL);
     std::string region;
     std::string preset;
     uint32_t frequency_slot = 0;
@@ -893,6 +918,26 @@ typedef struct {
     uint32_t precision_bits = 0;
     uint32_t timestamp = 0;
 } mesh_position_info_t;
+
+typedef struct {
+    bool enabled = false;
+    bool probed = false;
+    bool present = false;
+    bool configured = false;
+    bool has_fix = false;
+    bool first_fix_reported = false;
+    int fd = -1;
+    size_t line_used = 0;
+    uint64_t next_probe_us = 0;
+    uint64_t last_rx_us = 0;
+    uint64_t last_fix_us = 0;
+    uint64_t session_start_us = 0;
+    char line[MESHTASTIC_NRF9151_LINE_MAX];
+    char modem_state[32] = "off";
+    char gps_state[32] = "off";
+    char detail[160] = "-";
+    mesh_position_info_t position;
+} nrf9151_gnss_state_t;
 
 typedef struct {
     bool has_device_metrics = false;
@@ -1071,6 +1116,10 @@ static uint32_t mesh_ack_drop_count;
 static uint32_t mesh_nodeinfo_tx_count;
 static uint32_t mesh_nodeinfo_drop_count;
 static uint64_t mesh_next_nodeinfo_us;
+static uint32_t mesh_position_tx_count;
+static uint32_t mesh_position_drop_count;
+static uint64_t mesh_next_position_us;
+static nrf9151_gnss_state_t mesh_gnss;
 static LR2021 *active_lr2021;
 static mesh_history_entry_t mesh_history[MESHTASTIC_PACKET_HISTORY_SIZE];
 static size_t mesh_history_count;
@@ -2252,6 +2301,743 @@ static void append_float_field(std::vector<uint8_t> *out, uint32_t field,
     memcpy(&raw, &value, sizeof(raw));
     append_varint(out, (field << 3U) | 5U);
     append_fixed32(out, raw);
+}
+
+static void nrf9151_gnss_set_state(const char *modem, const char *gps,
+                                   const char *detail)
+{
+    snprintf(mesh_gnss.modem_state, sizeof(mesh_gnss.modem_state), "%s",
+             modem && modem[0] ? modem : "-");
+    snprintf(mesh_gnss.gps_state, sizeof(mesh_gnss.gps_state), "%s",
+             gps && gps[0] ? gps : "-");
+    snprintf(mesh_gnss.detail, sizeof(mesh_gnss.detail), "%s",
+             detail && detail[0] ? detail : "-");
+}
+
+static void nrf9151_trim_in_place(char *line)
+{
+    char *start = line;
+    char *end;
+
+    if(!line) {
+        return;
+    }
+    while(*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+    if(start != line) {
+        memmove(line, start, strlen(start) + 1U);
+    }
+    end = line + strlen(line);
+    while(end > line && isspace((unsigned char)end[-1])) {
+        *--end = '\0';
+    }
+}
+
+static int nrf9151_line_has_nmea_prefix(const char *line)
+{
+    return line && (strncmp(line, "$GP", 3) == 0 ||
+                    strncmp(line, "$GN", 3) == 0 ||
+                    strncmp(line, "$GA", 3) == 0 ||
+                    strncmp(line, "$GB", 3) == 0 ||
+                    strncmp(line, "$BD", 3) == 0);
+}
+
+static int nrf9151_nmea_checksum_ok(const char *line)
+{
+    const char *star;
+    unsigned int calc = 0;
+    unsigned int expect;
+
+    if(!line || line[0] != '$') {
+        return 0;
+    }
+    star = strchr(line, '*');
+    if(!star) {
+        return 1;
+    }
+    if(!isxdigit((unsigned char)star[1]) ||
+       !isxdigit((unsigned char)star[2])) {
+        return 0;
+    }
+    for(const char *p = line + 1; p < star; p++) {
+        calc ^= (unsigned char)*p;
+    }
+    expect = (unsigned int)strtoul(star + 1, nullptr, 16);
+    return (calc & 0xffU) == (expect & 0xffU);
+}
+
+static int nrf9151_nmea_split(char *body, char **fields, int max_fields)
+{
+    int count = 0;
+    char *p = body;
+
+    while(count < max_fields) {
+        fields[count++] = p;
+        while(*p && *p != ',') {
+            p++;
+        }
+        if(!*p) {
+            break;
+        }
+        *p++ = '\0';
+    }
+    return count;
+}
+
+static bool nrf9151_nmea_coord_to_double(const char *value, const char *dir,
+                                         double *out)
+{
+    int deg_width;
+    int degrees;
+    double raw;
+    double decimal;
+    char deg_str[4] = { 0 };
+
+    if(!value || !value[0] || !dir || !dir[0] || !out) {
+        return false;
+    }
+    deg_width = (dir[0] == 'N' || dir[0] == 'S') ? 2 : 3;
+    if((int)strlen(value) <= deg_width ||
+       (size_t)deg_width >= sizeof(deg_str)) {
+        return false;
+    }
+    memcpy(deg_str, value, (size_t)deg_width);
+    degrees = atoi(deg_str);
+    raw = strtod(value + deg_width, nullptr);
+    decimal = (double)degrees + raw / 60.0;
+    if(dir[0] == 'S' || dir[0] == 'W') {
+        decimal = -decimal;
+    }
+    if(!isfinite(decimal)) {
+        return false;
+    }
+    *out = decimal;
+    return true;
+}
+
+static void nrf9151_gnss_apply_fix(double lat, double lon, bool has_alt,
+                                   double alt_m, bool has_speed,
+                                   double speed_kmh, bool has_track,
+                                   double track_deg, uint32_t sats)
+{
+    if(!isfinite(lat) || !isfinite(lon) || lat < -90.0 || lat > 90.0 ||
+       lon < -180.0 || lon > 180.0) {
+        return;
+    }
+    mesh_gnss.position.has_latitude = true;
+    mesh_gnss.position.has_longitude = true;
+    mesh_gnss.position.latitude_i = (int32_t)llround(lat * 10000000.0);
+    mesh_gnss.position.longitude_i = (int32_t)llround(lon * 10000000.0);
+    mesh_gnss.position.timestamp = (uint32_t)time(nullptr);
+    mesh_gnss.position.precision_bits = 32U;
+    mesh_gnss.position.sats_in_view = sats;
+    if(has_alt && isfinite(alt_m)) {
+        mesh_gnss.position.has_altitude = true;
+        mesh_gnss.position.altitude_m = (int32_t)llround(alt_m);
+    }
+    if(has_speed && isfinite(speed_kmh) && speed_kmh >= 0.0) {
+        mesh_gnss.position.has_ground_speed = true;
+        mesh_gnss.position.ground_speed_cms = (uint32_t)llround(speed_kmh);
+    }
+    if(has_track && isfinite(track_deg) && track_deg >= 0.0) {
+        mesh_gnss.position.has_ground_track = true;
+        mesh_gnss.position.ground_track_1e5 =
+            (uint32_t)llround(track_deg * 100.0);
+    }
+    mesh_gnss.has_fix = true;
+    mesh_gnss.last_fix_us = monotonic_us();
+    nrf9151_gnss_set_state("present", "fix", "GNSS fix");
+    if(!mesh_gnss.first_fix_reported) {
+        uint64_t ttff_ms = 0;
+        if(mesh_gnss.session_start_us > 0ULL &&
+           mesh_gnss.last_fix_us >= mesh_gnss.session_start_us) {
+            ttff_ms = (mesh_gnss.last_fix_us - mesh_gnss.session_start_us) /
+                      1000ULL;
+        }
+        mesh_gnss.first_fix_reported = true;
+        daemon_event("nRF9151 GNSS first fix lat=%.7f lon=%.7f sats=%u ttff=%lums",
+                     lat, lon, sats, (unsigned long)ttff_ms);
+    }
+}
+
+static void nrf9151_gnss_parse_gga(char **fields, int count)
+{
+    double lat = 0.0;
+    double lon = 0.0;
+    double alt = 0.0;
+    int fix = count > 6 ? atoi(fields[6]) : 0;
+    int sats = count > 7 ? atoi(fields[7]) : 0;
+
+    if(fix <= 0 || count <= 9 ||
+       !nrf9151_nmea_coord_to_double(fields[2], fields[3], &lat) ||
+       !nrf9151_nmea_coord_to_double(fields[4], fields[5], &lon)) {
+        nrf9151_gnss_set_state("present", "searching", "No GNSS fix");
+        return;
+    }
+    alt = fields[9] && fields[9][0] ? strtod(fields[9], nullptr) : 0.0;
+    nrf9151_gnss_apply_fix(lat, lon, fields[9] && fields[9][0], alt, false,
+                           0.0, false, 0.0, sats > 0 ? (uint32_t)sats : 0U);
+}
+
+static void nrf9151_gnss_parse_rmc(char **fields, int count)
+{
+    double lat = 0.0;
+    double lon = 0.0;
+    double speed_kmh = 0.0;
+    double track = 0.0;
+
+    if(count <= 8 || fields[2][0] != 'A' ||
+       !nrf9151_nmea_coord_to_double(fields[3], fields[4], &lat) ||
+       !nrf9151_nmea_coord_to_double(fields[5], fields[6], &lon)) {
+        return;
+    }
+    if(fields[7] && fields[7][0]) {
+        speed_kmh = strtod(fields[7], nullptr) * 1.852;
+    }
+    if(fields[8] && fields[8][0]) {
+        track = strtod(fields[8], nullptr);
+    }
+    nrf9151_gnss_apply_fix(lat, lon, false, 0.0,
+                           fields[7] && fields[7][0], speed_kmh,
+                           fields[8] && fields[8][0], track,
+                           mesh_gnss.position.sats_in_view);
+}
+
+static void nrf9151_gnss_parse_sentence(const char *line)
+{
+    char body[MESHTASTIC_NRF9151_LINE_MAX];
+    char *fields[32];
+    const char *star;
+    size_t len;
+    int count;
+    const char *type;
+
+    if(!line || line[0] != '$' || !nrf9151_nmea_checksum_ok(line)) {
+        return;
+    }
+    star = strchr(line, '*');
+    len = star ? (size_t)(star - line - 1) : strlen(line + 1);
+    if(len >= sizeof(body)) {
+        len = sizeof(body) - 1U;
+    }
+    memcpy(body, line + 1, len);
+    body[len] = '\0';
+    count = nrf9151_nmea_split(body, fields,
+                               (int)(sizeof(fields) / sizeof(fields[0])));
+    if(count <= 0 || strlen(fields[0]) < 5U) {
+        return;
+    }
+    type = fields[0] + strlen(fields[0]) - 3U;
+    if(strcmp(type, "GGA") == 0) {
+        nrf9151_gnss_parse_gga(fields, count);
+    } else if(strcmp(type, "RMC") == 0) {
+        nrf9151_gnss_parse_rmc(fields, count);
+    }
+}
+
+static void nrf9151_gnss_parse_pos_urc(const char *line)
+{
+    const char *p;
+    double lat = 0.0;
+    double lon = 0.0;
+    double alt = 0.0;
+    double acc = 0.0;
+    double speed = 0.0;
+    double heading = 0.0;
+    char datetime[64] = "";
+    int parsed;
+
+    if(!line) {
+        return;
+    }
+    p = strchr(line, ':');
+    if(!p) {
+        return;
+    }
+    p++;
+    while(*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    parsed = sscanf(p, "%lf,%lf,%lf,%lf,%lf,%lf,\"%63[^\"]\"",
+                    &lat, &lon, &alt, &acc, &speed, &heading, datetime);
+    if(parsed < 2) {
+        return;
+    }
+    (void)acc;
+    (void)datetime;
+    nrf9151_gnss_apply_fix(lat, lon, parsed >= 3, alt, parsed >= 5,
+                           speed * 3.6, parsed >= 6, heading,
+                           mesh_gnss.position.sats_in_view);
+}
+
+static void nrf9151_gnss_process_line(char *line)
+{
+    const char *nmea = nullptr;
+
+    if(!line) {
+        return;
+    }
+    nrf9151_trim_in_place(line);
+    if(!line[0]) {
+        return;
+    }
+    mesh_gnss.last_rx_us = monotonic_us();
+    if(strncmp(line, "#XGNSSNMEA:", 11) == 0) {
+        nmea = line + 11;
+        while(*nmea && isspace((unsigned char)*nmea)) {
+            nmea++;
+        }
+    } else if(nrf9151_line_has_nmea_prefix(line)) {
+        nmea = line;
+    }
+    if(nmea && nrf9151_line_has_nmea_prefix(nmea)) {
+        nrf9151_gnss_parse_sentence(nmea);
+        return;
+    }
+    if(strncmp(line, "#XGNSSPOS:", 10) == 0) {
+        nrf9151_gnss_parse_pos_urc(line);
+        return;
+    }
+    if(strncmp(line, "#XGNSS:", 7) == 0 ||
+       strncmp(line, "#XNMEA:", 7) == 0) {
+        nrf9151_gnss_set_state("present", mesh_gnss.has_fix ? "fix" :
+                               "searching", line);
+    }
+}
+
+static void nrf9151_gnss_feed_bytes(const char *buf, size_t len)
+{
+    for(size_t i = 0; i < len; i++) {
+        char c = buf[i];
+
+        if(c == '\r') {
+            continue;
+        }
+        if(c == '\n') {
+            mesh_gnss.line[mesh_gnss.line_used] = '\0';
+            nrf9151_gnss_process_line(mesh_gnss.line);
+            mesh_gnss.line_used = 0;
+            continue;
+        }
+        if(mesh_gnss.line_used + 1U >= sizeof(mesh_gnss.line)) {
+            mesh_gnss.line[mesh_gnss.line_used] = '\0';
+            nrf9151_gnss_process_line(mesh_gnss.line);
+            mesh_gnss.line_used = 0;
+        }
+        mesh_gnss.line[mesh_gnss.line_used++] = c;
+    }
+}
+
+static void nrf9151_gnss_process_response(const char *resp)
+{
+    char line[MESHTASTIC_NRF9151_LINE_MAX];
+    size_t used = 0;
+
+    if(!resp) {
+        return;
+    }
+    for(const char *p = resp; *p; p++) {
+        char c = *p;
+        if(c == '\r') {
+            continue;
+        }
+        if(c == '\n') {
+            line[used] = '\0';
+            nrf9151_gnss_process_line(line);
+            used = 0;
+            continue;
+        }
+        if(used + 1U >= sizeof(line)) {
+            line[used] = '\0';
+            nrf9151_gnss_process_line(line);
+            used = 0;
+        }
+        line[used++] = c;
+    }
+    if(used > 0U) {
+        line[used] = '\0';
+        nrf9151_gnss_process_line(line);
+    }
+}
+
+static int nrf9151_configure_uart3_iomux(void)
+{
+    int fd;
+    void *map;
+    volatile uint32_t *regs;
+
+    fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if(fd < 0) {
+        return -1;
+    }
+    map = mmap(NULL, K230_MESH_IOMUX_SIZE, PROT_READ | PROT_WRITE,
+               MAP_SHARED, fd, K230_MESH_IOMUX_BASE);
+    if(map == MAP_FAILED) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    regs = (volatile uint32_t *)map;
+    regs[K230_MESH_IOMUX_IO28_OFFSET / 4U] =
+        K230_MESH_IOMUX_FUNC_ALT2 | K230_MESH_IOMUX_IE_BIT |
+        K230_MESH_IOMUX_OE_BIT | K230_MESH_IOMUX_ST_BIT |
+        K230_MESH_IOMUX_DS_8MA;
+    regs[K230_MESH_IOMUX_IO29_OFFSET / 4U] =
+        K230_MESH_IOMUX_FUNC_ALT2 | K230_MESH_IOMUX_IE_BIT |
+        K230_MESH_IOMUX_ST_BIT | K230_MESH_IOMUX_DS_8MA;
+    regs[K230_MESH_IOMUX_IO50_OFFSET / 4U] =
+        K230_MESH_IOMUX_FUNC_ALT0 | K230_MESH_IOMUX_DS_8MA;
+    regs[K230_MESH_IOMUX_IO51_OFFSET / 4U] =
+        K230_MESH_IOMUX_FUNC_ALT0 | K230_MESH_IOMUX_DS_8MA;
+    munmap(map, K230_MESH_IOMUX_SIZE);
+    close(fd);
+    return 0;
+}
+
+static int nrf9151_open_uart(const std::string &path)
+{
+    int fd = open(path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    struct termios tio;
+
+    if(fd < 0) {
+        return -1;
+    }
+    if(tcgetattr(fd, &tio) != 0) {
+        close(fd);
+        return -1;
+    }
+    cfmakeraw(&tio);
+    cfsetispeed(&tio, MESHTASTIC_NRF9151_UART_BAUD);
+    cfsetospeed(&tio, MESHTASTIC_NRF9151_UART_BAUD);
+    tio.c_cflag |= CLOCAL | CREAD;
+    tio.c_cflag &= ~(PARENB | CSTOPB | CSIZE);
+    tio.c_cflag |= CS8;
+#ifdef CRTSCTS
+    tio.c_cflag &= ~CRTSCTS;
+#endif
+    tio.c_cc[VMIN] = 0;
+    tio.c_cc[VTIME] = 0;
+    if(tcsetattr(fd, TCSANOW, &tio) != 0) {
+        close(fd);
+        return -1;
+    }
+    tcflush(fd, TCIOFLUSH);
+    return fd;
+}
+
+static bool nrf9151_response_has_token(const char *resp, const char *token)
+{
+    const char *p = resp;
+    size_t token_len;
+
+    if(!resp || !token) {
+        return false;
+    }
+    token_len = strlen(token);
+    while(*p) {
+        while(*p == '\r' || *p == '\n' || isspace((unsigned char)*p)) {
+            p++;
+        }
+        if(strncmp(p, token, token_len) == 0 &&
+           (p[token_len] == '\0' || p[token_len] == '\r' ||
+            p[token_len] == '\n' || isspace((unsigned char)p[token_len]))) {
+            return true;
+        }
+        while(*p && *p != '\r' && *p != '\n') {
+            p++;
+        }
+    }
+    return false;
+}
+
+static int nrf9151_exchange(int fd, const char *cmd, char *resp,
+                            size_t resp_len, uint64_t timeout_us)
+{
+    std::string wire;
+    uint64_t start;
+    size_t used = 0;
+
+    if(resp && resp_len > 0U) {
+        resp[0] = '\0';
+    }
+    if(fd < 0 || !cmd) {
+        return -1;
+    }
+    wire = std::string(cmd) + "\r\n";
+    if(write(fd, wire.c_str(), wire.size()) < 0) {
+        return -1;
+    }
+    start = monotonic_us();
+    while(monotonic_us() - start < timeout_us) {
+        struct pollfd pfd;
+        char buf[128];
+        int rc;
+        ssize_t n;
+
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        rc = poll(&pfd, 1, 80);
+        if(rc < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if(rc == 0 || !(pfd.revents & POLLIN)) {
+            continue;
+        }
+        n = read(fd, buf, sizeof(buf));
+        if(n < 0) {
+            if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if(n == 0) {
+            continue;
+        }
+        if(resp && resp_len > 0U && used + 1U < resp_len) {
+            size_t copy = (size_t)n;
+            if(copy > resp_len - used - 1U) {
+                copy = resp_len - used - 1U;
+            }
+            memcpy(resp + used, buf, copy);
+            used += copy;
+            resp[used] = '\0';
+        }
+        nrf9151_gnss_feed_bytes(buf, (size_t)n);
+        if(resp && (nrf9151_response_has_token(resp, "OK") ||
+                    nrf9151_response_has_token(resp, "ERROR"))) {
+            return nrf9151_response_has_token(resp, "OK") ? 0 : 1;
+        }
+    }
+    return -1;
+}
+
+static void nrf9151_gnss_read_available(void)
+{
+    for(;;) {
+        char buf[256];
+        ssize_t n;
+
+        if(mesh_gnss.fd < 0) {
+            return;
+        }
+        n = read(mesh_gnss.fd, buf, sizeof(buf));
+        if(n < 0) {
+            if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                return;
+            }
+            daemon_event("nRF9151 GNSS read failed: %s", strerror(errno));
+            close(mesh_gnss.fd);
+            mesh_gnss.fd = -1;
+            mesh_gnss.present = false;
+            mesh_gnss.configured = false;
+            nrf9151_gnss_set_state("error", "unavailable", "UART read error");
+            return;
+        }
+        if(n == 0) {
+            return;
+        }
+        nrf9151_gnss_feed_bytes(buf, (size_t)n);
+    }
+}
+
+static int nrf9151_response_gnss_active(const char *resp)
+{
+    const char *p;
+
+    if(!resp) {
+        return -1;
+    }
+    p = strstr(resp, "#XGNSS:");
+    if(!p) {
+        p = strstr(resp, "GNSS:");
+    }
+    if(!p) {
+        return -1;
+    }
+    p = strchr(p, ':');
+    if(!p) {
+        return -1;
+    }
+    p++;
+    while(*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    return atoi(p) > 0 ? 1 : 0;
+}
+
+static bool nrf9151_gnss_start_locked(const probe_options_t &opts)
+{
+    static const char *const setup_cmds[] = {
+        "AT+CFUN=0",
+        "AT%XSYSTEMMODE=0,0,1,0",
+        "AT+CFUN=31",
+        "AT#XNMEA=1",
+    };
+    char resp[MESHTASTIC_NRF9151_RESPONSE_MAX];
+    int rc;
+
+    if(mesh_gnss.configured) {
+        return true;
+    }
+    rc = nrf9151_exchange(mesh_gnss.fd, "AT#XGNSS?", resp, sizeof(resp),
+                          MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
+    nrf9151_gnss_process_response(resp);
+    if(rc == 0 && nrf9151_response_gnss_active(resp) > 0) {
+        rc = nrf9151_exchange(mesh_gnss.fd, "AT#XNMEA=1", resp, sizeof(resp),
+                              MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
+        nrf9151_gnss_process_response(resp);
+        mesh_gnss.configured = rc == 0;
+        if(mesh_gnss.configured) {
+            nrf9151_gnss_set_state("present", "searching",
+                                   "GNSS already running");
+            daemon_event("nRF9151 GNSS already running uart=%s",
+                         opts.gps_uart_path.c_str());
+        }
+        return mesh_gnss.configured;
+    }
+
+    for(size_t i = 0; i < ARRAY_SIZE(setup_cmds); i++) {
+        rc = nrf9151_exchange(mesh_gnss.fd, setup_cmds[i], resp, sizeof(resp),
+                              MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
+        nrf9151_gnss_process_response(resp);
+        if(rc != 0) {
+            daemon_event("nRF9151 GNSS setup command failed: %s rc=%d",
+                         setup_cmds[i], rc);
+        }
+    }
+    mesh_gnss.session_start_us = monotonic_us();
+    mesh_gnss.first_fix_reported = false;
+    rc = nrf9151_exchange(mesh_gnss.fd, "AT#XGNSS=1,0,0,0", resp,
+                          sizeof(resp), MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
+    nrf9151_gnss_process_response(resp);
+    if(rc != 0) {
+        char status[MESHTASTIC_NRF9151_RESPONSE_MAX];
+        int status_rc = nrf9151_exchange(mesh_gnss.fd, "AT#XGNSS?", status,
+                                         sizeof(status),
+                                         MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
+        nrf9151_gnss_process_response(status);
+        if(status_rc != 0 || nrf9151_response_gnss_active(status) <= 0) {
+            nrf9151_gnss_set_state("present", "error", "GNSS start failed");
+            daemon_event("nRF9151 GNSS start failed rc=%d status_rc=%d",
+                         rc, status_rc);
+            return false;
+        }
+    }
+    mesh_gnss.configured = true;
+    nrf9151_gnss_set_state("present", "searching", "GNSS running");
+    daemon_event("nRF9151 GNSS started uart=%s interval=%us",
+                 opts.gps_uart_path.c_str(), opts.position_interval_sec);
+    return true;
+}
+
+static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
+{
+    char resp[MESHTASTIC_NRF9151_RESPONSE_MAX];
+    int rc;
+
+    if(!opts.position_enabled) {
+        if(mesh_gnss.fd >= 0) {
+            close(mesh_gnss.fd);
+            mesh_gnss.fd = -1;
+        }
+        mesh_gnss.enabled = false;
+        nrf9151_gnss_set_state("off", "off", "Position disabled");
+        return;
+    }
+    mesh_gnss.enabled = true;
+    if(mesh_gnss.fd < 0) {
+        if(now < mesh_gnss.next_probe_us) {
+            return;
+        }
+        mesh_gnss.next_probe_us = now + MESHTASTIC_POSITION_RETRY_US;
+        mesh_gnss.probed = true;
+        nrf9151_gnss_set_state("probing", "unavailable", "Opening UART");
+        (void)nrf9151_configure_uart3_iomux();
+        mesh_gnss.fd = nrf9151_open_uart(opts.gps_uart_path);
+        if(mesh_gnss.fd < 0) {
+            mesh_gnss.present = false;
+            nrf9151_gnss_set_state("missing", "unavailable", strerror(errno));
+            daemon_event("nRF9151 GNSS UART open failed path=%s err=%s",
+                         opts.gps_uart_path.c_str(), strerror(errno));
+            return;
+        }
+        rc = nrf9151_exchange(mesh_gnss.fd, "AT", resp, sizeof(resp),
+                              MESHTASTIC_NRF9151_PROBE_TIMEOUT_US);
+        nrf9151_gnss_process_response(resp);
+        if(rc != 0) {
+            close(mesh_gnss.fd);
+            mesh_gnss.fd = -1;
+            mesh_gnss.present = false;
+            mesh_gnss.configured = false;
+            nrf9151_gnss_set_state("missing", "unavailable",
+                                   "No AT response");
+            daemon_event("nRF9151 GNSS probe failed path=%s rc=%d",
+                         opts.gps_uart_path.c_str(), rc);
+            return;
+        }
+        mesh_gnss.present = true;
+        nrf9151_gnss_set_state("present", "starting", "AT OK");
+        daemon_event("nRF9151 detected for Meshtastic GNSS path=%s",
+                     opts.gps_uart_path.c_str());
+    }
+    if(!mesh_gnss.configured) {
+        (void)nrf9151_gnss_start_locked(opts);
+    }
+    nrf9151_gnss_read_available();
+}
+
+static void nrf9151_gnss_close(void)
+{
+    if(mesh_gnss.fd >= 0) {
+        close(mesh_gnss.fd);
+        mesh_gnss.fd = -1;
+    }
+    mesh_gnss.configured = false;
+}
+
+static bool encode_position_proto(const mesh_position_info_t &position,
+                                  uint32_t next_update_sec,
+                                  std::vector<uint8_t> *out)
+{
+    if(!out || !position.has_latitude || !position.has_longitude) {
+        return false;
+    }
+    out->clear();
+    append_sfixed32_field(out, 1U, position.latitude_i);
+    append_sfixed32_field(out, 2U, position.longitude_i);
+    if(position.has_altitude) {
+        append_uint32_field(out, 3U, (uint32_t)position.altitude_m);
+    }
+    if(position.timestamp != 0U) {
+        append_varint(out, (7U << 3U) | 5U);
+        append_fixed32(out, position.timestamp);
+    }
+    append_uint32_field(out, 5U, 2U);
+    if(position.has_altitude) {
+        append_uint32_field(out, 6U, 2U);
+    }
+    if(position.has_ground_speed) {
+        append_uint32_field(out, 15U, position.ground_speed_cms);
+    }
+    if(position.has_ground_track) {
+        append_uint32_field(out, 16U, position.ground_track_1e5);
+    }
+    if(position.sats_in_view != 0U) {
+        append_uint32_field(out, 19U, position.sats_in_view);
+    }
+    if(next_update_sec != 0U) {
+        append_uint32_field(out, 21U, next_update_sec);
+    }
+    if(position.precision_bits != 0U) {
+        append_uint32_field(out, 23U, position.precision_bits);
+    }
+    return !out->empty();
 }
 
 static uint32_t phoneapi_region_enum(const std::string &name)
@@ -5979,6 +6765,14 @@ static uint32_t mesh_nodeinfo_next_ms(uint64_t now_us)
     return (uint32_t)((mesh_next_nodeinfo_us - now_us + 999ULL) / 1000ULL);
 }
 
+static uint32_t mesh_position_next_ms(uint64_t now_us)
+{
+    if(mesh_next_position_us == 0ULL || mesh_next_position_us <= now_us) {
+        return 0U;
+    }
+    return (uint32_t)((mesh_next_position_us - now_us + 999ULL) / 1000ULL);
+}
+
 static bool mesh_ack_track_frame(const tx_frame_t &frame)
 {
     size_t slot = MESHTASTIC_ACK_RETRY_QUEUE_SIZE;
@@ -6360,6 +7154,71 @@ static bool build_mesh_nodeinfo_frame(const probe_options_t &opts,
     return true;
 }
 
+static bool build_mesh_position_frame(const probe_options_t &opts,
+                                      const mesh_position_info_t &position,
+                                      tx_frame_t *frame)
+{
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> position_proto;
+    std::vector<uint8_t> data_proto;
+    std::string channel_name;
+    mesh_header_t header;
+    uint32_t packet_id;
+    char summary[220];
+
+    if(!frame || !parse_psk(opts.psk, &key) ||
+       !encode_position_proto(position, opts.position_interval_sec,
+                              &position_proto) ||
+       !encode_data_proto(MESHTASTIC_POSITION_APP, position_proto, 0, 0,
+                          &data_proto)) {
+        return false;
+    }
+    packet_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+    if(packet_id == 0U) {
+        packet_id = 1U;
+    }
+    if(!aes_ctr_crypt(key, opts.from_node, packet_id, &data_proto)) {
+        return false;
+    }
+    if(data_proto.size() + MESHTASTIC_HEADER_LENGTH >
+       MESHTASTIC_MAX_LORA_PAYLOAD_LEN) {
+        return false;
+    }
+
+    memset(&header, 0, sizeof(header));
+    header.to = MESHTASTIC_NODENUM_BROADCAST;
+    header.from = opts.from_node;
+    header.id = packet_id;
+    header.flags = (opts.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
+                   ((opts.hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
+                    MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
+    channel_name = effective_mesh_channel_name(opts);
+    header.channel = mesh_channel_hash(channel_name, key);
+    header.next_hop = 0;
+    header.relay_node = (uint8_t)(opts.from_node & 0xffU);
+
+    frame->bytes.clear();
+    append_mesh_header(&frame->bytes, header);
+    frame->bytes.insert(frame->bytes.end(), data_proto.begin(),
+                        data_proto.end());
+    frame->rebroadcast = false;
+    frame->want_ack = false;
+    frame->routing_ack = false;
+    frame->phoneapi_origin = false;
+    frame->to_node = header.to;
+    frame->from_node = header.from;
+    frame->packet_id = header.id;
+    frame->ack_request_id = 0;
+    frame->channel = header.channel;
+    snprintf(summary, sizeof(summary),
+             "mesh position id=0x%08x from=0x%08x ch=0x%02x lat=%.7f lon=%.7f sats=%u",
+             header.id, header.from, header.channel,
+             position.latitude_i * 1e-7, position.longitude_i * 1e-7,
+             position.sats_in_view);
+    frame->summary = summary;
+    return true;
+}
+
 static bool build_mesh_ack_frame(const probe_options_t &opts,
                                  const mesh_header_t &rx_header,
                                  uint32_t error_reason,
@@ -6561,14 +7420,14 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                 snprintf(alt_text, sizeof(alt_text), "-");
             }
             if(position_ok && position.has_ground_speed) {
-                snprintf(speed_text, sizeof(speed_text), "%.2fm/s",
-                         position.ground_speed_cms / 100.0);
+                snprintf(speed_text, sizeof(speed_text), "%ukm/h",
+                         position.ground_speed_cms);
             } else {
                 snprintf(speed_text, sizeof(speed_text), "-");
             }
             if(position_ok && position.has_ground_track) {
-                snprintf(track_text, sizeof(track_text), "%.1fdeg",
-                         position.ground_track_1e5 / 100000.0);
+                snprintf(track_text, sizeof(track_text), "%.2fdeg",
+                         position.ground_track_1e5 / 100.0);
             } else {
                 snprintf(track_text, sizeof(track_text), "-");
             }
@@ -6816,10 +7675,11 @@ static std::string daemon_status_response(const probe_options_t &opts,
                                           chip_type_t chip,
                                           size_t pending_send_count)
 {
-    char buf[1800];
+    char buf[2200];
     char ble_detail[160];
     char ble_pair[16];
     char slot_text[16];
+    char gps_detail[160];
     phoneapi_bridge_state_t ble_state;
     const char *queued = pending_send_count > 0U ? "1" : "0";
     uint64_t now = monotonic_us();
@@ -6834,6 +7694,12 @@ static std::string daemon_status_response(const probe_options_t &opts,
     } else {
         snprintf(slot_text, sizeof(slot_text), "%s", "auto");
     }
+    snprintf(gps_detail, sizeof(gps_detail), "%s", mesh_gnss.detail);
+    for(size_t i = 0; gps_detail[i]; i++) {
+        if(isspace((unsigned char)gps_detail[i])) {
+            gps_detail[i] = '_';
+        }
+    }
     snprintf(buf, sizeof(buf),
              "OK version=%s chip=%s op=%s tx=%lu rx=%lu queued=%s queued_count=%u "
              "ble=%s ble_detail=%s ble_pair=%s "
@@ -6842,6 +7708,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
+             "position=%s nrf9151=%s gps=%s gps_detail=%s "
+             "position_tx=%lu position_drop=%lu next_position_ms=%u "
+             "lat=%.7f lon=%.7f sats=%u "
              "region=%s preset=%s slot=%s resolved_slot=%u slots=%u freq=%.3f bw=%.1f sf=%u cr=4/%u sw=0x%02x manual_power=%s power=%d node=%s "
              "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s channel_url=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
@@ -6864,6 +7733,14 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_nodeinfo_tx_count,
              (unsigned long)mesh_nodeinfo_drop_count,
              mesh_nodeinfo_next_ms(now),
+             opts.position_enabled ? "on" : "off",
+             mesh_gnss.modem_state, mesh_gnss.gps_state, gps_detail,
+             (unsigned long)mesh_position_tx_count,
+             (unsigned long)mesh_position_drop_count,
+             mesh_position_next_ms(now),
+             mesh_gnss.has_fix ? mesh_gnss.position.latitude_i * 1e-7 : 0.0,
+             mesh_gnss.has_fix ? mesh_gnss.position.longitude_i * 1e-7 : 0.0,
+             mesh_gnss.has_fix ? mesh_gnss.position.sats_in_view : 0U,
              opts.resolved_region.empty() ? "-" : opts.resolved_region.c_str(),
              opts.resolved_preset.empty() ? "-" : opts.resolved_preset.c_str(),
              slot_text, opts.resolved_slot, opts.resolved_slot_count,
@@ -7439,6 +8316,10 @@ static void print_usage(const char *argv0)
             "  --nodeinfo       Send one NodeInfo packet when daemon starts (default)\n"
             "  --no-nodeinfo    Do not advertise this node on daemon start\n"
             "  --nodeinfo-interval SEC  Periodic daemon NodeInfo interval, default 600\n"
+            "  --position       Enable nRF9151 GNSS Position broadcast (default)\n"
+            "  --no-position    Disable GNSS Position broadcast\n"
+            "  --position-interval SEC  Periodic Position interval, default 900\n"
+            "  --gps-uart PATH  nRF9151 AT UART for GNSS, default " MESHTASTIC_NRF9151_UART_DEV "\n"
             "  --no-rebroadcast Disable minimal broadcast flood forwarding\n"
             "  --channel-name S Default primary channel name, empty uses preset name\n"
             "  --psk VALUE      default, none/off/0, or 16/32-byte hex key\n",
@@ -7492,6 +8373,18 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
                 tmp = 60U;
             }
             opts->nodeinfo_interval_sec = tmp;
+        } else if(strcmp(arg, "--position") == 0) {
+            opts->position_enabled = true;
+        } else if(strcmp(arg, "--no-position") == 0) {
+            opts->position_enabled = false;
+        } else if(strcmp(arg, "--position-interval") == 0 && i + 1 < argc &&
+                  parse_u32(argv[++i], &tmp, 10)) {
+            if(tmp < 60U) {
+                tmp = 60U;
+            }
+            opts->position_interval_sec = tmp;
+        } else if(strcmp(arg, "--gps-uart") == 0 && i + 1 < argc) {
+            opts->gps_uart_path = argv[++i];
         } else if(strcmp(arg, "--ack") == 0) {
             opts->want_ack = true;
             opts->want_ack_set = true;
@@ -8196,6 +9089,14 @@ int main(int argc, char **argv)
                      opts.profile.freq);
         mesh_next_nodeinfo_us =
             (opts.mesh_mode && opts.advertise_nodeinfo) ? monotonic_us() : 0ULL;
+        mesh_next_position_us =
+            (opts.mesh_mode && opts.position_enabled) ?
+            monotonic_us() + 5000000ULL : 0ULL;
+        mesh_gnss = nrf9151_gnss_state_t();
+        nrf9151_gnss_set_state(opts.position_enabled ? "probing" : "off",
+                               opts.position_enabled ? "unavailable" : "off",
+                               opts.position_enabled ? "Waiting" :
+                               "Position disabled");
         if(opts.mesh_mode) {
             phoneapi_start(opts);
         }
@@ -8270,6 +9171,10 @@ int main(int argc, char **argv)
         handle_delayed_tx(radio, now);
         handle_ack_retry(radio, now);
 
+        if(opts.mesh_mode && opts.position_enabled) {
+            nrf9151_gnss_poll(opts, now);
+        }
+
         if(mesh_next_nodeinfo_us != 0ULL && now >= mesh_next_nodeinfo_us &&
            active_op != OP_TX) {
             tx_frame_t frame;
@@ -8292,6 +9197,42 @@ int main(int argc, char **argv)
                 mesh_next_nodeinfo_us = now + MESHTASTIC_NODEINFO_RETRY_US;
                 daemon_event("NodeInfo build failed node=%s",
                              opts.node_name.c_str());
+            }
+        }
+
+        if(mesh_next_position_us != 0ULL && now >= mesh_next_position_us &&
+           active_op != OP_TX) {
+            tx_frame_t frame;
+            uint64_t interval_us =
+                (uint64_t)opts.position_interval_sec * 1000000ULL;
+            if(!mesh_gnss.present || !mesh_gnss.has_fix) {
+                mesh_position_drop_count++;
+                mesh_next_position_us = now + MESHTASTIC_POSITION_RETRY_US;
+                daemon_event("Position TX skipped nrf9151=%s gps=%s",
+                             mesh_gnss.modem_state, mesh_gnss.gps_state);
+            } else if(build_mesh_position_frame(opts, mesh_gnss.position,
+                                                &frame)) {
+                if(start_tx(radio, frame) == 0) {
+                    mesh_position_tx_count++;
+                    mesh_next_position_us = now + interval_us;
+                    mesh_node_update_position(opts.from_node,
+                                              mesh_gnss.position);
+                    daemon_event("Position TX start from=0x%08x lat=%.7f lon=%.7f sats=%u",
+                                 opts.from_node,
+                                 mesh_gnss.position.latitude_i * 1e-7,
+                                 mesh_gnss.position.longitude_i * 1e-7,
+                                 mesh_gnss.position.sats_in_view);
+                } else {
+                    mesh_position_drop_count++;
+                    mesh_next_position_us = now + MESHTASTIC_POSITION_RETRY_US;
+                    daemon_event("Position TX start failed from=0x%08x",
+                                 opts.from_node);
+                }
+            } else {
+                mesh_position_drop_count++;
+                mesh_next_position_us = now + MESHTASTIC_POSITION_RETRY_US;
+                daemon_event("Position build failed from=0x%08x",
+                             opts.from_node);
             }
         }
 
@@ -8426,6 +9367,7 @@ int main(int argc, char **argv)
 
     printf("Summary: chip=%s tx=%lu rx=%lu\n", chip_name(chip),
            (unsigned long)tx_count, (unsigned long)rx_count);
+    nrf9151_gnss_close();
     phoneapi_stop();
     if(daemon_fd >= 0) {
         close(daemon_fd);
