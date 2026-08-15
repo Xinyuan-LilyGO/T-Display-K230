@@ -3774,6 +3774,12 @@ static lv_obj_t *chip(lv_obj_t *parent, const char *text, uint32_t color)
 
 static void create_status_bar(lv_obj_t *scr)
 {
+    const int status_chip_w = 64;
+    const int status_chip_h = 30;
+    const int status_chip_gap = 10;
+    const int status_chip_count = 4;
+    const int status_group_w =
+        status_chip_w * status_chip_count + status_chip_gap * (status_chip_count - 1);
     lv_obj_t *bar = lv_obj_create(scr);
     status_bar_obj = bar;
     lv_obj_set_pos(bar, 0, 0);
@@ -3787,14 +3793,25 @@ static void create_status_bar(lv_obj_t *scr)
     time_label = label(bar, "--:--", &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_align(time_label, LV_ALIGN_LEFT_MID, 24, 0);
 
-    lv_obj_t *ble = lv_obj_create(bar);
+    lv_obj_t *status_group = lv_obj_create(bar);
+    lv_obj_set_size(status_group, status_group_w, status_chip_h);
+    lv_obj_set_style_bg_opa(status_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(status_group, 0, 0);
+    lv_obj_set_style_pad_all(status_group, 0, 0);
+    lv_obj_set_style_pad_column(status_group, status_chip_gap, 0);
+    lv_obj_set_flex_flow(status_group, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(status_group, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(status_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(status_group, LV_ALIGN_RIGHT_MID, -24, 0);
+
+    lv_obj_t *ble = lv_obj_create(status_group);
     lv_obj_add_style(ble, &style_chip, 0);
-    lv_obj_set_size(ble, 70, 30);
+    lv_obj_set_size(ble, status_chip_w, status_chip_h);
     lv_obj_set_style_pad_all(ble, 0, 0);
     lv_obj_clear_flag(ble, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(ble, LV_ALIGN_RIGHT_MID, -238, 0);
     status_ble_label = label(ble, "BLE", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 12, 0);
+    lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 10, 0);
     status_ble_led = lv_obj_create(ble);
     lv_obj_set_size(status_ble_led, 9, 9);
     lv_obj_set_style_radius(status_ble_led, LV_RADIUS_CIRCLE, 0);
@@ -3806,14 +3823,14 @@ static void create_status_bar(lv_obj_t *scr)
     lv_obj_align_to(status_ble_led, status_ble_label,
                     LV_ALIGN_OUT_RIGHT_MID, 3, 0);
 
-    lv_obj_t *wifi = chip(bar, "WiFi", path_exists("/sys/class/net/wlan0") ? 0x25C281 : 0x9AA4AF);
-    lv_obj_align(wifi, LV_ALIGN_RIGHT_MID, -156, 0);
+    lv_obj_t *wifi = chip(status_group, "WiFi", path_exists("/sys/class/net/wlan0") ? 0x25C281 : 0x9AA4AF);
+    lv_obj_set_size(wifi, status_chip_w, status_chip_h);
 
-    lv_obj_t *ssh = chip(bar, "SSH", 0x3DA5FF);
-    lv_obj_align(ssh, LV_ALIGN_RIGHT_MID, -86, 0);
+    lv_obj_t *ssh = chip(status_group, "SSH", 0x3DA5FF);
+    lv_obj_set_size(ssh, status_chip_w, status_chip_h);
 
-    lv_obj_t *cam = chip(bar, "CAM", has_video_node() ? 0x25C281 : 0x9AA4AF);
-    lv_obj_align(cam, LV_ALIGN_RIGHT_MID, -24, 0);
+    lv_obj_t *cam = chip(status_group, "CAM", has_video_node() ? 0x25C281 : 0x9AA4AF);
+    lv_obj_set_size(cam, status_chip_w, status_chip_h);
 
     app_set_ble_status(status_ble_state);
 }
