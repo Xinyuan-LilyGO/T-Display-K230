@@ -2212,6 +2212,16 @@ static void append_uint32_field(std::vector<uint8_t> *out, uint32_t field,
     append_varint(out, value);
 }
 
+static void append_sfixed32_field(std::vector<uint8_t> *out, uint32_t field,
+                                  int32_t value)
+{
+    if(!out) {
+        return;
+    }
+    append_varint(out, (field << 3U) | 5U);
+    append_fixed32(out, (uint32_t)value);
+}
+
 static void append_bool_field(std::vector<uint8_t> *out, uint32_t field,
                               bool value)
 {
@@ -2316,7 +2326,20 @@ static bool encode_phoneapi_user_proto(const probe_options_t &opts,
     return true;
 }
 
+static uint32_t phoneapi_nodedb_count(uint32_t local_node)
+{
+    uint32_t count = 1U;
+
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        if(mesh_nodes[i].node != 0U && mesh_nodes[i].node != local_node) {
+            count++;
+        }
+    }
+    return count;
+}
+
 static bool encode_phoneapi_my_node_info(const probe_options_t &opts,
+                                         uint32_t nodedb_count,
                                          std::vector<uint8_t> *out)
 {
     uint8_t device_id[8];
@@ -2331,7 +2354,7 @@ static bool encode_phoneapi_my_node_info(const probe_options_t &opts,
     append_uint32_field(out, 8U, 1U);
     append_bytes_field(out, 12U, device_id, sizeof(device_id));
     append_string_field(out, 13U, "nrf52840_pca10059", 31U);
-    append_uint32_field(out, 15U, 1U);
+    append_uint32_field(out, 15U, nodedb_count == 0U ? 1U : nodedb_count);
     return true;
 }
 
@@ -2577,6 +2600,147 @@ static bool encode_phoneapi_node_info(const probe_options_t &opts,
     append_bytes_field(out, 2U, user);
     append_varint(out, (5U << 3U) | 5U);
     append_fixed32(out, now);
+    append_uint32_field(out, 9U, 0U);
+    return true;
+}
+
+static std::string phoneapi_cached_node_long_name(const mesh_node_entry_t &node)
+{
+    char fallback[24];
+
+    if(node.long_name[0]) {
+        return std::string(node.long_name);
+    }
+    snprintf(fallback, sizeof(fallback), "node-%04x",
+             (unsigned)(node.node & 0xffffU));
+    return std::string(fallback);
+}
+
+static bool encode_phoneapi_cached_user_proto(const mesh_node_entry_t &node,
+                                              std::vector<uint8_t> *out)
+{
+    char id[16];
+    std::string long_name;
+    std::string short_name;
+
+    if(!out || node.node == 0U) {
+        return false;
+    }
+    long_name = mesh_clean_text(phoneapi_cached_node_long_name(node));
+    if(long_name.empty()) {
+        long_name = "node";
+    }
+    if(node.short_name[0]) {
+        short_name = mesh_clean_text(node.short_name);
+    }
+    if(short_name.empty()) {
+        short_name = make_short_node_name(long_name);
+    }
+    out->clear();
+    snprintf(id, sizeof(id), "!%08x", node.node);
+    append_string_field(out, 1U, id, 15U);
+    append_string_field(out, 2U, long_name, 39U);
+    append_string_field(out, 3U, short_name, 4U);
+    if(node.hw_model >= 0) {
+        append_uint32_field(out, 5U, (uint32_t)node.hw_model);
+    }
+    return true;
+}
+
+static bool encode_phoneapi_cached_position_proto(const mesh_node_entry_t &node,
+                                                  std::vector<uint8_t> *out)
+{
+    if(!out || !node.has_position) {
+        return false;
+    }
+    out->clear();
+    append_sfixed32_field(out, 1U, node.latitude_i);
+    append_sfixed32_field(out, 2U, node.longitude_i);
+    if(node.has_altitude) {
+        append_uint32_field(out, 3U, (uint32_t)node.altitude_m);
+    }
+    if(node.position_timestamp != 0U) {
+        append_varint(out, (7U << 3U) | 5U);
+        append_fixed32(out, node.position_timestamp);
+    }
+    if(node.has_ground_speed) {
+        append_uint32_field(out, 15U, node.ground_speed_cms);
+    }
+    if(node.has_ground_track) {
+        append_uint32_field(out, 16U, node.ground_track_1e5);
+    }
+    if(node.sats_in_view != 0U) {
+        append_uint32_field(out, 19U, node.sats_in_view);
+    }
+    if(node.precision_bits != 0U) {
+        append_uint32_field(out, 23U, node.precision_bits);
+    }
+    return !out->empty();
+}
+
+static bool encode_phoneapi_cached_device_metrics_proto(
+    const mesh_node_entry_t &node, std::vector<uint8_t> *out)
+{
+    if(!out || !node.has_device_metrics) {
+        return false;
+    }
+    out->clear();
+    if(node.has_battery_level) {
+        append_uint32_field(out, 1U, node.battery_level);
+    }
+    if(node.has_device_voltage) {
+        append_float_field(out, 2U, node.device_voltage);
+    }
+    if(node.has_channel_utilization) {
+        append_float_field(out, 3U, node.channel_utilization);
+    }
+    if(node.has_air_util_tx) {
+        append_float_field(out, 4U, node.air_util_tx);
+    }
+    if(node.uptime_seconds != 0U) {
+        append_uint32_field(out, 5U, node.uptime_seconds);
+    }
+    return !out->empty();
+}
+
+static uint32_t phoneapi_node_last_heard_epoch(const mesh_node_entry_t &node)
+{
+    uint32_t now_epoch = (uint32_t)time(nullptr);
+    uint64_t now_us = monotonic_us();
+    uint64_t age_s = 0;
+
+    if(node.last_seen_us != 0U && node.last_seen_us <= now_us) {
+        age_s = (now_us - node.last_seen_us) / 1000000ULL;
+    }
+    if(age_s > now_epoch) {
+        return 0U;
+    }
+    return now_epoch - (uint32_t)age_s;
+}
+
+static bool encode_phoneapi_cached_node_info(const mesh_node_entry_t &node,
+                                             std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> user;
+    std::vector<uint8_t> position;
+    std::vector<uint8_t> metrics;
+
+    if(!out || node.node == 0U ||
+       !encode_phoneapi_cached_user_proto(node, &user)) {
+        return false;
+    }
+    out->clear();
+    append_uint32_field(out, 1U, node.node);
+    append_bytes_field(out, 2U, user);
+    if(encode_phoneapi_cached_position_proto(node, &position)) {
+        append_bytes_field(out, 3U, position);
+    }
+    append_float_field(out, 4U, node.snr);
+    append_varint(out, (5U << 3U) | 5U);
+    append_fixed32(out, phoneapi_node_last_heard_epoch(node));
+    if(encode_phoneapi_cached_device_metrics_proto(node, &metrics)) {
+        append_bytes_field(out, 6U, metrics);
+    }
     append_uint32_field(out, 9U, 0U);
     return true;
 }
@@ -3345,6 +3509,28 @@ static void phoneapi_notify_mesh_rx(const mesh_header_t &header,
     (void)phoneapi_send_from_payload_global(2U, packet, "rx_packet");
 }
 
+static void phoneapi_notify_node_update(uint32_t node, const char *reason)
+{
+    std::vector<uint8_t> payload;
+
+    if(node == 0U || node == phoneapi_opts.from_node) {
+        return;
+    }
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        if(mesh_nodes[i].node != node) {
+            continue;
+        }
+        if(!encode_phoneapi_cached_node_info(mesh_nodes[i], &payload)) {
+            return;
+        }
+        if(phoneapi_send_from_payload_global(4U, payload, "node_info_update")) {
+            daemon_event("PhoneAPI node update sent node=0x%08x reason=%s",
+                         node, reason && reason[0] ? reason : "-");
+        }
+        return;
+    }
+}
+
 static int phoneapi_open_uart(void)
 {
     int fd = open(MESHTASTIC_PHONEAPI_UART_DEV,
@@ -4050,14 +4236,55 @@ static bool phoneapi_send_config_complete(int fd, uint32_t nonce)
     return true;
 }
 
+static bool phoneapi_send_nodeinfo_entries(int fd, const probe_options_t &opts,
+                                           const char *reason,
+                                           uint32_t *sent_count)
+{
+    std::vector<uint8_t> payload;
+    uint32_t sent = 0U;
+    uint32_t cached = 0U;
+    bool ok = true;
+
+    if(encode_phoneapi_node_info(opts, &payload)) {
+        ok = phoneapi_send_from_payload(fd, 4U, payload,
+                                        "node_info_local") && ok;
+        sent++;
+    } else {
+        ok = false;
+    }
+
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        if(mesh_nodes[i].node == 0U || mesh_nodes[i].node == opts.from_node) {
+            continue;
+        }
+        if(encode_phoneapi_cached_node_info(mesh_nodes[i], &payload)) {
+            ok = phoneapi_send_from_payload(fd, 4U, payload,
+                                            "node_info_cached") && ok;
+            sent++;
+            cached++;
+        } else {
+            ok = false;
+        }
+    }
+    if(sent_count) {
+        *sent_count = sent;
+    }
+    daemon_event("PhoneAPI nodeinfo entries reason=%s sent=%u cached=%u ok=%s",
+                 reason && reason[0] ? reason : "-",
+                 sent, cached, ok ? "yes" : "no");
+    return ok;
+}
+
 static bool phoneapi_send_config_stage(int fd, const probe_options_t &opts,
                                        uint32_t nonce)
 {
     std::vector<uint8_t> payload;
+    uint32_t nodeinfo_sent = 0U;
     bool ok = true;
 
     daemon_event("PhoneAPI config stage requested nonce=%u", nonce);
-    ok = encode_phoneapi_my_node_info(opts, &payload) &&
+    ok = encode_phoneapi_my_node_info(opts, phoneapi_nodedb_count(opts.from_node),
+                                      &payload) &&
          phoneapi_send_from_payload(fd, 3U, payload, "my_info") && ok;
     ok = encode_phoneapi_metadata(&payload) &&
          phoneapi_send_from_payload(fd, 13U, payload, "metadata") && ok;
@@ -4071,6 +4298,9 @@ static bool phoneapi_send_config_stage(int fd, const probe_options_t &opts,
          phoneapi_send_from_payload(fd, 5U, payload, "config_bluetooth") && ok;
     ok = encode_phoneapi_channel(opts, &payload) &&
          phoneapi_send_from_payload(fd, 10U, payload, "channel") && ok;
+    ok = phoneapi_send_nodeinfo_entries(fd, opts, "config",
+                                        &nodeinfo_sent) && ok;
+    daemon_event("PhoneAPI config stage nodeinfo_sent=%u", nodeinfo_sent);
     ok = phoneapi_send_config_complete(fd, nonce) && ok;
     return ok;
 }
@@ -4078,12 +4308,13 @@ static bool phoneapi_send_config_stage(int fd, const probe_options_t &opts,
 static bool phoneapi_send_nodeinfo_stage(int fd, const probe_options_t &opts,
                                          uint32_t nonce)
 {
-    std::vector<uint8_t> payload;
+    uint32_t nodeinfo_sent = 0U;
     bool ok = true;
 
     daemon_event("PhoneAPI nodeinfo stage requested nonce=%u", nonce);
-    ok = encode_phoneapi_node_info(opts, &payload) &&
-         phoneapi_send_from_payload(fd, 4U, payload, "node_info") && ok;
+    ok = phoneapi_send_nodeinfo_entries(fd, opts, "nodeinfo",
+                                        &nodeinfo_sent) && ok;
+    daemon_event("PhoneAPI nodeinfo stage nodeinfo_sent=%u", nodeinfo_sent);
     ok = phoneapi_send_config_complete(fd, nonce) && ok;
     return ok;
 }
@@ -6038,6 +6269,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
 
             if(position_ok && channel_match) {
                 mesh_node_update_position(header.from, position);
+                phoneapi_notify_node_update(header.from, "position");
             }
             if(position_ok && position.has_altitude) {
                 snprintf(alt_text, sizeof(alt_text), "%dm",
@@ -6075,6 +6307,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
 
             if(channel_match && user_ok) {
                 mesh_node_update_user(header.from, user);
+                phoneapi_notify_node_update(header.from, "user");
             }
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u nodeinfo=%s long=%s short=%s hw=%d%s",
                          (unsigned long)rx_count, header.from, header.to,
@@ -6092,6 +6325,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
 
             if(telemetry_ok && channel_match) {
                 mesh_node_update_telemetry(header.from, telemetry);
+                phoneapi_notify_node_update(header.from, "telemetry");
             }
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u telemetry=%s %s%s",
                          (unsigned long)rx_count, header.from, header.to,
@@ -6106,6 +6340,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
 
             if(neighbor_ok && channel_match) {
                 mesh_node_update_neighbor_info(header.from, neighbor_info);
+                phoneapi_notify_node_update(header.from, "neighbor");
             }
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u neighbor=%s owner=0x%08x last=0x%08x count=%u list=%s%s",
                          (unsigned long)rx_count, header.from, header.to,
