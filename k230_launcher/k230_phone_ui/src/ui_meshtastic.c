@@ -125,6 +125,7 @@ static lv_obj_t *mesh_canned_delete_overlay;
 static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
+static lv_obj_t *mesh_publish_status_label;
 static lv_obj_t *mesh_pairing_overlay;
 static lv_obj_t *mesh_settings_value_labels[24];
 static char mesh_last_pairing_code[16];
@@ -2145,16 +2146,27 @@ static void mesh_publish_event_cb(lv_event_t *event)
 {
     const char *command = (const char *)lv_event_get_user_data(event);
     char response[256];
+    int ok;
 
     if(!command || !command[0]) {
         return;
     }
-    if(mesh_ipc_command(command, response, sizeof(response)) == 0) {
+    ok = mesh_ipc_command(command, response, sizeof(response)) == 0;
+    if(ok) {
         ui_trim_text(response);
         mesh_append_log("publish: %s", response);
     } else {
         ui_trim_text(response);
         mesh_append_log("publish failed: %s", response);
+    }
+    if(mesh_publish_status_label &&
+       lv_obj_is_valid(mesh_publish_status_label)) {
+        lv_label_set_text(mesh_publish_status_label,
+                          response[0] ? response :
+                          (ok ? ui_tr("Queued") : ui_tr("Failed")));
+        lv_obj_set_style_text_color(
+            mesh_publish_status_label,
+            lv_color_hex(ok ? 0x25C281 : 0xEF4D5A), 0);
     }
     mesh_refresh_status();
 }
@@ -3586,6 +3598,7 @@ static void mesh_close_settings_page(void)
     }
     mesh_settings_overlay = NULL;
     mesh_log_label = NULL;
+    mesh_publish_status_label = NULL;
     memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
 }
 
@@ -5062,7 +5075,14 @@ static void mesh_profile_event_cb(lv_event_t *event)
     lv_obj_add_event_cb(btn, mesh_publish_event_cb, LV_EVENT_CLICKED,
                         "PUBLISH_TELEMETRY\n");
 
-    y += button_row_h + 22;
+    y += button_row_h + 10;
+    mesh_publish_status_label = ui_label(panel, ui_tr("Ready"),
+                                         &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(mesh_publish_status_label, margin, y);
+    lv_obj_set_width(mesh_publish_status_label, content_w);
+    lv_label_set_long_mode(mesh_publish_status_label, LV_LABEL_LONG_DOT);
+
+    y += 38;
     section = ui_label(panel, "Radio profile", &lv_font_montserrat_18,
                        0xF2F5F8);
     lv_obj_set_pos(section, margin, y);

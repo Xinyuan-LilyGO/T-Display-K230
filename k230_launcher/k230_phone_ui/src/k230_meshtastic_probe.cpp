@@ -10119,10 +10119,34 @@ static std::string handle_daemon_command(const std::string &line,
         if(!opts.mesh_mode) {
             return "ERR mesh-disabled\n";
         }
-        mesh_manual_position_requested = true;
-        daemon_event("Manual Position publish queued gps=%s/%s",
+        if(!opts.position_enabled) {
+            return "ERR position-disabled\n";
+        }
+        daemon_event("Manual Position publish requested nrf9151=%s gps=%s",
                      mesh_gnss.modem_state, mesh_gnss.gps_state);
-        return "OK position queued\n";
+        if(mesh_gnss.probed && !mesh_gnss.present) {
+            return "ERR nrf9151-missing\n";
+        }
+        mesh_manual_position_requested = true;
+        if(mesh_gnss.present && !mesh_gnss.has_fix) {
+            char buf[128];
+
+            snprintf(buf, sizeof(buf),
+                     "OK position waiting gps=%s detail=%s\n",
+                     mesh_gnss.gps_state, mesh_gnss.detail);
+            return std::string(buf);
+        }
+        if(mesh_gnss.present && mesh_gnss.has_fix) {
+            char buf[160];
+
+            snprintf(buf, sizeof(buf),
+                     "OK position queued lat=%.7f lon=%.7f sats=%u\n",
+                     mesh_gnss.position.latitude_i * 1e-7,
+                     mesh_gnss.position.longitude_i * 1e-7,
+                     mesh_gnss.position.sats_in_view);
+            return std::string(buf);
+        }
+        return "OK position probing nrf9151\n";
     }
     if(line == "PUBLISH_TELEMETRY" || line == "publish_telemetry") {
         if(!opts.mesh_mode) {

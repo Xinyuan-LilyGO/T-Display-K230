@@ -203,6 +203,8 @@ static const ui_translation_t ui_translations[] = {
     { "NAK", "未确认", "NAK" },
     { "Dropped", "已丢弃", "破棄" },
     { "TX failed", "发送失败", "送信失敗" },
+    { "Queued", "已加入队列", "キュー済み" },
+    { "Failed", "失败", "失敗" },
     { "Keyboard test", "键盘测试", "キーボードテスト" },
     { "Keyboard backlight", "键盘背光", "キーボードバックライト" },
     { "Keyboard PWM frequency", "键盘 PWM 频率", "キーボードPWM周波数" },
