@@ -4086,6 +4086,7 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     char snr[24];
     char pos[128];
     char tel[160];
+    char trace[192];
     char nbr[192];
     char summary[320];
 
@@ -4102,7 +4103,8 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     mesh_node_line_value(line, "rssi=", rssi, sizeof(rssi));
     mesh_node_line_value(line, "snr=", snr, sizeof(snr));
     mesh_node_line_segment(line, "pos=", " tel=", pos, sizeof(pos));
-    mesh_node_line_segment(line, "tel=", " nbr=", tel, sizeof(tel));
+    mesh_node_line_segment(line, "tel=", " trace=", tel, sizeof(tel));
+    mesh_node_line_segment(line, "trace=", " nbr=", trace, sizeof(trace));
     mesh_node_line_segment(line, "nbr=", NULL, nbr, sizeof(nbr));
     if(strcmp(name, "-") == 0 && strcmp(short_name, "-") != 0) {
         snprintf(name, sizeof(name), "%s", short_name);
@@ -4202,6 +4204,15 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
         lv_obj_set_pos(label, right_x, y + 36);
         lv_obj_set_width(label, right_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+        y += 156;
+        section = ui_label(panel, "Trace", &lv_font_montserrat_20,
+                           0xF2F5F8);
+        lv_obj_set_pos(section, margin, y);
+        label = ui_label(panel, trace, &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y + 36);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     } else {
         y += 172;
         section = ui_label(panel, "Position", &lv_font_montserrat_20,
@@ -4217,6 +4228,15 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
                            0xF2F5F8);
         lv_obj_set_pos(section, margin, y);
         label = ui_label(panel, tel, &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y + 36);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+        y += 156;
+        section = ui_label(panel, "Trace", &lv_font_montserrat_20,
+                           0xF2F5F8);
+        lv_obj_set_pos(section, margin, y);
+        label = ui_label(panel, trace, &lv_font_montserrat_18, 0xCBD5E1);
         lv_obj_set_pos(label, margin, y + 36);
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);

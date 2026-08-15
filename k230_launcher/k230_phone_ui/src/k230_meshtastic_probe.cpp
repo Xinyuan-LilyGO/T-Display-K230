@@ -875,6 +875,8 @@ typedef struct {
     uint32_t neighbor_broadcast_interval_secs = 0;
     uint32_t neighbor_count = 0;
     char neighbor_summary[160] = {0};
+    bool has_route_info = false;
+    char route_summary[160] = {0};
 } mesh_node_entry_t;
 
 typedef struct {
@@ -1851,6 +1853,22 @@ static void mesh_node_update_neighbor_info(uint32_t node,
     mesh_nodedb_mark_dirty();
 }
 
+static void mesh_node_update_route_info(uint32_t node,
+                                        const std::string &summary)
+{
+    mesh_node_entry_t *entry = mesh_node_get_or_create(node);
+    std::string clean = mesh_clean_text(summary);
+
+    if(!entry || clean.empty()) {
+        return;
+    }
+    mesh_node_touch_timestamp(entry);
+    entry->has_route_info = true;
+    snprintf(entry->route_summary, sizeof(entry->route_summary), "%s",
+             clean.c_str());
+    mesh_nodedb_mark_dirty();
+}
+
 static char mesh_hex_digit(unsigned int value)
 {
     static const char digits[] = "0123456789abcdef";
@@ -2034,6 +2052,7 @@ static bool mesh_nodedb_save(void)
         std::string long_hex;
         std::string short_hex;
         std::string neighbor_hex;
+        std::string route_hex;
 
         if(node.node == 0U) {
             continue;
@@ -2044,12 +2063,14 @@ static bool mesh_nodedb_save(void)
                                          sizeof(node.short_name));
         neighbor_hex = mesh_hex_encode_text(node.neighbor_summary,
                                             sizeof(node.neighbor_summary));
+        route_hex = mesh_hex_encode_text(node.route_summary,
+                                         sizeof(node.route_summary));
         fprintf(fp,
-                "v1\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
+                "v2\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
                 "%u\t%u\t%u\t%u\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t"
                 "%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t"
                 "%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%u\t"
-                "%u\t%u\t%u\t%u\t%u\t%s\n",
+                "%u\t%u\t%u\t%u\t%u\t%s\t%u\t%s\n",
                 node.node, mesh_node_last_seen_epoch(node),
                 node.rssi_dbm, node.snr, node.rx_count,
                 long_hex.c_str(), short_hex.c_str(), node.hw_model,
@@ -2081,7 +2102,8 @@ static bool mesh_nodedb_save(void)
                 node.has_neighbor_info ? 1U : 0U,
                 node.neighbor_node_id, node.neighbor_last_sent_by_id,
                 node.neighbor_broadcast_interval_secs,
-                node.neighbor_count, neighbor_hex.c_str());
+                node.neighbor_count, neighbor_hex.c_str(),
+                node.has_route_info ? 1U : 0U, route_hex.c_str());
     }
     if(fclose(fp) != 0) {
         unlink(K230_MESH_NODEDB_TMP_FILE);
@@ -2149,7 +2171,8 @@ static bool mesh_nodedb_load(void)
             continue;
         }
         mesh_split_tsv(line, &fields);
-        if(fields.size() < 49U || strcmp(fields[0], "v1") != 0) {
+        if(fields.size() < 49U ||
+           (strcmp(fields[0], "v1") != 0 && strcmp(fields[0], "v2") != 0)) {
             skipped++;
             continue;
         }
@@ -2254,6 +2277,15 @@ static bool mesh_nodedb_load(void)
                                  sizeof(tmp.neighbor_summary));
         } else {
             ok = false;
+        }
+        if(ok && strcmp(fields[0], "v2") == 0) {
+            NODEDB_GET_BOOL(tmp.has_route_info);
+            if(ok && idx < fields.size()) {
+                mesh_hex_decode_text(fields[idx++], tmp.route_summary,
+                                     sizeof(tmp.route_summary));
+            } else {
+                ok = false;
+            }
         }
 
 #undef NODEDB_GET_U32
@@ -9235,6 +9267,10 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
             bool route_ok = decode_route_discovery_proto(decoded.payload,
                                                          &route_summary);
 
+            if(route_ok && channel_match) {
+                mesh_node_update_route_info(header.from, route_summary);
+                phoneapi_notify_node_update(header.from, "traceroute");
+            }
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u traceroute=%s request=0x%08x reply=0x%08x %s%s",
                          (unsigned long)rx_count, header.from, header.to,
                          header.id, header.channel, hop_limit, hop_start,
@@ -9804,7 +9840,7 @@ static std::string daemon_chat_log_response(void)
 
 static std::string daemon_nodes_response(void)
 {
-    char line[768];
+    char line[1024];
     std::string response = "OK nodes\n";
 
     if(mesh_node_count == 0U) {
@@ -9821,6 +9857,8 @@ static std::string daemon_nodes_response(void)
         const char *short_name = mesh_nodes[i].short_name[0] ?
                                  mesh_nodes[i].short_name : "-";
         std::string telemetry = telemetry_summary(mesh_nodes[i]);
+        const char *route = mesh_nodes[i].has_route_info ?
+                            mesh_nodes[i].route_summary : "-";
         const char *neighbor = mesh_nodes[i].has_neighbor_info ?
                                mesh_nodes[i].neighbor_summary : "-";
         if(mesh_nodes[i].has_position) {
@@ -9847,7 +9885,7 @@ static std::string daemon_nodes_response(void)
                 snprintf(track_text, sizeof(track_text), "-");
             }
             snprintf(line, sizeof(line),
-                     "0x%08x name=%s short=%s hw=%d rx=%lu age=%us rssi=%ddBm snr=%.1f pos=%.7f,%.7f alt=%s speed=%s track=%s sats=%u precision=%u time=%u tel=%s nbr=%s\n",
+                     "0x%08x name=%s short=%s hw=%d rx=%lu age=%us rssi=%ddBm snr=%.1f pos=%.7f,%.7f alt=%s speed=%s track=%s sats=%u precision=%u time=%u tel=%s trace=%s nbr=%s\n",
                      mesh_nodes[i].node, long_name, short_name,
                      mesh_nodes[i].hw_model,
                      (unsigned long)mesh_nodes[i].rx_count, age_s,
@@ -9858,15 +9896,15 @@ static std::string daemon_nodes_response(void)
                      mesh_nodes[i].sats_in_view,
                      mesh_nodes[i].precision_bits,
                      mesh_nodes[i].position_timestamp, telemetry.c_str(),
-                     neighbor);
+                     route, neighbor);
         } else {
             snprintf(line, sizeof(line),
-                     "0x%08x name=%s short=%s hw=%d rx=%lu age=%us rssi=%ddBm snr=%.1f pos=- tel=%s nbr=%s\n",
+                     "0x%08x name=%s short=%s hw=%d rx=%lu age=%us rssi=%ddBm snr=%.1f pos=- tel=%s trace=%s nbr=%s\n",
                      mesh_nodes[i].node, long_name, short_name,
                      mesh_nodes[i].hw_model,
                      (unsigned long)mesh_nodes[i].rx_count, age_s,
                      mesh_nodes[i].rssi_dbm, mesh_nodes[i].snr,
-                     telemetry.c_str(), neighbor);
+                     telemetry.c_str(), route, neighbor);
         }
         response += line;
     }
