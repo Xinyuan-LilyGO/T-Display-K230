@@ -1088,6 +1088,7 @@ static pthread_mutex_t phoneapi_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static phoneapi_bridge_state_t phoneapi_bridge_state = PHONEAPI_BRIDGE_OFFLINE;
 static char phoneapi_bridge_detail[160] = "not-started";
 static bool phoneapi_init_sent;
+static bool phoneapi_mesh_connected_event;
 static uint64_t phoneapi_last_adv_us;
 static char phoneapi_pairing_code[16];
 static uint64_t phoneapi_pairing_code_us;
@@ -1326,8 +1327,11 @@ static bool phoneapi_bridge_status_connected(const std::string &line)
     if(line.rfind("+MESH:CONNECTED", 0) == 0) {
         return true;
     }
-    return line.find("CONN=1") != std::string::npos ||
-           line.find("MESH_CONN=1") != std::string::npos;
+    if(line.find("CONN=1") != std::string::npos ||
+       line.find("MESH_CONN=1") != std::string::npos) {
+        return phoneapi_mesh_connected_event;
+    }
+    return false;
 }
 
 static bool phoneapi_status_bool_field(const std::string &line,
@@ -4177,6 +4181,7 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
         }
         phoneapi_bridge_set_pairing_code(code);
         phoneapi_bridge_set_state(PHONEAPI_BRIDGE_CONNECTED, "pairing");
+        phoneapi_mesh_connected_event = true;
         daemon_event("PhoneAPI BLE pairing code %s",
                      code[0] ? code : "invalid");
         return;
@@ -4185,18 +4190,24 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
         phoneapi_bridge_set_state(PHONEAPI_BRIDGE_CONNECTED,
                                   line.find(",OK") != std::string::npos ?
                                   "paired" : "pair-failed");
+        phoneapi_mesh_connected_event = true;
         daemon_event("PhoneAPI UART %s", line.c_str());
         return;
     }
     if(line.rfind("+MESH:SECURED,", 0) == 0) {
         phoneapi_bridge_set_state(PHONEAPI_BRIDGE_CONNECTED, "secured");
+        phoneapi_mesh_connected_event = true;
         daemon_event("PhoneAPI UART %s", line.c_str());
         return;
     }
     if(line.rfind("+MESH:DISCONNECTED", 0) == 0) {
+        phoneapi_mesh_connected_event = false;
         phoneapi_bridge_clear_pairing_code();
     }
     if(phoneapi_bridge_status_line(line)) {
+        if(line.rfind("+MESH:CONNECTED", 0) == 0) {
+            phoneapi_mesh_connected_event = true;
+        }
         bool connected = phoneapi_bridge_status_connected(line);
         bool adv_known = false;
         bool advertising = phoneapi_bridge_status_advertising(line,
@@ -4275,6 +4286,7 @@ static void *phoneapi_thread_main(void *arg)
     phoneapi_uart_fd = fd;
     pthread_mutex_unlock(&phoneapi_uart_mutex);
     phoneapi_bridge_set_state(PHONEAPI_BRIDGE_PROBING, "uart-open");
+    phoneapi_mesh_connected_event = false;
     daemon_event("PhoneAPI bridge probing uart=%s", MESHTASTIC_PHONEAPI_UART_DEV);
     (void)phoneapi_uart_send_line(fd, "AT+MESHSTATUS?");
     last_probe_us = monotonic_us();
