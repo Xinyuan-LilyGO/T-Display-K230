@@ -108,6 +108,10 @@
 #define K230_PHONE_UI_PREFS_DIR K230_PHONE_UI_CONFIG_PARENT "/k230_phone_ui"
 #define K230_MESH_NODEDB_FILE K230_PHONE_UI_PREFS_DIR "/meshtastic_nodes.tsv"
 #define K230_MESH_NODEDB_TMP_FILE K230_MESH_NODEDB_FILE ".tmp"
+#define K230_MESH_UI_DIR "/root/meshtastic"
+#define K230_MESH_CANNED_MESSAGES_FILE K230_MESH_UI_DIR "/canned_messages.txt"
+#define K230_MESH_CANNED_MESSAGES_MAX_BYTES 200U
+#define K230_MESH_CANNED_MESSAGES_MAX_ITEMS 8U
 #define MESHTASTIC_NODEDB_SAVE_DEBOUNCE_US (5ULL * 1000000ULL)
 #define K230_MESH_IOMUX_BASE 0x91105000UL
 #define K230_MESH_IOMUX_SIZE 0x1000UL
@@ -5011,6 +5015,7 @@ typedef struct {
     uint32_t get_config_request = 0;
     bool has_get_module_config_request = false;
     uint32_t get_module_config_request = 0;
+    bool get_canned_message_module_messages_request = false;
     bool get_device_metadata_request = false;
     bool has_set_time_only = false;
     uint32_t set_time_only = 0;
@@ -5022,6 +5027,8 @@ typedef struct {
     std::vector<uint8_t> set_config;
     bool has_set_module_config = false;
     std::vector<uint8_t> set_module_config;
+    bool has_set_canned_message_module_messages = false;
+    std::string set_canned_message_module_messages;
 } phoneapi_admin_request_t;
 
 static bool phoneapi_proto_skip(const uint8_t *data, size_t len, size_t *pos,
@@ -5151,6 +5158,12 @@ static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
                 return false;
             }
             out->has_get_module_config_request = true;
+        } else if(field == 10U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->get_canned_message_module_messages_request = value != 0U;
         } else if(field == 12U && wire == 0U) {
             uint32_t value;
             if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
@@ -5188,6 +5201,16 @@ static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
                 out->has_set_module_config = true;
             }
             pos += l;
+        } else if(field == 36U && wire == 2U) {
+            uint32_t l;
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            out->set_canned_message_module_messages.assign(
+                (const char *)payload.data() + pos, l);
+            pos += l;
+            out->has_set_canned_message_module_messages = true;
         } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
                                        wire)) {
             return false;
@@ -6394,6 +6417,138 @@ static bool phoneapi_pref_write(const std::vector<phoneapi_pref_entry_t> &entrie
     return true;
 }
 
+static bool phoneapi_canned_append_message(std::string *out,
+                                           const std::string &message)
+{
+    std::string clean = mesh_clean_text(message);
+    size_t needed;
+    size_t available;
+
+    if(!out || clean.empty()) {
+        return false;
+    }
+    needed = clean.size() + (out->empty() ? 0U : 1U);
+    if(out->size() + needed > K230_MESH_CANNED_MESSAGES_MAX_BYTES) {
+        if(!out->empty()) {
+            return false;
+        }
+        if(clean.size() > K230_MESH_CANNED_MESSAGES_MAX_BYTES) {
+            clean.resize(K230_MESH_CANNED_MESSAGES_MAX_BYTES);
+        }
+    }
+    if(!out->empty()) {
+        out->push_back('|');
+    }
+    available = K230_MESH_CANNED_MESSAGES_MAX_BYTES - out->size();
+    out->append(clean, 0U, clean.size() < available ? clean.size() : available);
+    return true;
+}
+
+static bool phoneapi_canned_messages_load(std::string *out)
+{
+    static const char *defaults[] = {
+        "OK",
+        "On my way",
+        "Need help",
+        "At location",
+        "Battery low",
+        "Signal check",
+        "Please repeat",
+        "Stand by",
+    };
+    FILE *fp;
+    char line[256];
+    size_t count = 0U;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    fp = fopen(K230_MESH_CANNED_MESSAGES_FILE, "r");
+    if(fp) {
+        while(count < K230_MESH_CANNED_MESSAGES_MAX_ITEMS &&
+              fgets(line, sizeof(line), fp)) {
+            std::string clean;
+
+            line[strcspn(line, "\r\n")] = '\0';
+            clean = phoneapi_trim_copy(line);
+            if(clean.empty() || clean[0] == '#') {
+                continue;
+            }
+            if(phoneapi_canned_append_message(out, clean)) {
+                count++;
+            }
+        }
+        fclose(fp);
+    }
+    if(count == 0U) {
+        for(size_t i = 0U; i < ARRAY_SIZE(defaults) &&
+             i < K230_MESH_CANNED_MESSAGES_MAX_ITEMS; i++) {
+            if(phoneapi_canned_append_message(out, defaults[i])) {
+                count++;
+            }
+        }
+    }
+    return true;
+}
+
+static bool phoneapi_canned_messages_save(const std::string &messages)
+{
+    char tmp_path[sizeof(K230_MESH_CANNED_MESSAGES_FILE) + 8];
+    std::string clipped = messages;
+    FILE *fp;
+    size_t start = 0U;
+    size_t count = 0U;
+
+    if(clipped.size() > K230_MESH_CANNED_MESSAGES_MAX_BYTES) {
+        clipped.resize(K230_MESH_CANNED_MESSAGES_MAX_BYTES);
+    }
+    if(mkdir(K230_MESH_UI_DIR, 0755) != 0 && errno != EEXIST) {
+        daemon_event("Canned messages mkdir failed: %s", strerror(errno));
+        return false;
+    }
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp",
+             K230_MESH_CANNED_MESSAGES_FILE);
+    fp = fopen(tmp_path, "w");
+    if(!fp) {
+        daemon_event("Canned messages save open failed: %s", strerror(errno));
+        return false;
+    }
+    fprintf(fp, "# K230 Meshtastic canned messages\n");
+    fprintf(fp, "# One message per line. Empty lines are ignored.\n");
+    while(start <= clipped.size() &&
+          count < K230_MESH_CANNED_MESSAGES_MAX_ITEMS) {
+        size_t end = clipped.find('|', start);
+        std::string item;
+
+        if(end == std::string::npos) {
+            end = clipped.size();
+        }
+        item = mesh_clean_text(clipped.substr(start, end - start));
+        if(!item.empty()) {
+            fprintf(fp, "%s\n", item.c_str());
+            count++;
+        }
+        if(end >= clipped.size()) {
+            break;
+        }
+        start = end + 1U;
+    }
+    if(fclose(fp) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+    if(rename(tmp_path, K230_MESH_CANNED_MESSAGES_FILE) != 0) {
+        unlink(tmp_path);
+        daemon_event("Canned messages save rename failed: %s",
+                     strerror(errno));
+        return false;
+    }
+    daemon_event("Canned messages saved count=%u bytes=%u",
+                 (unsigned)count, (unsigned)clipped.size());
+    return true;
+}
+
 static bool phoneapi_persist_meshtastic_opts(const probe_options_t &opts)
 {
     std::vector<phoneapi_pref_entry_t> entries;
@@ -6678,6 +6833,16 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
                      admin.set_time_only, tx.packet_id);
         handled = true;
     }
+    if(admin.has_set_canned_message_module_messages) {
+        bool ok = phoneapi_canned_messages_save(
+                      admin.set_canned_message_module_messages);
+        daemon_event("PhoneAPI local admin set_canned_messages id=0x%08x bytes=%u ok=%s",
+                     tx.packet_id,
+                     (unsigned)admin.set_canned_message_module_messages.size(),
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
     if(admin.has_set_owner || admin.has_set_channel || admin.has_set_config ||
        admin.has_set_module_config) {
         bool persist_required = admin.has_set_owner || admin.has_set_channel ||
@@ -6748,6 +6913,26 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
                                                      "admin_module_config");
         daemon_event("PhoneAPI local admin module_config_response id=0x%08x type=%u ok=%s",
                      tx.packet_id, admin.get_module_config_request,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.get_canned_message_module_messages_request) {
+        std::string messages;
+        std::vector<uint8_t> canned_bytes;
+        std::vector<uint8_t> response;
+        bool ok = phoneapi_canned_messages_load(&messages);
+
+        if(ok) {
+            canned_bytes.assign(messages.begin(), messages.end());
+            ok = encode_phoneapi_admin_response_bytes(runtime_opts, 11U,
+                                                      canned_bytes,
+                                                      &response) &&
+                 phoneapi_send_local_admin_response(fd, tx, response,
+                                                    "admin_canned_messages");
+        }
+        daemon_event("PhoneAPI local admin canned_messages_response id=0x%08x bytes=%u ok=%s",
+                     tx.packet_id, (unsigned)messages.size(),
                      ok ? "yes" : "no");
         ok_all = ok_all && ok;
         handled = true;
