@@ -28,6 +28,7 @@
 #define MESHTASTIC_PROBE_PATH "/root/app/k230_phone_ui/k230_meshtastic_probe"
 #define MESHTASTIC_SOCKET_PATH "/tmp/k230_meshtastic.sock"
 #define MESHTASTIC_DAEMON_LOG "/tmp/k230_meshtastic_daemon_ui.log"
+#define MESHTASTIC_UI_TRACE_LOG "/tmp/k230_meshtastic_ui.log"
 #define MESHTASTIC_CHANNEL_DIR "/root/meshtastic"
 #define MESHTASTIC_CHANNEL_URL_FILE MESHTASTIC_CHANNEL_DIR "/channel_url.txt"
 #define MESHTASTIC_QR_SCAN_PATH "/root/app/k230_phone_ui/k230_qr_scan"
@@ -443,6 +444,26 @@ static int mesh_ipc_command(const char *command, char *response,
     response[used] = '\0';
     close(fd);
     return used > 0U ? 0 : -1;
+}
+
+static void mesh_ui_trace(const char *fmt, ...)
+{
+    struct timeval tv;
+    FILE *fp;
+    va_list ap;
+
+    fp = fopen(MESHTASTIC_UI_TRACE_LOG, "a");
+    if(!fp) {
+        return;
+    }
+    gettimeofday(&tv, NULL);
+    fprintf(fp, "[%ld.%03ld] ", (long)tv.tv_sec,
+            (long)(tv.tv_usec / 1000));
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
 }
 
 static void mesh_append_log(const char *fmt, ...)
@@ -1646,7 +1667,10 @@ static void mesh_refresh_status(void)
         char ack_retry[16];
         char ack_timeout[16];
         char ack_drop[16];
+        char queued_count[16];
 
+        mesh_status_field(mesh_status_text, "queued_count", queued_count,
+                          sizeof(queued_count), "0");
         mesh_status_field(mesh_status_text, "ack_pending", ack_pending,
                           sizeof(ack_pending), "0");
         mesh_status_field(mesh_status_text, "ack_rx", ack_rx, sizeof(ack_rx),
@@ -1660,11 +1684,11 @@ static void mesh_refresh_status(void)
         mesh_status_field(mesh_status_text, "ack_drop", ack_drop,
                           sizeof(ack_drop), "0");
         snprintf(detail, sizeof(detail),
-                 "%s -> %s  ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
+                 "%s -> %s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
                  mesh_node_name,
                  mesh_to_text_is_broadcast(mesh_to_node) ? "broadcast" :
                  mesh_to_node,
-                 mesh_ack_enabled ? "on" : "off",
+                 queued_count, mesh_ack_enabled ? "on" : "off",
                  ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
                  ack_drop);
         lv_label_set_text(mesh_detail_label, detail);
@@ -3763,32 +3787,67 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     }
 }
 
-static void mesh_send_submit_cb(const char *text, void *user_data)
+static void mesh_send_text_now(const char *text, const char *source,
+                               int clear_textarea)
 {
+    char clean[256];
     char command[320];
     char response[256];
+    int ret;
 
-    (void)user_data;
-    if(!text || !text[0]) {
+    snprintf(clean, sizeof(clean), "%s", text ? text : "");
+    ui_trim_text(clean);
+    mesh_ui_trace("SEND_%s len=%u active_inline=%d text=%.80s",
+                  source ? source : "unknown", (unsigned)strlen(clean),
+                  ui_input_inline_is_active(mesh_inline_input), clean);
+
+    if(!clean[0]) {
         mesh_append_log("send skipped: empty message");
+        mesh_ui_trace("SEND_SKIP source=%s reason=empty",
+                      source ? source : "unknown");
         return;
     }
-    snprintf(command, sizeof(command), "SEND %.220s\n", text);
-    if(mesh_ipc_command(command, response, sizeof(response)) == 0) {
-        ui_trim_text(response);
+
+    snprintf(command, sizeof(command), "SEND %.220s\n", clean);
+    ret = mesh_ipc_command(command, response, sizeof(response));
+    ui_trim_text(response);
+    mesh_ui_trace("SEND_RESPONSE source=%s ret=%d response=%s",
+                  source ? source : "unknown", ret, response);
+    if(ret == 0) {
         mesh_append_log("send: %s", response);
     } else {
-        ui_trim_text(response);
         mesh_append_log("send failed: %s", response);
     }
+    if(clear_textarea && mesh_textarea && lv_obj_is_valid(mesh_textarea)) {
+        lv_textarea_set_text(mesh_textarea, "");
+        lv_obj_add_state(mesh_textarea, LV_STATE_FOCUSED);
+    }
     mesh_refresh_status();
+    app_request_fast_refresh();
+}
+
+static void mesh_send_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    mesh_send_text_now(text, "SUBMIT", 0);
 }
 
 static void mesh_send_event_cb(lv_event_t *event)
 {
-    (void)event;
-    if(mesh_inline_input) {
+    const char *text = "";
+
+    if(mesh_textarea && lv_obj_is_valid(mesh_textarea)) {
+        text = lv_textarea_get_text(mesh_textarea);
+    }
+    mesh_ui_trace("SEND_CLICK code=%d active_inline=%d text_len=%u",
+                  (int)lv_event_get_code(event),
+                  ui_input_inline_is_active(mesh_inline_input),
+                  (unsigned)strlen(text ? text : ""));
+
+    if(mesh_inline_input && ui_input_inline_is_active(mesh_inline_input)) {
         ui_input_inline_submit(mesh_inline_input);
+    } else {
+        mesh_send_text_now(text, "BUTTON", 1);
     }
 }
 

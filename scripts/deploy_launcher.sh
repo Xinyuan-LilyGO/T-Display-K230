@@ -375,7 +375,8 @@ if [ "${DEPLOY_APP}" = "1" ]; then
     if [ -x /etc/init.d/S99zz_k230_phone_ui ]; then
         /etc/init.d/S99zz_k230_phone_ui stop >/tmp/k230_phone_ui_deploy_stop.log 2>&1 || true
     fi
-    killall -q k230_phone_ui k230_phone_ui_fullswitch_test ffmpeg aplay || true
+    killall -q k230_phone_ui k230_phone_ui_fullswitch_test \
+        k230_meshtastic_probe ffmpeg aplay || true
     for _ in 1 2 3 4 5; do
         if ! pidof k230_phone_ui >/dev/null 2>&1 &&
            ! pidof k230_phone_ui_fullswitch_test >/dev/null 2>&1; then

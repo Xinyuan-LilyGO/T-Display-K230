@@ -24,6 +24,7 @@
 
 #include <openssl/evp.h>
 
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@
 #define PROBE_VERSION "0.22"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
+#define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 8U
 #define LORA_PIN_CS 14U
 #define LORA_PIN_RST 5U
 #define LORA_PIN_BUSY 19U
@@ -6807,14 +6809,14 @@ static int setup_daemon_socket(const std::string &path)
 
 static std::string daemon_status_response(const probe_options_t &opts,
                                           chip_type_t chip,
-                                          const std::string &pending_send)
+                                          size_t pending_send_count)
 {
     char buf[1800];
     char ble_detail[160];
     char ble_pair[16];
     char slot_text[16];
     phoneapi_bridge_state_t ble_state;
-    const char *queued = pending_send.empty() ? "0" : "1";
+    const char *queued = pending_send_count > 0U ? "1" : "0";
     uint64_t now = monotonic_us();
     std::string channel_url = meshtastic_channel_url(opts);
 
@@ -6828,7 +6830,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
         snprintf(slot_text, sizeof(slot_text), "%s", "auto");
     }
     snprintf(buf, sizeof(buf),
-             "OK version=%s chip=%s op=%s tx=%lu rx=%lu queued=%s "
+             "OK version=%s chip=%s op=%s tx=%lu rx=%lu queued=%s queued_count=%u "
              "ble=%s ble_detail=%s ble_pair=%s "
              "hist=%u dup=%lu rebroadcast=%lu rebroadcast_drop=%lu "
              "delayed=%u next_rebroadcast_ms=%u "
@@ -6839,6 +6841,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s channel_url=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
              (unsigned long)tx_count, (unsigned long)rx_count, queued,
+             (unsigned)pending_send_count,
              phoneapi_bridge_state_name(ble_state), ble_detail, ble_pair,
              (unsigned)mesh_history_count,
              (unsigned long)mesh_duplicate_count,
@@ -7202,13 +7205,13 @@ static std::string daemon_nodes_response(void)
 static std::string handle_daemon_command(const std::string &line,
                                          const probe_options_t &opts,
                                          chip_type_t chip,
-                                         std::string *pending_send)
+                                         std::deque<std::string> *send_queue)
 {
     std::string message;
 
     if(line == "STATUS" || line == "status") {
-        return daemon_status_response(opts, chip, pending_send ? *pending_send :
-                                      std::string());
+        return daemon_status_response(opts, chip,
+                                      send_queue ? send_queue->size() : 0U);
     }
     if(line == "LOG" || line == "log") {
         return daemon_event_log_response();
@@ -7236,7 +7239,7 @@ static std::string handle_daemon_command(const std::string &line,
         return "OK quitting\n";
     }
     if(line.compare(0, 5, "SEND ") == 0 || line.compare(0, 5, "send ") == 0) {
-        if(!pending_send) {
+        if(!send_queue) {
             return "ERR internal\n";
         }
         message = trim_ipc_line(line.c_str() + 5);
@@ -7246,13 +7249,20 @@ static std::string handle_daemon_command(const std::string &line,
         if(message.size() > MESHTASTIC_MAX_IPC_MESSAGE_LEN) {
             return "ERR message-too-long\n";
         }
-        if(active_op == OP_TX || !pending_send->empty()) {
-            return "ERR busy\n";
+        if(send_queue->size() >= MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+            daemon_event("Daemon SEND queue full len=%u depth=%u",
+                         (unsigned)message.size(),
+                         (unsigned)send_queue->size());
+            return "ERR queue-full\n";
         }
-        *pending_send = message;
+        send_queue->push_back(message);
+        daemon_event("Daemon SEND queued len=%u depth=%u op=%s",
+                     (unsigned)message.size(),
+                     (unsigned)send_queue->size(),
+                     op_name(active_op));
         char buf[96];
-        snprintf(buf, sizeof(buf), "OK queued len=%u\n",
-                 (unsigned)message.size());
+        snprintf(buf, sizeof(buf), "OK queued len=%u depth=%u\n",
+                 (unsigned)message.size(), (unsigned)send_queue->size());
         return std::string(buf);
     }
     return "ERR unknown-command\n";
@@ -7260,7 +7270,7 @@ static std::string handle_daemon_command(const std::string &line,
 
 static void accept_daemon_clients(int server_fd, const probe_options_t &opts,
                                   chip_type_t chip,
-                                  std::string *pending_send)
+                                  std::deque<std::string> *send_queue)
 {
     for(;;) {
         struct pollfd pfd;
@@ -7292,7 +7302,7 @@ static void accept_daemon_clients(int server_fd, const probe_options_t &opts,
                 buf[n] = '\0';
                 line = trim_ipc_line(buf);
                 response = handle_daemon_command(line, opts, chip,
-                                                 pending_send);
+                                                 send_queue);
             }
         }
         (void)fd_write_all(client_fd, response.c_str(), response.size());
@@ -8065,7 +8075,7 @@ int main(int argc, char **argv)
     bool send_once_finished = false;
     bool send_once_awaiting_ack = false;
     int daemon_fd = -1;
-    std::string pending_daemon_send;
+    std::deque<std::string> pending_daemon_sends;
 
     setvbuf(stdout, nullptr, _IOLBF, 0);
     setvbuf(stderr, nullptr, _IOLBF, 0);
@@ -8215,7 +8225,8 @@ int main(int argc, char **argv)
         }
 
         if(daemon_fd >= 0) {
-            accept_daemon_clients(daemon_fd, opts, chip, &pending_daemon_send);
+            accept_daemon_clients(daemon_fd, opts, chip,
+                                  &pending_daemon_sends);
         }
 
         if(active_op != OP_TX) {
@@ -8276,10 +8287,13 @@ int main(int argc, char **argv)
             }
         }
 
-        if(!pending_daemon_send.empty() && active_op != OP_TX) {
+        if(!pending_daemon_sends.empty() && active_op != OP_TX) {
             tx_frame_t frame;
-            std::string message = pending_daemon_send;
-            pending_daemon_send.clear();
+            std::string message = pending_daemon_sends.front();
+            pending_daemon_sends.pop_front();
+            daemon_event("Daemon SEND dequeue depth=%u len=%u",
+                         (unsigned)pending_daemon_sends.size(),
+                         (unsigned)message.size());
             if(build_tx_frame(opts, message, &frame)) {
                 if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
                     if(frame.want_ack) {
@@ -8290,7 +8304,13 @@ int main(int argc, char **argv)
                         daemon_chat("TX 0x%08x: %s", opts.from_node,
                                     clean.c_str());
                     }
+                } else {
+                    daemon_event("Daemon SEND start failed len=%u",
+                                 (unsigned)message.size());
                 }
+            } else {
+                daemon_event("Daemon SEND build failed len=%u",
+                             (unsigned)message.size());
             }
         }
 
