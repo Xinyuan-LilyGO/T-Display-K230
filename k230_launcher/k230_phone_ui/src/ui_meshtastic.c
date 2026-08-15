@@ -24,6 +24,7 @@
 #define MESHTASTIC_DAEMON_LOG "/tmp/k230_meshtastic_daemon_ui.log"
 #define MESHTASTIC_UI_LOG_MAX 4096
 #define MESHTASTIC_UI_NODE_SELECT_MAX 24
+#define MESHTASTIC_UI_NODE_LINE_MAX 768
 #define MESHTASTIC_PREF_REGION "meshtastic.region"
 #define MESHTASTIC_PREF_PRESET "meshtastic.preset"
 #define MESHTASTIC_PREF_CHANNEL "meshtastic.channel"
@@ -55,6 +56,8 @@ static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
 static char mesh_last_chat_text[3072];
 static char mesh_last_ble_state[32] = "offline";
 static char mesh_node_select_ids[MESHTASTIC_UI_NODE_SELECT_MAX][24];
+static char mesh_node_select_lines[MESHTASTIC_UI_NODE_SELECT_MAX][MESHTASTIC_UI_NODE_LINE_MAX];
+static char mesh_node_detail_target_id[24];
 static int mesh_keyboard_reserved_h;
 static int mesh_status_panel_h;
 static int mesh_chat_gap;
@@ -1950,6 +1953,176 @@ static void mesh_select_node_target_event_cb(lv_event_t *event)
     mesh_restart_daemon_if_online();
 }
 
+static void mesh_node_detail_back_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_nodes_event_cb(NULL);
+}
+
+static void mesh_node_detail_event_cb(lv_event_t *event)
+{
+    const char *line = (const char *)lv_event_get_user_data(event);
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *section;
+    lv_obj_t *label;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int landscape = ui_is_landscape();
+    int left_w = landscape ? (content_w - 18) / 2 : content_w;
+    int right_x = landscape ? margin + left_w + 18 : margin;
+    int right_w = landscape ? content_w - left_w - 18 : content_w;
+    int y;
+    char node_id[24];
+    char name[64];
+    char short_name[24];
+    char hw[16];
+    char rx[16];
+    char age[24];
+    char rssi[24];
+    char snr[24];
+    char pos[128];
+    char tel[160];
+    char nbr[192];
+    char summary[320];
+
+    if(!line || strncmp(line, "0x", 2) != 0 ||
+       sscanf(line, "%23s", node_id) != 1) {
+        return;
+    }
+
+    mesh_node_line_segment(line, "name=", " short=", name, sizeof(name));
+    mesh_node_line_value(line, "short=", short_name, sizeof(short_name));
+    mesh_node_line_value(line, "hw=", hw, sizeof(hw));
+    mesh_node_line_value(line, "rx=", rx, sizeof(rx));
+    mesh_node_line_value(line, "age=", age, sizeof(age));
+    mesh_node_line_value(line, "rssi=", rssi, sizeof(rssi));
+    mesh_node_line_value(line, "snr=", snr, sizeof(snr));
+    mesh_node_line_segment(line, "pos=", " tel=", pos, sizeof(pos));
+    mesh_node_line_segment(line, "tel=", " nbr=", tel, sizeof(tel));
+    mesh_node_line_segment(line, "nbr=", NULL, nbr, sizeof(nbr));
+    if(strcmp(name, "-") == 0 && strcmp(short_name, "-") != 0) {
+        snprintf(name, sizeof(name), "%s", short_name);
+    }
+    snprintf(mesh_node_detail_target_id, sizeof(mesh_node_detail_target_id),
+             "%s", node_id);
+
+    if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
+        lv_obj_delete(mesh_nodes_overlay);
+    }
+    mesh_nodes_overlay = lv_obj_create(lv_screen_active());
+    ui_set_fullscreen(mesh_nodes_overlay);
+    lv_obj_set_style_bg_color(mesh_nodes_overlay, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_nodes_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mesh_nodes_overlay, 0, 0);
+    lv_obj_set_style_border_width(mesh_nodes_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_nodes_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_nodes_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(mesh_nodes_overlay);
+
+    panel = ui_scroll_panel(mesh_nodes_overlay, 0, 0, screen_w, screen_h);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    title = ui_label(panel, name, &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, margin, 22);
+    lv_obj_set_width(title, content_w - 210);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    subtitle = ui_label(panel, node_id, &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(subtitle, margin, 56);
+    lv_obj_set_width(subtitle, content_w - 210);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 206, 18, 100,
+                            "Message", 0x25C281);
+    lv_obj_add_event_cb(btn, mesh_select_node_target_event_cb,
+                        LV_EVENT_CLICKED, mesh_node_detail_target_id);
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96, "Back",
+                            0x374151);
+    lv_obj_add_event_cb(btn, mesh_node_detail_back_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    y = 104;
+    snprintf(summary, sizeof(summary),
+             "RSSI %s\nSNR %s\nPackets %s\nLast seen %s\nHardware %s",
+             rssi, snr, rx, age, hw);
+
+    section = ui_label(panel, "Signal", &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_pos(section, margin, y);
+    label = ui_label(panel, summary, &lv_font_montserrat_18, 0xCBD5E1);
+    lv_obj_set_pos(label, margin, y + 36);
+    lv_obj_set_width(label, left_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+    if(landscape) {
+        section = ui_label(panel, "Position", &lv_font_montserrat_20,
+                           0xF2F5F8);
+        lv_obj_set_pos(section, right_x, y);
+        label = ui_label(panel, pos, &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, right_x, y + 36);
+        lv_obj_set_width(label, right_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+        y += 176;
+        section = ui_label(panel, "Telemetry", &lv_font_montserrat_20,
+                           0xF2F5F8);
+        lv_obj_set_pos(section, margin, y);
+        label = ui_label(panel, tel, &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y + 36);
+        lv_obj_set_width(label, left_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+        section = ui_label(panel, "Neighbors", &lv_font_montserrat_20,
+                           0xF2F5F8);
+        lv_obj_set_pos(section, right_x, y);
+        label = ui_label(panel, nbr, &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, right_x, y + 36);
+        lv_obj_set_width(label, right_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    } else {
+        y += 172;
+        section = ui_label(panel, "Position", &lv_font_montserrat_20,
+                           0xF2F5F8);
+        lv_obj_set_pos(section, margin, y);
+        label = ui_label(panel, pos, &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y + 36);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+        y += 156;
+        section = ui_label(panel, "Telemetry", &lv_font_montserrat_20,
+                           0xF2F5F8);
+        lv_obj_set_pos(section, margin, y);
+        label = ui_label(panel, tel, &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y + 36);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+        y += 156;
+        section = ui_label(panel, "Neighbors", &lv_font_montserrat_20,
+                           0xF2F5F8);
+        lv_obj_set_pos(section, margin, y);
+        label = ui_label(panel, nbr, &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y + 36);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+        y += 156;
+        section = ui_label(panel, "Raw", &lv_font_montserrat_20, 0xF2F5F8);
+        lv_obj_set_pos(section, margin, y);
+        label = ui_label(panel, line, &lv_font_montserrat_14, 0x94A3B8);
+        lv_obj_set_pos(label, margin, y + 36);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    }
+}
+
 static void mesh_add_node_card(lv_obj_t *panel, const char *line,
                                int x, int y, int w, int h,
                                size_t select_index)
@@ -1995,6 +2168,8 @@ static void mesh_add_node_card(lv_obj_t *panel, const char *line,
     }
     snprintf(mesh_node_select_ids[select_index],
              sizeof(mesh_node_select_ids[select_index]), "%s", node_id);
+    snprintf(mesh_node_select_lines[select_index],
+             sizeof(mesh_node_select_lines[select_index]), "%s", line);
 
     card = ui_panel(panel, x, y, w, h);
     lv_obj_set_style_radius(card, 8, 0);
@@ -2002,8 +2177,8 @@ static void mesh_add_node_card(lv_obj_t *panel, const char *line,
     lv_obj_set_style_border_color(card, lv_color_hex(0x243044), 0);
     lv_obj_set_style_border_width(card, 1, 0);
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(card, mesh_select_node_target_event_cb,
-                        LV_EVENT_CLICKED, mesh_node_select_ids[select_index]);
+    lv_obj_add_event_cb(card, mesh_node_detail_event_cb,
+                        LV_EVENT_CLICKED, mesh_node_select_lines[select_index]);
 
     name_label = ui_label(card, name, &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_set_pos(name_label, 14, 12);
@@ -2029,7 +2204,7 @@ static void mesh_add_node_card(lv_obj_t *panel, const char *line,
     lv_obj_set_width(detail_label, w - 28);
     lv_label_set_long_mode(detail_label, LV_LABEL_LONG_WRAP);
 
-    hint_label = ui_label(card, "Tap to direct message",
+    hint_label = ui_label(card, "Tap for details",
                           &lv_font_montserrat_14, 0x3DA5FF);
     lv_obj_set_pos(hint_label, 14, h - 28);
     lv_obj_set_width(hint_label, w - 28);
