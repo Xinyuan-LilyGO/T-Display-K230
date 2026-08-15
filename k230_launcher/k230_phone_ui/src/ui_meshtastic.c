@@ -52,6 +52,7 @@ static lv_timer_t *mesh_timer;
 static char mesh_status_text[512] = "Not running";
 static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
 static char mesh_last_chat_text[3072];
+static char mesh_last_ble_state[32] = "offline";
 static int mesh_keyboard_reserved_h;
 static int mesh_status_panel_h;
 static int mesh_chat_gap;
@@ -400,6 +401,55 @@ static void mesh_append_log(const char *fmt, ...)
 static int mesh_status_is_online(const char *status)
 {
     return status && strncmp(status, "OK ", 3) == 0;
+}
+
+static void mesh_status_field(const char *status, const char *key,
+                              char *out, size_t out_len,
+                              const char *fallback)
+{
+    const char *p;
+    size_t key_len;
+
+    if(!out || out_len == 0U) {
+        return;
+    }
+    snprintf(out, out_len, "%s", fallback ? fallback : "");
+    if(!status || !key || !key[0]) {
+        return;
+    }
+    key_len = strlen(key);
+    p = status;
+    while((p = strstr(p, key)) != NULL) {
+        if((p == status || isspace((unsigned char)p[-1])) &&
+           p[key_len] == '=') {
+            size_t n = 0;
+            p += key_len + 1U;
+            while(p[n] && !isspace((unsigned char)p[n]) &&
+                  n + 1U < out_len) {
+                out[n] = p[n];
+                n++;
+            }
+            out[n] = '\0';
+            return;
+        }
+        p += key_len;
+    }
+}
+
+static void mesh_apply_ble_status(const char *status, int online)
+{
+    char ble_state[32];
+
+    mesh_status_field(status, "ble", ble_state, sizeof(ble_state), "offline");
+    if(!online) {
+        snprintf(ble_state, sizeof(ble_state), "%s", "offline");
+    }
+    app_set_ble_status(ble_state);
+    if(strcmp(mesh_last_ble_state, ble_state) != 0) {
+        mesh_append_log("BLE bridge: %s", ble_state);
+        snprintf(mesh_last_ble_state, sizeof(mesh_last_ble_state), "%s",
+                 ble_state);
+    }
 }
 
 static void mesh_safe_arg(char *dst, size_t dst_len, const char *src)
@@ -1050,6 +1100,7 @@ static void mesh_refresh_status(void)
     }
     ui_trim_text(mesh_status_text);
     online = mesh_status_is_online(mesh_status_text);
+    mesh_apply_ble_status(mesh_status_text, online);
 
     if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
         lv_label_set_text(mesh_status_label,

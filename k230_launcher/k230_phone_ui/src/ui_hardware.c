@@ -1135,6 +1135,11 @@ int ui_hardware_keyboard_backlight_get(void)
     return keyboard_backlight_current_or_pref();
 }
 
+int ui_hardware_boot0_screen_off(void)
+{
+    return boot0_screen_off;
+}
+
 void ui_hardware_shutdown_backlights_apply(int screen_value,
                                            int keyboard_percent)
 {

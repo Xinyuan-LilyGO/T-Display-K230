@@ -42,6 +42,7 @@ int ui_bq27220_get_current_ma(int *current_ma);
 int ui_bq27220_get_voltage_mv(int *voltage_mv);
 int ui_hardware_screen_backlight_get(void);
 int ui_hardware_keyboard_backlight_get(void);
+int ui_hardware_boot0_screen_off(void);
 void ui_hardware_shutdown_backlights_apply(int screen_value,
                                            int keyboard_percent);
 void ui_hardware_shutdown_backlights_step_apply(int screen_value,

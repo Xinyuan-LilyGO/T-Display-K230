@@ -197,6 +197,7 @@ typedef struct {
 
 static volatile int running = 1;
 static lv_indev_t *evdev_indev;
+static lv_indev_read_cb_t evdev_original_read_cb;
 static char input_path[64];
 static page_id_t current_page = PAGE_HOME;
 static page_id_t page_stack[8];
@@ -205,6 +206,7 @@ static lv_obj_t *app_screen;
 static lv_obj_t *ui_stage_obj;
 static lv_obj_t *page_root;
 static lv_obj_t *status_bar_obj;
+static lv_obj_t *status_ble_label;
 static lv_obj_t *transition_old_page;
 static int page_transition_active;
 static lv_obj_t *time_label;
@@ -455,6 +457,8 @@ static int shutdown_saved_screen_backlight;
 static int shutdown_saved_keyboard_backlight;
 static int shutdown_last_progress = -1;
 static int shutdown_last_fade_log_progress = -1;
+static char status_ble_state[24] = "offline";
+static uint64_t touch_block_last_log_us;
 
 static lv_style_t style_panel;
 static lv_style_t style_text_primary;
@@ -1124,6 +1128,21 @@ void app_note_user_activity(void)
     pthread_mutex_unlock(&display_idle_lock);
 }
 
+static int display_idle_is_dimmed(void)
+{
+    int dimmed;
+
+    pthread_mutex_lock(&display_idle_lock);
+    dimmed = display_idle_dimmed;
+    pthread_mutex_unlock(&display_idle_lock);
+    return dimmed;
+}
+
+static int touch_input_blocked(void)
+{
+    return display_idle_is_dimmed() || ui_hardware_boot0_screen_off();
+}
+
 static void display_idle_poll(void)
 {
     int timeout_s;
@@ -1154,6 +1173,19 @@ static void display_idle_poll(void)
         should_dim = 1;
     }
     pthread_mutex_unlock(&display_idle_lock);
+
+    if(!restore_pending && display_idle_is_dimmed() &&
+       ui_hardware_screen_backlight_get() > 0) {
+        pthread_mutex_lock(&display_idle_lock);
+        display_idle_dimmed = 0;
+        display_idle_wake_pending = 0;
+        display_last_activity_us = now;
+        pthread_mutex_unlock(&display_idle_lock);
+        touch_trace_log("DISPLAY_TIMEOUT_EXTERNAL_WAKE screen=%d",
+                        ui_hardware_screen_backlight_get());
+        app_request_fast_refresh();
+        return;
+    }
 
     if(restore_pending) {
         int screen = saved_screen > 0 ? saved_screen : 80;
@@ -1271,6 +1303,25 @@ static void display_map_raw_touch(int32_t raw_x, int32_t raw_y, int32_t *screen_
     }
 }
 
+static void evdev_guarded_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    if(evdev_original_read_cb) {
+        evdev_original_read_cb(indev, data);
+    }
+    if(touch_input_blocked()) {
+        uint64_t now = monotonic_us();
+        if(data) {
+            data->state = LV_INDEV_STATE_RELEASED;
+        }
+        if(now - touch_block_last_log_us > 1000000ULL) {
+            touch_block_last_log_us = now;
+            touch_trace_log("TOUCH_BLOCKED screen_off idle=%d boot0=%d",
+                            display_idle_is_dimmed(),
+                            ui_hardware_boot0_screen_off());
+        }
+    }
+}
+
 static void trace_raw_state(uint32_t seq, int pressed, int32_t raw_x, int32_t raw_y,
                             uint64_t kernel_us, uint64_t recv_us)
 {
@@ -1311,6 +1362,16 @@ static void trace_raw_state(uint32_t seq, int pressed, int32_t raw_x, int32_t ra
                         (unsigned long long)(kernel_us / 1000000ULL),
                         (unsigned long long)(kernel_us % 1000000ULL),
                         (double)lag_us / 1000.0);
+    }
+    if(touch_input_blocked()) {
+        uint64_t now = monotonic_us();
+        if(now - touch_block_last_log_us > 1000000ULL) {
+            touch_block_last_log_us = now;
+            touch_trace_log("RAW_IGNORED_SCREEN_OFF seq=%lu idle=%d boot0=%d",
+                            (unsigned long)seq, display_idle_is_dimmed(),
+                            ui_hardware_boot0_screen_off());
+        }
+        return;
     }
     app_note_user_activity();
     edge_back_raw_trace(seq, pressed, screen_x, screen_y);
@@ -3725,6 +3786,10 @@ static void create_status_bar(lv_obj_t *scr)
     time_label = label(bar, "--:--", &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_align(time_label, LV_ALIGN_LEFT_MID, 24, 0);
 
+    lv_obj_t *ble = chip(bar, "BLE", 0x9AA4AF);
+    lv_obj_align(ble, LV_ALIGN_RIGHT_MID, -226, 0);
+    status_ble_label = lv_obj_get_child(ble, 0);
+
     lv_obj_t *wifi = chip(bar, "WiFi", path_exists("/sys/class/net/wlan0") ? 0x25C281 : 0x9AA4AF);
     lv_obj_align(wifi, LV_ALIGN_RIGHT_MID, -156, 0);
 
@@ -3733,6 +3798,27 @@ static void create_status_bar(lv_obj_t *scr)
 
     lv_obj_t *cam = chip(bar, "CAM", has_video_node() ? 0x25C281 : 0x9AA4AF);
     lv_obj_align(cam, LV_ALIGN_RIGHT_MID, -24, 0);
+
+    app_set_ble_status(status_ble_state);
+}
+
+void app_set_ble_status(const char *state)
+{
+    uint32_t color = 0x9AA4AF;
+    const char *value = state && state[0] ? state : "offline";
+
+    snprintf(status_ble_state, sizeof(status_ble_state), "%s", value);
+    if(strcmp(value, "ready") == 0 || strcmp(value, "connected") == 0) {
+        color = 0x25C281;
+    } else if(strcmp(value, "probing") == 0 ||
+              strcmp(value, "starting") == 0 ||
+              strcmp(value, "unsupported") == 0 ||
+              strcmp(value, "error") == 0) {
+        color = 0xF5A524;
+    }
+    if(status_ble_label && lv_obj_is_valid(status_ble_label)) {
+        lv_obj_set_style_text_color(status_ble_label, lv_color_hex(color), 0);
+    }
 }
 
 static lv_obj_t *icon_tile(lv_obj_t *parent, const app_item_t *item, int x, int y,
@@ -9205,6 +9291,10 @@ int main(void)
         start_touch_trace(input_dev);
         ui_multitouch_start(input_dev);
         evdev_indev = lv_evdev_create(LV_INDEV_TYPE_POINTER, input_dev);
+        if(evdev_indev) {
+            evdev_original_read_cb = lv_indev_get_read_cb(evdev_indev);
+            lv_indev_set_read_cb(evdev_indev, evdev_guarded_read_cb);
+        }
         apply_touch_transform();
     } else {
         fprintf(stderr, "no input event device found; touch disabled\n");

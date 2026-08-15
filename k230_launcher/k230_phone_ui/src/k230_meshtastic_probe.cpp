@@ -922,6 +922,15 @@ typedef struct {
 } mesh_neighbor_info_t;
 
 typedef enum {
+    PHONEAPI_BRIDGE_OFFLINE = 0,
+    PHONEAPI_BRIDGE_PROBING,
+    PHONEAPI_BRIDGE_READY,
+    PHONEAPI_BRIDGE_CONNECTED,
+    PHONEAPI_BRIDGE_UNSUPPORTED,
+    PHONEAPI_BRIDGE_ERROR,
+} phoneapi_bridge_state_t;
+
+typedef enum {
     REGION_PROFILE_STD = 0,
     REGION_PROFILE_EU868,
     REGION_PROFILE_LITE,
@@ -1069,6 +1078,10 @@ static pthread_mutex_t phoneapi_uart_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int phoneapi_uart_fd = -1;
 static pthread_mutex_t phoneapi_tx_mutex = PTHREAD_MUTEX_INITIALIZER;
 static phoneapi_mesh_tx_t phoneapi_pending_tx;
+static pthread_mutex_t phoneapi_state_mutex = PTHREAD_MUTEX_INITIALIZER;
+static phoneapi_bridge_state_t phoneapi_bridge_state = PHONEAPI_BRIDGE_OFFLINE;
+static char phoneapi_bridge_detail[160] = "not-started";
+static bool phoneapi_init_sent;
 
 static void radio_event_isr(void)
 {
@@ -1140,6 +1153,86 @@ static void daemon_event(const char *fmt, ...)
     pthread_mutex_unlock(&daemon_log_mutex);
     printf("%s\n", line);
     fflush(stdout);
+}
+
+static const char *phoneapi_bridge_state_name(phoneapi_bridge_state_t state)
+{
+    switch(state) {
+    case PHONEAPI_BRIDGE_PROBING:
+        return "probing";
+    case PHONEAPI_BRIDGE_READY:
+        return "ready";
+    case PHONEAPI_BRIDGE_CONNECTED:
+        return "connected";
+    case PHONEAPI_BRIDGE_UNSUPPORTED:
+        return "unsupported";
+    case PHONEAPI_BRIDGE_ERROR:
+        return "error";
+    case PHONEAPI_BRIDGE_OFFLINE:
+    default:
+        return "offline";
+    }
+}
+
+static void phoneapi_bridge_set_state(phoneapi_bridge_state_t state,
+                                      const char *fmt, ...)
+{
+    char detail[sizeof(phoneapi_bridge_detail)];
+    va_list ap;
+
+    if(fmt && fmt[0]) {
+        va_start(ap, fmt);
+        vsnprintf(detail, sizeof(detail), fmt, ap);
+        va_end(ap);
+    } else {
+        snprintf(detail, sizeof(detail), "%s",
+                 phoneapi_bridge_state_name(state));
+    }
+    for(size_t i = 0; detail[i]; i++) {
+        if(isspace((unsigned char)detail[i])) {
+            detail[i] = '_';
+        }
+    }
+
+    pthread_mutex_lock(&phoneapi_state_mutex);
+    phoneapi_bridge_state = state;
+    snprintf(phoneapi_bridge_detail, sizeof(phoneapi_bridge_detail), "%s",
+             detail);
+    pthread_mutex_unlock(&phoneapi_state_mutex);
+}
+
+static phoneapi_bridge_state_t phoneapi_bridge_get_state(char *detail,
+                                                         size_t detail_len)
+{
+    phoneapi_bridge_state_t state;
+
+    pthread_mutex_lock(&phoneapi_state_mutex);
+    state = phoneapi_bridge_state;
+    if(detail && detail_len > 0U) {
+        snprintf(detail, detail_len, "%s", phoneapi_bridge_detail);
+    }
+    pthread_mutex_unlock(&phoneapi_state_mutex);
+    return state;
+}
+
+static bool phoneapi_bridge_can_send(void)
+{
+    phoneapi_bridge_state_t state = phoneapi_bridge_get_state(nullptr, 0);
+
+    return state == PHONEAPI_BRIDGE_READY ||
+           state == PHONEAPI_BRIDGE_CONNECTED;
+}
+
+static bool phoneapi_bridge_status_line(const std::string &line)
+{
+    return line.rfind("+MESH:STATUS", 0) == 0 ||
+           line.find("MESH_ADV=") != std::string::npos;
+}
+
+static bool phoneapi_bridge_status_connected(const std::string &line)
+{
+    return line.find("CONN=1") != std::string::npos ||
+           line.find("MESH_CONN=1") != std::string::npos;
 }
 
 static std::string mesh_clean_text(const std::string &text)
@@ -2462,7 +2555,7 @@ static bool phoneapi_send_from_payload_global(uint32_t field,
 {
     int fd = phoneapi_uart_fd;
 
-    if(fd < 0 || !phoneapi_thread_running) {
+    if(fd < 0 || !phoneapi_thread_running || !phoneapi_bridge_can_send()) {
         return false;
     }
     return phoneapi_send_from_payload(fd, field, payload, label);
@@ -2676,6 +2769,38 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
     if(line.empty() || line == "OK") {
         return;
     }
+    if(phoneapi_bridge_status_line(line)) {
+        phoneapi_bridge_state_t state =
+            phoneapi_bridge_status_connected(line) ?
+            PHONEAPI_BRIDGE_CONNECTED : PHONEAPI_BRIDGE_READY;
+
+        phoneapi_bridge_set_state(state,
+                                  phoneapi_bridge_status_connected(line) ?
+                                  "connected" : "advertising");
+        if(!phoneapi_init_sent) {
+            phoneapi_init_sent = true;
+            daemon_event("PhoneAPI bridge supported: %s", line.c_str());
+            (void)phoneapi_uart_send_line(fd, "AT+MESHCLR");
+            usleep(20000);
+            (void)phoneapi_uart_send_line(fd,
+                                          std::string("AT+MESHADV=") +
+                                          MESHTASTIC_PHONEAPI_ADV_NAME);
+            daemon_event("PhoneAPI bridge advertising name=%s",
+                         MESHTASTIC_PHONEAPI_ADV_NAME);
+        } else {
+            daemon_event("PhoneAPI UART %s", line.c_str());
+        }
+        return;
+    }
+    if((line.rfind("ERR", 0) == 0 || line.rfind("+ERR", 0) == 0) &&
+       !phoneapi_init_sent) {
+        phoneapi_bridge_set_state(PHONEAPI_BRIDGE_UNSUPPORTED,
+                                  "firmware-mismatch");
+        daemon_event("PhoneAPI bridge disabled: unsupported nRF52840 firmware line=%s",
+                     line.c_str());
+        phoneapi_thread_running = false;
+        return;
+    }
     if(line.rfind("+MESH:TORADIO,", 0) == 0) {
         const char *start = line.c_str() + strlen("+MESH:TORADIO,");
         char *endptr = nullptr;
@@ -2691,7 +2816,8 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
         phoneapi_process_toradio(fd, hex, hex_len);
         return;
     }
-    if(line.rfind("+MESH:", 0) == 0 || line.rfind("+ERR", 0) == 0) {
+    if(line.rfind("+MESH:", 0) == 0 || line.rfind("+ERR", 0) == 0 ||
+       line.rfind("ERR", 0) == 0) {
         daemon_event("PhoneAPI UART %s", line.c_str());
     }
 }
@@ -2702,23 +2828,25 @@ static void *phoneapi_thread_main(void *arg)
     int fd = phoneapi_open_uart();
     char line[2304];
     size_t line_len = 0;
+    uint64_t last_probe_us = 0;
+    unsigned int probe_attempts = 0;
 
     if(fd < 0) {
+        phoneapi_bridge_set_state(PHONEAPI_BRIDGE_OFFLINE, "open-failed");
         daemon_event("PhoneAPI bridge disabled: open %s failed: %s",
                      MESHTASTIC_PHONEAPI_UART_DEV, strerror(errno));
         phoneapi_thread_running = false;
         return nullptr;
     }
+    phoneapi_init_sent = false;
     pthread_mutex_lock(&phoneapi_uart_mutex);
     phoneapi_uart_fd = fd;
     pthread_mutex_unlock(&phoneapi_uart_mutex);
-    daemon_event("PhoneAPI bridge ready uart=%s adv=%s",
-                 MESHTASTIC_PHONEAPI_UART_DEV, MESHTASTIC_PHONEAPI_ADV_NAME);
-    (void)phoneapi_uart_send_line(fd, "AT+MESHCLR");
-    usleep(20000);
-    (void)phoneapi_uart_send_line(fd,
-                                  std::string("AT+MESHADV=") +
-                                  MESHTASTIC_PHONEAPI_ADV_NAME);
+    phoneapi_bridge_set_state(PHONEAPI_BRIDGE_PROBING, "uart-open");
+    daemon_event("PhoneAPI bridge probing uart=%s", MESHTASTIC_PHONEAPI_UART_DEV);
+    (void)phoneapi_uart_send_line(fd, "AT+MESHSTATUS?");
+    last_probe_us = monotonic_us();
+    probe_attempts = 1;
 
     while(phoneapi_thread_running && running) {
         struct pollfd pfd;
@@ -2734,6 +2862,21 @@ static void *phoneapi_thread_main(void *arg)
             break;
         }
         if(ret == 0 || !(pfd.revents & POLLIN)) {
+            if(!phoneapi_init_sent) {
+                uint64_t now = monotonic_us();
+                if(now - last_probe_us > 1000000ULL) {
+                    if(probe_attempts >= 3U) {
+                        phoneapi_bridge_set_state(PHONEAPI_BRIDGE_UNSUPPORTED,
+                                                  "status-timeout");
+                        daemon_event("PhoneAPI bridge disabled: AT+MESHSTATUS? timeout");
+                        phoneapi_thread_running = false;
+                        break;
+                    }
+                    (void)phoneapi_uart_send_line(fd, "AT+MESHSTATUS?");
+                    last_probe_us = now;
+                    probe_attempts++;
+                }
+            }
             continue;
         }
         for(;;) {
@@ -2746,6 +2889,7 @@ static void *phoneapi_thread_main(void *arg)
                 if(errno == EAGAIN || errno == EWOULDBLOCK) {
                     break;
                 }
+                phoneapi_bridge_set_state(PHONEAPI_BRIDGE_ERROR, "read-failed");
                 daemon_event("PhoneAPI read failed: %s", strerror(errno));
                 phoneapi_thread_running = false;
                 break;
@@ -2767,11 +2911,17 @@ static void *phoneapi_thread_main(void *arg)
             }
         }
     }
-    (void)phoneapi_uart_send_line(fd, "AT+MESHADV=OFF");
+    if(phoneapi_init_sent) {
+        (void)phoneapi_uart_send_line(fd, "AT+MESHADV=OFF");
+    }
     pthread_mutex_lock(&phoneapi_uart_mutex);
     phoneapi_uart_fd = -1;
     pthread_mutex_unlock(&phoneapi_uart_mutex);
     close(fd);
+    if(phoneapi_bridge_get_state(nullptr, 0) != PHONEAPI_BRIDGE_UNSUPPORTED &&
+       phoneapi_bridge_get_state(nullptr, 0) != PHONEAPI_BRIDGE_ERROR) {
+        phoneapi_bridge_set_state(PHONEAPI_BRIDGE_OFFLINE, "stopped");
+    }
     daemon_event("PhoneAPI bridge stopped");
     return nullptr;
 }
@@ -2782,10 +2932,12 @@ static void phoneapi_start(const probe_options_t &opts)
         return;
     }
     phoneapi_opts = opts;
+    phoneapi_bridge_set_state(PHONEAPI_BRIDGE_PROBING, "starting");
     phoneapi_thread_running = true;
     if(pthread_create(&phoneapi_thread, nullptr, phoneapi_thread_main,
                       nullptr) != 0) {
         phoneapi_thread_running = false;
+        phoneapi_bridge_set_state(PHONEAPI_BRIDGE_ERROR, "thread-create");
         daemon_event("PhoneAPI bridge pthread_create failed: %s",
                      strerror(errno));
         return;
@@ -4689,12 +4841,16 @@ static std::string daemon_status_response(const probe_options_t &opts,
                                           chip_type_t chip,
                                           const std::string &pending_send)
 {
-    char buf[1120];
+    char buf[1280];
+    char ble_detail[160];
+    phoneapi_bridge_state_t ble_state;
     const char *queued = pending_send.empty() ? "0" : "1";
     uint64_t now = monotonic_us();
 
+    ble_state = phoneapi_bridge_get_state(ble_detail, sizeof(ble_detail));
     snprintf(buf, sizeof(buf),
              "OK version=%s chip=%s op=%s tx=%lu rx=%lu queued=%s "
+             "ble=%s ble_detail=%s "
              "hist=%u dup=%lu rebroadcast=%lu rebroadcast_drop=%lu "
              "delayed=%u next_rebroadcast_ms=%u "
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
@@ -4704,6 +4860,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
              (unsigned long)tx_count, (unsigned long)rx_count, queued,
+             phoneapi_bridge_state_name(ble_state), ble_detail,
              (unsigned)mesh_history_count,
              (unsigned long)mesh_duplicate_count,
              (unsigned long)mesh_rebroadcast_count,

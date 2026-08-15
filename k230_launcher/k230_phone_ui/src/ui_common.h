@@ -109,6 +109,7 @@ void app_nav_back(void);
 void app_take_screenshot(void);
 void app_request_fast_refresh(void);
 void app_refresh_current_page(void);
+void app_set_ble_status(const char *state);
 void app_note_user_activity(void);
 int app_edge_back_enabled(void);
 void app_set_edge_back_enabled(int enabled);
