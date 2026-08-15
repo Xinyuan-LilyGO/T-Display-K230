@@ -77,7 +77,7 @@
 #define MESHTASTIC_NODEINFO_INTERVAL_US (10ULL * 60ULL * 1000000ULL)
 #define MESHTASTIC_NODEINFO_RETRY_US (60ULL * 1000000ULL)
 #define MESHTASTIC_PHONEAPI_UART_DEV "/dev/ttyS1"
-#define MESHTASTIC_PHONEAPI_ADV_NAME "nRF52840"
+#define MESHTASTIC_PHONEAPI_ADV_REFRESH_US (15ULL * 1000000ULL)
 #define MESHTASTIC_PHONEAPI_CONFIG_NONCE 69420U
 #define MESHTASTIC_PHONEAPI_NODEINFO_NONCE 69421U
 #define MESHTASTIC_HW_MODEL_NRF52840_PCA10059 40U
@@ -1082,6 +1082,7 @@ static pthread_mutex_t phoneapi_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static phoneapi_bridge_state_t phoneapi_bridge_state = PHONEAPI_BRIDGE_OFFLINE;
 static char phoneapi_bridge_detail[160] = "not-started";
 static bool phoneapi_init_sent;
+static uint64_t phoneapi_last_adv_us;
 
 static void radio_event_isr(void)
 {
@@ -1226,13 +1227,62 @@ static bool phoneapi_bridge_can_send(void)
 static bool phoneapi_bridge_status_line(const std::string &line)
 {
     return line.rfind("+MESH:STATUS", 0) == 0 ||
+           line.rfind("+MESH:ADV", 0) == 0 ||
+           line.rfind("+MESH:CONNECTED", 0) == 0 ||
+           line.rfind("+MESH:DISCONNECTED", 0) == 0 ||
            line.find("MESH_ADV=") != std::string::npos;
 }
 
 static bool phoneapi_bridge_status_connected(const std::string &line)
 {
+    if(line.rfind("+MESH:CONNECTED", 0) == 0) {
+        return true;
+    }
     return line.find("CONN=1") != std::string::npos ||
            line.find("MESH_CONN=1") != std::string::npos;
+}
+
+static std::string phoneapi_default_node_name(const probe_options_t &opts)
+{
+    char tmp[24];
+    uint32_t suffix = opts.from_node;
+
+    if(suffix == 0U) {
+        suffix = 0x2300U;
+    }
+    snprintf(tmp, sizeof(tmp), "k230-%04x", (unsigned)(suffix & 0xffffU));
+    return std::string(tmp);
+}
+
+static std::string phoneapi_sanitize_adv_name(const std::string &name)
+{
+    std::string out;
+
+    for(size_t i = 0; i < name.size() && out.size() < 31U; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if(c >= 0x20U && c < 0x7fU && c != ',' && c != '\r' && c != '\n') {
+            out.push_back((char)c);
+        } else if(!out.empty() && out.back() != '-') {
+            out.push_back('-');
+        }
+    }
+    while(!out.empty() && (out.back() == ' ' || out.back() == '-')) {
+        out.pop_back();
+    }
+    while(!out.empty() && (out.front() == ' ' || out.front() == '-')) {
+        out.erase(out.begin());
+    }
+    return out;
+}
+
+static std::string phoneapi_adv_name(const probe_options_t &opts)
+{
+    std::string name = phoneapi_sanitize_adv_name(opts.node_name);
+
+    if(name.empty() || name == "nRF52840" || name == "K230 nRF52840 AT") {
+        name = phoneapi_default_node_name(opts);
+    }
+    return name;
 }
 
 static std::string mesh_clean_text(const std::string &text)
@@ -2098,7 +2148,7 @@ static bool encode_phoneapi_user_proto(const probe_options_t &opts,
         return false;
     }
     if(long_name.empty()) {
-        long_name = "nRF52840";
+        long_name = phoneapi_default_node_name(opts);
     }
     short_name = make_short_node_name(long_name);
     out->clear();
@@ -2634,6 +2684,19 @@ static bool phoneapi_uart_send_line(int fd, const std::string &line)
     return ok;
 }
 
+static bool phoneapi_send_adv_start(int fd, const char *reason)
+{
+    std::string name = phoneapi_adv_name(phoneapi_opts);
+    std::string command = "AT+MESHADV=" + name;
+    bool ok = phoneapi_uart_send_line(fd, command);
+
+    phoneapi_last_adv_us = monotonic_us();
+    daemon_event("PhoneAPI bridge advertising name=%s reason=%s ok=%s",
+                 name.c_str(), reason && reason[0] ? reason : "manual",
+                 ok ? "yes" : "no");
+    return ok;
+}
+
 static bool phoneapi_send_from_payload(int fd, uint32_t field,
                                        const std::vector<uint8_t> &payload,
                                        const char *label)
@@ -2779,14 +2842,11 @@ static void phoneapi_process_uart_line(int fd, const std::string &raw_line)
                                   "connected" : "advertising");
         if(!phoneapi_init_sent) {
             phoneapi_init_sent = true;
+            phoneapi_last_adv_us = 0;
             daemon_event("PhoneAPI bridge supported: %s", line.c_str());
             (void)phoneapi_uart_send_line(fd, "AT+MESHCLR");
             usleep(20000);
-            (void)phoneapi_uart_send_line(fd,
-                                          std::string("AT+MESHADV=") +
-                                          MESHTASTIC_PHONEAPI_ADV_NAME);
-            daemon_event("PhoneAPI bridge advertising name=%s",
-                         MESHTASTIC_PHONEAPI_ADV_NAME);
+            (void)phoneapi_send_adv_start(fd, "init");
         } else {
             daemon_event("PhoneAPI UART %s", line.c_str());
         }
@@ -2829,6 +2889,7 @@ static void *phoneapi_thread_main(void *arg)
     char line[2304];
     size_t line_len = 0;
     uint64_t last_probe_us = 0;
+    uint64_t last_status_us = 0;
     unsigned int probe_attempts = 0;
 
     if(fd < 0) {
@@ -2862,8 +2923,8 @@ static void *phoneapi_thread_main(void *arg)
             break;
         }
         if(ret == 0 || !(pfd.revents & POLLIN)) {
+            uint64_t now = monotonic_us();
             if(!phoneapi_init_sent) {
-                uint64_t now = monotonic_us();
                 if(now - last_probe_us > 1000000ULL) {
                     if(probe_attempts >= 3U) {
                         phoneapi_bridge_set_state(PHONEAPI_BRIDGE_UNSUPPORTED,
@@ -2875,6 +2936,19 @@ static void *phoneapi_thread_main(void *arg)
                     (void)phoneapi_uart_send_line(fd, "AT+MESHSTATUS?");
                     last_probe_us = now;
                     probe_attempts++;
+                }
+            } else {
+                phoneapi_bridge_state_t bridge_state;
+
+                if(now - last_status_us > 3000000ULL) {
+                    (void)phoneapi_uart_send_line(fd, "AT+MESHSTATUS?");
+                    last_status_us = now;
+                }
+                bridge_state = phoneapi_bridge_get_state(nullptr, 0);
+                if(bridge_state != PHONEAPI_BRIDGE_CONNECTED &&
+                   now - phoneapi_last_adv_us >
+                   MESHTASTIC_PHONEAPI_ADV_REFRESH_US) {
+                    (void)phoneapi_send_adv_start(fd, "refresh");
                 }
             }
             continue;

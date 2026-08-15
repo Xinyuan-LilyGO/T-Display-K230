@@ -207,6 +207,7 @@ static lv_obj_t *ui_stage_obj;
 static lv_obj_t *page_root;
 static lv_obj_t *status_bar_obj;
 static lv_obj_t *status_ble_label;
+static lv_obj_t *status_ble_led;
 static lv_obj_t *transition_old_page;
 static int page_transition_active;
 static lv_obj_t *time_label;
@@ -3786,9 +3787,21 @@ static void create_status_bar(lv_obj_t *scr)
     time_label = label(bar, "--:--", &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_align(time_label, LV_ALIGN_LEFT_MID, 24, 0);
 
-    lv_obj_t *ble = chip(bar, "BLE", 0x9AA4AF);
+    lv_obj_t *ble = lv_obj_create(bar);
+    lv_obj_add_style(ble, &style_chip, 0);
+    lv_obj_set_size(ble, 66, 30);
+    lv_obj_clear_flag(ble, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(ble, LV_ALIGN_RIGHT_MID, -226, 0);
-    status_ble_label = lv_obj_get_child(ble, 0);
+    status_ble_label = label(ble, "BLE", &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 10, 0);
+    status_ble_led = lv_obj_create(ble);
+    lv_obj_set_size(status_ble_led, 9, 9);
+    lv_obj_set_style_radius(status_ble_led, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(status_ble_led, 0, 0);
+    lv_obj_set_style_bg_opa(status_ble_led, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(0x59616C), 0);
+    lv_obj_clear_flag(status_ble_led, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(status_ble_led, LV_ALIGN_RIGHT_MID, -9, 0);
 
     lv_obj_t *wifi = chip(bar, "WiFi", path_exists("/sys/class/net/wlan0") ? 0x25C281 : 0x9AA4AF);
     lv_obj_align(wifi, LV_ALIGN_RIGHT_MID, -156, 0);
@@ -3818,6 +3831,18 @@ void app_set_ble_status(const char *state)
     }
     if(status_ble_label && lv_obj_is_valid(status_ble_label)) {
         lv_obj_set_style_text_color(status_ble_label, lv_color_hex(color), 0);
+    }
+    if(status_ble_led && lv_obj_is_valid(status_ble_led)) {
+        uint32_t led_color = 0x59616C;
+        if(strcmp(value, "connected") == 0) {
+            led_color = 0x25C281;
+        } else if(strcmp(value, "probing") == 0 ||
+                  strcmp(value, "starting") == 0 ||
+                  strcmp(value, "unsupported") == 0 ||
+                  strcmp(value, "error") == 0) {
+            led_color = 0xF5A524;
+        }
+        lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(led_color), 0);
     }
 }
 
