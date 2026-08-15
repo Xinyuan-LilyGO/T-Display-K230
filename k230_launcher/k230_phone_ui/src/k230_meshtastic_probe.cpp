@@ -1373,7 +1373,8 @@ static std::string phoneapi_adv_name(const probe_options_t &opts)
 {
     std::string name = phoneapi_sanitize_adv_name(opts.node_name);
 
-    if(name.empty() || name == "nRF52840" || name == "K230 nRF52840 AT") {
+    if(name.empty() || name == "nRF52840" ||
+       name == "K230 nRF52840 AT" || name == "k230-t-display") {
         name = phoneapi_default_node_name(opts);
     }
     return name;
@@ -2112,8 +2113,8 @@ static bool encode_user_proto(const probe_options_t &opts,
     if(!out) {
         return false;
     }
-    if(long_name.empty()) {
-        long_name = "k230-t-display";
+    if(long_name.empty() || long_name == "k230-t-display") {
+        long_name = phoneapi_default_node_name(opts);
     }
     short_name = make_short_node_name(long_name);
 
@@ -2241,7 +2242,7 @@ static bool encode_phoneapi_user_proto(const probe_options_t &opts,
     if(!out) {
         return false;
     }
-    if(long_name.empty()) {
+    if(long_name.empty() || long_name == "k230-t-display") {
         long_name = phoneapi_default_node_name(opts);
     }
     short_name = make_short_node_name(long_name);
@@ -6717,12 +6718,55 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
     return true;
 }
 
+static bool default_node_name_from_netdev(const char *ifname, std::string *name)
+{
+    char path[96];
+    char line[96];
+    char compact[13];
+    FILE *fp;
+    size_t out = 0;
+
+    if(!ifname || !name) {
+        return false;
+    }
+    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
+    fp = fopen(path, "r");
+    if(!fp) {
+        return false;
+    }
+    if(!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return false;
+    }
+    fclose(fp);
+    for(size_t i = 0; line[i] && out < sizeof(compact) - 1U; i++) {
+        if(isxdigit((unsigned char)line[i])) {
+            compact[out++] = (char)tolower((unsigned char)line[i]);
+        }
+    }
+    compact[out] = '\0';
+    if(out < 4U) {
+        return false;
+    }
+    *name = std::string("k230-") + (compact + out - 4U);
+    return true;
+}
+
 static void default_node_name(std::string *name)
 {
     char host[64] = "k230";
     char buf[96];
 
-    if(!name || !name->empty()) {
+    if(!name) {
+        return;
+    }
+    if(!name->empty() && *name != "k230-t-display" &&
+       *name != "nRF52840" && *name != "K230 nRF52840 AT") {
+        return;
+    }
+    name->clear();
+    if(default_node_name_from_netdev("eth0", name) ||
+       default_node_name_from_netdev("wlan0", name)) {
         return;
     }
     (void)gethostname(host, sizeof(host));
