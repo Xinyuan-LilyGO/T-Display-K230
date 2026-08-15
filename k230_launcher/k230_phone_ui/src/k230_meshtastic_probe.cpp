@@ -3347,6 +3347,33 @@ static bool encode_phoneapi_config_lora(const probe_options_t &opts,
     return true;
 }
 
+static bool encode_phoneapi_config_position(const probe_options_t &opts,
+                                            std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> position;
+    uint32_t flags = 0x0001U | 0x0020U | 0x0080U | 0x0100U | 0x0200U;
+    uint32_t gps_mode = opts.position_enabled ? 1U : 0U;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    if(opts.position_enabled && mesh_gnss.probed && !mesh_gnss.present) {
+        gps_mode = 2U;
+    }
+    append_uint32_field(&position, 1U, opts.position_interval_sec);
+    append_bool_field(&position, 2U, false);
+    append_bool_field(&position, 3U, false);
+    append_uint32_field(&position, 5U, 30U);
+    append_uint32_field(&position, 7U, flags);
+    append_uint32_field(&position, 8U, 29U);
+    append_uint32_field(&position, 9U, 28U);
+    append_uint32_field(&position, 12U, 2U);
+    append_uint32_field(&position, 13U, gps_mode);
+    append_bytes_field(out, 2U, position);
+    return true;
+}
+
 static bool encode_phoneapi_config_bluetooth(std::vector<uint8_t> *out)
 {
     std::vector<uint8_t> bluetooth;
@@ -4015,16 +4042,21 @@ typedef struct {
 
 typedef struct {
     bool has_lora = false;
+    bool has_position = false;
     bool has_region = false;
     bool has_preset = false;
     bool has_hop_limit = false;
     bool has_tx_power = false;
     bool has_channel_num = false;
+    bool has_position_enabled = false;
+    bool has_position_interval = false;
     std::string region;
     std::string preset;
     uint32_t hop_limit = 0;
     int32_t tx_power = 0;
     uint32_t channel_num = 0;
+    bool position_enabled = false;
+    uint32_t position_interval_sec = 0;
 } phoneapi_config_update_t;
 
 static bool phoneapi_read_length_delimited(const std::vector<uint8_t> &payload,
@@ -4303,6 +4335,56 @@ static bool phoneapi_parse_lora_config_update(
     return true;
 }
 
+static bool phoneapi_parse_position_config_update(
+    const std::vector<uint8_t> &payload, phoneapi_config_update_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
+    }
+    out->has_position = true;
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 1U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            if(value >= 30U && value <= 86400U) {
+                out->position_interval_sec = value;
+                out->has_position_interval = true;
+            }
+        } else if(field == 4U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->position_enabled = value != 0U;
+            out->has_position_enabled = true;
+        } else if(field == 13U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->position_enabled = value == 1U;
+            out->has_position_enabled = true;
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool phoneapi_parse_config_update(const std::vector<uint8_t> &payload,
                                          phoneapi_config_update_t *out)
 {
@@ -4322,7 +4404,13 @@ static bool phoneapi_parse_config_update(const std::vector<uint8_t> &payload,
         }
         field = tag >> 3U;
         wire = tag & 0x07U;
-        if(field == 6U && wire == 2U) {
+        if(field == 2U && wire == 2U) {
+            std::vector<uint8_t> position;
+            if(!phoneapi_read_length_delimited(payload, &pos, &position) ||
+               !phoneapi_parse_position_config_update(position, out)) {
+                return false;
+            }
+        } else if(field == 6U && wire == 2U) {
             std::vector<uint8_t> lora;
             if(!phoneapi_read_length_delimited(payload, &pos, &lora) ||
                !phoneapi_parse_lora_config_update(lora, out)) {
@@ -4723,6 +4811,9 @@ static bool encode_phoneapi_admin_config_response(const probe_options_t &opts,
     case 0U:
         ok = encode_phoneapi_config_device(&config);
         break;
+    case 1U:
+        ok = encode_phoneapi_config_position(opts, &config);
+        break;
     case 5U:
         ok = encode_phoneapi_config_lora(opts, &config);
         break;
@@ -4790,6 +4881,8 @@ static bool encode_phoneapi_admin_metadata_response(const probe_options_t &opts,
 #define K230_MESH_PREF_HOP "meshtastic.hop"
 #define K230_MESH_PREF_ACK "meshtastic.ack"
 #define K230_MESH_PREF_REBROADCAST "meshtastic.rebroadcast"
+#define K230_MESH_PREF_POSITION "meshtastic.position"
+#define K230_MESH_PREF_POSITION_INTERVAL "meshtastic.position_interval"
 #define K230_PHONE_UI_PREF_VALUE_MAX 159U
 
 typedef struct {
@@ -4976,6 +5069,10 @@ static bool phoneapi_persist_meshtastic_opts(const probe_options_t &opts)
                           opts.want_ack ? "1" : "0");
         phoneapi_pref_set(&entries, K230_MESH_PREF_REBROADCAST,
                           opts.rebroadcast ? "1" : "0");
+        phoneapi_pref_set(&entries, K230_MESH_PREF_POSITION,
+                          opts.position_enabled ? "1" : "0");
+        snprintf(value, sizeof(value), "%u", opts.position_interval_sec);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_POSITION_INTERVAL, value);
         ok = phoneapi_pref_write(entries);
     }
     if(!ok) {
@@ -5062,6 +5159,24 @@ static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
                          opts->region.c_str(), opts->preset.c_str(),
                          opts->hop_limit, opts->profile.power,
                          opts->frequency_slot);
+        }
+        if(ok && config.has_position) {
+            if(config.has_position_enabled) {
+                opts->position_enabled = config.position_enabled;
+            }
+            if(config.has_position_interval) {
+                opts->position_interval_sec = config.position_interval_sec;
+            }
+            mesh_next_position_us = opts->position_enabled ?
+                monotonic_us() + 5000000ULL : 0ULL;
+            nrf9151_gnss_set_state(opts->position_enabled ? "probing" : "off",
+                                   opts->position_enabled ? "unavailable" :
+                                   "off",
+                                   opts->position_enabled ?
+                                   "PhoneAPI update" : "Disabled");
+            daemon_event("PhoneAPI local admin set_config position enabled=%s interval=%u",
+                         opts->position_enabled ? "yes" : "no",
+                         opts->position_interval_sec);
         }
         ok_all = ok_all && ok;
     }
@@ -5309,6 +5424,8 @@ static bool phoneapi_send_config_stage(int fd, const probe_options_t &opts,
          phoneapi_send_from_payload(fd, 5U, payload, "config_lora") && ok;
     ok = encode_phoneapi_config_device(&payload) &&
          phoneapi_send_from_payload(fd, 5U, payload, "config_device") && ok;
+    ok = encode_phoneapi_config_position(opts, &payload) &&
+         phoneapi_send_from_payload(fd, 5U, payload, "config_position") && ok;
     ok = encode_phoneapi_config_bluetooth(&payload) &&
          phoneapi_send_from_payload(fd, 5U, payload, "config_bluetooth") && ok;
     ok = encode_phoneapi_channel(opts, &payload) &&
