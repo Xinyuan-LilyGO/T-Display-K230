@@ -126,6 +126,7 @@ static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
 static lv_obj_t *mesh_publish_status_label;
+static lv_obj_t *mesh_node_request_status_label;
 static lv_obj_t *mesh_pairing_overlay;
 static lv_obj_t *mesh_settings_value_labels[24];
 static char mesh_last_pairing_code[16];
@@ -3608,6 +3609,7 @@ static void mesh_close_nodes_page(void)
         lv_obj_delete(mesh_nodes_overlay);
     }
     mesh_nodes_overlay = NULL;
+    mesh_node_request_status_label = NULL;
 }
 
 static void mesh_channel_scan_overlay_close(void)
@@ -4567,7 +4569,13 @@ static int mesh_node_line_value(const char *line, const char *key,
     if(!line || !key || !key[0]) {
         return 0;
     }
-    start = strstr(line, key);
+    start = line;
+    while((start = strstr(start, key)) != NULL) {
+        if(start == line || isspace((unsigned char)start[-1])) {
+            break;
+        }
+        start++;
+    }
     if(!start) {
         return 0;
     }
@@ -4617,6 +4625,119 @@ static int mesh_node_line_segment(const char *line, const char *start_key,
     return n > 0;
 }
 
+static int mesh_node_text_missing(const char *text)
+{
+    return !text || !text[0] || strcmp(text, "-") == 0;
+}
+
+static void mesh_node_append_line(char *out, size_t out_len,
+                                  const char *name, const char *value)
+{
+    size_t used;
+
+    if(!out || out_len == 0U || !name || mesh_node_text_missing(value)) {
+        return;
+    }
+    used = strlen(out);
+    if(used + 1U >= out_len) {
+        return;
+    }
+    snprintf(out + used, out_len - used, "%s%s: %s",
+             used > 0U ? "\n" : "", name, value);
+}
+
+static void mesh_node_append_value_from_key(char *out, size_t out_len,
+                                            const char *text,
+                                            const char *key,
+                                            const char *name)
+{
+    char value[64];
+
+    if(mesh_node_line_value(text, key, value, sizeof(value))) {
+        mesh_node_append_line(out, out_len, name, value);
+    }
+}
+
+static void mesh_node_format_position(const char *raw, char *out,
+                                      size_t out_len)
+{
+    const char *space;
+    size_t n;
+    char coords[96];
+
+    if(!out || out_len == 0U) {
+        return;
+    }
+    out[0] = '\0';
+    if(mesh_node_text_missing(raw)) {
+        snprintf(out, out_len, "No position data");
+        return;
+    }
+
+    space = strchr(raw, ' ');
+    n = space ? (size_t)(space - raw) : strlen(raw);
+    if(n >= sizeof(coords)) {
+        n = sizeof(coords) - 1U;
+    }
+    memcpy(coords, raw, n);
+    coords[n] = '\0';
+    mesh_node_append_line(out, out_len, "Coordinates", coords);
+    mesh_node_append_value_from_key(out, out_len, raw, "alt=", "Altitude");
+    mesh_node_append_value_from_key(out, out_len, raw, "speed=", "Speed");
+    mesh_node_append_value_from_key(out, out_len, raw, "track=", "Track");
+    mesh_node_append_value_from_key(out, out_len, raw, "sats=", "Satellites");
+    mesh_node_append_value_from_key(out, out_len, raw, "precision=",
+                                    "Precision");
+    mesh_node_append_value_from_key(out, out_len, raw, "time=", "Updated");
+    if(out[0] == '\0') {
+        snprintf(out, out_len, "%s", raw);
+    }
+}
+
+static void mesh_node_format_telemetry(const char *raw, char *out,
+                                       size_t out_len)
+{
+    if(!out || out_len == 0U) {
+        return;
+    }
+    out[0] = '\0';
+    if(mesh_node_text_missing(raw)) {
+        snprintf(out, out_len, "No telemetry data");
+        return;
+    }
+
+    mesh_node_append_value_from_key(out, out_len, raw, "bat=", "Battery");
+    mesh_node_append_value_from_key(out, out_len, raw, "v=", "Voltage");
+    mesh_node_append_value_from_key(out, out_len, raw, "ch=",
+                                    "Channel util");
+    mesh_node_append_value_from_key(out, out_len, raw, "air=", "Air util");
+    mesh_node_append_value_from_key(out, out_len, raw, "temp=",
+                                    "Temperature");
+    mesh_node_append_value_from_key(out, out_len, raw, "hum=", "Humidity");
+    mesh_node_append_value_from_key(out, out_len, raw, "press=", "Pressure");
+    mesh_node_append_value_from_key(out, out_len, raw, "env_v=",
+                                    "Sensor voltage");
+    mesh_node_append_value_from_key(out, out_len, raw, "iaq=", "IAQ");
+    mesh_node_append_value_from_key(out, out_len, raw, "up=", "Uptime");
+    mesh_node_append_value_from_key(out, out_len, raw, "time=", "Updated");
+    if(out[0] == '\0') {
+        snprintf(out, out_len, "%s", raw);
+    }
+}
+
+static void mesh_node_format_optional(const char *raw, const char *empty_text,
+                                      char *out, size_t out_len)
+{
+    if(!out || out_len == 0U) {
+        return;
+    }
+    if(mesh_node_text_missing(raw)) {
+        snprintf(out, out_len, "%s", empty_text ? empty_text : "-");
+    } else {
+        snprintf(out, out_len, "%s", raw);
+    }
+}
+
 static void mesh_select_node_target_event_cb(lv_event_t *event)
 {
     const char *node_id = (const char *)lv_event_get_user_data(event);
@@ -4657,10 +4778,24 @@ static void mesh_node_remote_request_event_cb(lv_event_t *event)
         ui_trim_text(response);
         mesh_append_log("request %s: %s",
                         mesh_node_detail_target_id, response);
+        if(mesh_node_request_status_label &&
+           lv_obj_is_valid(mesh_node_request_status_label)) {
+            lv_label_set_text(mesh_node_request_status_label,
+                              response[0] ? response : "Request sent");
+            lv_obj_set_style_text_color(mesh_node_request_status_label,
+                                        lv_color_hex(0x25C281), 0);
+        }
     } else {
         ui_trim_text(response);
         mesh_append_log("request failed %s: %s",
                         mesh_node_detail_target_id, response);
+        if(mesh_node_request_status_label &&
+           lv_obj_is_valid(mesh_node_request_status_label)) {
+            lv_label_set_text(mesh_node_request_status_label,
+                              response[0] ? response : "Request failed");
+            lv_obj_set_style_text_color(mesh_node_request_status_label,
+                                        lv_color_hex(0xEF4D5A), 0);
+        }
     }
     mesh_refresh_status();
 }
@@ -4703,6 +4838,10 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     char trace[192];
     char nbr[192];
     char summary[320];
+    char position_detail[320];
+    char telemetry_detail[320];
+    char trace_detail[224];
+    char neighbor_detail[224];
 
     if(!line || strncmp(line, "0x", 2) != 0 ||
        sscanf(line, "%23s", node_id) != 1) {
@@ -4720,6 +4859,13 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     mesh_node_line_segment(line, "tel=", " trace=", tel, sizeof(tel));
     mesh_node_line_segment(line, "trace=", " nbr=", trace, sizeof(trace));
     mesh_node_line_segment(line, "nbr=", NULL, nbr, sizeof(nbr));
+    mesh_node_format_position(pos, position_detail, sizeof(position_detail));
+    mesh_node_format_telemetry(tel, telemetry_detail,
+                               sizeof(telemetry_detail));
+    mesh_node_format_optional(trace, "No traceroute data", trace_detail,
+                              sizeof(trace_detail));
+    mesh_node_format_optional(nbr, "No neighbor data", neighbor_detail,
+                              sizeof(neighbor_detail));
     if(strcmp(name, "-") == 0 && strcmp(short_name, "-") != 0) {
         snprintf(name, sizeof(name), "%s", short_name);
     }
@@ -4781,7 +4927,16 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     MESH_NODE_REQ_BUTTON(4, "Neighbors", "REQUEST_NEIGHBORINFO", 0x14B8A6);
 #undef MESH_NODE_REQ_BUTTON
 
-    y = 88 + request_rows * 46 + 12;
+    y = 88 + request_rows * 46 + 6;
+    mesh_node_request_status_label =
+        ui_label(panel, "Tap a request button to update this node",
+                 &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(mesh_node_request_status_label, margin, y);
+    lv_obj_set_width(mesh_node_request_status_label, content_w);
+    lv_label_set_long_mode(mesh_node_request_status_label,
+                           LV_LABEL_LONG_DOT);
+
+    y += 34;
     snprintf(summary, sizeof(summary),
              "RSSI %s\nSNR %s\nPackets %s\nLast seen %s\nHardware %s",
              rssi, snr, rx, age, hw);
@@ -4797,16 +4952,18 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
         section = ui_label(panel, "Position", &lv_font_montserrat_20,
                            0xF2F5F8);
         lv_obj_set_pos(section, right_x, y);
-        label = ui_label(panel, pos, &lv_font_montserrat_18, 0xCBD5E1);
+        label = ui_label(panel, position_detail, &lv_font_montserrat_16,
+                         0xCBD5E1);
         lv_obj_set_pos(label, right_x, y + 36);
         lv_obj_set_width(label, right_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 
-        y += 176;
+        y += 190;
         section = ui_label(panel, "Telemetry", &lv_font_montserrat_20,
                            0xF2F5F8);
         lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, tel, &lv_font_montserrat_18, 0xCBD5E1);
+        label = ui_label(panel, telemetry_detail, &lv_font_montserrat_16,
+                         0xCBD5E1);
         lv_obj_set_pos(label, margin, y + 36);
         lv_obj_set_width(label, left_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
@@ -4814,16 +4971,18 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
         section = ui_label(panel, "Neighbors", &lv_font_montserrat_20,
                            0xF2F5F8);
         lv_obj_set_pos(section, right_x, y);
-        label = ui_label(panel, nbr, &lv_font_montserrat_18, 0xCBD5E1);
+        label = ui_label(panel, neighbor_detail, &lv_font_montserrat_16,
+                         0xCBD5E1);
         lv_obj_set_pos(label, right_x, y + 36);
         lv_obj_set_width(label, right_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 
-        y += 156;
+        y += 218;
         section = ui_label(panel, "Trace", &lv_font_montserrat_20,
                            0xF2F5F8);
         lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, trace, &lv_font_montserrat_18, 0xCBD5E1);
+        label = ui_label(panel, trace_detail, &lv_font_montserrat_16,
+                         0xCBD5E1);
         lv_obj_set_pos(label, margin, y + 36);
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
@@ -4832,34 +4991,38 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
         section = ui_label(panel, "Position", &lv_font_montserrat_20,
                            0xF2F5F8);
         lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, pos, &lv_font_montserrat_18, 0xCBD5E1);
+        label = ui_label(panel, position_detail, &lv_font_montserrat_16,
+                         0xCBD5E1);
         lv_obj_set_pos(label, margin, y + 36);
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 
-        y += 156;
+        y += 210;
         section = ui_label(panel, "Telemetry", &lv_font_montserrat_20,
                            0xF2F5F8);
         lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, tel, &lv_font_montserrat_18, 0xCBD5E1);
+        label = ui_label(panel, telemetry_detail, &lv_font_montserrat_16,
+                         0xCBD5E1);
         lv_obj_set_pos(label, margin, y + 36);
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 
-        y += 156;
+        y += 230;
         section = ui_label(panel, "Trace", &lv_font_montserrat_20,
                            0xF2F5F8);
         lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, trace, &lv_font_montserrat_18, 0xCBD5E1);
+        label = ui_label(panel, trace_detail, &lv_font_montserrat_16,
+                         0xCBD5E1);
         lv_obj_set_pos(label, margin, y + 36);
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 
-        y += 156;
+        y += 160;
         section = ui_label(panel, "Neighbors", &lv_font_montserrat_20,
                            0xF2F5F8);
         lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, nbr, &lv_font_montserrat_18, 0xCBD5E1);
+        label = ui_label(panel, neighbor_detail, &lv_font_montserrat_16,
+                         0xCBD5E1);
         lv_obj_set_pos(label, margin, y + 36);
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
