@@ -2518,6 +2518,13 @@ typedef struct {
 
 typedef struct {
     bool get_owner_request = false;
+    bool has_get_channel_request = false;
+    uint32_t get_channel_request = 0;
+    bool has_get_config_request = false;
+    uint32_t get_config_request = 0;
+    bool has_get_module_config_request = false;
+    uint32_t get_module_config_request = 0;
+    bool get_device_metadata_request = false;
     bool has_set_time_only = false;
     uint32_t set_time_only = 0;
 } phoneapi_admin_request_t;
@@ -2625,12 +2632,36 @@ static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
         }
         field = tag >> 3U;
         wire = tag & 0x07U;
-        if(field == 3U && wire == 0U) {
+        if(field == 1U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->get_channel_request)) {
+                return false;
+            }
+            out->has_get_channel_request = true;
+        } else if(field == 3U && wire == 0U) {
             uint32_t value;
             if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
                 return false;
             }
             out->get_owner_request = value != 0U;
+        } else if(field == 5U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->get_config_request)) {
+                return false;
+            }
+            out->has_get_config_request = true;
+        } else if(field == 7U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->get_module_config_request)) {
+                return false;
+            }
+            out->has_get_module_config_request = true;
+        } else if(field == 12U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->get_device_metadata_request = value != 0U;
         } else if(field == 43U && wire == 5U &&
                   pos + 4U <= payload.size()) {
             out->set_time_only = get_le32(payload.data() + pos);
@@ -2945,20 +2976,99 @@ static void phoneapi_session_passkey(const probe_options_t &opts,
     put_le32(passkey + 4, name_hash);
 }
 
-static bool encode_phoneapi_admin_owner_response(const probe_options_t &opts,
+static bool encode_phoneapi_admin_response_bytes(const probe_options_t &opts,
+                                                 uint32_t field,
+                                                 const std::vector<uint8_t> &value,
                                                  std::vector<uint8_t> *out)
 {
-    std::vector<uint8_t> user;
     uint8_t passkey[8];
 
-    if(!out || !encode_phoneapi_user_proto(opts, &user)) {
+    if(!out) {
         return false;
     }
     phoneapi_session_passkey(opts, passkey);
     out->clear();
-    append_bytes_field(out, 4U, user);
+    append_bytes_field(out, field, value);
     append_bytes_field(out, 101U, passkey, sizeof(passkey));
     return true;
+}
+
+static bool encode_phoneapi_admin_owner_response(const probe_options_t &opts,
+                                                 std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> user;
+
+    if(!out || !encode_phoneapi_user_proto(opts, &user)) {
+        return false;
+    }
+    return encode_phoneapi_admin_response_bytes(opts, 4U, user, out);
+}
+
+static bool encode_phoneapi_admin_config_response(const probe_options_t &opts,
+                                                  uint32_t config_type,
+                                                  std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> config;
+    bool ok = true;
+
+    if(!out) {
+        return false;
+    }
+    switch(config_type) {
+    case 0U:
+        ok = encode_phoneapi_config_device(&config);
+        break;
+    case 5U:
+        ok = encode_phoneapi_config_lora(opts, &config);
+        break;
+    case 6U:
+        ok = encode_phoneapi_config_bluetooth(&config);
+        break;
+    default:
+        config.clear();
+        daemon_event("PhoneAPI local admin config type %u returns empty",
+                     config_type);
+        break;
+    }
+    return ok && encode_phoneapi_admin_response_bytes(opts, 6U, config, out);
+}
+
+static bool encode_phoneapi_admin_module_config_response(
+    const probe_options_t &opts, uint32_t module_config_type,
+    std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> module_config;
+
+    if(!out) {
+        return false;
+    }
+    daemon_event("PhoneAPI local admin module config type %u returns empty",
+                 module_config_type);
+    return encode_phoneapi_admin_response_bytes(opts, 8U, module_config, out);
+}
+
+static bool encode_phoneapi_admin_channel_response(const probe_options_t &opts,
+                                                   uint32_t channel_request,
+                                                   std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> channel;
+
+    if(!out || !encode_phoneapi_channel(opts, &channel)) {
+        return false;
+    }
+    daemon_event("PhoneAPI local admin channel request=%u", channel_request);
+    return encode_phoneapi_admin_response_bytes(opts, 2U, channel, out);
+}
+
+static bool encode_phoneapi_admin_metadata_response(const probe_options_t &opts,
+                                                    std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> metadata;
+
+    if(!out || !encode_phoneapi_metadata(&metadata)) {
+        return false;
+    }
+    return encode_phoneapi_admin_response_bytes(opts, 13U, metadata, out);
 }
 
 static bool phoneapi_send_local_admin_response(int fd,
@@ -3023,6 +3133,54 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
                   phoneapi_send_local_admin_response(fd, tx, response,
                                                      "admin_owner");
         daemon_event("PhoneAPI local admin owner_response id=0x%08x ok=%s",
+                     tx.packet_id, ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.has_get_channel_request) {
+        std::vector<uint8_t> response;
+        bool ok = encode_phoneapi_admin_channel_response(
+                      phoneapi_opts, admin.get_channel_request, &response) &&
+                  phoneapi_send_local_admin_response(fd, tx, response,
+                                                     "admin_channel");
+        daemon_event("PhoneAPI local admin channel_response id=0x%08x req=%u ok=%s",
+                     tx.packet_id, admin.get_channel_request,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.has_get_config_request) {
+        std::vector<uint8_t> response;
+        bool ok = encode_phoneapi_admin_config_response(
+                      phoneapi_opts, admin.get_config_request, &response) &&
+                  phoneapi_send_local_admin_response(fd, tx, response,
+                                                     "admin_config");
+        daemon_event("PhoneAPI local admin config_response id=0x%08x type=%u ok=%s",
+                     tx.packet_id, admin.get_config_request,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.has_get_module_config_request) {
+        std::vector<uint8_t> response;
+        bool ok = encode_phoneapi_admin_module_config_response(
+                      phoneapi_opts, admin.get_module_config_request,
+                      &response) &&
+                  phoneapi_send_local_admin_response(fd, tx, response,
+                                                     "admin_module_config");
+        daemon_event("PhoneAPI local admin module_config_response id=0x%08x type=%u ok=%s",
+                     tx.packet_id, admin.get_module_config_request,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
+    if(admin.get_device_metadata_request) {
+        std::vector<uint8_t> response;
+        bool ok = encode_phoneapi_admin_metadata_response(phoneapi_opts,
+                                                          &response) &&
+                  phoneapi_send_local_admin_response(fd, tx, response,
+                                                     "admin_metadata");
+        daemon_event("PhoneAPI local admin metadata_response id=0x%08x ok=%s",
                      tx.packet_id, ok ? "yes" : "no");
         ok_all = ok_all && ok;
         handled = true;
