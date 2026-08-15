@@ -23,6 +23,7 @@
 #define MESHTASTIC_SOCKET_PATH "/tmp/k230_meshtastic.sock"
 #define MESHTASTIC_DAEMON_LOG "/tmp/k230_meshtastic_daemon_ui.log"
 #define MESHTASTIC_UI_LOG_MAX 4096
+#define MESHTASTIC_UI_NODE_SELECT_MAX 24
 #define MESHTASTIC_PREF_REGION "meshtastic.region"
 #define MESHTASTIC_PREF_PRESET "meshtastic.preset"
 #define MESHTASTIC_PREF_CHANNEL "meshtastic.channel"
@@ -53,6 +54,7 @@ static char mesh_status_text[512] = "Not running";
 static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
 static char mesh_last_chat_text[3072];
 static char mesh_last_ble_state[32] = "offline";
+static char mesh_node_select_ids[MESHTASTIC_UI_NODE_SELECT_MAX][24];
 static int mesh_keyboard_reserved_h;
 static int mesh_status_panel_h;
 static int mesh_chat_gap;
@@ -1241,6 +1243,25 @@ static void mesh_refresh_event_cb(lv_event_t *event)
     mesh_append_log("refresh: %s", mesh_status_text);
 }
 
+static void mesh_restart_daemon_if_online(void)
+{
+    char response[256];
+
+    if(mesh_ipc_command("STATUS\n", response, sizeof(response)) != 0) {
+        mesh_refresh_status();
+        return;
+    }
+    if(mesh_ipc_command("QUIT\n", response, sizeof(response)) == 0) {
+        ui_trim_text(response);
+        mesh_append_log("restart: %s", response);
+    } else {
+        ui_trim_text(response);
+        mesh_append_log("restart stop failed: %s", response);
+    }
+    usleep(220000);
+    mesh_start_event_cb(NULL);
+}
+
 static const mesh_region_choice_t *mesh_find_region_choice(const char *value)
 {
     if(!value || !value[0]) {
@@ -1849,6 +1870,172 @@ static void mesh_nodes_close_event_cb(lv_event_t *event)
 
 static void mesh_nodes_event_cb(lv_event_t *event);
 
+static int mesh_node_line_value(const char *line, const char *key,
+                                char *out, size_t out_len)
+{
+    const char *start;
+    size_t n = 0;
+
+    if(!out || out_len == 0U) {
+        return 0;
+    }
+    snprintf(out, out_len, "-");
+    if(!line || !key || !key[0]) {
+        return 0;
+    }
+    start = strstr(line, key);
+    if(!start) {
+        return 0;
+    }
+    start += strlen(key);
+    while(start[n] && !isspace((unsigned char)start[n]) &&
+          n + 1U < out_len) {
+        out[n] = start[n];
+        n++;
+    }
+    out[n] = '\0';
+    return n > 0;
+}
+
+static int mesh_node_line_segment(const char *line, const char *start_key,
+                                  const char *end_key, char *out,
+                                  size_t out_len)
+{
+    const char *start;
+    const char *end;
+    size_t n;
+
+    if(!out || out_len == 0U) {
+        return 0;
+    }
+    snprintf(out, out_len, "-");
+    if(!line || !start_key || !start_key[0]) {
+        return 0;
+    }
+    start = strstr(line, start_key);
+    if(!start) {
+        return 0;
+    }
+    start += strlen(start_key);
+    end = end_key && end_key[0] ? strstr(start, end_key) : NULL;
+    if(!end) {
+        end = line + strlen(line);
+    }
+    while(end > start && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    n = (size_t)(end - start);
+    if(n >= out_len) {
+        n = out_len - 1U;
+    }
+    memcpy(out, start, n);
+    out[n] = '\0';
+    return n > 0;
+}
+
+static void mesh_select_node_target_event_cb(lv_event_t *event)
+{
+    const char *node_id = (const char *)lv_event_get_user_data(event);
+
+    if(!node_id || !node_id[0]) {
+        return;
+    }
+    snprintf(mesh_to_node, sizeof(mesh_to_node), "%s", node_id);
+    mesh_save_profile_prefs();
+    mesh_update_profile_label();
+    mesh_close_nodes_page();
+    mesh_append_log("target selected: %s",
+                    mesh_to_text_is_broadcast(mesh_to_node) ?
+                    "broadcast" : mesh_to_node);
+    mesh_restart_daemon_if_online();
+}
+
+static void mesh_add_node_card(lv_obj_t *panel, const char *line,
+                               int x, int y, int w, int h,
+                               size_t select_index)
+{
+    lv_obj_t *card;
+    lv_obj_t *name_label;
+    lv_obj_t *id_label;
+    lv_obj_t *meta_label;
+    lv_obj_t *detail_label;
+    lv_obj_t *hint_label;
+    char node_id[24];
+    char name[64];
+    char short_name[24];
+    char hw[16];
+    char rx[16];
+    char age[24];
+    char rssi[24];
+    char snr[24];
+    char pos[96];
+    char tel[128];
+    char detail[260];
+    char meta[160];
+
+    if(select_index >= MESHTASTIC_UI_NODE_SELECT_MAX ||
+       !line || strncmp(line, "0x", 2) != 0) {
+        return;
+    }
+    if(sscanf(line, "%23s", node_id) != 1) {
+        return;
+    }
+    mesh_node_line_segment(line, "name=", " short=", name, sizeof(name));
+    mesh_node_line_value(line, "short=", short_name, sizeof(short_name));
+    mesh_node_line_value(line, "hw=", hw, sizeof(hw));
+    mesh_node_line_value(line, "rx=", rx, sizeof(rx));
+    mesh_node_line_value(line, "age=", age, sizeof(age));
+    mesh_node_line_value(line, "rssi=", rssi, sizeof(rssi));
+    mesh_node_line_value(line, "snr=", snr, sizeof(snr));
+    mesh_node_line_segment(line, "pos=", " tel=", pos, sizeof(pos));
+    mesh_node_line_segment(line, "tel=", " nbr=", tel, sizeof(tel));
+
+    if(strcmp(name, "-") == 0 && strcmp(short_name, "-") != 0) {
+        snprintf(name, sizeof(name), "%s", short_name);
+    }
+    snprintf(mesh_node_select_ids[select_index],
+             sizeof(mesh_node_select_ids[select_index]), "%s", node_id);
+
+    card = ui_panel(panel, x, y, w, h);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x111827), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x243044), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card, mesh_select_node_target_event_cb,
+                        LV_EVENT_CLICKED, mesh_node_select_ids[select_index]);
+
+    name_label = ui_label(card, name, &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_pos(name_label, 14, 12);
+    lv_obj_set_width(name_label, w - 28);
+    lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
+
+    id_label = ui_label(card, node_id, &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(id_label, 14, 42);
+    lv_obj_set_width(id_label, w - 28);
+    lv_label_set_long_mode(id_label, LV_LABEL_LONG_DOT);
+
+    snprintf(meta, sizeof(meta), "RSSI %s  SNR %s  RX %s  Age %s",
+             rssi, snr, rx, age);
+    meta_label = ui_label(card, meta, &lv_font_montserrat_14, 0x25C281);
+    lv_obj_set_pos(meta_label, 14, 68);
+    lv_obj_set_width(meta_label, w - 28);
+    lv_label_set_long_mode(meta_label, LV_LABEL_LONG_DOT);
+
+    snprintf(detail, sizeof(detail), "HW %s  Pos %s\n%s",
+             hw, pos, tel);
+    detail_label = ui_label(card, detail, &lv_font_montserrat_14, 0xCBD5E1);
+    lv_obj_set_pos(detail_label, 14, 94);
+    lv_obj_set_width(detail_label, w - 28);
+    lv_label_set_long_mode(detail_label, LV_LABEL_LONG_WRAP);
+
+    hint_label = ui_label(card, "Tap to direct message",
+                          &lv_font_montserrat_14, 0x3DA5FF);
+    lv_obj_set_pos(hint_label, 14, h - 28);
+    lv_obj_set_width(hint_label, w - 28);
+    lv_label_set_long_mode(hint_label, LV_LABEL_LONG_DOT);
+}
+
 static void mesh_profile_event_cb(lv_event_t *event)
 {
     lv_obj_t *panel;
@@ -1990,15 +2177,26 @@ static void mesh_profile_event_cb(lv_event_t *event)
 static void mesh_nodes_event_cb(lv_event_t *event)
 {
     char response[2048];
-    const char *shown;
+    char nodes_text[2048];
+    char *saveptr = NULL;
+    char *line;
     lv_obj_t *panel;
     lv_obj_t *title;
+    lv_obj_t *subtitle;
     lv_obj_t *label;
     lv_obj_t *btn;
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
     int margin = ui_page_side_margin();
     int content_w = screen_w - margin * 2;
+    int landscape = ui_is_landscape();
+    int columns = landscape ? 2 : 1;
+    int gap = 12;
+    int card_w = columns == 2 ? (content_w - gap) / 2 : content_w;
+    int card_h = landscape ? 154 : 166;
+    int y = 98;
+    int node_index = 1;
+    int shown_count = 0;
 
     (void)event;
     if(mesh_ipc_command("NODES\n", response, sizeof(response)) != 0) {
@@ -2006,9 +2204,9 @@ static void mesh_nodes_event_cb(lv_event_t *event)
         mesh_append_log("nodes failed: %s", response);
         return;
     }
-    shown = response;
+    snprintf(nodes_text, sizeof(nodes_text), "%s", response);
     if(strncmp(response, "OK nodes\n", 9) == 0) {
-        shown = response + 9;
+        snprintf(nodes_text, sizeof(nodes_text), "%s", response + 9);
     }
     if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
         lv_obj_delete(mesh_nodes_overlay);
@@ -2031,15 +2229,47 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     title = ui_label(panel, "Meshtastic nodes", &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_pos(title, margin, 22);
+    lv_obj_set_width(title, content_w - 230);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    subtitle = ui_label(panel, "Tap a node to make it the direct-message target",
+                        &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(subtitle, margin, 56);
+    lv_obj_set_width(subtitle, content_w);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+    snprintf(mesh_node_select_ids[0], sizeof(mesh_node_select_ids[0]),
+             "0xffffffff");
+    btn = ui_command_button(panel, screen_w - margin - 206, 18, 100,
+                            "Broadcast", 0x25C281);
+    lv_obj_add_event_cb(btn, mesh_select_node_target_event_cb,
+                        LV_EVENT_CLICKED, mesh_node_select_ids[0]);
     btn = ui_command_button(panel, screen_w - margin - 96, 18, 96, "Close",
                             0x374151);
     lv_obj_add_event_cb(btn, mesh_nodes_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
 
-    label = ui_label(panel, shown, &lv_font_montserrat_16, 0xCBD5E1);
-    lv_obj_set_pos(label, margin, 76);
-    lv_obj_set_width(label, content_w);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    line = strtok_r(nodes_text, "\n", &saveptr);
+    while(line && node_index < MESHTASTIC_UI_NODE_SELECT_MAX) {
+        if(strncmp(line, "0x", 2) == 0) {
+            int col = shown_count % columns;
+            int row = shown_count / columns;
+            int x = margin + col * (card_w + gap);
+            int card_y = y + row * (card_h + gap);
+            mesh_add_node_card(panel, line, x, card_y, card_w, card_h,
+                               (size_t)node_index);
+            node_index++;
+            shown_count++;
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+
+    if(shown_count == 0) {
+        label = ui_label(panel,
+                         nodes_text[0] ? nodes_text : "No nodes seen yet",
+                         &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y + 12);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    }
 }
 
 static void mesh_send_submit_cb(const char *text, void *user_data)
