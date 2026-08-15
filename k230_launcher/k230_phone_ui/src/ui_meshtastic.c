@@ -14,20 +14,26 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "qrcodegen.h"
+
 #define MESHTASTIC_PROBE_PATH "/root/app/k230_phone_ui/k230_meshtastic_probe"
 #define MESHTASTIC_SOCKET_PATH "/tmp/k230_meshtastic.sock"
 #define MESHTASTIC_DAEMON_LOG "/tmp/k230_meshtastic_daemon_ui.log"
 #define MESHTASTIC_CHANNEL_DIR "/root/meshtastic"
 #define MESHTASTIC_CHANNEL_URL_FILE MESHTASTIC_CHANNEL_DIR "/channel_url.txt"
+#define MESHTASTIC_QR_SCAN_PATH "/root/app/k230_phone_ui/k230_qr_scan"
 #define MESHTASTIC_UI_LOG_MAX 4096
 #define MESHTASTIC_UI_NODE_SELECT_MAX 24
 #define MESHTASTIC_UI_NODE_LINE_MAX 768
+#define MESHTASTIC_CHANNEL_QR_MAX 280
+#define MESHTASTIC_CHANNEL_QR_BORDER 4
 #define MESHTASTIC_PREF_REGION "meshtastic.region"
 #define MESHTASTIC_PREF_PRESET "meshtastic.preset"
 #define MESHTASTIC_PREF_CHANNEL "meshtastic.channel"
@@ -81,10 +87,20 @@ static lv_obj_t *mesh_choice_overlay;
 static lv_obj_t *mesh_channel_overlay;
 static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
+static lv_obj_t *mesh_channel_qr_canvas;
 static lv_obj_t *mesh_pairing_overlay;
 static lv_obj_t *mesh_settings_value_labels[11];
 static char mesh_last_pairing_code[16];
 static char mesh_channel_url_text[1024];
+static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
+                                    MESHTASTIC_CHANNEL_QR_MAX];
+static lv_timer_t *mesh_channel_scan_timer;
+static pthread_mutex_t mesh_channel_scan_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t mesh_channel_scan_thread;
+static int mesh_channel_scan_running;
+static int mesh_channel_scan_ready;
+static int mesh_channel_scan_ok;
+static char mesh_channel_scan_status[256];
 
 typedef enum {
     MESH_FIELD_REGION = 0,
@@ -2158,12 +2174,17 @@ static void mesh_close_nodes_page(void)
 
 static void mesh_close_channel_page(void)
 {
+    if(mesh_channel_scan_timer) {
+        lv_timer_delete(mesh_channel_scan_timer);
+        mesh_channel_scan_timer = NULL;
+    }
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
         lv_obj_delete(mesh_channel_overlay);
     }
     mesh_channel_overlay = NULL;
     mesh_channel_url_label = NULL;
     mesh_channel_status_label = NULL;
+    mesh_channel_qr_canvas = NULL;
 }
 
 static void mesh_channel_close_event_cb(lv_event_t *event)
@@ -2212,6 +2233,233 @@ static int mesh_channel_url_fetch(char *out, size_t out_len,
         snprintf(status, status_len, "%s", "Channel URL ready");
     }
     return 0;
+}
+
+static uint16_t mesh_rgb565(uint32_t rgb)
+{
+    uint8_t r = (uint8_t)((rgb >> 16U) & 0xffU);
+    uint8_t g = (uint8_t)((rgb >> 8U) & 0xffU);
+    uint8_t b = (uint8_t)(rgb & 0xffU);
+
+    return (uint16_t)(((uint16_t)(r & 0xf8U) << 8U) |
+                      ((uint16_t)(g & 0xfcU) << 3U) |
+                      ((uint16_t)b >> 3U));
+}
+
+static void mesh_channel_qr_render(const char *url, int px)
+{
+    uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
+    uint8_t tmp[qrcodegen_BUFFER_LEN_MAX];
+    uint16_t black = mesh_rgb565(0x05070A);
+    uint16_t white = mesh_rgb565(0xF8FAFC);
+    uint16_t empty = mesh_rgb565(0x17212B);
+    int qr_size = 0;
+    int scale = 1;
+    int image_px;
+    int offset;
+    bool ok = false;
+
+    if(!mesh_channel_qr_canvas || !lv_obj_is_valid(mesh_channel_qr_canvas)) {
+        return;
+    }
+    if(px < 64) {
+        px = 64;
+    }
+    if(px > MESHTASTIC_CHANNEL_QR_MAX) {
+        px = MESHTASTIC_CHANNEL_QR_MAX;
+    }
+
+    for(int i = 0; i < px * px; i++) {
+        mesh_channel_qr_buf[i] = empty;
+    }
+    if(url && url[0]) {
+        ok = qrcodegen_encodeText(url, tmp, qr, qrcodegen_Ecc_MEDIUM,
+                                  qrcodegen_VERSION_MIN,
+                                  qrcodegen_VERSION_MAX,
+                                  qrcodegen_Mask_AUTO, true);
+    }
+    if(ok) {
+        qr_size = qrcodegen_getSize(qr);
+        if(qr_size > 0) {
+            scale = px / (qr_size + MESHTASTIC_CHANNEL_QR_BORDER * 2);
+            if(scale < 1) {
+                scale = 1;
+            }
+            image_px = (qr_size + MESHTASTIC_CHANNEL_QR_BORDER * 2) * scale;
+            offset = (px - image_px) / 2;
+            if(offset < 0) {
+                offset = 0;
+            }
+            for(int y = 0; y < px; y++) {
+                for(int x = 0; x < px; x++) {
+                    int mx = (x - offset) / scale - MESHTASTIC_CHANNEL_QR_BORDER;
+                    int my = (y - offset) / scale - MESHTASTIC_CHANNEL_QR_BORDER;
+                    bool module = false;
+
+                    if(x >= offset && y >= offset && x < offset + image_px &&
+                       y < offset + image_px && mx >= 0 && my >= 0 &&
+                       mx < qr_size && my < qr_size) {
+                        module = qrcodegen_getModule(qr, mx, my);
+                    }
+                    mesh_channel_qr_buf[y * px + x] = module ? black : white;
+                }
+            }
+        }
+    }
+    lv_canvas_set_buffer(mesh_channel_qr_canvas, mesh_channel_qr_buf,
+                         px, px, LV_COLOR_FORMAT_RGB565);
+    lv_obj_invalidate(mesh_channel_qr_canvas);
+}
+
+static void mesh_channel_set_status(const char *text, uint32_t color)
+{
+    if(mesh_channel_status_label &&
+       lv_obj_is_valid(mesh_channel_status_label)) {
+        lv_label_set_text(mesh_channel_status_label,
+                          text && text[0] ? ui_tr(text) : ui_tr("Ready"));
+        lv_obj_set_style_text_color(mesh_channel_status_label,
+                                    lv_color_hex(color), 0);
+    }
+}
+
+static void mesh_channel_refresh_view(int ok, const char *status, int qr_px)
+{
+    if(mesh_channel_url_label && lv_obj_is_valid(mesh_channel_url_label)) {
+        lv_label_set_text(mesh_channel_url_label,
+                          mesh_channel_url_text[0] ? mesh_channel_url_text :
+                          ui_tr("Channel URL unavailable"));
+        lv_obj_set_style_text_color(mesh_channel_url_label,
+                                    lv_color_hex(ok ? 0xD7DEE8 : 0xF5A524),
+                                    0);
+    }
+    mesh_channel_set_status(status && status[0] ? status : "Ready",
+                            ok ? 0x25C281 : 0xF5A524);
+    mesh_channel_qr_render(mesh_channel_url_text, qr_px);
+}
+
+static void *mesh_channel_scan_worker(void *arg)
+{
+    char url[1024];
+    char command[1200];
+    char response[1280];
+    FILE *fp;
+    int ok = 0;
+
+    (void)arg;
+    url[0] = '\0';
+    response[0] = '\0';
+
+    fp = popen(MESHTASTIC_QR_SCAN_PATH
+               " --timeout-sec 18 2>/tmp/k230_qr_scan.log", "r");
+    if(fp) {
+        if(fgets(url, sizeof(url), fp)) {
+            ui_trim_text(url);
+        }
+        if(pclose(fp) == 0 && url[0]) {
+            snprintf(command, sizeof(command), "IMPORT_CHANNEL_URL %s\n", url);
+            if(mesh_ipc_command(command, response, sizeof(response)) == 0) {
+                ui_trim_text(response);
+                ok = strncmp(response, "OK imported", 11) == 0;
+            }
+        } else {
+            snprintf(response, sizeof(response), "%s", "QR scan failed");
+        }
+    } else {
+        snprintf(response, sizeof(response), "%s", "QR scan failed");
+    }
+    pthread_mutex_lock(&mesh_channel_scan_mutex);
+    mesh_channel_scan_ok = ok;
+    mesh_channel_scan_ready = 1;
+    mesh_channel_scan_running = 0;
+    snprintf(mesh_channel_scan_status, sizeof(mesh_channel_scan_status), "%s",
+             response[0] ? response : (ok ? "Channel imported" :
+             "QR scan failed"));
+    pthread_mutex_unlock(&mesh_channel_scan_mutex);
+    return NULL;
+}
+
+static void mesh_channel_scan_timer_cb(lv_timer_t *timer)
+{
+    char status[256];
+    int ready;
+    int ok;
+    int qr_px;
+
+    (void)timer;
+    pthread_mutex_lock(&mesh_channel_scan_mutex);
+    ready = mesh_channel_scan_ready;
+    ok = mesh_channel_scan_ok;
+    snprintf(status, sizeof(status), "%s", mesh_channel_scan_status);
+    if(ready) {
+        mesh_channel_scan_ready = 0;
+    }
+    pthread_mutex_unlock(&mesh_channel_scan_mutex);
+
+    if(!ready) {
+        return;
+    }
+    qr_px = (mesh_channel_qr_canvas &&
+             lv_obj_is_valid(mesh_channel_qr_canvas)) ?
+            lv_obj_get_width(mesh_channel_qr_canvas) : 0;
+    if(qr_px <= 0) {
+        qr_px = ui_is_landscape() ? 220 : 240;
+    }
+    if(ok) {
+        char fetch_status[160];
+
+        mesh_load_profile_prefs();
+        mesh_settings_refresh();
+        mesh_update_profile_label();
+        mesh_channel_url_text[0] = '\0';
+        (void)mesh_channel_url_fetch(mesh_channel_url_text,
+                                     sizeof(mesh_channel_url_text),
+                                     fetch_status, sizeof(fetch_status));
+        mesh_channel_refresh_view(1, "Channel imported", qr_px);
+        mesh_append_log("channel QR import: %s", status);
+    } else {
+        mesh_channel_set_status(status[0] ? status : "QR scan failed",
+                                0xEF4D5A);
+        mesh_append_log("channel QR import failed: %s", status);
+    }
+    if(mesh_channel_scan_timer) {
+        lv_timer_delete(mesh_channel_scan_timer);
+        mesh_channel_scan_timer = NULL;
+    }
+}
+
+static void mesh_channel_scan_event_cb(lv_event_t *event)
+{
+    int running;
+
+    (void)event;
+    pthread_mutex_lock(&mesh_channel_scan_mutex);
+    running = mesh_channel_scan_running;
+    if(!running) {
+        mesh_channel_scan_running = 1;
+        mesh_channel_scan_ready = 0;
+        mesh_channel_scan_ok = 0;
+        mesh_channel_scan_status[0] = '\0';
+    }
+    pthread_mutex_unlock(&mesh_channel_scan_mutex);
+
+    if(running) {
+        mesh_channel_set_status("Scanning channel QR...", 0xF5A524);
+        return;
+    }
+    mesh_channel_set_status("Scanning channel QR...", 0xF5A524);
+    if(pthread_create(&mesh_channel_scan_thread, NULL,
+                      mesh_channel_scan_worker, NULL) != 0) {
+        pthread_mutex_lock(&mesh_channel_scan_mutex);
+        mesh_channel_scan_running = 0;
+        pthread_mutex_unlock(&mesh_channel_scan_mutex);
+        mesh_channel_set_status("QR scan failed", 0xEF4D5A);
+        return;
+    }
+    pthread_detach(mesh_channel_scan_thread);
+    if(!mesh_channel_scan_timer) {
+        mesh_channel_scan_timer = lv_timer_create(mesh_channel_scan_timer_cb,
+                                                  200, NULL);
+    }
 }
 
 static void mesh_channel_save_event_cb(lv_event_t *event)
@@ -2267,28 +2515,20 @@ static void mesh_channel_refresh_event_cb(lv_event_t *event)
 {
     char status[160];
     int ok;
+    int qr_px;
 
     (void)event;
     mesh_channel_url_text[0] = '\0';
     ok = mesh_channel_url_fetch(mesh_channel_url_text,
                                 sizeof(mesh_channel_url_text),
                                 status, sizeof(status)) == 0;
-    if(mesh_channel_url_label && lv_obj_is_valid(mesh_channel_url_label)) {
-        lv_label_set_text(mesh_channel_url_label,
-                          mesh_channel_url_text[0] ? mesh_channel_url_text :
-                          ui_tr("Channel URL unavailable"));
-        lv_obj_set_style_text_color(mesh_channel_url_label,
-                                    lv_color_hex(ok ? 0xD7DEE8 : 0xF5A524),
-                                    0);
+    qr_px = (mesh_channel_qr_canvas &&
+             lv_obj_is_valid(mesh_channel_qr_canvas)) ?
+            lv_obj_get_width(mesh_channel_qr_canvas) : 0;
+    if(qr_px <= 0) {
+        qr_px = ui_is_landscape() ? 220 : 240;
     }
-    if(mesh_channel_status_label &&
-       lv_obj_is_valid(mesh_channel_status_label)) {
-        lv_label_set_text(mesh_channel_status_label,
-                          status[0] ? ui_tr(status) : ui_tr("Ready"));
-        lv_obj_set_style_text_color(mesh_channel_status_label,
-                                    lv_color_hex(ok ? 0x25C281 : 0xF5A524),
-                                    0);
-    }
+    mesh_channel_refresh_view(ok, status, qr_px);
 }
 
 static void mesh_channel_event_cb(lv_event_t *event)
@@ -2304,19 +2544,42 @@ static void mesh_channel_event_cb(lv_event_t *event)
     int screen_h = ui_screen_height();
     int margin = ui_page_side_margin();
     int content_w = screen_w - margin * 2;
-    int card_h = ui_is_landscape() ? 210 : 280;
+    int landscape = ui_is_landscape();
+    int card_y = landscape ? 88 : 104;
+    int card_h = landscape ? screen_h - card_y - 104 : 392;
+    int qr_px;
+    int text_x;
+    int text_y;
+    int text_w;
     int button_w;
     int y;
 
     (void)event;
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
-        lv_obj_delete(mesh_channel_overlay);
+        mesh_close_channel_page();
     }
 
     mesh_channel_url_text[0] = '\0';
     (void)mesh_channel_url_fetch(mesh_channel_url_text,
                                  sizeof(mesh_channel_url_text),
                                  status, sizeof(status));
+
+    if(card_h < 220) {
+        card_h = 220;
+    }
+    if(!landscape && card_h > screen_h - card_y - 126) {
+        card_h = screen_h - card_y - 126;
+    }
+    if(card_h < 220) {
+        card_h = 220;
+    }
+    qr_px = landscape ? card_h - 32 : content_w - 96;
+    if(qr_px > MESHTASTIC_CHANNEL_QR_MAX) {
+        qr_px = MESHTASTIC_CHANNEL_QR_MAX;
+    }
+    if(qr_px < 180) {
+        qr_px = 180;
+    }
 
     mesh_channel_overlay = lv_obj_create(lv_screen_active());
     ui_set_fullscreen(mesh_channel_overlay);
@@ -2351,10 +2614,30 @@ static void mesh_channel_event_cb(lv_event_t *event)
     lv_obj_add_event_cb(btn, mesh_channel_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
 
-    card = ui_panel(panel, margin, 104, content_w, card_h);
+    card = ui_panel(panel, margin, card_y, content_w, card_h);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
     lv_obj_set_style_border_color(card, lv_color_hex(0x243044), 0);
     lv_obj_set_style_pad_all(card, 16, 0);
+
+    mesh_channel_qr_canvas = lv_canvas_create(card);
+    lv_obj_set_pos(mesh_channel_qr_canvas,
+                   landscape ? 16 : (content_w - qr_px) / 2, 16);
+    mesh_channel_qr_render(mesh_channel_url_text, qr_px);
+
+    text_x = landscape ? qr_px + 32 : 16;
+    text_y = landscape ? 18 : qr_px + 34;
+    text_w = landscape ? content_w - text_x - 32 : content_w - 32;
+    if(text_w < 160) {
+        text_w = content_w - 32;
+        text_x = 16;
+        text_y = qr_px + 34;
+    }
+
+    label = ui_label(card, "Show this QR to Meshtastic app",
+                     &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(label, text_x, text_y);
+    lv_obj_set_width(label, text_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 
     mesh_channel_url_label =
         ui_label(card,
@@ -2362,10 +2645,11 @@ static void mesh_channel_event_cb(lv_event_t *event)
                  "Channel URL unavailable",
                  &lv_font_montserrat_16,
                  mesh_channel_url_text[0] ? 0xD7DEE8 : 0xF5A524);
-    lv_obj_set_width(mesh_channel_url_label, content_w - 32);
+    lv_obj_set_pos(mesh_channel_url_label, text_x, text_y + 34);
+    lv_obj_set_width(mesh_channel_url_label, text_w);
     lv_label_set_long_mode(mesh_channel_url_label, LV_LABEL_LONG_WRAP);
 
-    y = 104 + card_h + 22;
+    y = card_y + card_h + 16;
     mesh_channel_status_label = ui_label(panel, status[0] ? status : "Ready",
                                          &lv_font_montserrat_16,
                                          mesh_channel_url_text[0] ?
@@ -2375,17 +2659,21 @@ static void mesh_channel_event_cb(lv_event_t *event)
     lv_label_set_long_mode(mesh_channel_status_label, LV_LABEL_LONG_DOT);
 
     y += 42;
-    button_w = (content_w - 16) / 2;
-    if(button_w < 128) {
-        button_w = 128;
+    button_w = (content_w - 24) / 3;
+    if(button_w < 112) {
+        button_w = 112;
     }
     btn = ui_command_button(panel, margin, y, button_w, "Save URL",
                             0x25C281);
     lv_obj_add_event_cb(btn, mesh_channel_save_event_cb, LV_EVENT_CLICKED,
                         NULL);
-    btn = ui_command_button(panel, margin + button_w + 16, y, button_w,
+    btn = ui_command_button(panel, margin + button_w + 12, y, button_w,
                             "Refresh", 0x3DA5FF);
     lv_obj_add_event_cb(btn, mesh_channel_refresh_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    btn = ui_command_button(panel, margin + (button_w + 12) * 2, y,
+                            button_w, "Scan QR", 0x8B5CF6);
+    lv_obj_add_event_cb(btn, mesh_channel_scan_event_cb, LV_EVENT_CLICKED,
                         NULL);
 }
 

@@ -9,6 +9,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(RADIOLIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/RadioLib/src)
 set(NOFRENDO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nofrendo/src)
 set(LIBTMT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libtmt)
+set(QRCODEGEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen)
+set(QUIRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quirc)
 set(FACE_DETECT_SRC_DIR "")
 set(FACE_DETECT_SRC_CANDIDATES
     ${CMAKE_CURRENT_SOURCE_DIR}/../face_detect/src
@@ -95,6 +97,7 @@ set(K230_PHONE_UI_SOURCES
     ui_lora.cpp
     ui_nes.cpp
     ${LIBTMT_DIR}/tmt.c
+    ${QRCODEGEN_DIR}/qrcodegen.c
     ${NOFRENDO_SOURCES}
     ${RADIOLIB_REQUIRED_SOURCES}
 )
@@ -122,6 +125,13 @@ add_executable(k230_meshtastic_probe
     k230_meshtastic_probe.cpp
     ${RADIOLIB_REQUIRED_SOURCES}
 )
+add_executable(k230_qr_scan
+    qr_scan.c
+    ${QUIRC_DIR}/quirc.c
+    ${QUIRC_DIR}/identify.c
+    ${QUIRC_DIR}/decode.c
+    ${QUIRC_DIR}/version_db.c
+)
 add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(drm_motion_probe drm_motion_probe.c)
 add_executable(drm_motion_probe_rgb565 drm_motion_probe.c)
@@ -134,6 +144,7 @@ target_include_directories(${ui_target} PRIVATE
     ${RADIOLIB_DIR}
     ${NOFRENDO_DIR}
     ${LIBTMT_DIR}
+    ${QRCODEGEN_DIR}
     ${CMAKE_SYSROOT}/usr/include/opencv4
 )
 if(K230_PHONE_UI_FACE_DETECT_ENABLED)
@@ -177,6 +188,12 @@ target_include_directories(k230_lora_flrc_tile_stream PRIVATE
 target_include_directories(k230_meshtastic_probe PRIVATE
     ${CMAKE_SYSROOT}/usr/include
     ${RADIOLIB_DIR}
+)
+
+target_include_directories(k230_qr_scan PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${CMAKE_SYSROOT}/usr/include/libdrm
+    ${QUIRC_DIR}
 )
 
 target_compile_definitions(k230_meshtastic_probe PRIVATE
@@ -313,7 +330,18 @@ target_link_libraries(k230_meshtastic_probe PRIVATE
     pthread
 )
 
-install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_halow_udp_stream k230_meshtastic_probe k230_pcm_volume drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
+target_link_directories(k230_qr_scan PRIVATE
+    ${CMAKE_SYSROOT}/usr/lib
+)
+
+target_link_libraries(k230_qr_scan PRIVATE
+    v4l2-drm
+    display
+    drm
+    m
+)
+
+install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_halow_udp_stream k230_meshtastic_probe k230_qr_scan k230_pcm_volume drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
 install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
         ${CMAKE_CURRENT_SOURCE_DIR}/k230_halow_camera_stream.sh
         DESTINATION /root/app/k230_phone_ui)

@@ -30,7 +30,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.21"
+#define PROBE_VERSION "0.22"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define LORA_PIN_CS 14U
@@ -3226,10 +3226,12 @@ typedef struct {
     bool has_preset = false;
     bool has_hop_limit = false;
     bool has_tx_power = false;
+    bool has_channel_num = false;
     std::string region;
     std::string preset;
     uint32_t hop_limit = 0;
     int32_t tx_power = 0;
+    uint32_t channel_num = 0;
 } phoneapi_config_update_t;
 
 static bool phoneapi_read_length_delimited(const std::vector<uint8_t> &payload,
@@ -3494,6 +3496,12 @@ static bool phoneapi_parse_lora_config_update(
             }
             out->tx_power = (int32_t)value;
             out->has_tx_power = true;
+        } else if(field == 11U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->channel_num)) {
+                return false;
+            }
+            out->has_channel_num = out->channel_num > 0U;
         } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
                                        wire)) {
             return false;
@@ -4253,10 +4261,14 @@ static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
                 opts->profile.power = (int8_t)config.tx_power;
                 opts->manual_power = config.tx_power != 0;
             }
+            if(config.has_channel_num) {
+                opts->frequency_slot = config.channel_num;
+            }
             *request_reconfigure = true;
-            daemon_event("PhoneAPI local admin set_config lora region=%s preset=%s hop=%u power=%d",
+            daemon_event("PhoneAPI local admin set_config lora region=%s preset=%s hop=%u power=%d slot=%u",
                          opts->region.c_str(), opts->preset.c_str(),
-                         opts->hop_limit, opts->profile.power);
+                         opts->hop_limit, opts->profile.power,
+                         opts->frequency_slot);
         }
         ok_all = ok_all && ok;
     }
@@ -6862,6 +6874,213 @@ static std::string daemon_channel_url_response(const probe_options_t &opts)
     return std::string("OK channel_url=") + url + "\n";
 }
 
+static int base64url_value(char c)
+{
+    if(c >= 'A' && c <= 'Z') {
+        return c - 'A';
+    }
+    if(c >= 'a' && c <= 'z') {
+        return c - 'a' + 26;
+    }
+    if(c >= '0' && c <= '9') {
+        return c - '0' + 52;
+    }
+    if(c == '-' || c == '+') {
+        return 62;
+    }
+    if(c == '_' || c == '/') {
+        return 63;
+    }
+    return -1;
+}
+
+static bool base64url_decode_no_pad(const std::string &text,
+                                    std::vector<uint8_t> *out)
+{
+    uint32_t acc = 0;
+    int bits = 0;
+    bool saw_pad = false;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    for(char c : text) {
+        int value;
+
+        if(isspace((unsigned char)c)) {
+            continue;
+        }
+        if(c == '=') {
+            saw_pad = true;
+            continue;
+        }
+        if(saw_pad) {
+            return false;
+        }
+        value = base64url_value(c);
+        if(value < 0) {
+            return false;
+        }
+        acc = (acc << 6U) | (uint32_t)value;
+        bits += 6;
+        if(bits >= 8) {
+            bits -= 8;
+            out->push_back((uint8_t)((acc >> bits) & 0xffU));
+        }
+    }
+    return !out->empty();
+}
+
+static bool meshtastic_channel_url_payload(const std::string &url,
+                                           std::string *payload)
+{
+    std::string clean = trim_ipc_line(url.c_str());
+    size_t hash;
+
+    if(!payload) {
+        return false;
+    }
+    payload->clear();
+    hash = clean.find('#');
+    if(hash != std::string::npos) {
+        clean.erase(0, hash + 1U);
+    } else {
+        const char prefix[] = "meshtastic.org/e/";
+        size_t marker = clean.find(prefix);
+        if(marker != std::string::npos) {
+            clean.erase(0, marker + strlen(prefix));
+        }
+    }
+    while(!clean.empty() && (clean[0] == '/' || clean[0] == '#')) {
+        clean.erase(0, 1);
+    }
+    for(char c : clean) {
+        if(isspace((unsigned char)c) || c == '&' || c == '?') {
+            break;
+        }
+        payload->push_back(c);
+    }
+    return !payload->empty();
+}
+
+static bool meshtastic_parse_channel_url(const std::string &url,
+                                         phoneapi_channel_update_t *channel,
+                                         phoneapi_config_update_t *config)
+{
+    std::string encoded;
+    std::vector<uint8_t> bytes;
+    size_t pos = 0;
+    bool found = false;
+
+    if(!channel || !config ||
+       !meshtastic_channel_url_payload(url, &encoded) ||
+       !base64url_decode_no_pad(encoded, &bytes)) {
+        return false;
+    }
+    *channel = phoneapi_channel_update_t();
+    *config = phoneapi_config_update_t();
+    while(pos < bytes.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(bytes.data(), bytes.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 1U && wire == 2U) {
+            std::vector<uint8_t> settings;
+            if(!phoneapi_read_length_delimited(bytes, &pos, &settings) ||
+               !phoneapi_parse_channel_settings(settings, channel)) {
+                return false;
+            }
+            found = true;
+        } else if(field == 2U && wire == 2U) {
+            std::vector<uint8_t> lora;
+            if(!phoneapi_read_length_delimited(bytes, &pos, &lora) ||
+               !phoneapi_parse_lora_config_update(lora, config)) {
+                return false;
+            }
+            found = true;
+        } else if(!phoneapi_proto_skip(bytes.data(), bytes.size(), &pos, wire)) {
+            return false;
+        }
+    }
+    return found;
+}
+
+static std::string daemon_import_channel_url_response(const std::string &url,
+                                                      const probe_options_t &opts)
+{
+    phoneapi_channel_update_t channel;
+    phoneapi_config_update_t config;
+    probe_options_t imported = opts;
+    char buf[512];
+    bool request_reconfigure = false;
+
+    if(!meshtastic_parse_channel_url(url, &channel, &config)) {
+        daemon_event("channel URL import failed: parse");
+        return "ERR invalid-channel-url\n";
+    }
+    if(channel.has_name) {
+        imported.channel_name = mesh_clean_text(channel.name);
+        request_reconfigure = true;
+    }
+    if(channel.has_psk) {
+        imported.psk = channel.psk;
+        request_reconfigure = true;
+    }
+    if(config.has_region && config.region != "UNSET") {
+        imported.region = config.region;
+        request_reconfigure = true;
+    }
+    if(config.has_preset) {
+        imported.preset = config.preset;
+        request_reconfigure = true;
+    }
+    if(config.has_hop_limit) {
+        imported.hop_limit = config.hop_limit;
+        request_reconfigure = true;
+    }
+    if(config.has_tx_power && config.tx_power >= -9 &&
+       config.tx_power <= MESHTASTIC_MAX_K230_TX_POWER_DBM) {
+        imported.profile.power = (int8_t)config.tx_power;
+        imported.manual_power = config.tx_power != 0;
+        request_reconfigure = true;
+    }
+    if(config.has_channel_num) {
+        imported.frequency_slot = config.channel_num;
+        request_reconfigure = true;
+    }
+    if(request_reconfigure && !apply_meshtastic_profile(&imported)) {
+        daemon_event("channel URL import failed: unsupported region=%s preset=%s slot=%u",
+                     imported.region.c_str(), imported.preset.c_str(),
+                     imported.frequency_slot);
+        return "ERR unsupported-channel-config\n";
+    }
+    if(!phoneapi_persist_meshtastic_opts(imported)) {
+        daemon_event("channel URL import failed: persist");
+        return "ERR persist-failed\n";
+    }
+    if(request_reconfigure) {
+        phoneapi_store_runtime_opts(imported, true);
+    }
+    daemon_event("channel URL imported region=%s preset=%s channel=%s psk=%s hop=%u slot=%u",
+                 imported.region.c_str(), imported.preset.c_str(),
+                 imported.channel_name.empty() ? "<preset>" :
+                 imported.channel_name.c_str(), imported.psk.c_str(),
+                 imported.hop_limit, imported.frequency_slot);
+    snprintf(buf, sizeof(buf),
+             "OK imported region=%s preset=%s channel=%s psk=%s hop=%u slot=%u\n",
+             imported.region.c_str(), imported.preset.c_str(),
+             imported.channel_name.empty() ? "<preset>" :
+             imported.channel_name.c_str(), imported.psk.c_str(),
+             imported.hop_limit, imported.frequency_slot);
+    return std::string(buf);
+}
+
 static std::string daemon_event_log_response(void)
 {
     std::string response = "OK log\n";
@@ -6996,6 +7215,14 @@ static std::string handle_daemon_command(const std::string &line,
     if(line == "CHANNEL_URL" || line == "channel_url" ||
        line == "CHANNELURL" || line == "channelurl") {
         return daemon_channel_url_response(opts);
+    }
+    if(line.compare(0, 19, "IMPORT_CHANNEL_URL ") == 0 ||
+       line.compare(0, 19, "import_channel_url ") == 0) {
+        message = trim_ipc_line(line.c_str() + 19);
+        if(message.empty()) {
+            return "ERR empty-channel-url\n";
+        }
+        return daemon_import_channel_url_response(message, opts);
     }
     if(line == "QUIT" || line == "quit") {
         running = 0;
