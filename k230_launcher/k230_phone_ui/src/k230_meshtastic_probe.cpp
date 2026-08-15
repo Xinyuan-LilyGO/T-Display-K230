@@ -748,6 +748,18 @@ typedef struct {
 } probe_profile_t;
 
 typedef struct {
+    bool configured = false;
+    uint32_t role = MESHTASTIC_CHANNEL_ROLE_DISABLED;
+    std::string name;
+    std::string psk;
+    bool uplink_enabled = false;
+    bool downlink_enabled = false;
+    bool has_position_precision = false;
+    uint32_t position_precision = 0;
+    bool is_muted = false;
+} mesh_channel_slot_t;
+
+typedef struct {
     probe_profile_t profile;
     std::string spi_path = LORA_SPI_DEV;
     std::string node_name;
@@ -803,6 +815,8 @@ typedef struct {
         (uint32_t)(MESHTASTIC_DEVICE_TELEMETRY_INTERVAL_US / 1000000ULL);
     uint32_t telemetry_environment_interval_sec =
         (uint32_t)(MESHTASTIC_ENV_TELEMETRY_INTERVAL_US / 1000000ULL);
+    mesh_channel_slot_t channels[MESHTASTIC_PHONEAPI_MAX_CHANNELS];
+    uint32_t primary_channel_index = 0;
     std::string region;
     std::string preset;
     uint32_t frequency_slot = 0;
@@ -2834,6 +2848,72 @@ static bool parse_psk(const std::string &text, std::vector<uint8_t> *key)
         key->push_back((uint8_t)((hi << 4) | lo));
     }
     return key->size() == 16U || key->size() == 32U;
+}
+
+static std::string mesh_psk_bytes_to_text(const std::vector<uint8_t> &psk)
+{
+    char buf[80];
+    static const char hex[] = "0123456789abcdef";
+
+    if(psk.empty() || (psk.size() == 1U && psk[0] == 0U)) {
+        return "none";
+    }
+    if(psk.size() == 1U && psk[0] >= 1U && psk[0] <= 10U) {
+        std::vector<uint8_t> key(default_psk,
+                                 default_psk + sizeof(default_psk));
+        if(psk[0] == 1U) {
+            return "default";
+        }
+        key[key.size() - 1U] =
+            (uint8_t)(key[key.size() - 1U] + (psk[0] - 1U));
+        return mesh_psk_bytes_to_text(key);
+    }
+    if(psk.size() == sizeof(default_psk) &&
+       memcmp(psk.data(), default_psk, sizeof(default_psk)) == 0) {
+        return "default";
+    }
+    if(psk.size() != 16U && psk.size() != 32U) {
+        return "default";
+    }
+    if(psk.size() * 2U + 3U > sizeof(buf)) {
+        return "default";
+    }
+    buf[0] = '0';
+    buf[1] = 'x';
+    for(size_t i = 0; i < psk.size(); i++) {
+        buf[2U + i * 2U] = hex[(psk[i] >> 4U) & 0x0fU];
+        buf[3U + i * 2U] = hex[psk[i] & 0x0fU];
+    }
+    buf[2U + psk.size() * 2U] = '\0';
+    return std::string(buf);
+}
+
+static std::string mesh_channel_slot_name(const probe_options_t &opts,
+                                          uint32_t index)
+{
+    if(index < MESHTASTIC_PHONEAPI_MAX_CHANNELS &&
+       opts.channels[index].configured &&
+       !opts.channels[index].name.empty()) {
+        return opts.channels[index].name;
+    }
+    if(index == opts.primary_channel_index) {
+        return effective_mesh_channel_name(opts);
+    }
+    return std::string();
+}
+
+static std::string mesh_channel_slot_psk(const probe_options_t &opts,
+                                         uint32_t index)
+{
+    if(index < MESHTASTIC_PHONEAPI_MAX_CHANNELS &&
+       opts.channels[index].configured &&
+       !opts.channels[index].psk.empty()) {
+        return opts.channels[index].psk;
+    }
+    if(index == opts.primary_channel_index) {
+        return opts.psk.empty() ? std::string("default") : opts.psk;
+    }
+    return std::string("default");
 }
 
 static uint8_t mesh_channel_hash(const std::string &name,
@@ -4986,26 +5066,57 @@ static bool encode_phoneapi_channel_at(const probe_options_t &opts,
 {
     std::vector<uint8_t> channel;
     std::vector<uint8_t> settings;
+    std::vector<uint8_t> module_settings;
     std::vector<uint8_t> key;
-    std::string channel_name = effective_mesh_channel_name(opts);
+    const mesh_channel_slot_t *slot = nullptr;
+    std::string channel_name;
+    std::string psk;
+    uint32_t role = MESHTASTIC_CHANNEL_ROLE_DISABLED;
 
-    if(!out) {
+    if(!out || index >= MESHTASTIC_PHONEAPI_MAX_CHANNELS) {
         return false;
     }
     out->clear();
+    slot = &opts.channels[index];
+    if(slot->configured) {
+        role = slot->role;
+    } else if(index == opts.primary_channel_index) {
+        role = MESHTASTIC_CHANNEL_ROLE_PRIMARY;
+    }
     append_uint32_field(&channel, 1U, index);
-    if(index != 0U) {
+    if(role == MESHTASTIC_CHANNEL_ROLE_DISABLED) {
         append_uint32_field(&channel, 3U, MESHTASTIC_CHANNEL_ROLE_DISABLED);
         *out = channel;
         return true;
     }
-    (void)parse_psk(opts.psk, &key);
+    channel_name = mesh_channel_slot_name(opts, index);
+    psk = mesh_channel_slot_psk(opts, index);
+    if(!parse_psk(psk, &key)) {
+        (void)parse_psk("default", &key);
+    }
     if(!key.empty()) {
         append_bytes_field(&settings, 2U, key);
     }
-    append_string_field(&settings, 3U, channel_name, 31U);
+    if(!channel_name.empty()) {
+        append_string_field(&settings, 3U, channel_name, 31U);
+    }
+    if(slot->uplink_enabled) {
+        append_bool_field(&settings, 5U, true);
+    }
+    if(slot->downlink_enabled) {
+        append_bool_field(&settings, 6U, true);
+    }
+    if(slot->has_position_precision) {
+        append_uint32_field(&module_settings, 1U, slot->position_precision);
+    }
+    if(slot->is_muted) {
+        append_bool_field(&module_settings, 2U, true);
+    }
+    if(!module_settings.empty()) {
+        append_bytes_field(&settings, 7U, module_settings);
+    }
     append_bytes_field(&channel, 2U, settings);
-    append_uint32_field(&channel, 3U, MESHTASTIC_CHANNEL_ROLE_PRIMARY);
+    append_uint32_field(&channel, 3U, role);
     *out = channel;
     return true;
 }
@@ -5664,8 +5775,16 @@ typedef struct {
     bool has_role = false;
     bool has_name = false;
     bool has_psk = false;
+    bool has_uplink_enabled = false;
+    bool has_downlink_enabled = false;
+    bool has_position_precision = false;
+    bool has_is_muted = false;
     uint32_t index = 0U;
     uint32_t role = MESHTASTIC_CHANNEL_ROLE_PRIMARY;
+    bool uplink_enabled = false;
+    bool downlink_enabled = false;
+    uint32_t position_precision = 0U;
+    bool is_muted = false;
     std::string name;
     std::string psk;
 } phoneapi_channel_update_t;
@@ -5772,14 +5891,47 @@ static bool phoneapi_parse_user_update(const std::vector<uint8_t> &payload,
 
 static std::string phoneapi_psk_bytes_to_text(const std::vector<uint8_t> &psk)
 {
-    if(psk.empty()) {
-        return "none";
+    return mesh_psk_bytes_to_text(psk);
+}
+
+static bool phoneapi_parse_channel_module_settings(
+    const std::vector<uint8_t> &payload, phoneapi_channel_update_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
     }
-    if(psk.size() == sizeof(default_psk) &&
-       memcmp(psk.data(), default_psk, sizeof(default_psk)) == 0) {
-        return "default";
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 1U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->position_precision = value;
+            out->has_position_precision = true;
+        } else if(field == 2U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->is_muted = value != 0U;
+            out->has_is_muted = true;
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
     }
-    return phoneapi_hex_encode(psk);
+    return true;
 }
 
 static bool phoneapi_parse_channel_settings(
@@ -5813,6 +5965,28 @@ static bool phoneapi_parse_channel_settings(
             }
             out->name = mesh_clean_text(out->name);
             out->has_name = true;
+        } else if(field == 5U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->uplink_enabled = value != 0U;
+            out->has_uplink_enabled = true;
+        } else if(field == 6U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->downlink_enabled = value != 0U;
+            out->has_downlink_enabled = true;
+        } else if(field == 7U && wire == 2U) {
+            std::vector<uint8_t> module_settings;
+            if(!phoneapi_read_length_delimited(payload, &pos,
+                                               &module_settings) ||
+               !phoneapi_parse_channel_module_settings(module_settings,
+                                                       out)) {
+                return false;
+            }
         } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
                                        wire)) {
             return false;
@@ -6685,6 +6859,8 @@ static bool encode_phoneapi_admin_connection_status_response(
 #define K230_MESH_PREF_PRESET "meshtastic.preset"
 #define K230_MESH_PREF_CHANNEL "meshtastic.channel"
 #define K230_MESH_PREF_PSK "meshtastic.psk"
+#define K230_MESH_PREF_PRIMARY_CHANNEL "meshtastic.channel.primary"
+#define K230_MESH_PREF_CHANNEL_SLOT_PREFIX "meshtastic.channel.slot"
 #define K230_MESH_PREF_POWER "meshtastic.power"
 #define K230_MESH_PREF_NODE "meshtastic.node"
 #define K230_MESH_PREF_FROM "meshtastic.from"
@@ -6777,7 +6953,7 @@ static bool phoneapi_pref_load(std::vector<phoneapi_pref_entry_t> *entries)
             continue;
         }
         entries->push_back({key, phoneapi_pref_value_clip(value)});
-        if(entries->size() >= 96U) {
+        if(entries->size() >= 192U) {
             break;
         }
     }
@@ -6800,6 +6976,31 @@ static void phoneapi_pref_set(std::vector<phoneapi_pref_entry_t> *entries,
         }
     }
     entries->push_back({key, clipped});
+}
+
+static bool phoneapi_pref_get(const std::vector<phoneapi_pref_entry_t> &entries,
+                              const char *key, std::string *out)
+{
+    if(!key || !out) {
+        return false;
+    }
+    for(size_t i = 0; i < entries.size(); i++) {
+        if(entries[i].key == key) {
+            *out = entries[i].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void phoneapi_channel_pref_key(char *out, size_t out_len,
+                                      uint32_t index, const char *field)
+{
+    if(!out || out_len == 0U || !field) {
+        return;
+    }
+    snprintf(out, out_len, "%s.%u.%s", K230_MESH_PREF_CHANNEL_SLOT_PREFIX,
+             index, field);
 }
 
 static bool phoneapi_pref_write(const std::vector<phoneapi_pref_entry_t> &entries)
@@ -7057,6 +7258,38 @@ static bool phoneapi_persist_meshtastic_opts(const probe_options_t &opts)
         phoneapi_pref_set(&entries, K230_MESH_PREF_CHANNEL,
                           opts.channel_name);
         phoneapi_pref_set(&entries, K230_MESH_PREF_PSK, opts.psk);
+        snprintf(value, sizeof(value), "%u", opts.primary_channel_index);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_PRIMARY_CHANNEL, value);
+        for(uint32_t i = 0U; i < MESHTASTIC_PHONEAPI_MAX_CHANNELS; i++) {
+            char key[64];
+            const mesh_channel_slot_t &slot = opts.channels[i];
+
+            phoneapi_channel_pref_key(key, sizeof(key), i, "role");
+            snprintf(value, sizeof(value), "%u", slot.configured ?
+                     slot.role :
+                     (i == opts.primary_channel_index ?
+                      MESHTASTIC_CHANNEL_ROLE_PRIMARY :
+                      MESHTASTIC_CHANNEL_ROLE_DISABLED));
+            phoneapi_pref_set(&entries, key, value);
+            phoneapi_channel_pref_key(key, sizeof(key), i, "name");
+            phoneapi_pref_set(&entries, key, mesh_channel_slot_name(opts, i));
+            phoneapi_channel_pref_key(key, sizeof(key), i, "psk");
+            phoneapi_pref_set(&entries, key, mesh_channel_slot_psk(opts, i));
+            phoneapi_channel_pref_key(key, sizeof(key), i, "uplink");
+            phoneapi_pref_set(&entries, key,
+                              slot.uplink_enabled ? "1" : "0");
+            phoneapi_channel_pref_key(key, sizeof(key), i, "downlink");
+            phoneapi_pref_set(&entries, key,
+                              slot.downlink_enabled ? "1" : "0");
+            phoneapi_channel_pref_key(key, sizeof(key), i, "muted");
+            phoneapi_pref_set(&entries, key, slot.is_muted ? "1" : "0");
+            phoneapi_channel_pref_key(key, sizeof(key), i,
+                                      "position_precision");
+            snprintf(value, sizeof(value), "%u",
+                     slot.has_position_precision ?
+                     slot.position_precision : 0U);
+            phoneapi_pref_set(&entries, key, value);
+        }
         phoneapi_pref_set(&entries, K230_MESH_PREF_POWER,
                           opts.manual_power ?
                           std::to_string((int)opts.profile.power) : "auto");
@@ -7144,22 +7377,84 @@ static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
                             (index == 0U ? MESHTASTIC_CHANNEL_ROLE_PRIMARY :
                                            MESHTASTIC_CHANNEL_ROLE_SECONDARY);
 
-            if(index == 0U && role != MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+            if(index >= MESHTASTIC_PHONEAPI_MAX_CHANNELS ||
+               role > MESHTASTIC_CHANNEL_ROLE_SECONDARY) {
+                ok = false;
+                daemon_event("PhoneAPI local admin set_channel invalid index=%u role=%u",
+                             index, role);
+            } else if(role == MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+                mesh_channel_slot_t &slot = opts->channels[index];
+
+                slot = mesh_channel_slot_t();
+                slot.configured = true;
+                slot.role = MESHTASTIC_CHANNEL_ROLE_DISABLED;
+                if(index == opts->primary_channel_index) {
+                    opts->primary_channel_index = 0U;
+                    opts->channels[0].configured = true;
+                    opts->channels[0].role = MESHTASTIC_CHANNEL_ROLE_PRIMARY;
+                    opts->channel_name = opts->channels[0].name;
+                    opts->psk = opts->channels[0].psk.empty() ?
+                                std::string("default") : opts->channels[0].psk;
+                    *request_reconfigure = true;
+                }
+                daemon_event("PhoneAPI local admin set_channel index=%u disabled",
+                             index);
+            } else {
+                mesh_channel_slot_t &slot = opts->channels[index];
+
+                slot.configured = true;
+                slot.role = role;
                 if(channel.has_name) {
-                    opts->channel_name = mesh_clean_text(channel.name);
+                    slot.name = mesh_clean_text(channel.name);
                 }
                 if(channel.has_psk) {
-                    opts->psk = channel.psk;
+                    slot.psk = channel.psk;
                 }
-                *request_reconfigure = true;
-                daemon_event("PhoneAPI local admin set_channel index=%u role=%u name=%s psk=%s",
+                if(channel.has_uplink_enabled) {
+                    slot.uplink_enabled = channel.uplink_enabled;
+                }
+                if(channel.has_downlink_enabled) {
+                    slot.downlink_enabled = channel.downlink_enabled;
+                }
+                if(channel.has_position_precision) {
+                    slot.position_precision = channel.position_precision;
+                    slot.has_position_precision = true;
+                }
+                if(channel.has_is_muted) {
+                    slot.is_muted = channel.is_muted;
+                }
+                if(slot.psk.empty()) {
+                    slot.psk = (index == opts->primary_channel_index) ?
+                               opts->psk : std::string("default");
+                }
+                if(role == MESHTASTIC_CHANNEL_ROLE_PRIMARY) {
+                    for(uint32_t i = 0U; i < MESHTASTIC_PHONEAPI_MAX_CHANNELS;
+                        i++) {
+                        if(i != index && opts->channels[i].configured &&
+                           opts->channels[i].role ==
+                           MESHTASTIC_CHANNEL_ROLE_PRIMARY) {
+                            opts->channels[i].role =
+                                MESHTASTIC_CHANNEL_ROLE_SECONDARY;
+                        }
+                    }
+                    opts->primary_channel_index = index;
+                    opts->channel_name = slot.name;
+                    opts->psk = slot.psk;
+                    *request_reconfigure = true;
+                } else if(index == opts->primary_channel_index) {
+                    slot.role = MESHTASTIC_CHANNEL_ROLE_PRIMARY;
+                    role = MESHTASTIC_CHANNEL_ROLE_PRIMARY;
+                }
+
+                daemon_event("PhoneAPI local admin set_channel index=%u role=%u name=%s psk=%s uplink=%s downlink=%s muted=%s",
                              index, role,
-                             opts->channel_name.empty() ? "<preset>" :
-                             opts->channel_name.c_str(),
-                             opts->psk.c_str());
-            } else {
-                daemon_event("PhoneAPI local admin set_channel index=%u role=%u ignored unsupported secondary",
-                             index, role);
+                             mesh_channel_slot_name(*opts, index).empty() ?
+                             "<preset>" :
+                             mesh_channel_slot_name(*opts, index).c_str(),
+                             mesh_channel_slot_psk(*opts, index).c_str(),
+                             slot.uplink_enabled ? "yes" : "no",
+                             slot.downlink_enabled ? "yes" : "no",
+                             slot.is_muted ? "yes" : "no");
             }
         }
         ok_all = ok_all && ok;
@@ -11601,6 +11896,110 @@ static bool parse_u32(const char *text, uint32_t *out, int base)
     return true;
 }
 
+static bool phoneapi_pref_bool_text(const std::string &text)
+{
+    return text == "1" || text == "true" || text == "on" ||
+           text == "yes";
+}
+
+static void phoneapi_load_meshtastic_channel_slots(probe_options_t *opts)
+{
+    std::vector<phoneapi_pref_entry_t> entries;
+    std::string text;
+    uint32_t primary = 0U;
+    bool has_channel_slot_pref = false;
+
+    if(!opts || !phoneapi_pref_load(&entries)) {
+        return;
+    }
+    if(phoneapi_pref_get(entries, K230_MESH_PREF_PRIMARY_CHANNEL, &text) &&
+       parse_u32(text.c_str(), &primary, 10) &&
+       primary < MESHTASTIC_PHONEAPI_MAX_CHANNELS) {
+        opts->primary_channel_index = primary;
+    }
+    primary = opts->primary_channel_index;
+
+    for(uint32_t i = 0U; i < MESHTASTIC_PHONEAPI_MAX_CHANNELS; i++) {
+        char key[64];
+        mesh_channel_slot_t &slot = opts->channels[i];
+        uint32_t value;
+
+        phoneapi_channel_pref_key(key, sizeof(key), i, "role");
+        if(phoneapi_pref_get(entries, key, &text) &&
+           parse_u32(text.c_str(), &value, 10) &&
+           value <= MESHTASTIC_CHANNEL_ROLE_SECONDARY) {
+            slot.configured = true;
+            slot.role = value;
+            has_channel_slot_pref = true;
+        }
+        phoneapi_channel_pref_key(key, sizeof(key), i, "name");
+        if(phoneapi_pref_get(entries, key, &text)) {
+            slot.configured = true;
+            slot.name = mesh_clean_text(text);
+            has_channel_slot_pref = true;
+        }
+        phoneapi_channel_pref_key(key, sizeof(key), i, "psk");
+        if(phoneapi_pref_get(entries, key, &text)) {
+            std::vector<uint8_t> key_bytes;
+
+            if(parse_psk(text, &key_bytes)) {
+                slot.configured = true;
+                slot.psk = text;
+                has_channel_slot_pref = true;
+            }
+        }
+        phoneapi_channel_pref_key(key, sizeof(key), i, "uplink");
+        if(phoneapi_pref_get(entries, key, &text)) {
+            slot.configured = true;
+            slot.uplink_enabled = phoneapi_pref_bool_text(text);
+            has_channel_slot_pref = true;
+        }
+        phoneapi_channel_pref_key(key, sizeof(key), i, "downlink");
+        if(phoneapi_pref_get(entries, key, &text)) {
+            slot.configured = true;
+            slot.downlink_enabled = phoneapi_pref_bool_text(text);
+            has_channel_slot_pref = true;
+        }
+        phoneapi_channel_pref_key(key, sizeof(key), i, "muted");
+        if(phoneapi_pref_get(entries, key, &text)) {
+            slot.configured = true;
+            slot.is_muted = phoneapi_pref_bool_text(text);
+            has_channel_slot_pref = true;
+        }
+        phoneapi_channel_pref_key(key, sizeof(key), i,
+                                  "position_precision");
+        if(phoneapi_pref_get(entries, key, &text) &&
+           parse_u32(text.c_str(), &value, 10)) {
+            slot.configured = true;
+            slot.has_position_precision = true;
+            slot.position_precision = value;
+            has_channel_slot_pref = true;
+        }
+    }
+
+    if(!has_channel_slot_pref) {
+        return;
+    }
+    if(primary >= MESHTASTIC_PHONEAPI_MAX_CHANNELS) {
+        primary = 0U;
+    }
+    opts->primary_channel_index = primary;
+    opts->channels[primary].configured = true;
+    opts->channels[primary].role = MESHTASTIC_CHANNEL_ROLE_PRIMARY;
+    for(uint32_t i = 0U; i < MESHTASTIC_PHONEAPI_MAX_CHANNELS; i++) {
+        if(i != primary && opts->channels[i].configured &&
+           opts->channels[i].role == MESHTASTIC_CHANNEL_ROLE_PRIMARY) {
+            opts->channels[i].role = MESHTASTIC_CHANNEL_ROLE_SECONDARY;
+        }
+    }
+    if(!opts->channels[primary].name.empty()) {
+        opts->channel_name = opts->channels[primary].name;
+    }
+    if(!opts->channels[primary].psk.empty()) {
+        opts->psk = opts->channels[primary].psk;
+    }
+}
+
 static bool parse_fixed_position_i(const char *text, probe_options_t *opts)
 {
     char buf[96];
@@ -12380,6 +12779,7 @@ int main(int argc, char **argv)
             return run_daemon_client(opts);
         }
     }
+    phoneapi_load_meshtastic_channel_slots(&opts);
     default_node_name(&opts.node_name);
     default_from_node(&opts);
     if(opts.mesh_mode) {
