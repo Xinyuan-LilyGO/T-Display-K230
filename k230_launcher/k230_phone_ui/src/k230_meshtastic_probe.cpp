@@ -102,6 +102,11 @@
 #define MESHTASTIC_AHT20_ADDR 0x38
 #define MESHTASTIC_AHT20_STATUS_BUSY 0x80
 #define MESHTASTIC_AHT20_STATUS_CALIBRATED 0x08
+#define K230_PHONE_UI_CONFIG_PARENT "/root/.config"
+#define K230_PHONE_UI_PREFS_DIR K230_PHONE_UI_CONFIG_PARENT "/k230_phone_ui"
+#define K230_MESH_NODEDB_FILE K230_PHONE_UI_PREFS_DIR "/meshtastic_nodes.tsv"
+#define K230_MESH_NODEDB_TMP_FILE K230_MESH_NODEDB_FILE ".tmp"
+#define MESHTASTIC_NODEDB_SAVE_DEBOUNCE_US (5ULL * 1000000ULL)
 #define K230_MESH_IOMUX_BASE 0x91105000UL
 #define K230_MESH_IOMUX_SIZE 0x1000UL
 #define K230_MESH_IOMUX_IO28_OFFSET (28U * 4U)
@@ -812,6 +817,7 @@ typedef struct {
 typedef struct {
     uint32_t node = 0;
     uint64_t last_seen_us = 0;
+    uint32_t last_seen_epoch = 0;
     int rssi_dbm = 0;
     float snr = 0.0f;
     uint32_t rx_count = 0;
@@ -1152,6 +1158,12 @@ static char daemon_chat_log[MESHTASTIC_CHAT_LOG_LINES][MESHTASTIC_CHAT_LOG_LINE_
 static size_t daemon_chat_log_count;
 static mesh_node_entry_t mesh_nodes[MESHTASTIC_NODE_CACHE_SIZE];
 static size_t mesh_node_count;
+static bool mesh_nodedb_dirty;
+static bool mesh_nodedb_loaded;
+static uint64_t mesh_nodedb_next_save_us;
+static uint32_t mesh_nodedb_load_count;
+static uint32_t mesh_nodedb_save_count;
+static uint32_t mesh_nodedb_save_fail_count;
 static pthread_mutex_t daemon_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t phoneapi_thread;
 static volatile bool phoneapi_thread_running;
@@ -1555,6 +1567,87 @@ static void daemon_chat(const char *fmt, ...)
     pthread_mutex_unlock(&daemon_log_mutex);
 }
 
+static bool mesh_config_dir_ensure(void)
+{
+    if(mkdir(K230_PHONE_UI_CONFIG_PARENT, 0755) != 0 && errno != EEXIST) {
+        daemon_event("Mesh config mkdir %s failed: %s",
+                     K230_PHONE_UI_CONFIG_PARENT, strerror(errno));
+        return false;
+    }
+    if(mkdir(K230_PHONE_UI_PREFS_DIR, 0755) != 0 && errno != EEXIST) {
+        daemon_event("Mesh config mkdir %s failed: %s",
+                     K230_PHONE_UI_PREFS_DIR, strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+static uint32_t mesh_now_epoch(void)
+{
+    time_t now = time(nullptr);
+
+    return now > 0 ? (uint32_t)now : 0U;
+}
+
+static void mesh_node_touch_timestamp(mesh_node_entry_t *entry)
+{
+    if(!entry) {
+        return;
+    }
+    if(entry->last_seen_us == 0ULL) {
+        entry->last_seen_us = monotonic_us();
+    }
+    if(entry->last_seen_epoch == 0U) {
+        entry->last_seen_epoch = mesh_now_epoch();
+    }
+}
+
+static uint32_t mesh_node_last_seen_epoch(const mesh_node_entry_t &node)
+{
+    uint32_t now_epoch = mesh_now_epoch();
+    uint64_t now_us = monotonic_us();
+    uint64_t age_s = 0;
+
+    if(node.last_seen_epoch != 0U) {
+        return node.last_seen_epoch;
+    }
+    if(now_epoch == 0U || node.last_seen_us == 0ULL ||
+       node.last_seen_us > now_us) {
+        return 0U;
+    }
+    age_s = (now_us - node.last_seen_us) / 1000000ULL;
+    if(age_s > now_epoch) {
+        return 0U;
+    }
+    return now_epoch - (uint32_t)age_s;
+}
+
+static uint32_t mesh_node_age_seconds(const mesh_node_entry_t &node)
+{
+    uint32_t now_epoch = mesh_now_epoch();
+    uint64_t now_us = monotonic_us();
+
+    if(node.last_seen_epoch != 0U && now_epoch >= node.last_seen_epoch) {
+        return now_epoch - node.last_seen_epoch;
+    }
+    if(node.last_seen_us != 0ULL && node.last_seen_us <= now_us) {
+        uint64_t age_s = (now_us - node.last_seen_us) / 1000000ULL;
+        return age_s > UINT32_MAX ? UINT32_MAX : (uint32_t)age_s;
+    }
+    return 0U;
+}
+
+static void mesh_nodedb_mark_dirty(void)
+{
+    uint64_t due_us = monotonic_us() + MESHTASTIC_NODEDB_SAVE_DEBOUNCE_US;
+
+    mesh_nodedb_dirty = true;
+    if(mesh_nodedb_next_save_us == 0ULL ||
+       mesh_nodedb_next_save_us > due_us) {
+        mesh_nodedb_next_save_us = due_us;
+    }
+}
+
 static mesh_node_entry_t *mesh_node_get_or_create(uint32_t node)
 {
     size_t slot = MESHTASTIC_NODE_CACHE_SIZE;
@@ -1592,9 +1685,11 @@ static void mesh_node_seen(uint32_t node, float rssi, float snr)
         return;
     }
     entry->last_seen_us = monotonic_us();
+    entry->last_seen_epoch = mesh_now_epoch();
     entry->rssi_dbm = (int)roundf(rssi);
     entry->snr = snr;
     entry->rx_count++;
+    mesh_nodedb_mark_dirty();
 }
 
 static void mesh_node_update_user(uint32_t node, const mesh_user_info_t &user)
@@ -1606,6 +1701,7 @@ static void mesh_node_update_user(uint32_t node, const mesh_user_info_t &user)
     if(!entry) {
         return;
     }
+    mesh_node_touch_timestamp(entry);
     if(!clean_long.empty()) {
         snprintf(entry->long_name, sizeof(entry->long_name), "%s",
                  clean_long.c_str());
@@ -1617,6 +1713,7 @@ static void mesh_node_update_user(uint32_t node, const mesh_user_info_t &user)
     if(user.hw_model >= 0) {
         entry->hw_model = user.hw_model;
     }
+    mesh_nodedb_mark_dirty();
 }
 
 static void mesh_node_update_position(uint32_t node,
@@ -1627,6 +1724,7 @@ static void mesh_node_update_position(uint32_t node,
     if(!entry || !position.has_latitude || !position.has_longitude) {
         return;
     }
+    mesh_node_touch_timestamp(entry);
     entry->has_position = true;
     entry->latitude_i = position.latitude_i;
     entry->longitude_i = position.longitude_i;
@@ -1645,6 +1743,7 @@ static void mesh_node_update_position(uint32_t node,
         entry->has_ground_track = true;
         entry->ground_track_1e5 = position.ground_track_1e5;
     }
+    mesh_nodedb_mark_dirty();
 }
 
 static void mesh_node_update_telemetry(uint32_t node,
@@ -1655,6 +1754,7 @@ static void mesh_node_update_telemetry(uint32_t node,
     if(!entry) {
         return;
     }
+    mesh_node_touch_timestamp(entry);
     entry->telemetry_timestamp = telemetry.timestamp;
     if(telemetry.has_device_metrics) {
         entry->has_device_metrics = true;
@@ -1699,6 +1799,7 @@ static void mesh_node_update_telemetry(uint32_t node,
             entry->iaq = telemetry.iaq;
         }
     }
+    mesh_nodedb_mark_dirty();
 }
 
 static void mesh_node_update_neighbor_info(uint32_t node,
@@ -1709,6 +1810,7 @@ static void mesh_node_update_neighbor_info(uint32_t node,
     if(!entry || !info.has_neighbor_info) {
         return;
     }
+    mesh_node_touch_timestamp(entry);
     entry->has_neighbor_info = true;
     entry->neighbor_node_id = info.node_id;
     entry->neighbor_last_sent_by_id = info.last_sent_by_id;
@@ -1717,6 +1819,439 @@ static void mesh_node_update_neighbor_info(uint32_t node,
     entry->neighbor_count = info.neighbor_count;
     snprintf(entry->neighbor_summary, sizeof(entry->neighbor_summary), "%s",
              info.summary.empty() ? "-" : info.summary.c_str());
+    mesh_nodedb_mark_dirty();
+}
+
+static char mesh_hex_digit(unsigned int value)
+{
+    static const char digits[] = "0123456789abcdef";
+
+    return digits[value & 0x0fU];
+}
+
+static std::string mesh_hex_encode_text(const char *text, size_t max_len)
+{
+    std::string out;
+
+    if(!text || !text[0] || max_len == 0U) {
+        return "-";
+    }
+    for(size_t i = 0; i < max_len && text[i]; i++) {
+        unsigned char c = (unsigned char)text[i];
+        out.push_back(mesh_hex_digit(c >> 4U));
+        out.push_back(mesh_hex_digit(c));
+    }
+    return out.empty() ? "-" : out;
+}
+
+static int mesh_hex_value(char c)
+{
+    if(c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if(c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if(c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static void mesh_hex_decode_text(const char *hex, char *out, size_t out_len)
+{
+    size_t pos = 0;
+
+    if(!out || out_len == 0U) {
+        return;
+    }
+    out[0] = '\0';
+    if(!hex || !hex[0] || strcmp(hex, "-") == 0) {
+        return;
+    }
+    for(size_t i = 0; hex[i] && hex[i + 1U] && pos + 1U < out_len;
+        i += 2U) {
+        int hi = mesh_hex_value(hex[i]);
+        int lo = mesh_hex_value(hex[i + 1U]);
+
+        if(hi < 0 || lo < 0) {
+            break;
+        }
+        out[pos++] = (char)((hi << 4) | lo);
+    }
+    out[pos] = '\0';
+}
+
+static bool mesh_parse_u32_text(const char *text, uint32_t *out)
+{
+    char *end = nullptr;
+    unsigned long value;
+
+    if(!text || !text[0] || !out) {
+        return false;
+    }
+    errno = 0;
+    value = strtoul(text, &end, 0);
+    if(errno != 0 || end == text || *end != '\0' || value > UINT32_MAX) {
+        return false;
+    }
+    *out = (uint32_t)value;
+    return true;
+}
+
+static bool mesh_parse_i32_text(const char *text, int32_t *out)
+{
+    char *end = nullptr;
+    long value;
+
+    if(!text || !text[0] || !out) {
+        return false;
+    }
+    errno = 0;
+    value = strtol(text, &end, 0);
+    if(errno != 0 || end == text || *end != '\0' ||
+       value < INT32_MIN || value > INT32_MAX) {
+        return false;
+    }
+    *out = (int32_t)value;
+    return true;
+}
+
+static bool mesh_parse_bool_text(const char *text, bool *out)
+{
+    uint32_t value;
+
+    if(!out || !mesh_parse_u32_text(text, &value)) {
+        return false;
+    }
+    *out = value != 0U;
+    return true;
+}
+
+static bool mesh_parse_float_text(const char *text, float *out)
+{
+    char *end = nullptr;
+    float value;
+
+    if(!text || !text[0] || !out) {
+        return false;
+    }
+    errno = 0;
+    value = strtof(text, &end);
+    if(errno != 0 || end == text || *end != '\0') {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+static void mesh_split_tsv(char *line, std::vector<char *> *fields)
+{
+    char *p;
+
+    if(!line || !fields) {
+        return;
+    }
+    fields->clear();
+    p = line;
+    while(true) {
+        char *tab = strchr(p, '\t');
+
+        fields->push_back(p);
+        if(!tab) {
+            break;
+        }
+        *tab = '\0';
+        p = tab + 1;
+    }
+}
+
+static void mesh_loaded_epoch_to_monotonic(mesh_node_entry_t *node)
+{
+    uint32_t now_epoch = mesh_now_epoch();
+    uint64_t now_us = monotonic_us();
+    uint64_t age_us = 0;
+
+    if(!node) {
+        return;
+    }
+    if(node->last_seen_epoch == 0U || now_epoch == 0U ||
+       node->last_seen_epoch >= now_epoch) {
+        node->last_seen_us = now_us;
+        return;
+    }
+    age_us = (uint64_t)(now_epoch - node->last_seen_epoch) * 1000000ULL;
+    node->last_seen_us = age_us < now_us ? now_us - age_us : 1ULL;
+}
+
+static bool mesh_nodedb_save(void)
+{
+    FILE *fp;
+
+    if(!mesh_config_dir_ensure()) {
+        mesh_nodedb_save_fail_count++;
+        return false;
+    }
+    fp = fopen(K230_MESH_NODEDB_TMP_FILE, "w");
+    if(!fp) {
+        mesh_nodedb_save_fail_count++;
+        daemon_event("NodeDB save open failed: %s", strerror(errno));
+        return false;
+    }
+
+    fprintf(fp, "# k230 meshtastic nodedb v1\n");
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        const mesh_node_entry_t &node = mesh_nodes[i];
+        std::string long_hex;
+        std::string short_hex;
+        std::string neighbor_hex;
+
+        if(node.node == 0U) {
+            continue;
+        }
+        long_hex = mesh_hex_encode_text(node.long_name,
+                                        sizeof(node.long_name));
+        short_hex = mesh_hex_encode_text(node.short_name,
+                                         sizeof(node.short_name));
+        neighbor_hex = mesh_hex_encode_text(node.neighbor_summary,
+                                            sizeof(node.neighbor_summary));
+        fprintf(fp,
+                "v1\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
+                "%u\t%u\t%u\t%u\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t"
+                "%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t"
+                "%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%u\t"
+                "%u\t%u\t%u\t%u\t%u\t%s\n",
+                node.node, mesh_node_last_seen_epoch(node),
+                node.rssi_dbm, node.snr, node.rx_count,
+                long_hex.c_str(), short_hex.c_str(), node.hw_model,
+                node.has_position ? 1U : 0U,
+                node.has_altitude ? 1U : 0U,
+                node.has_ground_speed ? 1U : 0U,
+                node.has_ground_track ? 1U : 0U,
+                node.latitude_i, node.longitude_i, node.altitude_m,
+                node.ground_speed_cms, node.ground_track_1e5,
+                node.sats_in_view, node.precision_bits,
+                node.position_timestamp,
+                node.has_device_metrics ? 1U : 0U,
+                node.has_battery_level ? 1U : 0U,
+                node.has_device_voltage ? 1U : 0U,
+                node.has_channel_utilization ? 1U : 0U,
+                node.has_air_util_tx ? 1U : 0U,
+                node.battery_level, node.uptime_seconds,
+                node.device_voltage, node.channel_utilization,
+                node.air_util_tx,
+                node.has_environment_metrics ? 1U : 0U,
+                node.has_temperature ? 1U : 0U,
+                node.has_humidity ? 1U : 0U,
+                node.has_pressure ? 1U : 0U,
+                node.has_environment_voltage ? 1U : 0U,
+                node.has_iaq ? 1U : 0U,
+                node.temperature_c, node.humidity_percent,
+                node.pressure_hpa, node.environment_voltage, node.iaq,
+                node.telemetry_timestamp,
+                node.has_neighbor_info ? 1U : 0U,
+                node.neighbor_node_id, node.neighbor_last_sent_by_id,
+                node.neighbor_broadcast_interval_secs,
+                node.neighbor_count, neighbor_hex.c_str());
+    }
+    if(fclose(fp) != 0) {
+        unlink(K230_MESH_NODEDB_TMP_FILE);
+        mesh_nodedb_save_fail_count++;
+        daemon_event("NodeDB save close failed: %s", strerror(errno));
+        return false;
+    }
+    if(rename(K230_MESH_NODEDB_TMP_FILE, K230_MESH_NODEDB_FILE) != 0) {
+        unlink(K230_MESH_NODEDB_TMP_FILE);
+        mesh_nodedb_save_fail_count++;
+        daemon_event("NodeDB save rename failed: %s", strerror(errno));
+        return false;
+    }
+
+    mesh_nodedb_dirty = false;
+    mesh_nodedb_next_save_us = 0ULL;
+    mesh_nodedb_save_count++;
+    daemon_event("NodeDB saved nodes=%u saves=%u",
+                 (unsigned)mesh_node_count, mesh_nodedb_save_count);
+    return true;
+}
+
+static void mesh_nodedb_maybe_save(uint64_t now_us)
+{
+    if(!mesh_nodedb_dirty || mesh_nodedb_next_save_us == 0ULL ||
+       now_us < mesh_nodedb_next_save_us) {
+        return;
+    }
+    (void)mesh_nodedb_save();
+}
+
+static bool mesh_nodedb_load(void)
+{
+    FILE *fp;
+    char line[2048];
+    uint32_t loaded = 0;
+    uint32_t skipped = 0;
+
+    mesh_nodedb_loaded = true;
+    mesh_nodedb_dirty = false;
+    mesh_nodedb_next_save_us = 0ULL;
+
+    fp = fopen(K230_MESH_NODEDB_FILE, "r");
+    if(!fp) {
+        if(errno == ENOENT) {
+            daemon_event("NodeDB empty file=%s", K230_MESH_NODEDB_FILE);
+            return true;
+        }
+        daemon_event("NodeDB load open failed: %s", strerror(errno));
+        return false;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        std::vector<char *> fields;
+        mesh_node_entry_t tmp;
+        mesh_node_entry_t *entry;
+        uint32_t value_u32;
+        int32_t value_i32;
+        float value_f;
+        bool value_bool;
+        size_t idx = 1;
+        bool ok = true;
+
+        line[strcspn(line, "\r\n")] = '\0';
+        if(line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+        mesh_split_tsv(line, &fields);
+        if(fields.size() < 49U || strcmp(fields[0], "v1") != 0) {
+            skipped++;
+            continue;
+        }
+
+#define NODEDB_GET_U32(dst) \
+        do { \
+            if(ok && idx < fields.size() && \
+               mesh_parse_u32_text(fields[idx++], &value_u32)) { \
+                (dst) = value_u32; \
+            } else { \
+                ok = false; \
+            } \
+        } while(0)
+#define NODEDB_GET_I32(dst) \
+        do { \
+            if(ok && idx < fields.size() && \
+               mesh_parse_i32_text(fields[idx++], &value_i32)) { \
+                (dst) = value_i32; \
+            } else { \
+                ok = false; \
+            } \
+        } while(0)
+#define NODEDB_GET_BOOL(dst) \
+        do { \
+            if(ok && idx < fields.size() && \
+               mesh_parse_bool_text(fields[idx++], &value_bool)) { \
+                (dst) = value_bool; \
+            } else { \
+                ok = false; \
+            } \
+        } while(0)
+#define NODEDB_GET_FLOAT(dst) \
+        do { \
+            if(ok && idx < fields.size() && \
+               mesh_parse_float_text(fields[idx++], &value_f)) { \
+                (dst) = value_f; \
+            } else { \
+                ok = false; \
+            } \
+        } while(0)
+
+        tmp.hw_model = -1;
+        NODEDB_GET_U32(tmp.node);
+        NODEDB_GET_U32(tmp.last_seen_epoch);
+        NODEDB_GET_I32(tmp.rssi_dbm);
+        NODEDB_GET_FLOAT(tmp.snr);
+        NODEDB_GET_U32(tmp.rx_count);
+        if(ok && idx < fields.size()) {
+            mesh_hex_decode_text(fields[idx++], tmp.long_name,
+                                 sizeof(tmp.long_name));
+        } else {
+            ok = false;
+        }
+        if(ok && idx < fields.size()) {
+            mesh_hex_decode_text(fields[idx++], tmp.short_name,
+                                 sizeof(tmp.short_name));
+        } else {
+            ok = false;
+        }
+        NODEDB_GET_I32(tmp.hw_model);
+        NODEDB_GET_BOOL(tmp.has_position);
+        NODEDB_GET_BOOL(tmp.has_altitude);
+        NODEDB_GET_BOOL(tmp.has_ground_speed);
+        NODEDB_GET_BOOL(tmp.has_ground_track);
+        NODEDB_GET_I32(tmp.latitude_i);
+        NODEDB_GET_I32(tmp.longitude_i);
+        NODEDB_GET_I32(tmp.altitude_m);
+        NODEDB_GET_U32(tmp.ground_speed_cms);
+        NODEDB_GET_U32(tmp.ground_track_1e5);
+        NODEDB_GET_U32(tmp.sats_in_view);
+        NODEDB_GET_U32(tmp.precision_bits);
+        NODEDB_GET_U32(tmp.position_timestamp);
+        NODEDB_GET_BOOL(tmp.has_device_metrics);
+        NODEDB_GET_BOOL(tmp.has_battery_level);
+        NODEDB_GET_BOOL(tmp.has_device_voltage);
+        NODEDB_GET_BOOL(tmp.has_channel_utilization);
+        NODEDB_GET_BOOL(tmp.has_air_util_tx);
+        NODEDB_GET_U32(tmp.battery_level);
+        NODEDB_GET_U32(tmp.uptime_seconds);
+        NODEDB_GET_FLOAT(tmp.device_voltage);
+        NODEDB_GET_FLOAT(tmp.channel_utilization);
+        NODEDB_GET_FLOAT(tmp.air_util_tx);
+        NODEDB_GET_BOOL(tmp.has_environment_metrics);
+        NODEDB_GET_BOOL(tmp.has_temperature);
+        NODEDB_GET_BOOL(tmp.has_humidity);
+        NODEDB_GET_BOOL(tmp.has_pressure);
+        NODEDB_GET_BOOL(tmp.has_environment_voltage);
+        NODEDB_GET_BOOL(tmp.has_iaq);
+        NODEDB_GET_FLOAT(tmp.temperature_c);
+        NODEDB_GET_FLOAT(tmp.humidity_percent);
+        NODEDB_GET_FLOAT(tmp.pressure_hpa);
+        NODEDB_GET_FLOAT(tmp.environment_voltage);
+        NODEDB_GET_U32(tmp.iaq);
+        NODEDB_GET_U32(tmp.telemetry_timestamp);
+        NODEDB_GET_BOOL(tmp.has_neighbor_info);
+        NODEDB_GET_U32(tmp.neighbor_node_id);
+        NODEDB_GET_U32(tmp.neighbor_last_sent_by_id);
+        NODEDB_GET_U32(tmp.neighbor_broadcast_interval_secs);
+        NODEDB_GET_U32(tmp.neighbor_count);
+        if(ok && idx < fields.size()) {
+            mesh_hex_decode_text(fields[idx++], tmp.neighbor_summary,
+                                 sizeof(tmp.neighbor_summary));
+        } else {
+            ok = false;
+        }
+
+#undef NODEDB_GET_U32
+#undef NODEDB_GET_I32
+#undef NODEDB_GET_BOOL
+#undef NODEDB_GET_FLOAT
+
+        if(!ok || tmp.node == 0U) {
+            skipped++;
+            continue;
+        }
+        mesh_loaded_epoch_to_monotonic(&tmp);
+        entry = mesh_node_get_or_create(tmp.node);
+        if(!entry) {
+            skipped++;
+            continue;
+        }
+        *entry = tmp;
+        loaded++;
+    }
+    fclose(fp);
+    mesh_nodedb_load_count = loaded;
+    mesh_nodedb_dirty = false;
+    mesh_nodedb_next_save_us = 0ULL;
+    daemon_event("NodeDB loaded nodes=%u skipped=%u file=%s",
+                 loaded, skipped, K230_MESH_NODEDB_FILE);
+    return true;
 }
 
 static const char *chip_name(chip_type_t chip)
@@ -4011,17 +4546,7 @@ static bool encode_phoneapi_cached_device_metrics_proto(
 
 static uint32_t phoneapi_node_last_heard_epoch(const mesh_node_entry_t &node)
 {
-    uint32_t now_epoch = (uint32_t)time(nullptr);
-    uint64_t now_us = monotonic_us();
-    uint64_t age_s = 0;
-
-    if(node.last_seen_us != 0U && node.last_seen_us <= now_us) {
-        age_s = (now_us - node.last_seen_us) / 1000000ULL;
-    }
-    if(age_s > now_epoch) {
-        return 0U;
-    }
-    return now_epoch - (uint32_t)age_s;
+    return mesh_node_last_seen_epoch(node);
 }
 
 static bool encode_phoneapi_cached_node_info(const mesh_node_entry_t &node,
@@ -5346,7 +5871,6 @@ static bool encode_phoneapi_admin_metadata_response(const probe_options_t &opts,
     return encode_phoneapi_admin_response_bytes(opts, 13U, metadata, out);
 }
 
-#define K230_PHONE_UI_PREFS_DIR "/root/.config/k230_phone_ui"
 #define K230_PHONE_UI_PREFS_FILE K230_PHONE_UI_PREFS_DIR "/settings.conf"
 #define K230_PHONE_UI_PREFS_LOCK K230_PHONE_UI_PREFS_DIR "/settings.conf.lock"
 #define K230_MESH_PREF_REGION "meshtastic.region"
@@ -5512,13 +6036,7 @@ static bool phoneapi_persist_meshtastic_opts(const probe_options_t &opts)
     if(preset.empty()) {
         preset = MESHTASTIC_DEFAULT_PRESET;
     }
-    if(mkdir("/root/.config", 0755) != 0 && errno != EEXIST) {
-        daemon_event("PhoneAPI prefs mkdir /root/.config failed: %s",
-                     strerror(errno));
-        return false;
-    }
-    if(mkdir(K230_PHONE_UI_PREFS_DIR, 0755) != 0 && errno != EEXIST) {
-        daemon_event("PhoneAPI prefs mkdir failed: %s", strerror(errno));
+    if(!mesh_config_dir_ensure()) {
         return false;
     }
     lock_fd = open(K230_PHONE_UI_PREFS_LOCK,
@@ -8446,6 +8964,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "position_tx=%lu position_drop=%lu next_position_ms=%u "
              "lat=%.7f lon=%.7f sats=%u "
              "telemetry=%s telemetry_env=%s telemetry_tx=%lu telemetry_drop=%lu next_telemetry_ms=%u "
+             "nodedb=%u nodedb_load=%u nodedb_save=%u nodedb_fail=%u nodedb_dirty=%s "
              "region=%s preset=%s slot=%s resolved_slot=%u slots=%u freq=%.3f bw=%.1f sf=%u cr=4/%u sw=0x%02x manual_power=%s power=%d node=%s "
              "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s channel_url=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
@@ -8481,6 +9000,11 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_telemetry_tx_count,
              (unsigned long)mesh_telemetry_drop_count,
              mesh_telemetry_next_ms(now),
+             (unsigned)mesh_node_count,
+             mesh_nodedb_load_count,
+             mesh_nodedb_save_count,
+             mesh_nodedb_save_fail_count,
+             mesh_nodedb_dirty ? "1" : "0",
              opts.resolved_region.empty() ? "-" : opts.resolved_region.c_str(),
              opts.resolved_preset.empty() ? "-" : opts.resolved_preset.c_str(),
              slot_text, opts.resolved_slot, opts.resolved_slot_count,
@@ -8752,7 +9276,6 @@ static std::string daemon_chat_log_response(void)
 static std::string daemon_nodes_response(void)
 {
     char line[768];
-    uint64_t now = monotonic_us();
     std::string response = "OK nodes\n";
 
     if(mesh_node_count == 0U) {
@@ -8763,7 +9286,7 @@ static std::string daemon_nodes_response(void)
              (unsigned)mesh_node_count);
     response += line;
     for(size_t i = 0; i < mesh_node_count; i++) {
-        uint32_t age_s = 0;
+        uint32_t age_s = mesh_node_age_seconds(mesh_nodes[i]);
         const char *long_name = mesh_nodes[i].long_name[0] ?
                                 mesh_nodes[i].long_name : "-";
         const char *short_name = mesh_nodes[i].short_name[0] ?
@@ -8771,9 +9294,6 @@ static std::string daemon_nodes_response(void)
         std::string telemetry = telemetry_summary(mesh_nodes[i]);
         const char *neighbor = mesh_nodes[i].has_neighbor_info ?
                                mesh_nodes[i].neighbor_summary : "-";
-        if(mesh_nodes[i].last_seen_us <= now) {
-            age_s = (uint32_t)((now - mesh_nodes[i].last_seen_us) / 1000000ULL);
-        }
         if(mesh_nodes[i].has_position) {
             char alt_text[24];
             char speed_text[24];
@@ -9853,6 +10373,9 @@ int main(int argc, char **argv)
                      opts.resolved_preset.empty() ? "-" :
                      opts.resolved_preset.c_str(),
                      opts.profile.freq);
+        if(opts.mesh_mode) {
+            (void)mesh_nodedb_load();
+        }
         mesh_next_nodeinfo_us =
             (opts.mesh_mode && opts.advertise_nodeinfo) ? monotonic_us() : 0ULL;
         mesh_next_position_us =
@@ -9942,6 +10465,7 @@ int main(int argc, char **argv)
         mesh_history_expire(now);
         handle_delayed_tx(radio, now);
         handle_ack_retry(radio, now);
+        mesh_nodedb_maybe_save(now);
 
         if(opts.mesh_mode && opts.position_enabled) {
             nrf9151_gnss_poll(opts, now);
@@ -10204,6 +10728,9 @@ int main(int argc, char **argv)
 
     printf("Summary: chip=%s tx=%lu rx=%lu\n", chip_name(chip),
            (unsigned long)tx_count, (unsigned long)rx_count);
+    if(opts.daemon_mode && opts.mesh_mode && mesh_nodedb_dirty) {
+        (void)mesh_nodedb_save();
+    }
     nrf9151_gnss_close();
     phoneapi_stop();
     if(daemon_fd >= 0) {
