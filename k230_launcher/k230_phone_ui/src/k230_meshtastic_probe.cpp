@@ -844,6 +844,15 @@ typedef struct {
 } mesh_header_t;
 
 typedef struct {
+    bool valid = false;
+    uint32_t index = 0;
+    uint32_t role = MESHTASTIC_CHANNEL_ROLE_DISABLED;
+    uint8_t hash = 0;
+    std::string name;
+    std::string psk;
+} mesh_channel_match_t;
+
+typedef struct {
     uint32_t from;
     uint32_t id;
     uint8_t channel;
@@ -2914,6 +2923,20 @@ static std::string mesh_channel_slot_psk(const probe_options_t &opts,
         return opts.psk.empty() ? std::string("default") : opts.psk;
     }
     return std::string("default");
+}
+
+static uint32_t mesh_channel_slot_role(const probe_options_t &opts,
+                                       uint32_t index)
+{
+    if(index >= MESHTASTIC_PHONEAPI_MAX_CHANNELS) {
+        return MESHTASTIC_CHANNEL_ROLE_DISABLED;
+    }
+    if(opts.channels[index].configured) {
+        return opts.channels[index].role;
+    }
+    return index == opts.primary_channel_index ?
+           MESHTASTIC_CHANNEL_ROLE_PRIMARY :
+           MESHTASTIC_CHANNEL_ROLE_DISABLED;
 }
 
 static uint8_t mesh_channel_hash(const std::string &name,
@@ -10214,6 +10237,7 @@ static bool build_mesh_direct_data_frame(const probe_options_t &opts,
                                          uint32_t reply_id,
                                          bool request_ack,
                                          const char *summary_kind,
+                                         const std::string *psk_override,
                                          tx_frame_t *frame)
 {
     std::vector<uint8_t> key;
@@ -10221,9 +10245,10 @@ static bool build_mesh_direct_data_frame(const probe_options_t &opts,
     mesh_header_t header;
     uint32_t packet_id;
     char summary[260];
+    const std::string &psk = psk_override ? *psk_override : opts.psk;
 
     if(!frame || to_node == 0U || meshtastic_node_is_broadcast(to_node) ||
-       !parse_psk(opts.psk, &key) ||
+       !parse_psk(psk, &key) ||
        !encode_data_proto(portnum, payload, 0, reply_id, &data_proto,
                           want_response, data_dest, 0U)) {
         return false;
@@ -10345,12 +10370,14 @@ static bool build_mesh_remote_request_frame(const probe_options_t &opts,
                                         portnum, payload, true, data_dest, 0U,
                                         request_ack,
                                         mesh_remote_request_name(req.type),
+                                        nullptr,
                                         frame);
 }
 
 static bool build_mesh_want_response_frame(const probe_options_t &opts,
                                            const mesh_header_t &rx_header,
                                            const mesh_data_proto_t &request,
+                                           const std::string *psk_override,
                                            tx_frame_t *frame)
 {
     std::vector<uint8_t> payload;
@@ -10413,13 +10440,14 @@ static bool build_mesh_want_response_frame(const probe_options_t &opts,
                                         rx_header.channel, portnum, payload,
                                         false, 0U, rx_header.id,
                                         false,
-                                        "want-response", frame);
+                                        "want-response", psk_override, frame);
 }
 
 static bool build_mesh_ack_frame(const probe_options_t &opts,
                                  const mesh_header_t &rx_header,
                                  uint32_t error_reason,
                                  bool ack_wants_ack,
+                                 const std::string *psk_override,
                                  tx_frame_t *frame)
 {
     std::vector<uint8_t> key;
@@ -10429,8 +10457,9 @@ static bool build_mesh_ack_frame(const probe_options_t &opts,
     uint32_t packet_id;
     uint8_t ack_hop;
     char summary[220];
+    const std::string &psk = psk_override ? *psk_override : opts.psk;
 
-    if(!frame || !parse_psk(opts.psk, &key)) {
+    if(!frame || !parse_psk(psk, &key)) {
         return false;
     }
     if(!encode_routing_proto(error_reason, &routing_proto) ||
@@ -10517,18 +10546,69 @@ static bool build_tx_frame(const probe_options_t &opts,
     return true;
 }
 
+static bool mesh_decode_payload_for_known_channel(
+    const probe_options_t &opts, const mesh_header_t &header,
+    const std::vector<uint8_t> &encrypted_payload,
+    std::vector<uint8_t> *decoded_payload, mesh_data_proto_t *decoded,
+    mesh_channel_match_t *match)
+{
+    for(uint32_t i = 0U; i < MESHTASTIC_PHONEAPI_MAX_CHANNELS; i++) {
+        std::vector<uint8_t> key;
+        std::vector<uint8_t> candidate;
+        mesh_data_proto_t candidate_decoded;
+        std::string name;
+        std::string psk;
+        uint32_t role = mesh_channel_slot_role(opts, i);
+        uint8_t hash;
+
+        if(role == MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+            continue;
+        }
+        name = mesh_channel_slot_name(opts, i);
+        psk = mesh_channel_slot_psk(opts, i);
+        if(!parse_psk(psk, &key)) {
+            continue;
+        }
+        hash = mesh_channel_hash(name, key);
+        if(header.channel != hash) {
+            continue;
+        }
+        candidate = encrypted_payload;
+        if(!aes_ctr_crypt(key, header.from, header.id, &candidate) ||
+           !decode_data_proto(candidate.data(), candidate.size(),
+                              &candidate_decoded)) {
+            continue;
+        }
+        if(decoded_payload) {
+            *decoded_payload = candidate;
+        }
+        if(decoded) {
+            *decoded = candidate_decoded;
+        }
+        if(match) {
+            match->valid = true;
+            match->index = i;
+            match->role = role;
+            match->hash = hash;
+            match->name = name;
+            match->psk = psk;
+        }
+        return true;
+    }
+    return false;
+}
+
 static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                             size_t len, float rssi, float snr,
                             tx_frame_t *rebroadcast_frame)
 {
     mesh_header_t header;
-    std::vector<uint8_t> key;
+    mesh_channel_match_t channel_info;
+    std::vector<uint8_t> encrypted_payload;
     std::vector<uint8_t> payload;
-    std::string channel_name;
     mesh_data_proto_t decoded;
     uint8_t hop_limit;
     uint8_t hop_start;
-    bool psk_ok;
     bool channel_match = false;
     bool duplicate = false;
     bool should_rebroadcast = false;
@@ -10553,14 +10633,10 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
         mesh_history_remember(header);
     }
 
-    payload.assign(data + MESHTASTIC_HEADER_LENGTH, data + len);
-    channel_name = effective_mesh_channel_name(opts);
-    psk_ok = parse_psk(opts.psk, &key);
-    if(psk_ok && header.channel == mesh_channel_hash(channel_name, key)) {
-        channel_match = true;
-        (void)aes_ctr_crypt(key, header.from, header.id, &payload);
-    }
-    data_ok = decode_data_proto(payload.data(), payload.size(), &decoded);
+    encrypted_payload.assign(data + MESHTASTIC_HEADER_LENGTH, data + len);
+    data_ok = mesh_decode_payload_for_known_channel(
+        opts, header, encrypted_payload, &payload, &decoded, &channel_info);
+    channel_match = data_ok && channel_info.valid;
     if(data_ok && duplicate && channel_match &&
        header.from == opts.from_node &&
        header.to == MESHTASTIC_NODENUM_BROADCAST &&
@@ -10568,6 +10644,10 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
         (void)mesh_ack_complete_implicit(opts.from_node, header);
     }
     if(data_ok) {
+        daemon_event("RX channel match index=%u role=%u name=%s hash=0x%02x",
+                     channel_info.index, channel_info.role,
+                     channel_info.name.empty() ? "<empty>" :
+                     channel_info.name.c_str(), channel_info.hash);
         if(channel_match && !duplicate && header.from != opts.from_node) {
             phoneapi_notify_mesh_rx(header, payload, rssi, snr);
         }
@@ -10741,13 +10821,14 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
         daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f payload_len=%u decode=failed%s",
                      (unsigned long)rx_count, header.from, header.to,
                      header.id, header.channel, hop_limit, hop_start, rssi,
-                     snr, (unsigned)payload.size(),
+                     snr, (unsigned)encrypted_payload.size(),
                      duplicate ? " duplicate" : "");
     }
 
     if(channel_match && data_ok && decoded.want_response && !duplicate &&
        header.to == opts.from_node && header.from != opts.from_node) {
         if(build_mesh_want_response_frame(opts, header, decoded,
+                                          &channel_info.psk,
                                           rebroadcast_frame)) {
             daemon_event("WantResponse queued port=%u request=0x%08x to=0x%08x",
                          decoded.portnum, header.id, header.from);
@@ -10767,7 +10848,8 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
     }
     if(ack_candidate &&
        build_mesh_ack_frame(opts, header, MESHTASTIC_ROUTING_ERROR_NONE,
-                            ack_wants_ack, rebroadcast_frame)) {
+                            ack_wants_ack, &channel_info.psk,
+                            rebroadcast_frame)) {
         daemon_event("Mesh ACK candidate req=0x%08x to=0x%08x ack=%s",
                      header.id, header.from,
                      ack_wants_ack ? "reliable" : "plain");
