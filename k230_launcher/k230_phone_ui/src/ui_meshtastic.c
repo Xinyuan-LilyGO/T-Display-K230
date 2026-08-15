@@ -114,6 +114,7 @@ static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_choice_overlay;
 static lv_obj_t *mesh_channel_overlay;
 static lv_obj_t *mesh_channel_profiles_overlay;
+static lv_obj_t *mesh_channel_profile_delete_overlay;
 static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
@@ -121,6 +122,8 @@ static lv_obj_t *mesh_pairing_overlay;
 static lv_obj_t *mesh_settings_value_labels[24];
 static char mesh_last_pairing_code[16];
 static char mesh_channel_url_text[1024];
+static char mesh_channel_profile_edit_path[160];
+static char mesh_channel_profile_delete_path[160];
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
 static lv_timer_t *mesh_channel_scan_timer;
@@ -2023,6 +2026,11 @@ static int mesh_channel_profile_ensure_dir(void)
 
 static void mesh_channel_profiles_close(void)
 {
+    if(mesh_channel_profile_delete_overlay &&
+       lv_obj_is_valid(mesh_channel_profile_delete_overlay)) {
+        lv_obj_delete(mesh_channel_profile_delete_overlay);
+    }
+    mesh_channel_profile_delete_overlay = NULL;
     if(mesh_channel_profiles_overlay &&
        lv_obj_is_valid(mesh_channel_profiles_overlay)) {
         lv_obj_delete(mesh_channel_profiles_overlay);
@@ -2102,11 +2110,19 @@ static int mesh_channel_profile_write_current(void)
     char name[64];
     FILE *fp = NULL;
     int slot = -1;
+    int overwrite = 0;
 
     if(mesh_channel_profile_ensure_dir() != 0) {
         return -1;
     }
-    for(int i = 0; i < 100; i++) {
+
+    if(mesh_channel_profile_edit_path[0] &&
+       access(mesh_channel_profile_edit_path, F_OK) == 0) {
+        snprintf(path, sizeof(path), "%s", mesh_channel_profile_edit_path);
+        overwrite = 1;
+    }
+
+    for(int i = 0; !overwrite && i < 100; i++) {
         snprintf(path, sizeof(path), "%s/channel_%02d.conf",
                  MESHTASTIC_CHANNEL_PROFILE_DIR, i);
         if(access(path, F_OK) != 0) {
@@ -2114,13 +2130,25 @@ static int mesh_channel_profile_write_current(void)
             break;
         }
     }
-    if(slot < 0) {
+    if(!overwrite && slot < 0) {
         mesh_append_log("channel profile save failed: no free slot");
         return -1;
     }
 
-    snprintf(path, sizeof(path), "%s/channel_%02d.conf",
-             MESHTASTIC_CHANNEL_PROFILE_DIR, slot);
+    if(!overwrite) {
+        snprintf(path, sizeof(path), "%s/channel_%02d.conf",
+                 MESHTASTIC_CHANNEL_PROFILE_DIR, slot);
+    }
+    if(overwrite) {
+        mesh_channel_profile_read_value(path, "name", name, sizeof(name),
+                                        "");
+    } else {
+        mesh_channel_profile_default_name(name, sizeof(name));
+    }
+    if(!name[0]) {
+        mesh_channel_profile_default_name(name, sizeof(name));
+    }
+
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     fp = fopen(tmp_path, "w");
     if(!fp) {
@@ -2128,7 +2156,6 @@ static int mesh_channel_profile_write_current(void)
         return -1;
     }
 
-    mesh_channel_profile_default_name(name, sizeof(name));
     fprintf(fp, "# K230 Meshtastic channel profile\n");
     fprintf(fp, "name=%s\n", name);
     fprintf(fp, "region=%s\n", mesh_region);
@@ -2161,16 +2188,22 @@ static int mesh_channel_profile_write_current(void)
         mesh_append_log("channel profile save failed: %s", strerror(errno));
         return -1;
     }
-    mesh_append_log("channel profile saved: %s", path);
+    snprintf(mesh_channel_profile_edit_path,
+             sizeof(mesh_channel_profile_edit_path), "%s", path);
+    mesh_append_log(overwrite ? "channel profile updated: %s" :
+                    "channel profile saved: %s", path);
     return 0;
 }
 
-static void mesh_channel_profile_apply_file(const char *path)
+static int mesh_channel_profile_apply_file_ex(const char *path,
+                                              int close_profiles,
+                                              int restart_daemon,
+                                              const char *action)
 {
     char value[96];
 
     if(!path || !path[0]) {
-        return;
+        return -1;
     }
     if(mesh_channel_profile_read_value(path, "region", value,
                                        sizeof(value),
@@ -2275,19 +2308,36 @@ static void mesh_channel_profile_apply_file(const char *path)
     mesh_save_profile_prefs();
     mesh_settings_refresh();
     mesh_update_profile_label();
-    mesh_channel_profiles_close();
-    mesh_append_log("channel profile loaded: %s", path);
-    mesh_restart_daemon_if_online();
+    if(close_profiles) {
+        mesh_channel_profiles_close();
+    }
+    mesh_append_log("channel profile %s: %s",
+                    action && action[0] ? action : "loaded", path);
+    if(restart_daemon) {
+        mesh_restart_daemon_if_online();
+    }
+    return 0;
+}
+
+static void mesh_channel_profile_apply_file(const char *path)
+{
+    if(mesh_channel_profile_apply_file_ex(path, 1, 1, "loaded") == 0) {
+        mesh_channel_profile_edit_path[0] = '\0';
+    }
 }
 
 static void mesh_channel_profile_load_event_cb(lv_event_t *event)
 {
     const char *path = (const char *)lv_event_get_user_data(event);
 
+    if(event) {
+        lv_event_stop_processing(event);
+    }
     mesh_channel_profile_apply_file(path);
 }
 
 static void mesh_channel_profiles_event_cb(lv_event_t *event);
+static void mesh_profile_event_cb(lv_event_t *event);
 
 static void mesh_channel_profile_save_event_cb(lv_event_t *event)
 {
@@ -2295,6 +2345,163 @@ static void mesh_channel_profile_save_event_cb(lv_event_t *event)
     if(mesh_channel_profile_write_current() == 0) {
         mesh_channel_profiles_event_cb(NULL);
     }
+}
+
+static void mesh_channel_profile_edit_event_cb(lv_event_t *event)
+{
+    const char *path = (const char *)lv_event_get_user_data(event);
+    char edit_path[160];
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(!path || !path[0]) {
+        return;
+    }
+    snprintf(edit_path, sizeof(edit_path), "%s", path);
+    if(mesh_channel_profile_apply_file_ex(edit_path, 1, 0, "editing") == 0) {
+        snprintf(mesh_channel_profile_edit_path,
+                 sizeof(mesh_channel_profile_edit_path), "%s", edit_path);
+        mesh_profile_event_cb(NULL);
+    }
+}
+
+static void mesh_channel_profile_delete_confirm_close(void)
+{
+    if(mesh_channel_profile_delete_overlay &&
+       lv_obj_is_valid(mesh_channel_profile_delete_overlay)) {
+        lv_obj_delete(mesh_channel_profile_delete_overlay);
+    }
+    mesh_channel_profile_delete_overlay = NULL;
+}
+
+static void mesh_channel_profile_delete_cancel_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_channel_profile_delete_confirm_close();
+}
+
+static void mesh_channel_profile_delete_accept_event_cb(lv_event_t *event)
+{
+    char deleted_path[160];
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    snprintf(deleted_path, sizeof(deleted_path), "%s",
+             mesh_channel_profile_delete_path);
+    if(deleted_path[0] && unlink(deleted_path) == 0) {
+        mesh_append_log("channel profile deleted: %s", deleted_path);
+        if(strcmp(mesh_channel_profile_edit_path, deleted_path) == 0) {
+            mesh_channel_profile_edit_path[0] = '\0';
+        }
+    } else {
+        mesh_append_log("channel profile delete failed: %s",
+                        strerror(errno));
+    }
+    mesh_channel_profile_delete_path[0] = '\0';
+    mesh_channel_profile_delete_confirm_close();
+    mesh_channel_profiles_event_cb(NULL);
+}
+
+static void mesh_channel_profile_delete_event_cb(lv_event_t *event)
+{
+    const char *path = (const char *)lv_event_get_user_data(event);
+    lv_obj_t *dialog;
+    lv_obj_t *title;
+    lv_obj_t *name_label;
+    lv_obj_t *note;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int dialog_w = ui_is_landscape() ? 560 : 500;
+    int dialog_h = ui_is_landscape() ? 236 : 260;
+    int pad = 24;
+    int gap = 18;
+    int button_w;
+    int button_y;
+    char name[64];
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(!path || !path[0]) {
+        return;
+    }
+
+    mesh_channel_profile_delete_confirm_close();
+    snprintf(mesh_channel_profile_delete_path,
+             sizeof(mesh_channel_profile_delete_path), "%s", path);
+    mesh_channel_profile_read_value(path, "name", name, sizeof(name),
+                                    "Channel");
+
+    if(dialog_w > screen_w - 48) {
+        dialog_w = screen_w - 48;
+    }
+    if(dialog_w < 320) {
+        dialog_w = 320;
+    }
+    if(dialog_h > screen_h - 48) {
+        dialog_h = screen_h - 48;
+    }
+    if(dialog_h < 216) {
+        dialog_h = 216;
+    }
+    button_w = (dialog_w - pad * 2 - gap) / 2;
+    button_y = dialog_h - pad - 58;
+
+    mesh_channel_profile_delete_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_channel_profile_delete_overlay);
+    lv_obj_set_style_bg_color(mesh_channel_profile_delete_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_channel_profile_delete_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(mesh_channel_profile_delete_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_channel_profile_delete_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_channel_profile_delete_overlay,
+                      LV_OBJ_FLAG_SCROLLABLE);
+
+    dialog = ui_panel(mesh_channel_profile_delete_overlay, 0, 0,
+                      dialog_w, dialog_h);
+    lv_obj_align(dialog, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(dialog, 16, 0);
+    lv_obj_set_style_border_color(dialog, lv_color_hex(0x3A2630), 0);
+    lv_obj_set_style_pad_all(dialog, 0, 0);
+
+    title = ui_label(dialog, ui_tr("Delete profile?"),
+                     &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_pos(title, pad, pad);
+    lv_obj_set_width(title, dialog_w - pad * 2);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    name_label = ui_label(dialog, name, &lv_font_montserrat_18, 0xF5A524);
+    lv_obj_set_pos(name_label, pad, pad + 52);
+    lv_obj_set_width(name_label, dialog_w - pad * 2);
+    lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
+
+    note = ui_label(dialog, ui_tr("This cannot be undone."),
+                    &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(note, pad, pad + 88);
+    lv_obj_set_width(note, dialog_w - pad * 2);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(dialog, pad, button_y, button_w,
+                            ui_tr("Cancel"), 0x9AA4AF);
+    lv_obj_set_height(btn, 58);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A222C), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x2A3644), 0);
+    lv_obj_add_event_cb(btn, mesh_channel_profile_delete_cancel_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    btn = ui_command_button(dialog, pad + button_w + gap, button_y,
+                            button_w, ui_tr("Delete"), 0xEF4D5A);
+    lv_obj_set_height(btn, 58);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A1D24), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0xEF4D5A), 0);
+    lv_obj_add_event_cb(btn, mesh_channel_profile_delete_accept_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 }
 
 static int mesh_channel_profile_collect(char paths[][160], int max_paths)
@@ -2324,7 +2531,10 @@ static void mesh_channel_profile_add_card(lv_obj_t *panel, const char *path,
     lv_obj_t *card;
     lv_obj_t *name_label;
     lv_obj_t *summary_label;
-    lv_obj_t *hint_label;
+    lv_obj_t *btn;
+    int button_gap = 8;
+    int button_w = (w - 28 - button_gap * 2) / 3;
+    int button_y = h - 46;
     char name[64];
     char region[24];
     char preset[32];
@@ -2360,9 +2570,6 @@ static void mesh_channel_profile_add_card(lv_obj_t *panel, const char *path,
     lv_obj_set_style_bg_color(card, lv_color_hex(0x111827), 0);
     lv_obj_set_style_border_color(card, lv_color_hex(0x243044), 0);
     lv_obj_set_style_border_width(card, 1, 0);
-    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(card, mesh_channel_profile_load_event_cb,
-                        LV_EVENT_CLICKED, mesh_channel_profile_paths[index]);
 
     name_label = ui_label(card, name, &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_set_pos(name_label, 14, 12);
@@ -2374,11 +2581,24 @@ static void mesh_channel_profile_add_card(lv_obj_t *panel, const char *path,
     lv_obj_set_width(summary_label, w - 28);
     lv_label_set_long_mode(summary_label, LV_LABEL_LONG_WRAP);
 
-    hint_label = ui_label(card, ui_tr("Tap to load and restart"),
-                          &lv_font_montserrat_14, 0x25C281);
-    lv_obj_set_pos(hint_label, 14, h - 34);
-    lv_obj_set_width(hint_label, w - 28);
-    lv_label_set_long_mode(hint_label, LV_LABEL_LONG_DOT);
+    if(button_w < 64) {
+        button_w = 64;
+    }
+    btn = ui_command_button(card, 14, button_y, button_w,
+                            ui_tr("Load"), 0x25C281);
+    lv_obj_set_height(btn, 38);
+    lv_obj_add_event_cb(btn, mesh_channel_profile_load_event_cb,
+                        LV_EVENT_CLICKED, mesh_channel_profile_paths[index]);
+    btn = ui_command_button(card, 14 + button_w + button_gap, button_y,
+                            button_w, ui_tr("Edit"), 0x3DA5FF);
+    lv_obj_set_height(btn, 38);
+    lv_obj_add_event_cb(btn, mesh_channel_profile_edit_event_cb,
+                        LV_EVENT_CLICKED, mesh_channel_profile_paths[index]);
+    btn = ui_command_button(card, 14 + (button_w + button_gap) * 2,
+                            button_y, button_w, ui_tr("Delete"), 0xEF4D5A);
+    lv_obj_set_height(btn, 38);
+    lv_obj_add_event_cb(btn, mesh_channel_profile_delete_event_cb,
+                        LV_EVENT_CLICKED, mesh_channel_profile_paths[index]);
 }
 
 static void mesh_channel_profiles_event_cb(lv_event_t *event)
@@ -2395,7 +2615,7 @@ static void mesh_channel_profiles_event_cb(lv_event_t *event)
     int columns = ui_is_landscape() ? 2 : 1;
     int gap = 12;
     int card_w = columns == 2 ? (content_w - gap) / 2 : content_w;
-    int card_h = 156;
+    int card_h = 184;
     int y = 112;
     int count;
 
@@ -4875,6 +5095,11 @@ int ui_meshtastic_handle_back(void)
     }
     if(mesh_choice_overlay && lv_obj_is_valid(mesh_choice_overlay)) {
         mesh_choice_close();
+        return 1;
+    }
+    if(mesh_channel_profile_delete_overlay &&
+       lv_obj_is_valid(mesh_channel_profile_delete_overlay)) {
+        mesh_channel_profile_delete_confirm_close();
         return 1;
     }
     if(mesh_channel_profiles_overlay &&
