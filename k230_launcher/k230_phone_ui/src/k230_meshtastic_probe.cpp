@@ -1380,11 +1380,6 @@ static uint64_t tx_poll_finish_delay_us(size_t len)
     return delay;
 }
 
-static uint64_t tx_min_finish_delay_us(size_t len)
-{
-    return tx_poll_finish_delay_us(len);
-}
-
 static bool elapsed_after(uint64_t now_us, uint64_t start_us,
                           uint64_t delay_us)
 {
@@ -11738,7 +11733,9 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                      decoded.portnum, header.id, header.from);
     }
 
-    ack_candidate = secure_match && data_ok && header.to == opts.from_node &&
+    ack_candidate = secure_match && data_ok &&
+                    decoded.portnum != MESHTASTIC_ROUTING_APP &&
+                    header.to == opts.from_node &&
                     header.from != opts.from_node &&
                     mesh_header_want_ack(header);
     if(ack_candidate) {
@@ -14193,17 +14190,7 @@ int main(int argc, char **argv)
         }
 
         if(events > 0U) {
-            if(active_op == OP_TX &&
-               !elapsed_after(now, active_op_start_us,
-                              tx_min_finish_delay_us(active_tx_len))) {
-                printf("TX event ignored before air-time guard: elapsed=%llu guard=%llu events=%u\n",
-                       (unsigned long long)(now >= active_op_start_us ?
-                                            now - active_op_start_us : 0),
-                       (unsigned long long)tx_min_finish_delay_us(active_tx_len),
-                       events);
-            } else {
-                handle_radio_event(radio, opts);
-            }
+            handle_radio_event(radio, opts);
             if(active_op != OP_TX && !opts.auto_tx && send_once_started &&
                !send_once_finished &&
                (!send_once_awaiting_ack || mesh_ack_pending_count() == 0U)) {
