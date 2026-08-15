@@ -28,6 +28,8 @@
 #include <unistd.h>
 
 #include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
 
 #include <deque>
 #include <string>
@@ -36,7 +38,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.23"
+#define PROBE_VERSION "0.25"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 8U
@@ -111,6 +113,7 @@
 #define K230_PHONE_UI_PREFS_DIR K230_PHONE_UI_CONFIG_PARENT "/k230_phone_ui"
 #define K230_MESH_NODEDB_FILE K230_PHONE_UI_PREFS_DIR "/meshtastic_nodes.tsv"
 #define K230_MESH_NODEDB_TMP_FILE K230_MESH_NODEDB_FILE ".tmp"
+#define K230_MESH_IDENTITY_FILE K230_PHONE_UI_PREFS_DIR "/meshtastic_identity.tsv"
 #define K230_MESH_UI_DIR "/root/meshtastic"
 #define K230_MESH_CANNED_MESSAGES_FILE K230_MESH_UI_DIR "/canned_messages.txt"
 #define K230_MESH_RINGTONE_FILE K230_MESH_UI_DIR "/ringtone.rtttl"
@@ -139,6 +142,10 @@
 #define MESHTASTIC_PHONEAPI_NODEINFO_NONCE 69421U
 #define MESHTASTIC_HW_MODEL_NRF52840_PCA10059 40U
 #define MESHTASTIC_MAX_K230_TX_POWER_DBM 22
+#define MESHTASTIC_PKC_OVERHEAD 12U
+#define MESHTASTIC_CURVE25519_KEY_LEN 32U
+#define MESHTASTIC_PKC_TAG_LEN 8U
+#define MESHTASTIC_PKC_NONCE_LEN 13U
 #define OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH 0
 #define OVERRIDE_SLOT_PRESET_HASH -1
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -781,6 +788,10 @@ typedef struct {
     bool client_channel_url = false;
     bool client_quit = false;
     bool client_publish_nodeinfo = false;
+    bool client_send_to_requested = false;
+    bool client_send_to_ack = false;
+    std::string client_send_to_target;
+    std::string client_send_to_message;
     bool client_publish_position = false;
     bool client_publish_telemetry = false;
     bool client_request_nodeinfo = false;
@@ -789,6 +800,9 @@ typedef struct {
     bool client_request_traceroute = false;
     bool client_request_neighborinfo = false;
     std::string client_request_target;
+    bool client_import_node_key = false;
+    std::string client_import_node;
+    std::string client_import_key;
     bool rebroadcast = true;
     bool advertise_nodeinfo = true;
     bool position_enabled = true;
@@ -880,6 +894,8 @@ typedef struct {
     char long_name[40] = {0};
     char short_name[8] = {0};
     int hw_model = -1;
+    bool has_public_key = false;
+    uint8_t public_key[MESHTASTIC_CURVE25519_KEY_LEN] = {0};
     bool has_position = false;
     bool has_altitude = false;
     bool has_ground_speed = false;
@@ -976,6 +992,10 @@ typedef struct {
 typedef struct {
     std::string message;
     uint32_t channel_index = 0;
+    bool has_to_node = false;
+    uint32_t to_node = 0;
+    bool has_want_ack = false;
+    bool want_ack = false;
 } mesh_send_request_t;
 
 typedef struct {
@@ -1002,6 +1022,8 @@ typedef struct {
     std::string short_name;
     int hw_model = -1;
     bool has_name = false;
+    bool has_public_key = false;
+    uint8_t public_key[MESHTASTIC_CURVE25519_KEY_LEN] = {0};
 } mesh_user_info_t;
 
 typedef struct {
@@ -1064,6 +1086,13 @@ typedef struct {
     uint32_t iaq = 0;
     uint32_t timestamp = 0;
 } mesh_telemetry_info_t;
+
+typedef struct {
+    bool ready = false;
+    bool generated = false;
+    uint8_t public_key[MESHTASTIC_CURVE25519_KEY_LEN] = {0};
+    uint8_t private_key[MESHTASTIC_CURVE25519_KEY_LEN] = {0};
+} mesh_pki_identity_t;
 
 typedef struct {
     uint32_t node_id = 0;
@@ -1239,6 +1268,7 @@ static mesh_chat_dedup_entry_t mesh_chat_dedup[MESHTASTIC_CHAT_DEDUP_SIZE];
 static size_t mesh_chat_dedup_next;
 static delayed_tx_t mesh_delayed_tx_queue[MESHTASTIC_DELAYED_TX_QUEUE_SIZE];
 static ack_retry_entry_t mesh_ack_retry_queue[MESHTASTIC_ACK_RETRY_QUEUE_SIZE];
+static mesh_pki_identity_t mesh_pki_identity;
 static char daemon_event_log[MESHTASTIC_EVENT_LOG_LINES][MESHTASTIC_EVENT_LOG_LINE_LEN];
 static size_t daemon_event_log_count;
 static char daemon_chat_log[MESHTASTIC_CHAT_LOG_LINES][MESHTASTIC_CHAT_LOG_LINE_LEN];
@@ -1460,6 +1490,11 @@ static bool phoneapi_bridge_can_send(void)
            state == PHONEAPI_BRIDGE_CONNECTED;
 }
 
+static bool phoneapi_bridge_has_client(void)
+{
+    return phoneapi_bridge_get_state(nullptr, 0) == PHONEAPI_BRIDGE_CONNECTED;
+}
+
 static void phoneapi_store_runtime_opts(const probe_options_t &opts,
                                         bool request_reconfigure)
 {
@@ -1630,6 +1665,8 @@ static std::string mesh_clean_text(const std::string &text)
     }
     return out;
 }
+
+static std::string mesh_hex_encode_bytes(const uint8_t *data, size_t len);
 
 static void daemon_chat(const char *fmt, ...)
 {
@@ -1949,6 +1986,21 @@ static void mesh_node_update_user(uint32_t node, const mesh_user_info_t &user)
     if(user.hw_model >= 0) {
         entry->hw_model = user.hw_model;
     }
+    if(user.has_public_key) {
+        if(entry->has_public_key &&
+           memcmp(entry->public_key, user.public_key,
+                  MESHTASTIC_CURVE25519_KEY_LEN) != 0) {
+            daemon_event("NodeInfo public key mismatch node=0x%08x keep-existing",
+                         node);
+        } else if(!entry->has_public_key) {
+            memcpy(entry->public_key, user.public_key,
+                   MESHTASTIC_CURVE25519_KEY_LEN);
+            entry->has_public_key = true;
+            daemon_event("NodeInfo public key learned node=0x%08x key=%s",
+                         node,
+                         mesh_hex_encode_bytes(entry->public_key, 4U).c_str());
+        }
+    }
     mesh_nodedb_mark_dirty();
 }
 
@@ -2134,6 +2186,179 @@ static void mesh_hex_decode_text(const char *hex, char *out, size_t out_len)
     out[pos] = '\0';
 }
 
+static std::string mesh_hex_encode_bytes(const uint8_t *data, size_t len)
+{
+    std::string out;
+
+    if(!data || len == 0U) {
+        return "-";
+    }
+    out.reserve(len * 2U);
+    for(size_t i = 0; i < len; i++) {
+        out.push_back(mesh_hex_digit(data[i] >> 4U));
+        out.push_back(mesh_hex_digit(data[i]));
+    }
+    return out.empty() ? "-" : out;
+}
+
+static bool mesh_hex_decode_bytes(const char *hex, uint8_t *out, size_t len)
+{
+    size_t hex_len;
+
+    if(!hex || !out || len == 0U) {
+        return false;
+    }
+    if(strncmp(hex, "0x", 2) == 0 || strncmp(hex, "0X", 2) == 0) {
+        hex += 2;
+    }
+    hex_len = strlen(hex);
+    if(hex_len != len * 2U) {
+        return false;
+    }
+    for(size_t i = 0; i < len; i++) {
+        int hi = mesh_hex_value(hex[i * 2U]);
+        int lo = mesh_hex_value(hex[i * 2U + 1U]);
+
+        if(hi < 0 || lo < 0) {
+            return false;
+        }
+        out[i] = (uint8_t)((hi << 4U) | lo);
+    }
+    return true;
+}
+
+static bool mesh_pki_generate_identity(mesh_pki_identity_t *identity)
+{
+    EVP_PKEY_CTX *ctx;
+    EVP_PKEY *pkey = nullptr;
+    size_t public_len = MESHTASTIC_CURVE25519_KEY_LEN;
+    size_t private_len = MESHTASTIC_CURVE25519_KEY_LEN;
+    bool ok = false;
+
+    if(!identity) {
+        return false;
+    }
+    ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr);
+    if(!ctx) {
+        return false;
+    }
+    if(EVP_PKEY_keygen_init(ctx) == 1 &&
+       EVP_PKEY_keygen(ctx, &pkey) == 1 &&
+       EVP_PKEY_get_raw_public_key(pkey, identity->public_key,
+                                   &public_len) == 1 &&
+       EVP_PKEY_get_raw_private_key(pkey, identity->private_key,
+                                    &private_len) == 1 &&
+       public_len == MESHTASTIC_CURVE25519_KEY_LEN &&
+       private_len == MESHTASTIC_CURVE25519_KEY_LEN) {
+        identity->ready = true;
+        identity->generated = true;
+        ok = true;
+    }
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(ctx);
+    if(!ok) {
+        memset(identity, 0, sizeof(*identity));
+    }
+    return ok;
+}
+
+static bool mesh_pki_save_identity(const mesh_pki_identity_t &identity)
+{
+    FILE *fp;
+    std::string public_hex;
+    std::string private_hex;
+
+    if(!identity.ready || !mesh_config_dir_ensure()) {
+        return false;
+    }
+    public_hex = mesh_hex_encode_bytes(identity.public_key,
+                                       sizeof(identity.public_key));
+    private_hex = mesh_hex_encode_bytes(identity.private_key,
+                                        sizeof(identity.private_key));
+    fp = fopen(K230_MESH_IDENTITY_FILE, "w");
+    if(!fp) {
+        return false;
+    }
+    fprintf(fp, "# k230 meshtastic identity v1\n");
+    fprintf(fp, "public\t%s\n", public_hex.c_str());
+    fprintf(fp, "private\t%s\n", private_hex.c_str());
+    if(fclose(fp) != 0) {
+        unlink(K230_MESH_IDENTITY_FILE);
+        return false;
+    }
+    chmod(K230_MESH_IDENTITY_FILE, 0600);
+    return true;
+}
+
+static bool mesh_pki_load_identity_file(mesh_pki_identity_t *identity)
+{
+    FILE *fp;
+    char line[256];
+    uint8_t public_key[MESHTASTIC_CURVE25519_KEY_LEN] = {0};
+    uint8_t private_key[MESHTASTIC_CURVE25519_KEY_LEN] = {0};
+    bool have_public = false;
+    bool have_private = false;
+
+    if(!identity) {
+        return false;
+    }
+    fp = fopen(K230_MESH_IDENTITY_FILE, "r");
+    if(!fp) {
+        return false;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        char *key;
+        char *value;
+
+        line[strcspn(line, "\r\n")] = '\0';
+        if(line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+        key = line;
+        value = strchr(line, '\t');
+        if(!value) {
+            continue;
+        }
+        *value++ = '\0';
+        if(strcmp(key, "public") == 0) {
+            have_public = mesh_hex_decode_bytes(
+                value, public_key, sizeof(public_key));
+        } else if(strcmp(key, "private") == 0) {
+            have_private = mesh_hex_decode_bytes(
+                value, private_key, sizeof(private_key));
+        }
+    }
+    fclose(fp);
+    if(!have_public || !have_private) {
+        return false;
+    }
+    memset(identity, 0, sizeof(*identity));
+    memcpy(identity->public_key, public_key, sizeof(public_key));
+    memcpy(identity->private_key, private_key, sizeof(private_key));
+    identity->ready = true;
+    identity->generated = false;
+    return true;
+}
+
+static bool mesh_pki_load_or_create_identity(void)
+{
+    if(mesh_pki_identity.ready) {
+        return true;
+    }
+    if(mesh_pki_load_identity_file(&mesh_pki_identity)) {
+        return true;
+    }
+    if(!mesh_pki_generate_identity(&mesh_pki_identity)) {
+        return false;
+    }
+    return mesh_pki_save_identity(mesh_pki_identity);
+}
+
+static bool mesh_pki_public_key_available(void)
+{
+    return mesh_pki_identity.ready;
+}
+
 static bool mesh_parse_u32_text(const char *text, uint32_t *out)
 {
     char *end = nullptr;
@@ -2251,13 +2476,14 @@ static bool mesh_nodedb_save(void)
         return false;
     }
 
-    fprintf(fp, "# k230 meshtastic nodedb v4\n");
+    fprintf(fp, "# k230 meshtastic nodedb v5\n");
     for(size_t i = 0; i < mesh_node_count; i++) {
         const mesh_node_entry_t &node = mesh_nodes[i];
         std::string long_hex;
         std::string short_hex;
         std::string neighbor_hex;
         std::string route_hex;
+        std::string public_key_hex;
 
         if(node.node == 0U) {
             continue;
@@ -2270,12 +2496,16 @@ static bool mesh_nodedb_save(void)
                                             sizeof(node.neighbor_summary));
         route_hex = mesh_hex_encode_text(node.route_summary,
                                          sizeof(node.route_summary));
+        public_key_hex = node.has_public_key ?
+                         mesh_hex_encode_bytes(node.public_key,
+                                               sizeof(node.public_key)) :
+                         "-";
         fprintf(fp,
-                "v4\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
+                "v5\t%u\t%u\t%d\t%.3f\t%u\t%s\t%s\t%d\t"
                 "%u\t%u\t%u\t%u\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t"
                 "%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t"
                 "%u\t%u\t%u\t%u\t%u\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%u\t"
-                "%u\t%u\t%u\t%u\t%u\t%s\t%u\t%s\t%u\t%u\t%u\t%u\t%u\t%u\t%u\n",
+                "%u\t%u\t%u\t%u\t%u\t%s\t%u\t%s\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\n",
                 node.node, mesh_node_last_seen_epoch(node),
                 node.rssi_dbm, node.snr, node.rx_count,
                 long_hex.c_str(), short_hex.c_str(), node.hw_model,
@@ -2313,7 +2543,8 @@ static bool mesh_nodedb_save(void)
                 node.is_ignored ? 1U : 0U,
                 node.is_muted ? 1U : 0U,
                 node.has_channel ? 1U : 0U, node.channel_index,
-                node.has_hops_away ? 1U : 0U, node.hops_away);
+                node.has_hops_away ? 1U : 0U, node.hops_away,
+                node.has_public_key ? 1U : 0U, public_key_hex.c_str());
     }
     if(fclose(fp) != 0) {
         unlink(K230_MESH_NODEDB_TMP_FILE);
@@ -2383,7 +2614,8 @@ static bool mesh_nodedb_load(void)
         mesh_split_tsv(line, &fields);
         if(fields.size() < 49U ||
            (strcmp(fields[0], "v1") != 0 && strcmp(fields[0], "v2") != 0 &&
-            strcmp(fields[0], "v3") != 0)) {
+            strcmp(fields[0], "v3") != 0 && strcmp(fields[0], "v4") != 0 &&
+            strcmp(fields[0], "v5") != 0)) {
             skipped++;
             continue;
         }
@@ -2491,7 +2723,8 @@ static bool mesh_nodedb_load(void)
         }
         if(ok && (strcmp(fields[0], "v2") == 0 ||
                   strcmp(fields[0], "v3") == 0 ||
-                  strcmp(fields[0], "v4") == 0)) {
+                  strcmp(fields[0], "v4") == 0 ||
+                  strcmp(fields[0], "v5") == 0)) {
             NODEDB_GET_BOOL(tmp.has_route_info);
             if(ok && idx < fields.size()) {
                 mesh_hex_decode_text(fields[idx++], tmp.route_summary,
@@ -2501,16 +2734,30 @@ static bool mesh_nodedb_load(void)
             }
         }
         if(ok && (strcmp(fields[0], "v3") == 0 ||
-                  strcmp(fields[0], "v4") == 0)) {
+                  strcmp(fields[0], "v4") == 0 ||
+                  strcmp(fields[0], "v5") == 0)) {
             NODEDB_GET_BOOL(tmp.is_favorite);
             NODEDB_GET_BOOL(tmp.is_ignored);
             NODEDB_GET_BOOL(tmp.is_muted);
         }
-        if(ok && strcmp(fields[0], "v4") == 0) {
+        if(ok && (strcmp(fields[0], "v4") == 0 ||
+                  strcmp(fields[0], "v5") == 0)) {
             NODEDB_GET_BOOL(tmp.has_channel);
             NODEDB_GET_U32(tmp.channel_index);
             NODEDB_GET_BOOL(tmp.has_hops_away);
             NODEDB_GET_U32(tmp.hops_away);
+        }
+        if(ok && strcmp(fields[0], "v5") == 0) {
+            NODEDB_GET_BOOL(tmp.has_public_key);
+            if(ok && idx < fields.size()) {
+                if(tmp.has_public_key) {
+                    ok = mesh_hex_decode_bytes(fields[idx], tmp.public_key,
+                                               sizeof(tmp.public_key));
+                }
+                idx++;
+            } else {
+                ok = false;
+            }
         }
 
 #undef NODEDB_GET_U32
@@ -3225,6 +3472,13 @@ static bool encode_user_proto(const probe_options_t &opts,
     append_string_field(out, 3U, short_name, 4U);
     append_varint(out, (5U << 3U) | 0U);
     append_varint(out, 0U);
+    if(mesh_pki_public_key_available()) {
+        append_varint(out, (8U << 3U) | 2U);
+        append_varint(out, MESHTASTIC_CURVE25519_KEY_LEN);
+        out->insert(out->end(), mesh_pki_identity.public_key,
+                    mesh_pki_identity.public_key +
+                    MESHTASTIC_CURVE25519_KEY_LEN);
+    }
     return !out->empty();
 }
 
@@ -4555,6 +4809,10 @@ static bool encode_phoneapi_user_proto(const probe_options_t &opts,
     append_string_field(out, 3U, short_name, 4U);
     append_bytes_field(out, 4U, mac, sizeof(mac));
     append_uint32_field(out, 5U, MESHTASTIC_HW_MODEL_NRF52840_PCA10059);
+    if(mesh_pki_public_key_available()) {
+        append_bytes_field(out, 8U, mesh_pki_identity.public_key,
+                           MESHTASTIC_CURVE25519_KEY_LEN);
+    }
     return true;
 }
 
@@ -5317,6 +5575,10 @@ static bool encode_phoneapi_cached_user_proto(const mesh_node_entry_t &node,
     if(node.hw_model >= 0) {
         append_uint32_field(out, 5U, (uint32_t)node.hw_model);
     }
+    if(node.has_public_key) {
+        append_bytes_field(out, 8U, node.public_key,
+                           MESHTASTIC_CURVE25519_KEY_LEN);
+    }
     return true;
 }
 
@@ -5490,6 +5752,19 @@ static uint8_t mesh_header_hop_limit(const mesh_header_t &header);
 static uint8_t mesh_header_hop_start(const mesh_header_t &header);
 static bool mesh_header_want_ack(const mesh_header_t &header);
 static uint32_t mesh_prng_u32(uint32_t salt);
+static bool mesh_portnum_uses_pki_direct(uint32_t portnum);
+static bool build_mesh_pki_direct_data_frame(const probe_options_t &opts,
+                                             uint32_t to_node,
+                                             uint32_t portnum,
+                                             const std::vector<uint8_t> &payload,
+                                             uint32_t request_id,
+                                             uint32_t reply_id,
+                                             bool want_response,
+                                             uint32_t data_dest,
+                                             bool request_ack,
+                                             bool phoneapi_origin,
+                                             const char *summary_kind,
+                                             tx_frame_t *frame);
 static bool decode_data_proto(const uint8_t *data, size_t len,
                               mesh_data_proto_t *decoded);
 static bool decode_position_proto(const std::vector<uint8_t> &payload,
@@ -6577,7 +6852,7 @@ static bool phoneapi_send_from_payload_global(uint32_t field,
 {
     int fd = phoneapi_uart_fd;
 
-    if(fd < 0 || !phoneapi_thread_running || !phoneapi_bridge_can_send()) {
+    if(fd < 0 || !phoneapi_thread_running || !phoneapi_bridge_has_client()) {
         return false;
     }
     return phoneapi_send_from_payload(fd, field, payload, label);
@@ -8662,6 +8937,19 @@ static bool decode_user_proto(const std::vector<uint8_t> &payload,
                 found.short_name = mesh_clean_text(text);
             }
             found.has_name = true;
+        } else if(field == 8U && wire == 2U) {
+            uint32_t l;
+
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            if(l == MESHTASTIC_CURVE25519_KEY_LEN) {
+                memcpy(found.public_key, payload.data() + pos,
+                       MESHTASTIC_CURVE25519_KEY_LEN);
+                found.has_public_key = true;
+            }
+            pos += l;
         } else if(field == 5U && wire == 0U) {
             uint32_t hw = 0;
             if(!read_varint(payload.data(), payload.size(), &pos, &hw)) {
@@ -8692,7 +8980,7 @@ static bool decode_user_proto(const std::vector<uint8_t> &payload,
     if(user) {
         *user = found;
     }
-    return found.has_name || found.hw_model >= 0;
+    return found.has_name || found.hw_model >= 0 || found.has_public_key;
 }
 
 static bool decode_position_proto(const std::vector<uint8_t> &payload,
@@ -9462,6 +9750,203 @@ static bool aes_ctr_crypt(const std::vector<uint8_t> &key, uint32_t from_node,
     return true;
 }
 
+static bool mesh_node_copy_public_key(uint32_t node,
+                                      uint8_t out[MESHTASTIC_CURVE25519_KEY_LEN])
+{
+    mesh_node_entry_t *entry;
+
+    if(!out || node == 0U) {
+        return false;
+    }
+    if(node == phoneapi_opts.from_node && mesh_pki_identity.ready) {
+        memcpy(out, mesh_pki_identity.public_key,
+               MESHTASTIC_CURVE25519_KEY_LEN);
+        return true;
+    }
+    entry = mesh_node_find(node);
+    if(!entry || !entry->has_public_key) {
+        return false;
+    }
+    memcpy(out, entry->public_key, MESHTASTIC_CURVE25519_KEY_LEN);
+    return true;
+}
+
+static bool mesh_pki_shared_key(
+    const uint8_t remote_public[MESHTASTIC_CURVE25519_KEY_LEN],
+    uint8_t shared_key[SHA256_DIGEST_LENGTH])
+{
+    EVP_PKEY *local = nullptr;
+    EVP_PKEY *remote = nullptr;
+    EVP_PKEY_CTX *ctx = nullptr;
+    uint8_t shared[MESHTASTIC_CURVE25519_KEY_LEN] = {0};
+    size_t shared_len = sizeof(shared);
+    bool ok = false;
+
+    if(!mesh_pki_identity.ready || !remote_public || !shared_key) {
+        return false;
+    }
+    local = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr,
+                                         mesh_pki_identity.private_key,
+                                         MESHTASTIC_CURVE25519_KEY_LEN);
+    remote = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr,
+                                         remote_public,
+                                         MESHTASTIC_CURVE25519_KEY_LEN);
+    if(!local || !remote) {
+        goto out;
+    }
+    ctx = EVP_PKEY_CTX_new(local, nullptr);
+    if(!ctx) {
+        goto out;
+    }
+    if(EVP_PKEY_derive_init(ctx) != 1 ||
+       EVP_PKEY_derive_set_peer(ctx, remote) != 1 ||
+       EVP_PKEY_derive(ctx, shared, &shared_len) != 1 ||
+       shared_len != MESHTASTIC_CURVE25519_KEY_LEN) {
+        goto out;
+    }
+    SHA256(shared, shared_len, shared_key);
+    ok = true;
+
+out:
+    memset(shared, 0, sizeof(shared));
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(remote);
+    EVP_PKEY_free(local);
+    return ok;
+}
+
+static void mesh_pki_init_nonce(uint8_t nonce[MESHTASTIC_PKC_NONCE_LEN],
+                                uint32_t from_node,
+                                uint32_t packet_id,
+                                uint32_t extra_nonce)
+{
+    memset(nonce, 0, MESHTASTIC_PKC_NONCE_LEN);
+    put_le32(nonce, packet_id);
+    put_le32(nonce + 4U, 0U);
+    if(extra_nonce != 0U) {
+        put_le32(nonce + 4U, extra_nonce);
+    }
+    put_le32(nonce + 8U, from_node);
+}
+
+static bool mesh_pki_decrypt_payload(
+    const uint8_t remote_public[MESHTASTIC_CURVE25519_KEY_LEN],
+    uint32_t from_node,
+    uint32_t packet_id,
+    const std::vector<uint8_t> &encrypted_payload,
+    std::vector<uint8_t> *plain)
+{
+    EVP_CIPHER_CTX *ctx = nullptr;
+    uint8_t key[SHA256_DIGEST_LENGTH] = {0};
+    uint8_t nonce[MESHTASTIC_PKC_NONCE_LEN];
+    uint32_t extra_nonce;
+    const uint8_t *ciphertext;
+    const uint8_t *auth;
+    size_t cipher_len;
+    int out_len = 0;
+    bool ok = false;
+
+    if(!plain || encrypted_payload.size() <= MESHTASTIC_PKC_OVERHEAD ||
+       !mesh_pki_shared_key(remote_public, key)) {
+        return false;
+    }
+    cipher_len = encrypted_payload.size() - MESHTASTIC_PKC_OVERHEAD;
+    ciphertext = encrypted_payload.data();
+    auth = encrypted_payload.data() + cipher_len;
+    extra_nonce = get_le32(auth + MESHTASTIC_PKC_TAG_LEN);
+    mesh_pki_init_nonce(nonce, from_node, packet_id, extra_nonce);
+
+    plain->assign(cipher_len, 0U);
+    ctx = EVP_CIPHER_CTX_new();
+    if(!ctx) {
+        goto out;
+    }
+    if(EVP_DecryptInit_ex(ctx, EVP_aes_256_ccm(), nullptr, nullptr,
+                          nullptr) != 1 ||
+       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN,
+                           MESHTASTIC_PKC_NONCE_LEN, nullptr) != 1 ||
+       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG,
+                           MESHTASTIC_PKC_TAG_LEN, (void *)auth) != 1 ||
+       EVP_DecryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1 ||
+       EVP_DecryptUpdate(ctx, nullptr, &out_len, nullptr,
+                         (int)cipher_len) != 1 ||
+       EVP_DecryptUpdate(ctx, plain->data(), &out_len, ciphertext,
+                         (int)cipher_len) != 1) {
+        goto out;
+    }
+    plain->resize((size_t)out_len);
+    ok = true;
+
+out:
+    memset(key, 0, sizeof(key));
+    EVP_CIPHER_CTX_free(ctx);
+    if(!ok && plain) {
+        plain->clear();
+    }
+    return ok;
+}
+
+static bool mesh_pki_encrypt_payload(
+    const uint8_t remote_public[MESHTASTIC_CURVE25519_KEY_LEN],
+    uint32_t from_node,
+    uint32_t packet_id,
+    const std::vector<uint8_t> &plain,
+    std::vector<uint8_t> *encrypted_payload)
+{
+    EVP_CIPHER_CTX *ctx = nullptr;
+    uint8_t key[SHA256_DIGEST_LENGTH] = {0};
+    uint8_t nonce[MESHTASTIC_PKC_NONCE_LEN];
+    uint32_t extra_nonce;
+    uint8_t tag[MESHTASTIC_PKC_TAG_LEN] = {0};
+    int out_len = 0;
+    bool ok = false;
+
+    if(!encrypted_payload || plain.empty() ||
+       plain.size() + MESHTASTIC_PKC_OVERHEAD >
+           (MESHTASTIC_MAX_LORA_PAYLOAD_LEN - MESHTASTIC_HEADER_LENGTH) ||
+       !mesh_pki_shared_key(remote_public, key)) {
+        return false;
+    }
+    if(RAND_bytes((uint8_t *)&extra_nonce, sizeof(extra_nonce)) != 1) {
+        extra_nonce = (uint32_t)(monotonic_us() & 0xffffffffU) ^
+                      mesh_prng_u32(packet_id);
+    }
+    mesh_pki_init_nonce(nonce, from_node, packet_id, extra_nonce);
+    encrypted_payload->assign(plain.size() + MESHTASTIC_PKC_OVERHEAD, 0U);
+
+    ctx = EVP_CIPHER_CTX_new();
+    if(!ctx) {
+        goto out;
+    }
+    if(EVP_EncryptInit_ex(ctx, EVP_aes_256_ccm(), nullptr, nullptr,
+                          nullptr) != 1 ||
+       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN,
+                           MESHTASTIC_PKC_NONCE_LEN, nullptr) != 1 ||
+       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG,
+                           MESHTASTIC_PKC_TAG_LEN, nullptr) != 1 ||
+       EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1 ||
+       EVP_EncryptUpdate(ctx, nullptr, &out_len, nullptr,
+                         (int)plain.size()) != 1 ||
+       EVP_EncryptUpdate(ctx, encrypted_payload->data(), &out_len,
+                         plain.data(), (int)plain.size()) != 1 ||
+       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_GET_TAG,
+                           MESHTASTIC_PKC_TAG_LEN, tag) != 1) {
+        goto out;
+    }
+    memcpy(encrypted_payload->data() + plain.size(), tag, sizeof(tag));
+    put_le32(encrypted_payload->data() + plain.size() +
+             MESHTASTIC_PKC_TAG_LEN, extra_nonce);
+    ok = true;
+
+out:
+    memset(key, 0, sizeof(key));
+    EVP_CIPHER_CTX_free(ctx);
+    if(!ok && encrypted_payload) {
+        encrypted_payload->clear();
+    }
+    return ok;
+}
+
 static bool parse_mesh_header(const uint8_t *data, size_t len,
                               mesh_header_t *header)
 {
@@ -10031,6 +10516,23 @@ static bool build_mesh_frame(const probe_options_t &opts,
                                 &key, &channel_hash)) {
         return false;
     }
+    if(!meshtastic_node_is_broadcast(opts.to_node)) {
+        std::vector<uint8_t> text_payload;
+        uint8_t remote_public[MESHTASTIC_CURVE25519_KEY_LEN];
+
+        if(!mesh_node_copy_public_key(opts.to_node, remote_public)) {
+            daemon_event("Mesh direct text skipped target=0x%08x reason=no-public-key",
+                         opts.to_node);
+            return false;
+        }
+        text_payload.assign(message.begin(), message.end());
+        if(text_payload.size() > MESHTASTIC_DATA_PAYLOAD_LEN) {
+            text_payload.resize(MESHTASTIC_DATA_PAYLOAD_LEN);
+        }
+        return build_mesh_pki_direct_data_frame(
+            opts, opts.to_node, MESHTASTIC_TEXT_MESSAGE_APP, text_payload,
+            0U, 0U, false, 0U, opts.want_ack, false, "text", frame);
+    }
     if(packet_id == 0U) {
         packet_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
         if(packet_id == 0U) {
@@ -10099,8 +10601,24 @@ static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
     uint8_t hop_limit = tx.hop_limit != 0U ? tx.hop_limit : opts.hop_limit;
     char summary[220];
 
-    if(!frame ||
-       !mesh_resolve_tx_channel(opts, tx.channel_index, &channel_name, &psk,
+    if(!frame) {
+        return false;
+    }
+    if(tx.to_node != 0U && !meshtastic_node_is_broadcast(tx.to_node) &&
+       mesh_portnum_uses_pki_direct(tx.data.portnum)) {
+        uint8_t remote_public[MESHTASTIC_CURVE25519_KEY_LEN];
+
+        if(mesh_node_copy_public_key(tx.to_node, remote_public)) {
+            return build_mesh_pki_direct_data_frame(
+                opts, tx.to_node, tx.data.portnum, tx.data.payload,
+                tx.data.request_id, tx.data.reply_id,
+                tx.data.want_response, 0U, tx.want_ack, true,
+                "phoneapi", frame);
+        }
+        daemon_event("PhoneAPI direct PKI skipped target=0x%08x port=%u reason=no-public-key",
+                     tx.to_node, tx.data.portnum);
+    }
+    if(!mesh_resolve_tx_channel(opts, tx.channel_index, &channel_name, &psk,
                                 &key, &channel_hash)) {
         return false;
     }
@@ -10375,18 +10893,30 @@ static const char *mesh_remote_request_name(mesh_remote_request_type_t type)
     }
 }
 
-static bool mesh_make_placeholder_position(mesh_position_info_t *position)
+static bool mesh_select_local_position(const probe_options_t &opts,
+                                       mesh_position_info_t *position,
+                                       const char **source)
 {
     if(!position) {
         return false;
     }
-    *position = mesh_position_info_t();
-    position->has_latitude = true;
-    position->has_longitude = true;
-    position->latitude_i = 0;
-    position->longitude_i = 0;
-    position->timestamp = (uint32_t)time(nullptr);
-    return true;
+    if(fixed_position_from_opts(opts, position)) {
+        if(source) {
+            *source = "fixed";
+        }
+        return true;
+    }
+    if(mesh_gnss.present && mesh_gnss.has_fix) {
+        *position = mesh_gnss.position;
+        if(source) {
+            *source = "gnss";
+        }
+        return true;
+    }
+    if(source) {
+        *source = "unavailable";
+    }
+    return false;
 }
 
 static bool mesh_request_wants_environment_telemetry(
@@ -10506,6 +11036,88 @@ static bool build_mesh_direct_data_frame(const probe_options_t &opts,
     return true;
 }
 
+static bool mesh_portnum_uses_pki_direct(uint32_t portnum)
+{
+    return portnum != MESHTASTIC_NODEINFO_APP &&
+           portnum != MESHTASTIC_POSITION_APP &&
+           portnum != MESHTASTIC_ROUTING_APP &&
+           portnum != MESHTASTIC_TRACEROUTE_APP;
+}
+
+static bool build_mesh_pki_direct_data_frame(const probe_options_t &opts,
+                                             uint32_t to_node,
+                                             uint32_t portnum,
+                                             const std::vector<uint8_t> &payload,
+                                             uint32_t request_id,
+                                             uint32_t reply_id,
+                                             bool want_response,
+                                             uint32_t data_dest,
+                                             bool request_ack,
+                                             bool phoneapi_origin,
+                                             const char *summary_kind,
+                                             tx_frame_t *frame)
+{
+    uint8_t remote_public[MESHTASTIC_CURVE25519_KEY_LEN];
+    std::vector<uint8_t> data_proto;
+    std::vector<uint8_t> encrypted_payload;
+    mesh_header_t header;
+    uint32_t packet_id;
+    char summary[260];
+
+    if(!frame || to_node == 0U || meshtastic_node_is_broadcast(to_node) ||
+       !mesh_pki_identity.ready ||
+       !mesh_node_copy_public_key(to_node, remote_public) ||
+       !mesh_portnum_uses_pki_direct(portnum) ||
+       !encode_data_proto(portnum, payload, request_id, reply_id,
+                          &data_proto, want_response, data_dest, 0U)) {
+        return false;
+    }
+    packet_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+    if(packet_id == 0U) {
+        packet_id = 1U;
+    }
+    if(!mesh_pki_encrypt_payload(remote_public, opts.from_node, packet_id,
+                                 data_proto, &encrypted_payload)) {
+        return false;
+    }
+
+    memset(&header, 0, sizeof(header));
+    header.to = to_node;
+    header.from = opts.from_node;
+    header.id = packet_id;
+    header.flags = (opts.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
+                   ((opts.hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
+                    MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
+    if(request_ack) {
+        header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
+    }
+    header.channel = 0U;
+    header.next_hop = 0;
+    header.relay_node = (uint8_t)(opts.from_node & 0xffU);
+
+    frame->bytes.clear();
+    append_mesh_header(&frame->bytes, header);
+    frame->bytes.insert(frame->bytes.end(), encrypted_payload.begin(),
+                        encrypted_payload.end());
+    frame->rebroadcast = false;
+    frame->want_ack = mesh_header_want_ack(header);
+    frame->routing_ack = false;
+    frame->phoneapi_origin = phoneapi_origin;
+    frame->to_node = header.to;
+    frame->from_node = header.from;
+    frame->packet_id = header.id;
+    frame->ack_request_id = 0;
+    frame->channel = header.channel;
+    snprintf(summary, sizeof(summary),
+             "mesh %s pki id=0x%08x from=0x%08x to=0x%08x port=%u payload=%u want_response=%s reply=0x%08x ack=%s",
+             summary_kind && summary_kind[0] ? summary_kind : "direct",
+             header.id, header.from, header.to, portnum,
+             (unsigned)payload.size(), want_response ? "yes" : "no",
+             reply_id, frame->want_ack ? "yes" : "no");
+    frame->summary = summary;
+    return true;
+}
+
 static bool build_mesh_remote_request_frame(const probe_options_t &opts,
                                             const mesh_remote_request_t &req,
                                             tx_frame_t *frame)
@@ -10515,7 +11127,6 @@ static bool build_mesh_remote_request_frame(const probe_options_t &opts,
     uint32_t portnum = MESHTASTIC_NODEINFO_APP;
     uint32_t data_dest = 0U;
     bool request_ack = false;
-    mesh_position_info_t position;
 
     if(req.to_node == 0U || meshtastic_node_is_broadcast(req.to_node) ||
        !parse_psk(opts.psk, &key)) {
@@ -10530,15 +11141,8 @@ static bool build_mesh_remote_request_frame(const probe_options_t &opts,
         break;
     case MESH_REMOTE_REQ_POSITION:
         portnum = MESHTASTIC_POSITION_APP;
-        if(mesh_gnss.present && mesh_gnss.has_fix) {
-            position = mesh_gnss.position;
-        } else {
-            (void)mesh_make_placeholder_position(&position);
-        }
-        if(!encode_position_proto(position, opts.position_interval_sec,
-                                  &payload)) {
-            return false;
-        }
+        data_dest = req.to_node;
+        payload.clear();
         break;
     case MESH_REMOTE_REQ_TELEMETRY_DEVICE:
         portnum = MESHTASTIC_TELEMETRY_APP;
@@ -10583,6 +11187,7 @@ static bool build_mesh_want_response_frame(const probe_options_t &opts,
                                            const mesh_data_proto_t &request,
                                            float rx_snr,
                                            const std::string *psk_override,
+                                           bool pki_response,
                                            tx_frame_t *frame)
 {
     std::vector<uint8_t> payload;
@@ -10601,9 +11206,9 @@ static bool build_mesh_want_response_frame(const probe_options_t &opts,
             return false;
         }
     } else if(request.portnum == MESHTASTIC_POSITION_APP) {
-        if(mesh_gnss.present && mesh_gnss.has_fix) {
-            position = mesh_gnss.position;
-        } else {
+        const char *source = "unavailable";
+
+        if(!mesh_select_local_position(opts, &position, &source)) {
             daemon_event("WantResponse position skipped to=0x%08x gps=%s/%s",
                          rx_header.from, mesh_gnss.modem_state,
                          mesh_gnss.gps_state);
@@ -10613,6 +11218,10 @@ static bool build_mesh_want_response_frame(const probe_options_t &opts,
                                   &payload)) {
             return false;
         }
+        daemon_event("WantResponse position using %s to=0x%08x lat=%.7f lon=%.7f",
+                     source, rx_header.from,
+                     position.latitude_i * 1e-7,
+                     position.longitude_i * 1e-7);
     } else if(request.portnum == MESHTASTIC_TELEMETRY_APP) {
         environment = mesh_request_wants_environment_telemetry(request.payload);
         if(environment) {
@@ -10641,6 +11250,13 @@ static bool build_mesh_want_response_frame(const probe_options_t &opts,
         }
     } else {
         return false;
+    }
+    if(pki_response &&
+       build_mesh_pki_direct_data_frame(opts, rx_header.from, portnum,
+                                        payload, 0U, rx_header.id, false,
+                                        0U, false, false,
+                                        "want-response", frame)) {
+        return true;
     }
     return build_mesh_direct_data_frame(opts, rx_header.from,
                                         rx_header.channel, portnum, payload,
@@ -10806,6 +11422,48 @@ static bool mesh_decode_payload_for_known_channel(
     return false;
 }
 
+static bool mesh_decode_payload_for_pki(
+    const probe_options_t &opts, const mesh_header_t &header,
+    const std::vector<uint8_t> &encrypted_payload,
+    std::vector<uint8_t> *decoded_payload, mesh_data_proto_t *decoded)
+{
+    uint8_t remote_public[MESHTASTIC_CURVE25519_KEY_LEN];
+    std::vector<uint8_t> candidate;
+    mesh_data_proto_t candidate_decoded;
+
+    if(header.channel != 0U || header.to != opts.from_node ||
+       header.from == 0U || header.from == opts.from_node ||
+       meshtastic_node_is_broadcast(header.to)) {
+        return false;
+    }
+    if(!mesh_pki_identity.ready) {
+        daemon_event("PKI decrypt skipped from=0x%08x reason=no-local-identity",
+                     header.from);
+        return false;
+    }
+    if(!mesh_node_copy_public_key(header.from, remote_public)) {
+        daemon_event("PKI decrypt skipped from=0x%08x reason=no-remote-key",
+                     header.from);
+        return false;
+    }
+    if(!mesh_pki_decrypt_payload(remote_public, header.from, header.id,
+                                 encrypted_payload, &candidate) ||
+       !decode_data_proto(candidate.data(), candidate.size(),
+                          &candidate_decoded)) {
+        daemon_event("PKI decrypt failed from=0x%08x id=0x%08x len=%u",
+                     header.from, header.id,
+                     (unsigned)encrypted_payload.size());
+        return false;
+    }
+    if(decoded_payload) {
+        *decoded_payload = candidate;
+    }
+    if(decoded) {
+        *decoded = candidate_decoded;
+    }
+    return true;
+}
+
 static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                             size_t len, float rssi, float snr,
                             tx_frame_t *rebroadcast_frame)
@@ -10818,6 +11476,8 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
     uint8_t hop_limit;
     uint8_t hop_start;
     bool channel_match = false;
+    bool pki_match = false;
+    bool secure_match = false;
     bool duplicate = false;
     bool should_rebroadcast = false;
     bool data_ok = false;
@@ -10845,6 +11505,13 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
     data_ok = mesh_decode_payload_for_known_channel(
         opts, header, encrypted_payload, &payload, &decoded, &channel_info);
     channel_match = data_ok && channel_info.valid;
+    if(!data_ok) {
+        pki_match = mesh_decode_payload_for_pki(opts, header,
+                                                encrypted_payload,
+                                                &payload, &decoded);
+        data_ok = pki_match;
+    }
+    secure_match = channel_match || pki_match;
     if(data_ok && duplicate && channel_match &&
        header.from == opts.from_node &&
        header.to == MESHTASTIC_NODENUM_BROADCAST &&
@@ -10852,19 +11519,25 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
         (void)mesh_ack_complete_implicit(opts.from_node, header);
     }
     if(data_ok) {
-        daemon_event("RX channel match index=%u role=%u name=%s hash=0x%02x",
-                     channel_info.index, channel_info.role,
-                     channel_info.name.empty() ? "<empty>" :
-                     channel_info.name.c_str(), channel_info.hash);
+        if(pki_match) {
+            daemon_event("RX PKI match from=0x%08x id=0x%08x port=%u",
+                         header.from, header.id, decoded.portnum);
+        } else {
+            daemon_event("RX channel match index=%u role=%u name=%s hash=0x%02x",
+                         channel_info.index, channel_info.role,
+                         channel_info.name.empty() ? "<empty>" :
+                         channel_info.name.c_str(), channel_info.hash);
+        }
         if(channel_match && header.from != opts.from_node) {
             if(mesh_node_update_link_info(header.from, channel_info.index,
                                           hop_start, hop_limit)) {
                 phoneapi_notify_node_update(header.from, "link");
             }
         }
-        if(channel_match && !duplicate && header.from != opts.from_node) {
+        if(secure_match && !duplicate && header.from != opts.from_node) {
             uint32_t phoneapi_channel =
-                channel_info.role == MESHTASTIC_CHANNEL_ROLE_PRIMARY ?
+                (pki_match ||
+                 channel_info.role == MESHTASTIC_CHANNEL_ROLE_PRIMARY) ?
                 0U : channel_info.index;
 
             phoneapi_notify_mesh_rx(header, payload, phoneapi_channel,
@@ -10885,7 +11558,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                          mesh_header_want_ack(header) ? "yes" : "no",
                          rssi, snr, decoded.portnum, clean.c_str(),
                          duplicate ? " duplicate" : "");
-            if(!duplicate && channel_match && !clean.empty() &&
+            if(!duplicate && secure_match && !clean.empty() &&
                (header.to == MESHTASTIC_NODENUM_BROADCAST ||
                 header.to == opts.from_node || header.from == opts.from_node)) {
                 if(mesh_chat_text_seen_recently(header.from, header.to, clean)) {
@@ -10899,13 +11572,16 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
             }
         } else if(decoded.portnum == MESHTASTIC_POSITION_APP) {
             mesh_position_info_t position;
-            bool position_ok = decode_position_proto(decoded.payload,
+            bool position_request = decoded.want_response &&
+                                    decoded.payload.empty();
+            bool position_ok = !position_request &&
+                               decode_position_proto(decoded.payload,
                                                      &position);
             char alt_text[24];
             char speed_text[24];
             char track_text[24];
 
-            if(position_ok && channel_match) {
+            if(position_ok && secure_match) {
                 mesh_node_update_position(header.from, position);
                 phoneapi_notify_node_update(header.from, "position");
             }
@@ -10931,7 +11607,8 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                          (unsigned long)rx_count, header.from, header.to,
                          header.id, header.channel, hop_limit, hop_start,
                          rssi, snr, decoded.portnum,
-                         position_ok ? "ok" : "decode-failed",
+                         position_request ? "request" :
+                         (position_ok ? "ok" : "decode-failed"),
                          position.latitude_i * 1e-7,
                          position.longitude_i * 1e-7,
                          alt_text, speed_text, track_text,
@@ -10943,7 +11620,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
             std::string clean_long = mesh_clean_text(user.long_name);
             std::string clean_short = mesh_clean_text(user.short_name);
 
-            if(channel_match && user_ok) {
+            if(secure_match && user_ok) {
                 mesh_node_update_user(header.from, user);
                 phoneapi_notify_node_update(header.from, "user");
             }
@@ -10959,9 +11636,10 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
             mesh_telemetry_info_t telemetry;
             bool telemetry_ok = decode_telemetry_proto(decoded.payload,
                                                        &telemetry);
+            bool telemetry_request = decoded.want_response && !telemetry_ok;
             std::string summary = telemetry_summary(telemetry);
 
-            if(telemetry_ok && channel_match) {
+            if(telemetry_ok && secure_match) {
                 mesh_node_update_telemetry(header.from, telemetry);
                 phoneapi_notify_node_update(header.from, "telemetry");
             }
@@ -10969,14 +11647,15 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                          (unsigned long)rx_count, header.from, header.to,
                          header.id, header.channel, hop_limit, hop_start,
                          rssi, snr, decoded.portnum,
-                         telemetry_ok ? "ok" : "decode-failed",
+                         telemetry_request ? "request" :
+                         (telemetry_ok ? "ok" : "decode-failed"),
                          summary.c_str(), duplicate ? " duplicate" : "");
         } else if(decoded.portnum == MESHTASTIC_TRACEROUTE_APP) {
             std::string route_summary;
             bool route_ok = decode_route_discovery_proto(decoded.payload,
                                                          &route_summary);
 
-            if(route_ok && channel_match) {
+            if(route_ok && secure_match) {
                 mesh_node_update_route_info(header.from, route_summary);
                 phoneapi_notify_node_update(header.from, "traceroute");
             }
@@ -10994,7 +11673,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
             bool neighbor_ok = decode_neighbor_info_proto(decoded.payload,
                                                           &neighbor_info);
 
-            if(neighbor_ok && channel_match) {
+            if(neighbor_ok && secure_match) {
                 mesh_node_update_neighbor_info(header.from, neighbor_info);
                 phoneapi_notify_node_update(header.from, "neighbor");
             }
@@ -11019,7 +11698,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                          rssi, snr, decoded.portnum, decoded.request_id,
                          routing_ok ? "ok" : "decode-failed",
                          error_reason, duplicate ? " duplicate" : "");
-            if(channel_match && routing_ok && header.to == opts.from_node &&
+            if(secure_match && routing_ok && header.to == opts.from_node &&
                decoded.request_id != 0U) {
                 if(!mesh_ack_complete(header.from, decoded.request_id,
                                       error_reason)) {
@@ -11044,10 +11723,12 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                      duplicate ? " duplicate" : "");
     }
 
-    if(channel_match && data_ok && decoded.want_response && !duplicate &&
+    if(secure_match && data_ok && decoded.want_response && !duplicate &&
        header.to == opts.from_node && header.from != opts.from_node) {
         if(build_mesh_want_response_frame(opts, header, decoded, snr,
+                                          pki_match ? nullptr :
                                           &channel_info.psk,
+                                          pki_match,
                                           rebroadcast_frame)) {
             daemon_event("WantResponse queued port=%u request=0x%08x to=0x%08x",
                          decoded.portnum, header.id, header.from);
@@ -11057,18 +11738,31 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                      decoded.portnum, header.id, header.from);
     }
 
-    ack_candidate = channel_match && data_ok && header.to == opts.from_node &&
+    ack_candidate = secure_match && data_ok && header.to == opts.from_node &&
                     header.from != opts.from_node &&
                     mesh_header_want_ack(header);
     if(ack_candidate) {
-        ack_wants_ack = decoded.portnum == MESHTASTIC_TEXT_MESSAGE_APP &&
-                        decoded.request_id == 0U &&
-                        decoded.reply_id == 0U;
+        ack_wants_ack = false;
     }
-    if(ack_candidate &&
-       build_mesh_ack_frame(opts, header, MESHTASTIC_ROUTING_ERROR_NONE,
-                            ack_wants_ack, &channel_info.psk,
-                            rebroadcast_frame)) {
+    if(ack_candidate) {
+        mesh_header_t ack_source_header = header;
+        std::string primary_psk = opts.psk;
+        std::vector<uint8_t> primary_key;
+
+        if(pki_match && parse_psk(primary_psk, &primary_key)) {
+            ack_source_header.channel = mesh_channel_hash(
+                effective_mesh_channel_name(opts), primary_key);
+        }
+        if(!build_mesh_ack_frame(opts, ack_source_header,
+                                 MESHTASTIC_ROUTING_ERROR_NONE,
+                                 ack_wants_ack,
+                                 pki_match ? &primary_psk :
+                                 &channel_info.psk,
+                                 rebroadcast_frame)) {
+            ack_candidate = false;
+        }
+    }
+    if(ack_candidate) {
         daemon_event("Mesh ACK candidate req=0x%08x to=0x%08x ack=%s",
                      header.id, header.from,
                      ack_wants_ack ? "reliable" : "plain");
@@ -11077,8 +11771,6 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                          header.id, header.from);
             return true;
         }
-    } else {
-        ack_candidate = false;
     }
 
     if(duplicate) {
@@ -11203,7 +11895,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
                                           chip_type_t chip,
                                           size_t pending_send_count)
 {
-    char buf[2200];
+    char buf[2600];
     char ble_detail[160];
     char ble_pair[16];
     char slot_text[16];
@@ -11212,8 +11904,18 @@ static std::string daemon_status_response(const probe_options_t &opts,
     const char *queued = pending_send_count > 0U ? "1" : "0";
     uint64_t now = monotonic_us();
     std::string channel_url = meshtastic_channel_url(opts);
+    std::string pki_key = "-";
+    size_t node_public_key_count = 0;
 
     ble_state = phoneapi_bridge_get_state(ble_detail, sizeof(ble_detail));
+    if(mesh_pki_public_key_available()) {
+        pki_key = mesh_hex_encode_bytes(mesh_pki_identity.public_key, 4U);
+    }
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        if(mesh_nodes[i].node != 0U && mesh_nodes[i].has_public_key) {
+            node_public_key_count++;
+        }
+    }
     if(!phoneapi_bridge_get_pairing_code(ble_pair, sizeof(ble_pair))) {
         snprintf(ble_pair, sizeof(ble_pair), "%s", "-");
     }
@@ -11231,6 +11933,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
     snprintf(buf, sizeof(buf),
              "OK version=%s chip=%s op=%s tx=%lu rx=%lu queued=%s queued_count=%u "
              "ble=%s ble_detail=%s ble_pair=%s "
+             "pki=%s pki_generated=%s pki_key=%s node_keys=%u "
              "hist=%u dup=%lu rebroadcast=%lu rebroadcast_drop=%lu "
              "delayed=%u next_rebroadcast_ms=%u "
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
@@ -11247,6 +11950,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)tx_count, (unsigned long)rx_count, queued,
              (unsigned)pending_send_count,
              phoneapi_bridge_state_name(ble_state), ble_detail, ble_pair,
+             mesh_pki_public_key_available() ? "ready" : "off",
+             mesh_pki_identity.generated ? "yes" : "no",
+             pki_key.c_str(), (unsigned)node_public_key_count,
              (unsigned)mesh_history_count,
              (unsigned long)mesh_duplicate_count,
              (unsigned long)mesh_rebroadcast_count,
@@ -11673,9 +12379,10 @@ static std::string daemon_nodes_response(void)
                 snprintf(track_text, sizeof(track_text), "-");
             }
             snprintf(line, sizeof(line),
-                     "0x%08x name=%s short=%s hw=%d rx=%lu age=%us rssi=%ddBm snr=%.1f pos=%.7f,%.7f alt=%s speed=%s track=%s sats=%u precision=%u time=%u tel=%s trace=%s nbr=%s\n",
+                     "0x%08x name=%s short=%s hw=%d key=%s rx=%lu age=%us rssi=%ddBm snr=%.1f pos=%.7f,%.7f alt=%s speed=%s track=%s sats=%u precision=%u time=%u tel=%s trace=%s nbr=%s\n",
                      mesh_nodes[i].node, long_name, short_name,
                      mesh_nodes[i].hw_model,
+                     mesh_nodes[i].has_public_key ? "yes" : "no",
                      (unsigned long)mesh_nodes[i].rx_count, age_s,
                      mesh_nodes[i].rssi_dbm, mesh_nodes[i].snr,
                      mesh_nodes[i].latitude_i * 1e-7,
@@ -11687,9 +12394,10 @@ static std::string daemon_nodes_response(void)
                      route, neighbor);
         } else {
             snprintf(line, sizeof(line),
-                     "0x%08x name=%s short=%s hw=%d rx=%lu age=%us rssi=%ddBm snr=%.1f pos=- tel=%s trace=%s nbr=%s\n",
+                     "0x%08x name=%s short=%s hw=%d key=%s rx=%lu age=%us rssi=%ddBm snr=%.1f pos=- tel=%s trace=%s nbr=%s\n",
                      mesh_nodes[i].node, long_name, short_name,
                      mesh_nodes[i].hw_model,
+                     mesh_nodes[i].has_public_key ? "yes" : "no",
                      (unsigned long)mesh_nodes[i].rx_count, age_s,
                      mesh_nodes[i].rssi_dbm, mesh_nodes[i].snr,
                      telemetry.c_str(), route, neighbor);
@@ -11720,6 +12428,115 @@ static bool daemon_parse_target_command(const std::string &line,
         return false;
     }
     return true;
+}
+
+static bool mesh_parse_node_id_text(const std::string &text, uint32_t *node)
+{
+    std::string clean = trim_ipc_line(text.c_str());
+
+    if(!node || clean.empty()) {
+        return false;
+    }
+    if(clean[0] == '!') {
+        char *endp = nullptr;
+        unsigned long value;
+
+        errno = 0;
+        value = strtoul(clean.c_str() + 1, &endp, 16);
+        if(errno != 0 || endp == clean.c_str() + 1 || *endp != '\0' ||
+           value > 0xffffffffUL) {
+            return false;
+        }
+        *node = (uint32_t)value;
+        return true;
+    }
+    return mesh_parse_u32_text(clean.c_str(), node);
+}
+
+static bool mesh_parse_public_key_text(const std::string &text,
+                                       uint8_t public_key[
+                                           MESHTASTIC_CURVE25519_KEY_LEN])
+{
+    std::string clean = trim_ipc_line(text.c_str());
+    std::vector<uint8_t> bytes;
+
+    if(!public_key || clean.empty()) {
+        return false;
+    }
+    if(mesh_hex_decode_bytes(clean.c_str(), public_key,
+                             MESHTASTIC_CURVE25519_KEY_LEN)) {
+        return true;
+    }
+    if(!base64url_decode_no_pad(clean, &bytes) ||
+       bytes.size() != MESHTASTIC_CURVE25519_KEY_LEN) {
+        return false;
+    }
+    memcpy(public_key, bytes.data(), MESHTASTIC_CURVE25519_KEY_LEN);
+    return true;
+}
+
+static std::string daemon_import_node_key_response(const std::string &line,
+                                                   const char *prefix)
+{
+    const char *arg;
+    const char *node_start;
+    const char *node_end;
+    std::string node_text;
+    std::string key_text;
+    uint32_t node = 0;
+    uint8_t public_key[MESHTASTIC_CURVE25519_KEY_LEN];
+    mesh_node_entry_t *entry;
+    bool replaced = false;
+
+    if(!prefix || line.compare(0, strlen(prefix), prefix) != 0) {
+        return "ERR invalid-import-command\n";
+    }
+    arg = line.c_str() + strlen(prefix);
+    while(*arg && isspace((unsigned char)*arg)) {
+        arg++;
+    }
+    node_start = arg;
+    while(*arg && !isspace((unsigned char)*arg)) {
+        arg++;
+    }
+    node_end = arg;
+    while(*arg && isspace((unsigned char)*arg)) {
+        arg++;
+    }
+    node_text.assign(node_start, (size_t)(node_end - node_start));
+    key_text = trim_ipc_line(arg);
+    if(!mesh_parse_node_id_text(node_text, &node) || node == 0U ||
+       meshtastic_node_is_broadcast(node)) {
+        return "ERR invalid-node\n";
+    }
+    if(!mesh_parse_public_key_text(key_text, public_key)) {
+        return "ERR invalid-public-key\n";
+    }
+    entry = mesh_node_get_or_create(node);
+    if(!entry) {
+        return "ERR nodedb-full\n";
+    }
+    if(entry->has_public_key &&
+       memcmp(entry->public_key, public_key,
+              MESHTASTIC_CURVE25519_KEY_LEN) != 0) {
+        replaced = true;
+    }
+    memcpy(entry->public_key, public_key, MESHTASTIC_CURVE25519_KEY_LEN);
+    entry->has_public_key = true;
+    entry->last_seen_us = monotonic_us();
+    entry->last_seen_epoch = mesh_now_epoch();
+    mesh_nodedb_mark_dirty();
+    (void)mesh_nodedb_save();
+    daemon_event("Node key imported node=0x%08x key=%s replaced=%s",
+                 node, mesh_hex_encode_bytes(public_key, 4U).c_str(),
+                 replaced ? "yes" : "no");
+
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "OK imported node=0x%08x key=%s replaced=%s\n",
+             node, mesh_hex_encode_bytes(public_key, 4U).c_str(),
+             replaced ? "yes" : "no");
+    return std::string(buf);
 }
 
 static std::string daemon_queue_remote_request(
@@ -11921,6 +12738,12 @@ static std::string handle_daemon_command(const std::string &line,
                                            MESH_REMOTE_REQ_NEIGHBORINFO,
                                            target);
     }
+    if(line.compare(0, 16, "IMPORT_NODE_KEY ") == 0) {
+        return daemon_import_node_key_response(line, "IMPORT_NODE_KEY");
+    }
+    if(line.compare(0, 16, "import_node_key ") == 0) {
+        return daemon_import_node_key_response(line, "import_node_key");
+    }
     if(line.compare(0, 19, "IMPORT_CHANNEL_URL ") == 0 ||
        line.compare(0, 19, "import_channel_url ") == 0) {
         message = trim_ipc_line(line.c_str() + 19);
@@ -11988,6 +12811,71 @@ static std::string handle_daemon_command(const std::string &line,
         char buf[112];
         snprintf(buf, sizeof(buf), "OK queued slot=%u len=%u depth=%u\n",
                  channel_index, (unsigned)message.size(),
+                 (unsigned)send_queue->size());
+        return std::string(buf);
+    }
+    if(line.compare(0, 8, "SEND_TO ") == 0 ||
+       line.compare(0, 8, "send_to ") == 0 ||
+       line.compare(0, 12, "SEND_TO_ACK ") == 0 ||
+       line.compare(0, 12, "send_to_ack ") == 0) {
+        const bool want_ack =
+            line.compare(0, 12, "SEND_TO_ACK ") == 0 ||
+            line.compare(0, 12, "send_to_ack ") == 0;
+        const char *arg = line.c_str() + (want_ack ? 12 : 8);
+        char target_text[32];
+        size_t target_len = 0;
+        uint32_t target = 0;
+        mesh_send_request_t request;
+
+        if(!send_queue) {
+            return "ERR internal\n";
+        }
+        while(*arg && isspace((unsigned char)*arg)) {
+            arg++;
+        }
+        while(arg[target_len] && !isspace((unsigned char)arg[target_len]) &&
+              target_len + 1U < sizeof(target_text)) {
+            target_text[target_len] = arg[target_len];
+            target_len++;
+        }
+        target_text[target_len] = '\0';
+        if(target_len == 0U ||
+           !mesh_parse_node_id_text(target_text, &target) || target == 0U) {
+            return "ERR invalid-target\n";
+        }
+        arg += target_len;
+        while(*arg && isspace((unsigned char)*arg)) {
+            arg++;
+        }
+        message = trim_ipc_line(arg);
+        if(message.empty()) {
+            return "ERR empty-message\n";
+        }
+        if(message.size() > MESHTASTIC_MAX_IPC_MESSAGE_LEN) {
+            return "ERR message-too-long\n";
+        }
+        if(send_queue->size() >= MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+            daemon_event("Daemon SEND_TO queue full target=0x%08x len=%u depth=%u",
+                         target, (unsigned)message.size(),
+                         (unsigned)send_queue->size());
+            return "ERR queue-full\n";
+        }
+        request.message = message;
+        request.channel_index = 0U;
+        request.has_to_node = true;
+        request.to_node = target;
+        request.has_want_ack = true;
+        request.want_ack = want_ack;
+        send_queue->push_back(request);
+        daemon_event("Daemon SEND_TO queued target=0x%08x ack=%s len=%u depth=%u op=%s",
+                     target, want_ack ? "yes" : "no",
+                     (unsigned)message.size(),
+                     (unsigned)send_queue->size(), op_name(active_op));
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "OK queued target=0x%08x ack=%s len=%u depth=%u\n",
+                 target, want_ack ? "yes" : "no",
+                 (unsigned)message.size(),
                  (unsigned)send_queue->size());
         return std::string(buf);
     }
@@ -12103,6 +12991,18 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "REQUEST_TRACEROUTE " + opts.client_request_target + "\n";
     } else if(opts.client_request_neighborinfo) {
         command = "REQUEST_NEIGHBORINFO " + opts.client_request_target + "\n";
+    } else if(opts.client_import_node_key) {
+        command = "IMPORT_NODE_KEY " + opts.client_import_node + " " +
+                  opts.client_import_key + "\n";
+    } else if(opts.client_send_to_requested) {
+        if(opts.client_send_to_target.empty() ||
+           opts.client_send_to_message.empty()) {
+            fprintf(stderr, "--cmd-send-to target/message is empty\n");
+            return 2;
+        }
+        command = (opts.client_send_to_ack ? "SEND_TO_ACK " : "SEND_TO ") +
+                  opts.client_send_to_target + " " +
+                  opts.client_send_to_message + "\n";
     } else if(opts.client_quit) {
         command = "QUIT\n";
     } else if(opts.client_send_requested) {
@@ -12174,7 +13074,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-send \"hello\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -12191,7 +13091,10 @@ static void print_usage(const char *argv0)
             "  --cmd-request-telemetry NODE Ask daemon to request remote telemetry\n"
             "  --cmd-request-traceroute NODE Ask daemon to request remote traceroute\n"
             "  --cmd-request-neighborinfo NODE Ask daemon to request remote neighbor info\n"
+            "  --cmd-import-node-key NODE KEY Import 32-byte remote PKI public key, hex or base64\n"
             "  --cmd-send MSG  Ask running daemon to transmit MSG and exit\n"
+            "  --cmd-send-to NODE MSG  Ask daemon to transmit MSG to NODE without ACK\n"
+            "  --cmd-send-to-ack NODE MSG  Ask daemon to transmit MSG to NODE with ACK\n"
             "  --cmd-quit      Ask running daemon to exit\n\n"
             "Profile options:\n"
             "  --region NAME    Meshtastic region, default US when --mesh is used\n"
@@ -12519,6 +13422,21 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
                   i + 1 < argc) {
             opts->client_request_neighborinfo = true;
             opts->client_request_target = argv[++i];
+        } else if(strcmp(arg, "--cmd-import-node-key") == 0 &&
+                  i + 2 < argc) {
+            opts->client_import_node_key = true;
+            opts->client_import_node = argv[++i];
+            opts->client_import_key = argv[++i];
+        } else if(strcmp(arg, "--cmd-send-to") == 0 && i + 2 < argc) {
+            opts->client_send_to_requested = true;
+            opts->client_send_to_ack = false;
+            opts->client_send_to_target = argv[++i];
+            opts->client_send_to_message = argv[++i];
+        } else if(strcmp(arg, "--cmd-send-to-ack") == 0 && i + 2 < argc) {
+            opts->client_send_to_requested = true;
+            opts->client_send_to_ack = true;
+            opts->client_send_to_target = argv[++i];
+            opts->client_send_to_message = argv[++i];
         } else if(strcmp(arg, "--cmd-quit") == 0) {
             opts->client_quit = true;
         } else if(strcmp(arg, "--cmd-send") == 0 && i + 1 < argc) {
@@ -13125,6 +14043,8 @@ int main(int argc, char **argv)
                               (opts.client_request_telemetry ? 1 : 0) +
                               (opts.client_request_traceroute ? 1 : 0) +
                               (opts.client_request_neighborinfo ? 1 : 0) +
+                              (opts.client_import_node_key ? 1 : 0) +
+                              (opts.client_send_to_requested ? 1 : 0) +
                               (opts.client_quit ? 1 : 0) +
                               (opts.client_send_requested ? 1 : 0);
         if(client_commands > 1) {
@@ -13138,6 +14058,10 @@ int main(int argc, char **argv)
     phoneapi_load_meshtastic_channel_slots(&opts);
     default_node_name(&opts.node_name);
     default_from_node(&opts);
+    if(opts.mesh_mode && !mesh_pki_load_or_create_identity()) {
+        fprintf(stderr, "Meshtastic PKI identity unavailable\n");
+        return 2;
+    }
     if(opts.mesh_mode) {
         if(meshtastic_node_is_broadcast(opts.to_node)) {
             opts.want_ack = false;
@@ -13181,6 +14105,12 @@ int main(int argc, char **argv)
                mesh_channel_hash(channel_name, key));
         printf("Meshtastic channel URL: %s\n",
                meshtastic_channel_url(opts).c_str());
+        if(mesh_pki_public_key_available()) {
+            printf("Meshtastic PKI: generated=%s public=%s...\n",
+                   mesh_pki_identity.generated ? "yes" : "no",
+                   mesh_hex_encode_bytes(mesh_pki_identity.public_key,
+                                         4U).c_str());
+        }
     }
 
     hal = new K230LinuxHal(opts.spi_path.c_str(), LORA_SPI_SPEED_HZ);
@@ -13537,14 +14467,23 @@ int main(int argc, char **argv)
         if(!pending_daemon_sends.empty() && active_op != OP_TX) {
             tx_frame_t frame;
             mesh_send_request_t request = pending_daemon_sends.front();
+            probe_options_t tx_opts = opts;
             pending_daemon_sends.pop_front();
-            daemon_event("Daemon SEND dequeue depth=%u slot=%u len=%u",
+            if(request.has_to_node) {
+                tx_opts.to_node = request.to_node;
+            }
+            if(request.has_want_ack) {
+                tx_opts.want_ack = request.want_ack;
+            }
+            daemon_event("Daemon SEND dequeue depth=%u slot=%u target=0x%08x ack=%s len=%u",
                          (unsigned)pending_daemon_sends.size(),
                          request.channel_index,
+                         tx_opts.to_node,
+                         tx_opts.want_ack ? "yes" : "no",
                          (unsigned)request.message.size());
-            if(build_tx_frame(opts, request.message, request.channel_index,
+            if(build_tx_frame(tx_opts, request.message, request.channel_index,
                               &frame)) {
-                if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
+                if(start_tx(radio, frame) == 0 && tx_opts.mesh_mode) {
                     bool ack_tracked = true;
                     if(frame.want_ack) {
                         ack_tracked = mesh_ack_track_frame(frame);

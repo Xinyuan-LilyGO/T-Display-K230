@@ -888,13 +888,87 @@ static int mesh_to_text_is_broadcast(const char *text)
 {
     return !text || !text[0] || strcasecmp(text, "broadcast") == 0 ||
            strcasecmp(text, "default") == 0 || strcmp(text, "-") == 0 ||
-           strcasecmp(text, "0xffffffff") == 0 ||
-           strcasecmp(text, "0x000000ff") == 0 ||
-           strcasecmp(text, "0xff") == 0;
+           strcasecmp(text, "0xffffffff") == 0;
+}
+
+static int mesh_to_text_is_legacy_broadcast(const char *text)
+{
+    return text && (strcasecmp(text, "0x00ffffff") == 0 ||
+                    strcasecmp(text, "0xffffff") == 0);
+}
+
+static int mesh_normalize_from_node_text(const char *text, char *dst,
+                                         size_t dst_len)
+{
+    char tmp[96];
+    unsigned long value;
+
+    if(!dst || dst_len == 0U) {
+        return -1;
+    }
+    mesh_safe_or_default(tmp, sizeof(tmp), text, "auto");
+    if(mesh_from_text_is_auto(tmp)) {
+        snprintf(dst, dst_len, "0");
+        return 0;
+    }
+    if(mesh_parse_u32_text(tmp, &value) != 0 || value == 0UL ||
+       value == 0xffffffffUL) {
+        return -1;
+    }
+    snprintf(dst, dst_len, "0x%08lx", value & 0xffffffffUL);
+    return 0;
+}
+
+static int mesh_normalize_to_node_text(const char *text, char *dst,
+                                       size_t dst_len)
+{
+    char tmp[96];
+    unsigned long value;
+
+    if(!dst || dst_len == 0U) {
+        return -1;
+    }
+    mesh_safe_or_default(tmp, sizeof(tmp), text, "broadcast");
+    if(mesh_to_text_is_broadcast(tmp) ||
+       mesh_to_text_is_legacy_broadcast(tmp)) {
+        snprintf(dst, dst_len, "0xffffffff");
+        return 0;
+    }
+    if(mesh_parse_u32_text(tmp, &value) != 0 || value == 0UL) {
+        return -1;
+    }
+    snprintf(dst, dst_len, "0x%08lx", value & 0xffffffffUL);
+    return 0;
+}
+
+static void mesh_normalize_from_node(void)
+{
+    char normalized[24];
+
+    if(mesh_normalize_from_node_text(mesh_from_node, normalized,
+                                     sizeof(normalized)) != 0) {
+        snprintf(mesh_from_node, sizeof(mesh_from_node), "0");
+        return;
+    }
+    snprintf(mesh_from_node, sizeof(mesh_from_node), "%s", normalized);
+}
+
+static void mesh_normalize_to_node(void)
+{
+    char normalized[24];
+
+    if(mesh_normalize_to_node_text(mesh_to_node, normalized,
+                                   sizeof(normalized)) != 0) {
+        snprintf(mesh_to_node, sizeof(mesh_to_node), "0xffffffff");
+        mesh_ack_enabled = 0;
+        return;
+    }
+    snprintf(mesh_to_node, sizeof(mesh_to_node), "%s", normalized);
 }
 
 static void mesh_normalize_target_ack(void)
 {
+    mesh_normalize_to_node();
     if(mesh_to_text_is_broadcast(mesh_to_node)) {
         snprintf(mesh_to_node, sizeof(mesh_to_node), "0xffffffff");
         mesh_ack_enabled = 0;
@@ -990,6 +1064,7 @@ static void mesh_load_profile_prefs(void)
                  mesh_telemetry_environment_interval,
                  sizeof(mesh_telemetry_environment_interval), "300");
     mesh_normalize_power();
+    mesh_normalize_from_node();
     mesh_normalize_hop();
     mesh_normalize_slot();
     mesh_normalize_target_ack();
@@ -997,6 +1072,9 @@ static void mesh_load_profile_prefs(void)
 
 static void mesh_save_profile_prefs(void)
 {
+    mesh_normalize_from_node();
+    mesh_normalize_target_ack();
+
     ui_prefs_set(MESHTASTIC_PREF_REGION, mesh_region);
     ui_prefs_set(MESHTASTIC_PREF_PRESET, mesh_preset);
     ui_prefs_set(MESHTASTIC_PREF_CHANNEL, mesh_channel_name);
@@ -1089,6 +1167,45 @@ static int mesh_status_sync_channel(const char *value)
     return 1;
 }
 
+static int mesh_status_sync_from_node(const char *value)
+{
+    char normalized[24];
+
+    if(!value || !value[0] || strcmp(value, "-") == 0) {
+        return 0;
+    }
+    if(mesh_normalize_from_node_text(value, normalized,
+                                     sizeof(normalized)) != 0) {
+        return 0;
+    }
+    if(strcmp(mesh_from_node, normalized) == 0) {
+        return 0;
+    }
+    snprintf(mesh_from_node, sizeof(mesh_from_node), "%s", normalized);
+    return 1;
+}
+
+static int mesh_status_sync_to_node(const char *value)
+{
+    char normalized[24];
+
+    if(!value || !value[0] || strcmp(value, "-") == 0) {
+        return 0;
+    }
+    if(mesh_normalize_to_node_text(value, normalized, sizeof(normalized)) !=
+       0) {
+        return 0;
+    }
+    if(strcmp(mesh_to_node, normalized) == 0) {
+        return 0;
+    }
+    snprintf(mesh_to_node, sizeof(mesh_to_node), "%s", normalized);
+    if(mesh_to_text_is_broadcast(mesh_to_node)) {
+        mesh_ack_enabled = 0;
+    }
+    return 1;
+}
+
 static void mesh_sync_profile_from_status(const char *status, int online)
 {
     char value[96];
@@ -1121,11 +1238,9 @@ static void mesh_sync_profile_from_status(const char *status, int online)
     changed |= mesh_status_copy_if_changed(mesh_node_name,
                                            sizeof(mesh_node_name), value);
     mesh_status_field(status, "from", value, sizeof(value), "");
-    changed |= mesh_status_copy_if_changed(mesh_from_node,
-                                           sizeof(mesh_from_node), value);
+    changed |= mesh_status_sync_from_node(value);
     mesh_status_field(status, "to", value, sizeof(value), "");
-    changed |= mesh_status_copy_if_changed(mesh_to_node,
-                                           sizeof(mesh_to_node), value);
+    changed |= mesh_status_sync_to_node(value);
 
     mesh_status_field(status, "want_ack", value, sizeof(value), "");
     if(value[0]) {
@@ -2069,9 +2184,10 @@ static void mesh_start_event_cb(lv_event_t *event)
     }
     mesh_safe_or_default(node_arg, sizeof(node_arg), mesh_node_name,
                          "k230-t-display");
-    mesh_safe_or_default(from_arg, sizeof(from_arg), mesh_from_node, "0");
+    mesh_normalize_from_node();
     mesh_normalize_target_ack();
     mesh_save_profile_prefs();
+    mesh_safe_or_default(from_arg, sizeof(from_arg), mesh_from_node, "0");
     mesh_safe_or_default(to_arg, sizeof(to_arg), mesh_to_node, "0xffffffff");
     mesh_normalize_hop();
     mesh_safe_or_default(hop_arg, sizeof(hop_arg), mesh_hop_limit, "3");
@@ -2368,6 +2484,8 @@ static int mesh_channel_profile_write_current(void)
     fprintf(fp, "psk=%s\n", mesh_psk);
     fprintf(fp, "power=%s\n", mesh_tx_power);
     fprintf(fp, "node=%s\n", mesh_node_name);
+    mesh_normalize_from_node();
+    mesh_normalize_target_ack();
     fprintf(fp, "from=%s\n", mesh_from_node);
     fprintf(fp, "to=%s\n", mesh_to_node);
     fprintf(fp, "hop=%s\n", mesh_hop_limit);
@@ -2456,13 +2574,17 @@ static int mesh_channel_profile_apply_file_ex(const char *path,
     }
     if(mesh_channel_profile_read_value(path, "from", value, sizeof(value),
                                        "0") == 0) {
-        mesh_safe_or_default(mesh_from_node, sizeof(mesh_from_node), value,
-                             "0");
+        if(mesh_normalize_from_node_text(value, mesh_from_node,
+                                         sizeof(mesh_from_node)) != 0) {
+            snprintf(mesh_from_node, sizeof(mesh_from_node), "0");
+        }
     }
     if(mesh_channel_profile_read_value(path, "to", value, sizeof(value),
                                        "0xffffffff") == 0) {
-        mesh_safe_or_default(mesh_to_node, sizeof(mesh_to_node), value,
-                             "0xffffffff");
+        if(mesh_normalize_to_node_text(value, mesh_to_node,
+                                       sizeof(mesh_to_node)) != 0) {
+            snprintf(mesh_to_node, sizeof(mesh_to_node), "0xffffffff");
+        }
     }
     if(mesh_channel_profile_read_value(path, "hop", value, sizeof(value),
                                        "3") == 0) {
@@ -3162,29 +3284,18 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
                              "k230-t-display");
         break;
     case MESH_FIELD_FROM:
-        mesh_safe_or_default(tmp, sizeof(tmp), text, "auto");
-        if(mesh_from_text_is_auto(tmp)) {
-            snprintf(mesh_from_node, sizeof(mesh_from_node), "0");
-            break;
-        }
-        if(mesh_parse_u32_text(tmp, &value) != 0) {
+        if(mesh_normalize_from_node_text(text, mesh_from_node,
+                                         sizeof(mesh_from_node)) != 0) {
             mesh_append_log("invalid from node: %s", text);
             return;
         }
-        snprintf(mesh_from_node, sizeof(mesh_from_node), "%s", tmp);
         break;
     case MESH_FIELD_TO:
-        mesh_safe_or_default(tmp, sizeof(tmp), text, "broadcast");
-        if(mesh_to_text_is_broadcast(tmp)) {
-            snprintf(mesh_to_node, sizeof(mesh_to_node), "0xffffffff");
-            mesh_ack_enabled = 0;
-            break;
-        }
-        if(mesh_parse_u32_text(tmp, &value) != 0) {
+        if(mesh_normalize_to_node_text(text, mesh_to_node,
+                                       sizeof(mesh_to_node)) != 0) {
             mesh_append_log("invalid to node: %s", text);
             return;
         }
-        snprintf(mesh_to_node, sizeof(mesh_to_node), "%s", tmp);
         break;
     case MESH_FIELD_HOP:
         mesh_safe_or_default(tmp, sizeof(tmp), text, "3");
@@ -4786,7 +4897,11 @@ static void mesh_select_node_target_event_cb(lv_event_t *event)
     if(!node_id || !node_id[0]) {
         return;
     }
-    snprintf(mesh_to_node, sizeof(mesh_to_node), "%s", node_id);
+    if(mesh_normalize_to_node_text(node_id, mesh_to_node,
+                                   sizeof(mesh_to_node)) != 0) {
+        mesh_append_log("invalid target node: %s", node_id);
+        return;
+    }
     mesh_save_profile_prefs();
     mesh_update_profile_label();
     mesh_close_nodes_page();
