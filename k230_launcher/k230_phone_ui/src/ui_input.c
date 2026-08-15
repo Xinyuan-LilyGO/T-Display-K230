@@ -10,6 +10,7 @@
 #include <stdarg.h>
 
 #define UI_INPUT_LOG_PATH "/tmp/k230_input_dialog.log"
+#define UI_INPUT_PINYIN_PAGE_SIZE 9U
 
 typedef enum {
     UI_INPUT_KBD_LOWER = 0,
@@ -32,8 +33,9 @@ struct ui_input_inline {
     int hardware_keyboard;
     ui_input_keyboard_mode_t keyboard_mode;
     char pinyin_comp[32];
-    const char *candidate_map[10];
-    char candidate_text[8][24];
+    unsigned int pinyin_page;
+    const char *candidate_map[16];
+    char candidate_text[11][32];
     size_t min_length;
     const char *min_length_text;
     ui_input_submit_cb_t submit_cb;
@@ -91,36 +93,48 @@ static const char *const ui_input_kbd_pinyin_map[] = {
 
 typedef struct {
     const char *key;
-    const char *candidates[6];
+    const char *candidates[20];
 } ui_input_pinyin_entry_t;
 
 static const ui_input_pinyin_entry_t ui_input_pinyin_table[] = {
-    { "ai", { "爱", "矮", "哎", NULL } },
-    { "ba", { "吧", "八", "把", "爸", NULL } },
-    { "bu", { "不", "部", "步", NULL } },
-    { "de", { "的", "得", "地", NULL } },
-    { "hao", { "好", "号", "浩", NULL } },
-    { "he", { "和", "喝", "河", NULL } },
-    { "le", { "了", "乐", NULL } },
-    { "ma", { "吗", "妈", "马", NULL } },
-    { "mei", { "没", "美", "每", NULL } },
-    { "men", { "们", "门", NULL } },
-    { "ni", { "你", "呢", "尼", NULL } },
-    { "shi", { "是", "时", "使", "市", NULL } },
-    { "wo", { "我", "握", "窝", NULL } },
-    { "xie", { "谢", "写", "些", NULL } },
-    { "you", { "有", "又", "右", NULL } },
-    { "zhong", { "中", "种", "重", NULL } },
-    { "guo", { "国", "过", "果", NULL } },
+    { "ai", { "爱", "矮", "哎", "挨", "碍", NULL } },
+    { "ba", { "吧", "八", "把", "爸", "巴", "拔", "罢", NULL } },
+    { "bu", { "不", "部", "步", "布", "补", "捕", NULL } },
+    { "de", { "的", "得", "地", "德", NULL } },
+    { "fa", { "发", "法", "罚", "乏", NULL } },
+    { "ge", { "个", "各", "哥", "歌", "格", "隔", NULL } },
+    { "guo", { "国", "过", "果", "锅", "郭", "裹", NULL } },
+    { "hao", { "好", "号", "浩", "毫", "豪", "耗", NULL } },
+    { "he", { "和", "喝", "河", "合", "何", "核", NULL } },
+    { "kan", { "看", "砍", "刊", "堪", NULL } },
+    { "le", { "了", "乐", "勒", NULL } },
+    { "ma", { "吗", "妈", "马", "嘛", "码", "麻", NULL } },
+    { "mei", { "没", "美", "每", "妹", "煤", "梅", NULL } },
+    { "men", { "们", "门", "闷", NULL } },
+    { "ni", { "你", "呢", "尼", "妮", "泥", "拟", "逆", "匿", "腻", NULL } },
+    { "qu", { "去", "取", "区", "曲", "趣", NULL } },
+    { "ren", { "人", "任", "认", "仁", NULL } },
+    { "shi", { "是", "时", "事", "十", "使", "市", "识", "师", "试", "式", "世", NULL } },
+    { "shui", { "水", "谁", "睡", "税", NULL } },
+    { "ta", { "他", "她", "它", "塔", "踏", NULL } },
+    { "wo", { "我", "握", "窝", "卧", "沃", NULL } },
+    { "xie", { "谢", "写", "些", "鞋", "协", "斜", NULL } },
+    { "yao", { "要", "药", "摇", "腰", "咬", NULL } },
+    { "you", { "有", "又", "右", "油", "由", "友", "优", NULL } },
+    { "zai", { "在", "再", "载", "灾", "仔", NULL } },
+    { "zhong", { "中", "种", "重", "钟", "终", "众", NULL } },
 };
 
 static const ui_input_pinyin_entry_t *ui_input_pinyin_find(const char *key);
+static unsigned int ui_input_pinyin_candidate_count(
+    const ui_input_pinyin_entry_t *entry);
 static void ui_input_pinyin_clear(ui_input_dialog_state_t *state);
 static void ui_input_pinyin_insert(ui_input_dialog_state_t *state,
                                    const char *text);
 static void ui_input_pinyin_commit_best(ui_input_dialog_state_t *state);
 static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
                                             unsigned int index);
+static int ui_input_pinyin_page(ui_input_dialog_state_t *state, int delta);
 static void ui_input_hardware_sync_pinyin_mode(ui_input_dialog_state_t *state);
 static void ui_input_position_hardware_candidate_bar(ui_input_dialog_state_t *state);
 static lv_obj_t *ui_input_create_candidate_bar(lv_obj_t *parent, int height,
@@ -418,6 +432,7 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
     case LV_KEY_DEL:
         if(state->keyboard_mode == UI_INPUT_KBD_PINYIN && comp_len > 0U) {
             state->pinyin_comp[comp_len - 1U] = '\0';
+            state->pinyin_page = 0;
             ui_input_pinyin_update_candidates(state);
         } else {
             lv_textarea_delete_char(state->textarea);
@@ -429,6 +444,14 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
     }
 
     if(state->keyboard_mode == UI_INPUT_KBD_PINYIN) {
+        if((key == LV_KEY_RIGHT || key == LV_KEY_DOWN) &&
+           ui_input_pinyin_page(state, 1)) {
+            return;
+        }
+        if((key == LV_KEY_LEFT || key == LV_KEY_UP) &&
+           ui_input_pinyin_page(state, -1)) {
+            return;
+        }
         if(key == ' ') {
             if(comp_len > 0U) {
                 ui_input_pinyin_commit_best(state);
@@ -438,7 +461,7 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
             }
             return;
         }
-        if(comp_len > 0U && key >= '1' && key <= '6' &&
+        if(comp_len > 0U && key >= '1' && key <= '9' &&
            ui_input_pinyin_commit_candidate(state, (unsigned int)(key - '1'))) {
             return;
         }
@@ -448,6 +471,7 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
                 state->pinyin_comp[comp_len] =
                     (char)tolower((unsigned char)key);
                 state->pinyin_comp[comp_len + 1U] = '\0';
+                state->pinyin_page = 0;
                 ui_input_pinyin_update_candidates(state);
                 app_request_fast_refresh();
             }
@@ -489,9 +513,28 @@ static const ui_input_pinyin_entry_t *ui_input_pinyin_find(const char *key)
     return NULL;
 }
 
+static unsigned int ui_input_pinyin_candidate_count(
+    const ui_input_pinyin_entry_t *entry)
+{
+    unsigned int count = 0;
+
+    if(!entry) {
+        return 0;
+    }
+    while(count < (unsigned int)(sizeof(entry->candidates) /
+                                 sizeof(entry->candidates[0])) &&
+          entry->candidates[count]) {
+        count++;
+    }
+    return count;
+}
+
 static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
 {
     const ui_input_pinyin_entry_t *entry;
+    unsigned int count;
+    unsigned int start;
+    unsigned int shown = 0;
     size_t map_i = 0;
     size_t text_i = 0;
 
@@ -508,31 +551,54 @@ static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
         return;
     }
 
+    entry = ui_input_pinyin_find(state->pinyin_comp);
+    count = ui_input_pinyin_candidate_count(entry);
+    if(!count && state->pinyin_comp[0]) {
+        count = 1;
+    }
+    if(count) {
+        unsigned int max_page = (count - 1U) / UI_INPUT_PINYIN_PAGE_SIZE;
+
+        if(state->pinyin_page > max_page) {
+            state->pinyin_page = max_page;
+        }
+    } else {
+        state->pinyin_page = 0;
+    }
+    start = state->pinyin_page * UI_INPUT_PINYIN_PAGE_SIZE;
+
     lv_obj_clear_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
     snprintf(state->candidate_text[text_i], sizeof(state->candidate_text[text_i]),
              "%s", state->pinyin_comp[0] ? state->pinyin_comp : "Pinyin");
     state->candidate_map[map_i++] = state->candidate_text[text_i++];
 
-    entry = ui_input_pinyin_find(state->pinyin_comp);
     if(entry) {
-        for(size_t i = 0; entry->candidates[i] && map_i < 7; i++) {
+        for(unsigned int i = start;
+            i < count && shown < UI_INPUT_PINYIN_PAGE_SIZE &&
+            map_i < (sizeof(state->candidate_map) /
+                     sizeof(state->candidate_map[0])) - 1U &&
+            text_i < sizeof(state->candidate_text) /
+                     sizeof(state->candidate_text[0]);
+            i++, shown++) {
             snprintf(state->candidate_text[text_i],
-                     sizeof(state->candidate_text[text_i]), "%s",
-                     entry->candidates[i]);
+                     sizeof(state->candidate_text[text_i]), "%u %s",
+                     shown + 1U, entry->candidates[i]);
             state->candidate_map[map_i++] = state->candidate_text[text_i++];
         }
     } else if(state->pinyin_comp[0] && map_i < 7) {
         snprintf(state->candidate_text[text_i],
-                 sizeof(state->candidate_text[text_i]), "%s",
+                 sizeof(state->candidate_text[text_i]), "1 %s",
                  state->pinyin_comp);
         state->candidate_map[map_i++] = state->candidate_text[text_i++];
     }
 
-    state->candidate_map[map_i++] = "Clear";
-    state->candidate_map[map_i++] = "Input";
     state->candidate_map[map_i] = "";
     lv_buttonmatrix_set_map(state->candidate_bar, state->candidate_map);
     ui_input_position_hardware_candidate_bar(state);
+    ui_input_log("pinyin candidates mode=%d inline=%d active=%d comp=%s page=%u count=%u shown=%u",
+                 state->keyboard_mode, state->inline_mode,
+                 state == active_inline, state->pinyin_comp,
+                 state->pinyin_page, count, shown);
 }
 
 static void ui_input_position_hardware_candidate_bar(ui_input_dialog_state_t *state)
@@ -544,6 +610,7 @@ static void ui_input_position_hardware_candidate_bar(ui_input_dialog_state_t *st
     int bar_h;
     int x;
     int y;
+    int min_w;
 
     if(!state || !state->hardware_keyboard || state->keyboard ||
        !state->candidate_bar || !lv_obj_is_valid(state->candidate_bar) ||
@@ -563,14 +630,15 @@ static void ui_input_position_hardware_candidate_bar(ui_input_dialog_state_t *st
     if(bar_h < 36) {
         bar_h = ui_is_landscape() ? 42 : 52;
     }
-    if(bar_w < 280) {
-        bar_w = 280;
+    min_w = ui_is_landscape() ? 720 : 500;
+    if(bar_w < min_w) {
+        bar_w = min_w;
     }
     if(bar_w > screen_w - 24) {
         bar_w = screen_w - 24;
     }
 
-    x = (int)area.x1;
+    x = (int)(area.x1 + area.x2 + 1 - bar_w) / 2;
     if(x + bar_w > screen_w - 12) {
         x = screen_w - 12 - bar_w;
     }
@@ -664,6 +732,7 @@ static void ui_input_pinyin_clear(ui_input_dialog_state_t *state)
         return;
     }
     state->pinyin_comp[0] = '\0';
+    state->pinyin_page = 0;
     ui_input_pinyin_update_candidates(state);
     app_request_fast_refresh();
 }
@@ -676,6 +745,7 @@ static void ui_input_pinyin_insert(ui_input_dialog_state_t *state,
     }
     lv_textarea_add_text(state->textarea, text);
     state->pinyin_comp[0] = '\0';
+    state->pinyin_page = 0;
     if(state->keyboard_mode == UI_INPUT_KBD_PINYIN && state->keyboard) {
         lv_buttonmatrix_set_map(state->keyboard, ui_input_kbd_pinyin_map);
     }
@@ -703,7 +773,8 @@ static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
                                             unsigned int index)
 {
     const ui_input_pinyin_entry_t *entry;
-    unsigned int count = 0;
+    unsigned int count;
+    unsigned int real_index;
 
     if(!state || !state->pinyin_comp[0]) {
         return 0;
@@ -716,14 +787,46 @@ static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
         }
         return 0;
     }
-    while(count < 6U && entry->candidates[count]) {
-        if(count == index) {
-            ui_input_pinyin_insert(state, entry->candidates[count]);
-            return 1;
-        }
-        count++;
+    count = ui_input_pinyin_candidate_count(entry);
+    real_index = state->pinyin_page * UI_INPUT_PINYIN_PAGE_SIZE + index;
+    if(real_index < count && entry->candidates[real_index]) {
+        ui_input_pinyin_insert(state, entry->candidates[real_index]);
+        return 1;
     }
     return 0;
+}
+
+static int ui_input_pinyin_page(ui_input_dialog_state_t *state, int delta)
+{
+    const ui_input_pinyin_entry_t *entry;
+    unsigned int count;
+    unsigned int max_page;
+
+    if(!state || !state->pinyin_comp[0]) {
+        return 0;
+    }
+    entry = ui_input_pinyin_find(state->pinyin_comp);
+    count = ui_input_pinyin_candidate_count(entry);
+    if(count <= UI_INPUT_PINYIN_PAGE_SIZE) {
+        return 0;
+    }
+    max_page = (count - 1U) / UI_INPUT_PINYIN_PAGE_SIZE;
+    if(delta > 0) {
+        if(state->pinyin_page >= max_page) {
+            state->pinyin_page = 0;
+        } else {
+            state->pinyin_page++;
+        }
+    } else if(delta < 0) {
+        if(state->pinyin_page == 0U) {
+            state->pinyin_page = max_page;
+        } else {
+            state->pinyin_page--;
+        }
+    }
+    ui_input_pinyin_update_candidates(state);
+    app_request_fast_refresh();
+    return 1;
 }
 
 static void ui_input_keyboard_send_button(ui_input_dialog_state_t *state,
@@ -757,6 +860,7 @@ static void ui_input_keyboard_send_button(ui_input_dialog_state_t *state,
 
         if(state->keyboard_mode == UI_INPUT_KBD_PINYIN && len > 0U) {
             state->pinyin_comp[len - 1U] = '\0';
+            state->pinyin_page = 0;
             ui_input_pinyin_update_candidates(state);
         } else if(state->textarea) {
             lv_textarea_delete_char(state->textarea);
@@ -779,6 +883,7 @@ static void ui_input_keyboard_send_button(ui_input_dialog_state_t *state,
             state->pinyin_comp[len] =
                 (char)tolower((unsigned char)text[0]);
             state->pinyin_comp[len + 1U] = '\0';
+            state->pinyin_page = 0;
             ui_input_pinyin_update_candidates(state);
             app_request_fast_refresh();
         }
@@ -813,6 +918,7 @@ static void ui_input_candidate_event_cb(lv_event_t *event)
     lv_event_code_t code = lv_event_get_code(event);
     uint32_t btn_id;
     const char *text;
+    const char *candidate_text;
 
     if(code != LV_EVENT_VALUE_CHANGED || !state || !state->candidate_bar) {
         return;
@@ -831,6 +937,11 @@ static void ui_input_candidate_event_cb(lv_event_t *event)
     } else if(strcmp(text, "Input") == 0) {
         if(state->pinyin_comp[0]) {
             ui_input_pinyin_insert(state, state->pinyin_comp);
+        }
+    } else if(isdigit((unsigned char)text[0]) && text[1] == ' ') {
+        candidate_text = text + 2;
+        if(candidate_text[0]) {
+            ui_input_pinyin_insert(state, candidate_text);
         }
     } else if(strcmp(text, state->pinyin_comp) != 0) {
         ui_input_pinyin_insert(state, text);

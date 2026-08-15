@@ -1,6 +1,7 @@
 #include "ui_meshtastic.h"
 
 #include "ui_audio.h"
+#include "ui_hardware.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
 #include "ui_prefs.h"
@@ -3859,6 +3860,14 @@ static void mesh_input_focus_event_cb(lv_event_t *event)
     }
 }
 
+static void mesh_focus_input_if_hardware_keyboard(void)
+{
+    if(mesh_inline_input && ui_extension_keyboard_active() &&
+       !ui_input_inline_is_active(mesh_inline_input)) {
+        ui_input_inline_focus(mesh_inline_input);
+    }
+}
+
 static lv_obj_t *mesh_panel_title(lv_obj_t *parent, const char *title,
                                   const char *subtitle)
 {
@@ -3993,6 +4002,7 @@ void ui_meshtastic_create(lv_obj_t *scr)
     }
 
     mesh_layout_main();
+    mesh_focus_input_if_hardware_keyboard();
     mesh_start_event_cb(NULL);
     mesh_timer = lv_timer_create(mesh_timer_cb, 2000, NULL);
 }
