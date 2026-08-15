@@ -3824,7 +3824,7 @@ void app_set_ble_status(const char *state)
     const char *value = state && state[0] ? state : "offline";
 
     snprintf(status_ble_state, sizeof(status_ble_state), "%s", value);
-    if(strcmp(value, "connected") == 0) {
+    if(strcmp(value, "ready") == 0 || strcmp(value, "connected") == 0) {
         color = 0x25C281;
     } else if(strcmp(value, "probing") == 0 ||
               strcmp(value, "starting") == 0) {
@@ -3837,9 +3837,6 @@ void app_set_ble_status(const char *state)
         uint32_t led_color = 0xEF4D5A;
         if(strcmp(value, "connected") == 0) {
             led_color = 0x25C281;
-        } else if(strcmp(value, "probing") == 0 ||
-                  strcmp(value, "starting") == 0) {
-            led_color = 0xF5A524;
         }
         lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(led_color), 0);
     }
