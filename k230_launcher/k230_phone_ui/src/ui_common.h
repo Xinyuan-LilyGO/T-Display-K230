@@ -48,6 +48,9 @@ extern "C" {
 #ifndef UI_JA_FONT_PATH
 #define UI_JA_FONT_PATH "/root/app/k230_phone_ui/fonts/NotoSansJP-Regular.otf"
 #endif
+#ifndef UI_EMOJI_FONT_PATH
+#define UI_EMOJI_FONT_PATH "/root/app/k230_phone_ui/fonts/NotoColorEmoji.ttf"
+#endif
 
 typedef enum {
     PAGE_HOME = 0,

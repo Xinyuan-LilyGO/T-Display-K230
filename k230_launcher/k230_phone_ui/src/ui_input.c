@@ -37,7 +37,7 @@ struct ui_input_inline {
     char pinyin_comp[32];
     unsigned int pinyin_page;
     const char *candidate_map[16];
-    char candidate_text[11][32];
+    char candidate_text[11][96];
     size_t min_length;
     const char *min_length_text;
     ui_input_submit_cb_t submit_cb;

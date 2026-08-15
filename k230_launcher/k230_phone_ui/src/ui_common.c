@@ -18,11 +18,13 @@ typedef struct {
     uint32_t size;
     lv_font_t *font;
     lv_font_t *ja_font;
+    lv_font_t *emoji_font;
 } ui_font_slot_t;
 
 static int ui_fonts_started;
 static int ui_fonts_ready;
 static int ui_fonts_ja_ready;
+static int ui_fonts_emoji_ready;
 static int ui_font_size_loaded;
 static int ui_font_size_delta;
 static char ui_font_size_mode_value[8] = "medium";
@@ -118,14 +120,19 @@ static ui_font_slot_t *ui_font_slot_scaled_for_fallback(const lv_font_t *fallbac
 }
 
 #if LV_USE_FREETYPE
-static int ui_fonts_create_from_path(const char *path, int japanese)
+static int ui_fonts_create_from_path(const char *path, int font_kind)
 {
     size_t i;
     int ready = 0;
+    const char *name = "cjk";
 
     if(access(path, R_OK) != 0) {
-        fprintf(stderr, "[font] %s missing path=%s\n",
-                japanese ? "ja" : "cjk", path);
+        if(font_kind == 1) {
+            name = "ja";
+        } else if(font_kind == 2) {
+            name = "emoji";
+        }
+        fprintf(stderr, "[font] %s missing path=%s\n", name, path);
         return -1;
     }
 
@@ -135,23 +142,53 @@ static int ui_fonts_create_from_path(const char *path, int japanese)
                                     LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
                                     ui_font_slots[i].size,
                                     LV_FREETYPE_FONT_STYLE_NORMAL);
-        if(japanese) {
+        if(font_kind == 1) {
             ui_font_slots[i].ja_font = font;
+        } else if(font_kind == 2) {
+            ui_font_slots[i].emoji_font = font;
         } else {
             ui_font_slots[i].font = font;
         }
         if(!font) {
             fprintf(stderr, "[font] %s create failed size=%u\n",
-                    japanese ? "ja" : "cjk",
+                    font_kind == 1 ? "ja" : font_kind == 2 ? "emoji" : "cjk",
                     (unsigned int)ui_font_slots[i].size);
         }
     }
 
-    ready = japanese ? (ui_font_slots[2].ja_font != NULL) :
-            (ui_font_slots[2].font != NULL);
+    if(font_kind == 1) {
+        ready = ui_font_slots[2].ja_font != NULL;
+    } else if(font_kind == 2) {
+        ready = ui_font_slots[2].emoji_font != NULL;
+    } else {
+        ready = ui_font_slots[2].font != NULL;
+    }
     fprintf(stderr, "[font] %s %s path=%s\n",
-            japanese ? "ja" : "cjk", ready ? "ready" : "unavailable", path);
+            font_kind == 1 ? "ja" : font_kind == 2 ? "emoji" : "cjk",
+            ready ? "ready" : "unavailable", path);
     return ready ? 0 : -1;
+}
+
+static void ui_fonts_link_fallbacks(void)
+{
+    size_t i;
+
+    if(!ui_fonts_emoji_ready) {
+        return;
+    }
+
+    for(i = 0; i < sizeof(ui_font_slots) / sizeof(ui_font_slots[0]); i++) {
+        if(ui_font_slots[i].font && !ui_font_slots[i].font->fallback) {
+            ui_font_slots[i].font->fallback = ui_font_slots[i].emoji_font;
+        }
+        if(ui_font_slots[i].ja_font && !ui_font_slots[i].ja_font->fallback) {
+            ui_font_slots[i].ja_font->fallback = ui_font_slots[i].emoji_font;
+        }
+        if(ui_font_slots[i].emoji_font &&
+           !ui_font_slots[i].emoji_font->fallback) {
+            ui_font_slots[i].emoji_font->fallback = ui_font_slots[i].fallback;
+        }
+    }
 }
 #endif
 
@@ -173,6 +210,9 @@ int ui_fonts_init(void)
 
     ui_fonts_ready = ui_fonts_create_from_path(UI_CJK_FONT_PATH, 0) == 0;
     ui_fonts_ja_ready = ui_fonts_create_from_path(UI_JA_FONT_PATH, 1) == 0;
+    ui_fonts_emoji_ready =
+        ui_fonts_create_from_path(UI_EMOJI_FONT_PATH, 2) == 0;
+    ui_fonts_link_fallbacks();
     return ui_fonts_ready ? 0 : -1;
 #else
     fprintf(stderr, "[font] freetype disabled\n");
