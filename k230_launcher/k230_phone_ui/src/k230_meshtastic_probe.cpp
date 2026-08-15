@@ -37,6 +37,7 @@
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 8U
+#define MESHTASTIC_DAEMON_REQUEST_QUEUE_MAX 8U
 #define LORA_PIN_CS 14U
 #define LORA_PIN_RST 5U
 #define LORA_PIN_BUSY 19U
@@ -756,6 +757,10 @@ typedef struct {
     bool client_publish_nodeinfo = false;
     bool client_publish_position = false;
     bool client_publish_telemetry = false;
+    bool client_request_nodeinfo = false;
+    bool client_request_position = false;
+    bool client_request_telemetry = false;
+    std::string client_request_target;
     bool rebroadcast = true;
     bool advertise_nodeinfo = true;
     bool position_enabled = true;
@@ -900,6 +905,18 @@ typedef struct {
     uint8_t retries_left = 0;
     bool active = false;
 } ack_retry_entry_t;
+
+typedef enum {
+    MESH_REMOTE_REQ_NODEINFO = 0,
+    MESH_REMOTE_REQ_POSITION,
+    MESH_REMOTE_REQ_TELEMETRY_DEVICE,
+    MESH_REMOTE_REQ_TELEMETRY_ENVIRONMENT,
+} mesh_remote_request_type_t;
+
+typedef struct {
+    mesh_remote_request_type_t type = MESH_REMOTE_REQ_NODEINFO;
+    uint32_t to_node = 0;
+} mesh_remote_request_t;
 
 typedef struct {
     uint32_t portnum = 0;
@@ -2706,7 +2723,10 @@ static bool encode_data_proto(uint32_t portnum,
                               const std::vector<uint8_t> &payload,
                               uint32_t request_id,
                               uint32_t reply_id,
-                              std::vector<uint8_t> *out)
+                              std::vector<uint8_t> *out,
+                              bool want_response = false,
+                              uint32_t dest = 0U,
+                              uint32_t source = 0U)
 {
     if(!out) {
         return false;
@@ -2718,6 +2738,18 @@ static bool encode_data_proto(uint32_t portnum,
         out->push_back(0x12U);
         append_varint(out, (uint32_t)payload.size());
         out->insert(out->end(), payload.begin(), payload.end());
+    }
+    if(want_response) {
+        out->push_back(0x18U);
+        append_varint(out, 1U);
+    }
+    if(dest != 0U) {
+        out->push_back(0x25U);
+        append_fixed32(out, dest);
+    }
+    if(source != 0U) {
+        out->push_back(0x2dU);
+        append_fixed32(out, source);
     }
     if(request_id != 0U) {
         out->push_back(0x35U);
@@ -3929,6 +3961,17 @@ static bool encode_telemetry_proto(const mesh_telemetry_info_t &telemetry,
     }
     append_bytes_field(out, environment ? 3U : 2U, metrics);
     return !out->empty();
+}
+
+static bool encode_telemetry_request_proto(bool environment,
+                                           std::vector<uint8_t> *out)
+{
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_bytes_field(out, environment ? 3U : 2U, std::vector<uint8_t>());
+    return true;
 }
 
 static uint32_t phoneapi_region_enum(const std::string &name)
@@ -8478,6 +8521,264 @@ static bool build_mesh_telemetry_frame(const probe_options_t &opts,
     return true;
 }
 
+static const char *mesh_remote_request_name(mesh_remote_request_type_t type)
+{
+    switch(type) {
+    case MESH_REMOTE_REQ_NODEINFO:
+        return "nodeinfo";
+    case MESH_REMOTE_REQ_POSITION:
+        return "position";
+    case MESH_REMOTE_REQ_TELEMETRY_DEVICE:
+        return "telemetry-device";
+    case MESH_REMOTE_REQ_TELEMETRY_ENVIRONMENT:
+        return "telemetry-environment";
+    default:
+        return "unknown";
+    }
+}
+
+static bool mesh_make_placeholder_position(mesh_position_info_t *position)
+{
+    if(!position) {
+        return false;
+    }
+    *position = mesh_position_info_t();
+    position->has_latitude = true;
+    position->has_longitude = true;
+    position->latitude_i = 0;
+    position->longitude_i = 0;
+    position->timestamp = (uint32_t)time(nullptr);
+    return true;
+}
+
+static bool mesh_request_wants_environment_telemetry(
+    const std::vector<uint8_t> &payload)
+{
+    size_t pos = 0;
+
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if((field == 2U || field == 3U) && wire == 2U) {
+            return field == 3U;
+        }
+        if(wire == 0U) {
+            uint64_t ignored = 0;
+            if(!read_varint64(payload.data(), payload.size(), &pos,
+                              &ignored)) {
+                return false;
+            }
+        } else if(wire == 2U) {
+            uint32_t l;
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            pos += l;
+        } else if(wire == 5U && pos + 4U <= payload.size()) {
+            pos += 4U;
+        } else if(wire == 1U && pos + 8U <= payload.size()) {
+            pos += 8U;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
+static bool build_mesh_direct_data_frame(const probe_options_t &opts,
+                                         uint32_t to_node,
+                                         uint8_t channel,
+                                         uint32_t portnum,
+                                         const std::vector<uint8_t> &payload,
+                                         bool want_response,
+                                         uint32_t data_dest,
+                                         uint32_t reply_id,
+                                         const char *summary_kind,
+                                         tx_frame_t *frame)
+{
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> data_proto;
+    mesh_header_t header;
+    uint32_t packet_id;
+    char summary[260];
+
+    if(!frame || to_node == 0U || meshtastic_node_is_broadcast(to_node) ||
+       !parse_psk(opts.psk, &key) ||
+       !encode_data_proto(portnum, payload, 0, reply_id, &data_proto,
+                          want_response, data_dest, 0U)) {
+        return false;
+    }
+    packet_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+    if(packet_id == 0U) {
+        packet_id = 1U;
+    }
+    if(!aes_ctr_crypt(key, opts.from_node, packet_id, &data_proto)) {
+        return false;
+    }
+    if(data_proto.size() + MESHTASTIC_HEADER_LENGTH >
+       MESHTASTIC_MAX_LORA_PAYLOAD_LEN) {
+        return false;
+    }
+
+    memset(&header, 0, sizeof(header));
+    header.to = to_node;
+    header.from = opts.from_node;
+    header.id = packet_id;
+    header.flags = (opts.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
+                   ((opts.hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
+                    MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
+    header.channel = channel;
+    header.next_hop = 0;
+    header.relay_node = (uint8_t)(opts.from_node & 0xffU);
+
+    frame->bytes.clear();
+    append_mesh_header(&frame->bytes, header);
+    frame->bytes.insert(frame->bytes.end(), data_proto.begin(),
+                        data_proto.end());
+    frame->rebroadcast = false;
+    frame->want_ack = false;
+    frame->routing_ack = false;
+    frame->phoneapi_origin = false;
+    frame->to_node = header.to;
+    frame->from_node = header.from;
+    frame->packet_id = header.id;
+    frame->ack_request_id = 0;
+    frame->channel = header.channel;
+    snprintf(summary, sizeof(summary),
+             "mesh %s id=0x%08x from=0x%08x to=0x%08x ch=0x%02x port=%u payload=%u want_response=%s reply=0x%08x",
+             summary_kind && summary_kind[0] ? summary_kind : "direct",
+             header.id, header.from, header.to, header.channel, portnum,
+             (unsigned)payload.size(), want_response ? "yes" : "no",
+             reply_id);
+    frame->summary = summary;
+    return true;
+}
+
+static bool build_mesh_remote_request_frame(const probe_options_t &opts,
+                                            const mesh_remote_request_t &req,
+                                            tx_frame_t *frame)
+{
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> payload;
+    uint32_t portnum = MESHTASTIC_NODEINFO_APP;
+    uint32_t data_dest = 0U;
+    mesh_position_info_t position;
+
+    if(req.to_node == 0U || meshtastic_node_is_broadcast(req.to_node) ||
+       !parse_psk(opts.psk, &key)) {
+        return false;
+    }
+    switch(req.type) {
+    case MESH_REMOTE_REQ_NODEINFO:
+        portnum = MESHTASTIC_NODEINFO_APP;
+        if(!encode_user_proto(opts, &payload)) {
+            return false;
+        }
+        break;
+    case MESH_REMOTE_REQ_POSITION:
+        portnum = MESHTASTIC_POSITION_APP;
+        if(mesh_gnss.present && mesh_gnss.has_fix) {
+            position = mesh_gnss.position;
+        } else {
+            (void)mesh_make_placeholder_position(&position);
+        }
+        if(!encode_position_proto(position, opts.position_interval_sec,
+                                  &payload)) {
+            return false;
+        }
+        break;
+    case MESH_REMOTE_REQ_TELEMETRY_DEVICE:
+        portnum = MESHTASTIC_TELEMETRY_APP;
+        data_dest = req.to_node;
+        if(!encode_telemetry_request_proto(false, &payload)) {
+            return false;
+        }
+        break;
+    case MESH_REMOTE_REQ_TELEMETRY_ENVIRONMENT:
+        portnum = MESHTASTIC_TELEMETRY_APP;
+        data_dest = req.to_node;
+        if(!encode_telemetry_request_proto(true, &payload)) {
+            return false;
+        }
+        break;
+    default:
+        return false;
+    }
+    return build_mesh_direct_data_frame(opts, req.to_node,
+                                        mesh_channel_hash(
+                                            effective_mesh_channel_name(opts),
+                                            key),
+                                        portnum, payload, true, data_dest, 0U,
+                                        mesh_remote_request_name(req.type),
+                                        frame);
+}
+
+static bool build_mesh_want_response_frame(const probe_options_t &opts,
+                                           const mesh_header_t &rx_header,
+                                           const mesh_data_proto_t &request,
+                                           tx_frame_t *frame)
+{
+    std::vector<uint8_t> payload;
+    uint32_t portnum = request.portnum;
+    bool environment;
+    mesh_position_info_t position;
+    mesh_telemetry_info_t telemetry;
+
+    if(!frame || rx_header.from == 0U ||
+       rx_header.from == opts.from_node ||
+       meshtastic_node_is_broadcast(rx_header.from)) {
+        return false;
+    }
+    if(request.portnum == MESHTASTIC_NODEINFO_APP) {
+        if(!encode_user_proto(opts, &payload)) {
+            return false;
+        }
+    } else if(request.portnum == MESHTASTIC_POSITION_APP) {
+        if(mesh_gnss.present && mesh_gnss.has_fix) {
+            position = mesh_gnss.position;
+        } else {
+            daemon_event("WantResponse position skipped to=0x%08x gps=%s/%s",
+                         rx_header.from, mesh_gnss.modem_state,
+                         mesh_gnss.gps_state);
+            return false;
+        }
+        if(!encode_position_proto(position, opts.position_interval_sec,
+                                  &payload)) {
+            return false;
+        }
+    } else if(request.portnum == MESHTASTIC_TELEMETRY_APP) {
+        environment = mesh_request_wants_environment_telemetry(request.payload);
+        if(environment) {
+            if(!mesh_collect_environment_telemetry(&telemetry)) {
+                daemon_event("WantResponse env telemetry skipped to=0x%08x",
+                             rx_header.from);
+                return false;
+            }
+        } else if(!mesh_collect_device_telemetry(&telemetry)) {
+            daemon_event("WantResponse device telemetry skipped to=0x%08x",
+                         rx_header.from);
+            return false;
+        }
+        if(!encode_telemetry_proto(telemetry, environment, &payload)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    return build_mesh_direct_data_frame(opts, rx_header.from,
+                                        rx_header.channel, portnum, payload,
+                                        false, 0U, rx_header.id,
+                                        "want-response", frame);
+}
+
 static bool build_mesh_ack_frame(const probe_options_t &opts,
                                  const mesh_header_t &rx_header,
                                  uint32_t error_reason,
@@ -8787,6 +9088,18 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                      header.id, header.channel, hop_limit, hop_start, rssi,
                      snr, (unsigned)payload.size(),
                      duplicate ? " duplicate" : "");
+    }
+
+    if(channel_match && data_ok && decoded.want_response && !duplicate &&
+       header.to == opts.from_node && header.from != opts.from_node) {
+        if(build_mesh_want_response_frame(opts, header, decoded,
+                                          rebroadcast_frame)) {
+            daemon_event("WantResponse queued port=%u request=0x%08x to=0x%08x",
+                         decoded.portnum, header.id, header.from);
+            return true;
+        }
+        daemon_event("WantResponse unsupported/skipped port=%u request=0x%08x from=0x%08x",
+                     decoded.portnum, header.id, header.from);
     }
 
     ack_candidate = channel_match && data_ok && header.to == opts.from_node &&
@@ -9351,12 +9664,70 @@ static std::string daemon_nodes_response(void)
     return response;
 }
 
+static bool daemon_parse_target_command(const std::string &line,
+                                        const char *prefix,
+                                        uint32_t *target)
+{
+    const char *arg;
+
+    if(!prefix || !target) {
+        return false;
+    }
+    if(line.compare(0, strlen(prefix), prefix) != 0) {
+        return false;
+    }
+    arg = line.c_str() + strlen(prefix);
+    while(*arg && isspace((unsigned char)*arg)) {
+        arg++;
+    }
+    if(!mesh_parse_u32_text(arg, target) || *target == 0U ||
+       meshtastic_node_is_broadcast(*target)) {
+        return false;
+    }
+    return true;
+}
+
+static std::string daemon_queue_remote_request(
+    std::deque<mesh_remote_request_t> *request_queue,
+    mesh_remote_request_type_t type,
+    uint32_t target)
+{
+    mesh_remote_request_t request;
+    char buf[112];
+
+    if(!request_queue) {
+        return "ERR internal\n";
+    }
+    if(target == 0U || meshtastic_node_is_broadcast(target)) {
+        return "ERR invalid-target\n";
+    }
+    if(request_queue->size() >= MESHTASTIC_DAEMON_REQUEST_QUEUE_MAX) {
+        daemon_event("Remote request queue full target=0x%08x type=%s depth=%u",
+                     target, mesh_remote_request_name(type),
+                     (unsigned)request_queue->size());
+        return "ERR queue-full\n";
+    }
+    request.type = type;
+    request.to_node = target;
+    request_queue->push_back(request);
+    daemon_event("Remote request queued target=0x%08x type=%s depth=%u",
+                 target, mesh_remote_request_name(type),
+                 (unsigned)request_queue->size());
+    snprintf(buf, sizeof(buf), "OK request queued target=0x%08x type=%s depth=%u\n",
+             target, mesh_remote_request_name(type),
+             (unsigned)request_queue->size());
+    return std::string(buf);
+}
+
 static std::string handle_daemon_command(const std::string &line,
                                          const probe_options_t &opts,
                                          chip_type_t chip,
-                                         std::deque<std::string> *send_queue)
+                                         std::deque<std::string> *send_queue,
+                                         std::deque<mesh_remote_request_t> *
+                                             request_queue)
 {
     std::string message;
+    uint32_t target = 0U;
 
     if(line == "STATUS" || line == "status") {
         return daemon_status_response(opts, chip,
@@ -9400,6 +9771,62 @@ static std::string handle_daemon_command(const std::string &line,
         mesh_manual_environment_telemetry_requested = true;
         daemon_event("Manual Telemetry publish queued");
         return "OK telemetry queued\n";
+    }
+    if(daemon_parse_target_command(line, "REQUEST_NODEINFO", &target) ||
+       daemon_parse_target_command(line, "request_nodeinfo", &target)) {
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        return daemon_queue_remote_request(request_queue,
+                                           MESH_REMOTE_REQ_NODEINFO,
+                                           target);
+    }
+    if(daemon_parse_target_command(line, "REQUEST_POSITION", &target) ||
+       daemon_parse_target_command(line, "request_position", &target)) {
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        return daemon_queue_remote_request(request_queue,
+                                           MESH_REMOTE_REQ_POSITION,
+                                           target);
+    }
+    if(daemon_parse_target_command(line, "REQUEST_TELEMETRY_DEVICE",
+                                   &target) ||
+       daemon_parse_target_command(line, "request_telemetry_device",
+                                   &target)) {
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        return daemon_queue_remote_request(request_queue,
+                                           MESH_REMOTE_REQ_TELEMETRY_DEVICE,
+                                           target);
+    }
+    if(daemon_parse_target_command(line, "REQUEST_TELEMETRY_ENV", &target) ||
+       daemon_parse_target_command(line, "request_telemetry_env", &target)) {
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        return daemon_queue_remote_request(
+            request_queue, MESH_REMOTE_REQ_TELEMETRY_ENVIRONMENT, target);
+    }
+    if(daemon_parse_target_command(line, "REQUEST_TELEMETRY", &target) ||
+       daemon_parse_target_command(line, "request_telemetry", &target)) {
+        std::string response;
+
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        response = daemon_queue_remote_request(
+            request_queue, MESH_REMOTE_REQ_TELEMETRY_DEVICE, target);
+        if(response.rfind("OK", 0) == 0) {
+            std::string second = daemon_queue_remote_request(
+                request_queue, MESH_REMOTE_REQ_TELEMETRY_ENVIRONMENT,
+                target);
+            if(second.rfind("OK", 0) != 0) {
+                response += second;
+            }
+        }
+        return response;
     }
     if(line.compare(0, 19, "IMPORT_CHANNEL_URL ") == 0 ||
        line.compare(0, 19, "import_channel_url ") == 0) {
@@ -9445,7 +9872,9 @@ static std::string handle_daemon_command(const std::string &line,
 
 static void accept_daemon_clients(int server_fd, const probe_options_t &opts,
                                   chip_type_t chip,
-                                  std::deque<std::string> *send_queue)
+                                  std::deque<std::string> *send_queue,
+                                  std::deque<mesh_remote_request_t> *
+                                      request_queue)
 {
     for(;;) {
         struct pollfd pfd;
@@ -9477,7 +9906,7 @@ static void accept_daemon_clients(int server_fd, const probe_options_t &opts,
                 buf[n] = '\0';
                 line = trim_ipc_line(buf);
                 response = handle_daemon_command(line, opts, chip,
-                                                 send_queue);
+                                                 send_queue, request_queue);
             }
         }
         (void)fd_write_all(client_fd, response.c_str(), response.size());
@@ -9509,6 +9938,12 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "PUBLISH_POSITION\n";
     } else if(opts.client_publish_telemetry) {
         command = "PUBLISH_TELEMETRY\n";
+    } else if(opts.client_request_nodeinfo) {
+        command = "REQUEST_NODEINFO " + opts.client_request_target + "\n";
+    } else if(opts.client_request_position) {
+        command = "REQUEST_POSITION " + opts.client_request_target + "\n";
+    } else if(opts.client_request_telemetry) {
+        command = "REQUEST_TELEMETRY " + opts.client_request_target + "\n";
     } else if(opts.client_quit) {
         command = "QUIT\n";
     } else if(opts.client_send_requested) {
@@ -9580,7 +10015,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-send \"hello\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-send \"hello\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -9592,6 +10027,9 @@ static void print_usage(const char *argv0)
             "  --cmd-publish-nodeinfo  Ask daemon to publish this node info now\n"
             "  --cmd-publish-position  Ask daemon to publish current GNSS position now\n"
             "  --cmd-publish-telemetry Ask daemon to publish device and environment telemetry now\n"
+            "  --cmd-request-nodeinfo NODE  Ask daemon to request remote node info\n"
+            "  --cmd-request-position NODE  Ask daemon to request remote position\n"
+            "  --cmd-request-telemetry NODE Ask daemon to request remote telemetry\n"
             "  --cmd-send MSG  Ask running daemon to transmit MSG and exit\n"
             "  --cmd-quit      Ask running daemon to exit\n\n"
             "Profile options:\n"
@@ -9740,6 +10178,18 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_publish_position = true;
         } else if(strcmp(arg, "--cmd-publish-telemetry") == 0) {
             opts->client_publish_telemetry = true;
+        } else if(strcmp(arg, "--cmd-request-nodeinfo") == 0 &&
+                  i + 1 < argc) {
+            opts->client_request_nodeinfo = true;
+            opts->client_request_target = argv[++i];
+        } else if(strcmp(arg, "--cmd-request-position") == 0 &&
+                  i + 1 < argc) {
+            opts->client_request_position = true;
+            opts->client_request_target = argv[++i];
+        } else if(strcmp(arg, "--cmd-request-telemetry") == 0 &&
+                  i + 1 < argc) {
+            opts->client_request_telemetry = true;
+            opts->client_request_target = argv[++i];
         } else if(strcmp(arg, "--cmd-quit") == 0) {
             opts->client_quit = true;
         } else if(strcmp(arg, "--cmd-send") == 0 && i + 1 < argc) {
@@ -10308,6 +10758,7 @@ int main(int argc, char **argv)
     bool send_once_awaiting_ack = false;
     int daemon_fd = -1;
     std::deque<std::string> pending_daemon_sends;
+    std::deque<mesh_remote_request_t> pending_remote_requests;
 
     setvbuf(stdout, nullptr, _IOLBF, 0);
     setvbuf(stderr, nullptr, _IOLBF, 0);
@@ -10324,6 +10775,9 @@ int main(int argc, char **argv)
                               (opts.client_publish_nodeinfo ? 1 : 0) +
                               (opts.client_publish_position ? 1 : 0) +
                               (opts.client_publish_telemetry ? 1 : 0) +
+                              (opts.client_request_nodeinfo ? 1 : 0) +
+                              (opts.client_request_position ? 1 : 0) +
+                              (opts.client_request_telemetry ? 1 : 0) +
                               (opts.client_quit ? 1 : 0) +
                               (opts.client_send_requested ? 1 : 0);
         if(client_commands > 1) {
@@ -10481,7 +10935,8 @@ int main(int argc, char **argv)
 
         if(daemon_fd >= 0) {
             accept_daemon_clients(daemon_fd, opts, chip,
-                                  &pending_daemon_sends);
+                                  &pending_daemon_sends,
+                                  &pending_remote_requests);
         }
 
         if(active_op != OP_TX) {
@@ -10691,6 +11146,27 @@ int main(int argc, char **argv)
                 daemon_event("Telemetry build skipped type=environment from=0x%08x manual=%s",
                              opts.from_node,
                              manual_publish ? "yes" : "no");
+            }
+        }
+
+        if(!pending_remote_requests.empty() && active_op != OP_TX) {
+            tx_frame_t frame;
+            mesh_remote_request_t request = pending_remote_requests.front();
+            pending_remote_requests.pop_front();
+            daemon_event("Remote request dequeue target=0x%08x type=%s depth=%u",
+                         request.to_node,
+                         mesh_remote_request_name(request.type),
+                         (unsigned)pending_remote_requests.size());
+            if(build_mesh_remote_request_frame(opts, request, &frame)) {
+                if(start_tx(radio, frame) != 0) {
+                    daemon_event("Remote request TX start failed target=0x%08x type=%s",
+                                 request.to_node,
+                                 mesh_remote_request_name(request.type));
+                }
+            } else {
+                daemon_event("Remote request build failed target=0x%08x type=%s",
+                             request.to_node,
+                             mesh_remote_request_name(request.type));
             }
         }
 

@@ -4026,6 +4026,31 @@ static void mesh_node_detail_back_event_cb(lv_event_t *event)
     mesh_nodes_event_cb(NULL);
 }
 
+static void mesh_node_remote_request_event_cb(lv_event_t *event)
+{
+    const char *command_prefix =
+        (const char *)lv_event_get_user_data(event);
+    char command[96];
+    char response[256];
+
+    if(!command_prefix || !command_prefix[0] ||
+       !mesh_node_detail_target_id[0]) {
+        return;
+    }
+    snprintf(command, sizeof(command), "%s %s\n", command_prefix,
+             mesh_node_detail_target_id);
+    if(mesh_ipc_command(command, response, sizeof(response)) == 0) {
+        ui_trim_text(response);
+        mesh_append_log("request %s: %s",
+                        mesh_node_detail_target_id, response);
+    } else {
+        ui_trim_text(response);
+        mesh_append_log("request failed %s: %s",
+                        mesh_node_detail_target_id, response);
+    }
+    mesh_refresh_status();
+}
+
 static void mesh_node_detail_event_cb(lv_event_t *event)
 {
     const char *line = (const char *)lv_event_get_user_data(event);
@@ -4043,6 +4068,9 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     int left_w = landscape ? (content_w - 18) / 2 : content_w;
     int right_x = landscape ? margin + left_w + 18 : margin;
     int right_w = landscape ? content_w - left_w - 18 : content_w;
+    int request_gap = 8;
+    int request_area_w = content_w > 560 ? 560 : content_w;
+    int request_w = (request_area_w - request_gap * 2) / 3;
     int y;
     char node_id[24];
     char name[64];
@@ -4115,7 +4143,20 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     lv_obj_add_event_cb(btn, mesh_node_detail_back_event_cb,
                         LV_EVENT_CLICKED, NULL);
 
-    y = 104;
+    btn = ui_command_button(panel, margin, 88, request_w,
+                            ui_tr("Node info"), 0x25C281);
+    lv_obj_add_event_cb(btn, mesh_node_remote_request_event_cb,
+                        LV_EVENT_CLICKED, "REQUEST_NODEINFO");
+    btn = ui_command_button(panel, margin + request_w + request_gap, 88,
+                            request_w, ui_tr("Position"), 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_node_remote_request_event_cb,
+                        LV_EVENT_CLICKED, "REQUEST_POSITION");
+    btn = ui_command_button(panel, margin + (request_w + request_gap) * 2,
+                            88, request_w, ui_tr("Telemetry"), 0xA78BFA);
+    lv_obj_add_event_cb(btn, mesh_node_remote_request_event_cb,
+                        LV_EVENT_CLICKED, "REQUEST_TELEMETRY");
+
+    y = 146;
     snprintf(summary, sizeof(summary),
              "RSSI %s\nSNR %s\nPackets %s\nLast seen %s\nHardware %s",
              rssi, snr, rx, age, hw);
