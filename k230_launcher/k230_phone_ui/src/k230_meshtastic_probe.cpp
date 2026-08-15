@@ -30,7 +30,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.20"
+#define PROBE_VERSION "0.21"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define LORA_PIN_CS 14U
@@ -50,11 +50,15 @@
 #define MESHTASTIC_ADMIN_APP 6U
 #define MESHTASTIC_TELEMETRY_APP 67U
 #define MESHTASTIC_NEIGHBORINFO_APP 71U
+#define MESHTASTIC_ERRNO_SHOULD_RELEASE 35U
 #define MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK 0x07U
 #define MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK 0x08U
 #define MESHTASTIC_PACKET_FLAGS_HOP_START_MASK 0xE0U
 #define MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT 5U
 #define MESHTASTIC_ROUTING_ERROR_NONE 0U
+#define MESHTASTIC_ROUTING_ERROR_TIMEOUT 3U
+#define MESHTASTIC_ROUTING_ERROR_NO_INTERFACE 4U
+#define MESHTASTIC_ROUTING_ERROR_TOO_LARGE 7U
 #define MESHTASTIC_SYNC_WORD 0x2BU
 #define MESHTASTIC_DEFAULT_REGION "US"
 #define MESHTASTIC_DEFAULT_PRESET "LONG_FAST"
@@ -816,6 +820,7 @@ typedef struct {
     bool rebroadcast = false;
     bool want_ack = false;
     bool routing_ack = false;
+    bool phoneapi_origin = false;
     uint32_t rebroadcast_from = 0;
     uint32_t to_node = 0;
     uint32_t from_node = 0;
@@ -2924,11 +2929,16 @@ static bool phoneapi_hex_decode(const char *hex, size_t len,
 static uint8_t mesh_header_hop_limit(const mesh_header_t &header);
 static uint8_t mesh_header_hop_start(const mesh_header_t &header);
 static bool mesh_header_want_ack(const mesh_header_t &header);
+static uint32_t mesh_prng_u32(uint32_t salt);
 static bool decode_data_proto(const uint8_t *data, size_t len,
                               mesh_data_proto_t *decoded);
 static bool phoneapi_send_from_payload(int fd, uint32_t field,
                                        const std::vector<uint8_t> &payload,
                                        const char *label);
+static bool phoneapi_notify_routing_result(uint32_t from_node,
+                                           uint32_t request_id,
+                                           uint32_t error_reason,
+                                           const char *reason);
 
 typedef struct {
     bool has_want_config = false;
@@ -3619,6 +3629,94 @@ static void phoneapi_notify_mesh_rx(const mesh_header_t &header,
         return;
     }
     (void)phoneapi_send_from_payload_global(2U, packet, "rx_packet");
+}
+
+static bool phoneapi_notify_routing_result(uint32_t from_node,
+                                           uint32_t request_id,
+                                           uint32_t error_reason,
+                                           const char *reason)
+{
+    std::vector<uint8_t> routing_proto;
+    std::vector<uint8_t> data_proto;
+    std::vector<uint8_t> packet;
+    mesh_header_t header;
+    uint32_t local_node = phoneapi_opts.from_node;
+
+    if(request_id == 0U || local_node == 0U ||
+       !phoneapi_bridge_can_send()) {
+        return false;
+    }
+    if(from_node == 0U) {
+        from_node = MESHTASTIC_NODENUM_BROADCAST;
+    }
+    if(!encode_routing_proto(error_reason, &routing_proto) ||
+       !encode_data_proto(MESHTASTIC_ROUTING_APP, routing_proto,
+                          request_id, 0U, &data_proto)) {
+        return false;
+    }
+
+    memset(&header, 0, sizeof(header));
+    header.from = from_node;
+    header.to = local_node;
+    header.id = (uint32_t)(monotonic_us() & 0xffffffffU) ^
+                mesh_prng_u32(request_id);
+    if(header.id == 0U) {
+        header.id = 1U;
+    }
+    header.flags = 0U;
+    header.channel = 0U;
+    header.next_hop = 0U;
+    header.relay_node = (uint8_t)(from_node & 0xffU);
+
+    if(!encode_phoneapi_mesh_packet_decoded(header, data_proto, 0.0f, 0.0f,
+                                            &packet)) {
+        return false;
+    }
+    if(phoneapi_send_from_payload_global(2U, packet, "routing_result")) {
+        daemon_event("PhoneAPI routing result req=0x%08x from=0x%08x err=%u reason=%s",
+                     request_id, from_node, error_reason,
+                     reason && reason[0] ? reason : "-");
+        return true;
+    }
+    return false;
+}
+
+static bool phoneapi_send_local_loopback(int fd, const probe_options_t &opts,
+                                         const phoneapi_mesh_tx_t &tx)
+{
+    std::vector<uint8_t> data_proto;
+    std::vector<uint8_t> packet;
+    mesh_header_t header;
+    uint32_t packet_id = tx.packet_id;
+
+    if(packet_id == 0U) {
+        packet_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+        if(packet_id == 0U) {
+            packet_id = 1U;
+        }
+    }
+    if(!encode_data_proto(tx.data.portnum, tx.data.payload,
+                          tx.data.request_id, tx.data.reply_id,
+                          &data_proto)) {
+        return false;
+    }
+    memset(&header, 0, sizeof(header));
+    header.from = opts.from_node;
+    header.to = opts.from_node;
+    header.id = packet_id;
+    header.flags = tx.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK;
+    header.channel = 0U;
+    if(!encode_phoneapi_mesh_packet_decoded(header, data_proto, 0.0f, 0.0f,
+                                            &packet)) {
+        return false;
+    }
+    if(!phoneapi_send_from_payload(fd, 2U, packet, "local_loopback")) {
+        return false;
+    }
+    daemon_event("PhoneAPI local loopback id=0x%08x port=%u payload=%u",
+                 packet_id, tx.data.portnum,
+                 (unsigned)tx.data.payload.size());
+    return true;
 }
 
 static void phoneapi_notify_node_update(uint32_t node, const char *reason)
@@ -4468,6 +4566,17 @@ static void phoneapi_process_toradio(int fd, const char *hex, size_t hex_len)
                     fd, tx.packet_id, local_admin_ok ? 0U : 1U,
                     local_admin_ok ? 1U : 0U,
                     local_admin_ok ? "local-admin" : "local-admin-failed");
+            } else if(tx.to_node == phoneapi_opts.from_node &&
+                      tx.to_node != 0U) {
+                bool ok = phoneapi_send_local_loopback(fd, phoneapi_opts, tx);
+                daemon_event("PhoneAPI ToRadio local loopback handled len=%u id=0x%08x ok=%s",
+                             (unsigned)msg.packet_len, tx.packet_id,
+                             ok ? "yes" : "no");
+                (void)phoneapi_send_queue_status(
+                    fd, tx.packet_id,
+                    ok ? MESHTASTIC_ERRNO_SHOULD_RELEASE : 1U,
+                    ok ? 1U : 0U,
+                    ok ? "local-loopback" : "local-loopback-failed");
             } else if(phoneapi_queue_mesh_tx(tx)) {
                 daemon_event("PhoneAPI ToRadio packet queued len=%u port=%u to=0x%08x ack=%s",
                              (unsigned)msg.packet_len, tx.data.portnum,
@@ -5855,8 +5964,7 @@ static bool mesh_ack_track_frame(const tx_frame_t &frame)
 {
     size_t slot = MESHTASTIC_ACK_RETRY_QUEUE_SIZE;
 
-    if(!frame.want_ack || frame.packet_id == 0U ||
-       frame.to_node == MESHTASTIC_NODENUM_BROADCAST) {
+    if(!frame.want_ack || frame.packet_id == 0U) {
         return true;
     }
 
@@ -5904,6 +6012,12 @@ static bool mesh_ack_complete(uint32_t from_node, uint32_t packet_id,
         }
         mesh_ack_retry_queue[i].active = false;
         mesh_ack_retry_queue[i].due_us = 0;
+        if(mesh_ack_retry_queue[i].frame.phoneapi_origin) {
+            (void)phoneapi_notify_routing_result(
+                from_node, packet_id, error_reason,
+                error_reason == MESHTASTIC_ROUTING_ERROR_NONE ?
+                    "air-ack" : "air-nak");
+        }
         if(error_reason == MESHTASTIC_ROUTING_ERROR_NONE) {
             mesh_ack_rx_count++;
             daemon_event("Mesh ACK received id=0x%08x from=0x%08x ack=%lu pending=%u",
@@ -5917,6 +6031,33 @@ static bool mesh_ack_complete(uint32_t from_node, uint32_t packet_id,
                          (unsigned long)mesh_nak_rx_count,
                          mesh_ack_pending_count());
         }
+        return true;
+    }
+    return false;
+}
+
+static bool mesh_ack_complete_implicit(uint32_t relay_from_node,
+                                       const mesh_header_t &header)
+{
+    for(size_t i = 0; i < MESHTASTIC_ACK_RETRY_QUEUE_SIZE; i++) {
+        if(!mesh_ack_retry_queue[i].active ||
+           mesh_ack_retry_queue[i].packet_id != header.id ||
+           mesh_ack_retry_queue[i].to_node != MESHTASTIC_NODENUM_BROADCAST ||
+           mesh_ack_retry_queue[i].frame.channel != header.channel) {
+            continue;
+        }
+        mesh_ack_retry_queue[i].active = false;
+        mesh_ack_retry_queue[i].due_us = 0;
+        mesh_ack_rx_count++;
+        if(mesh_ack_retry_queue[i].frame.phoneapi_origin) {
+            (void)phoneapi_notify_routing_result(
+                relay_from_node, header.id, MESHTASTIC_ROUTING_ERROR_NONE,
+                "implicit-rebroadcast");
+        }
+        daemon_event("Mesh implicit ACK id=0x%08x relay=0x%08x ack=%lu pending=%u",
+                     header.id, relay_from_node,
+                     (unsigned long)mesh_ack_rx_count,
+                     mesh_ack_pending_count());
         return true;
     }
     return false;
@@ -5979,6 +6120,7 @@ static bool build_mesh_rebroadcast_frame(const probe_options_t &opts,
     frame->rebroadcast = true;
     frame->want_ack = false;
     frame->routing_ack = false;
+    frame->phoneapi_origin = false;
     frame->rebroadcast_from = fwd.from;
     frame->to_node = fwd.to;
     frame->from_node = fwd.from;
@@ -6033,7 +6175,7 @@ static bool build_mesh_frame(const probe_options_t &opts,
     header.flags = (opts.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
                    ((opts.hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
                     MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
-    if(opts.want_ack && header.to != MESHTASTIC_NODENUM_BROADCAST) {
+    if(opts.want_ack) {
         header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
     }
     channel_name = effective_mesh_channel_name(opts);
@@ -6048,6 +6190,7 @@ static bool build_mesh_frame(const probe_options_t &opts,
     frame->rebroadcast = false;
     frame->want_ack = mesh_header_want_ack(header);
     frame->routing_ack = false;
+    frame->phoneapi_origin = false;
     frame->to_node = header.to;
     frame->from_node = header.from;
     frame->packet_id = header.id;
@@ -6104,7 +6247,7 @@ static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
     header.flags = (hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
                    ((hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
                     MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
-    if(tx.want_ack && header.to != MESHTASTIC_NODENUM_BROADCAST) {
+    if(tx.want_ack) {
         header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
     }
     channel_name = effective_mesh_channel_name(opts);
@@ -6119,6 +6262,7 @@ static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
     frame->rebroadcast = false;
     frame->want_ack = mesh_header_want_ack(header);
     frame->routing_ack = false;
+    frame->phoneapi_origin = true;
     frame->to_node = header.to;
     frame->from_node = header.from;
     frame->packet_id = header.id;
@@ -6183,6 +6327,7 @@ static bool build_mesh_nodeinfo_frame(const probe_options_t &opts,
     frame->rebroadcast = false;
     frame->want_ack = false;
     frame->routing_ack = false;
+    frame->phoneapi_origin = false;
     frame->to_node = header.to;
     frame->from_node = header.from;
     frame->packet_id = header.id;
@@ -6253,6 +6398,7 @@ static bool build_mesh_ack_frame(const probe_options_t &opts,
     frame->rebroadcast = false;
     frame->want_ack = mesh_header_want_ack(header);
     frame->routing_ack = true;
+    frame->phoneapi_origin = false;
     frame->to_node = header.to;
     frame->from_node = header.from;
     frame->packet_id = header.id;
@@ -6340,6 +6486,12 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
         (void)aes_ctr_crypt(key, header.from, header.id, &payload);
     }
     data_ok = decode_data_proto(payload.data(), payload.size(), &decoded);
+    if(data_ok && duplicate && channel_match &&
+       header.from == opts.from_node &&
+       header.to == MESHTASTIC_NODENUM_BROADCAST &&
+       mesh_header_want_ack(header)) {
+        (void)mesh_ack_complete_implicit(opts.from_node, header);
+    }
     if(data_ok) {
         if(channel_match && !duplicate && header.from != opts.from_node) {
             phoneapi_notify_mesh_rx(header, payload, rssi, snr);
@@ -7629,6 +7781,13 @@ static void handle_ack_retry(PhysicalLayer *radio, uint64_t now_us)
     }
     if(mesh_ack_retry_queue[best].retries_left == 0U) {
         mesh_ack_timeout_count++;
+        if(mesh_ack_retry_queue[best].frame.phoneapi_origin) {
+            (void)phoneapi_notify_routing_result(
+                mesh_ack_retry_queue[best].to_node,
+                mesh_ack_retry_queue[best].packet_id,
+                MESHTASTIC_ROUTING_ERROR_TIMEOUT,
+                "ack-timeout");
+        }
         daemon_event("Mesh ACK timeout id=0x%08x to=0x%08x timeout=%lu pending=%u",
                      mesh_ack_retry_queue[best].packet_id,
                      mesh_ack_retry_queue[best].to_node,
@@ -7922,11 +8081,22 @@ int main(int argc, char **argv)
                                             clean.c_str());
                             }
                         }
+                    } else if(phoneapi_tx.packet_id != 0U) {
+                        (void)phoneapi_notify_routing_result(
+                            frame.to_node, phoneapi_tx.packet_id,
+                            MESHTASTIC_ROUTING_ERROR_NO_INTERFACE,
+                            "tx-start-failed");
                     }
                 } else {
                     daemon_event("PhoneAPI TX build failed port=%u payload=%u",
                                  phoneapi_tx.data.portnum,
                                  (unsigned)phoneapi_tx.data.payload.size());
+                    if(phoneapi_tx.packet_id != 0U) {
+                        (void)phoneapi_notify_routing_result(
+                            phoneapi_tx.to_node, phoneapi_tx.packet_id,
+                            MESHTASTIC_ROUTING_ERROR_TOO_LARGE,
+                            "tx-build-failed");
+                    }
                 }
             }
         }
