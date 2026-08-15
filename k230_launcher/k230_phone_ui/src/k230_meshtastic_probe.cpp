@@ -10963,6 +10963,7 @@ static bool build_mesh_direct_data_frame(const probe_options_t &opts,
                                          const std::vector<uint8_t> &payload,
                                          bool want_response,
                                          uint32_t data_dest,
+                                         uint32_t request_id,
                                          uint32_t reply_id,
                                          bool request_ack,
                                          const char *summary_kind,
@@ -10978,7 +10979,7 @@ static bool build_mesh_direct_data_frame(const probe_options_t &opts,
 
     if(!frame || to_node == 0U || meshtastic_node_is_broadcast(to_node) ||
        !parse_psk(psk, &key) ||
-       !encode_data_proto(portnum, payload, 0, reply_id, &data_proto,
+       !encode_data_proto(portnum, payload, request_id, reply_id, &data_proto,
                           want_response, data_dest, 0U)) {
         return false;
     }
@@ -11022,11 +11023,11 @@ static bool build_mesh_direct_data_frame(const probe_options_t &opts,
     frame->ack_request_id = 0;
     frame->channel = header.channel;
     snprintf(summary, sizeof(summary),
-             "mesh %s id=0x%08x from=0x%08x to=0x%08x ch=0x%02x port=%u payload=%u want_response=%s reply=0x%08x ack=%s",
+             "mesh %s id=0x%08x from=0x%08x to=0x%08x ch=0x%02x port=%u payload=%u want_response=%s request=0x%08x reply=0x%08x ack=%s",
              summary_kind && summary_kind[0] ? summary_kind : "direct",
              header.id, header.from, header.to, header.channel, portnum,
              (unsigned)payload.size(), want_response ? "yes" : "no",
-             reply_id, frame->want_ack ? "yes" : "no");
+             request_id, reply_id, frame->want_ack ? "yes" : "no");
     frame->summary = summary;
     return true;
 }
@@ -11104,11 +11105,11 @@ static bool build_mesh_pki_direct_data_frame(const probe_options_t &opts,
     frame->ack_request_id = 0;
     frame->channel = header.channel;
     snprintf(summary, sizeof(summary),
-             "mesh %s pki id=0x%08x from=0x%08x to=0x%08x port=%u payload=%u want_response=%s reply=0x%08x ack=%s",
+             "mesh %s pki id=0x%08x from=0x%08x to=0x%08x port=%u payload=%u want_response=%s request=0x%08x reply=0x%08x ack=%s",
              summary_kind && summary_kind[0] ? summary_kind : "direct",
              header.id, header.from, header.to, portnum,
              (unsigned)payload.size(), want_response ? "yes" : "no",
-             reply_id, frame->want_ack ? "yes" : "no");
+             request_id, reply_id, frame->want_ack ? "yes" : "no");
     frame->summary = summary;
     return true;
 }
@@ -11171,7 +11172,7 @@ static bool build_mesh_remote_request_frame(const probe_options_t &opts,
                                             effective_mesh_channel_name(opts),
                                             key),
                                         portnum, payload, true, data_dest, 0U,
-                                        request_ack,
+                                        0U, request_ack,
                                         mesh_remote_request_name(req.type),
                                         nullptr,
                                         frame);
@@ -11248,14 +11249,14 @@ static bool build_mesh_want_response_frame(const probe_options_t &opts,
     }
     if(pki_response &&
        build_mesh_pki_direct_data_frame(opts, rx_header.from, portnum,
-                                        payload, 0U, rx_header.id, false,
+                                        payload, rx_header.id, 0U, false,
                                         0U, false, false,
                                         "want-response", frame)) {
         return true;
     }
     return build_mesh_direct_data_frame(opts, rx_header.from,
                                         rx_header.channel, portnum, payload,
-                                        false, 0U, rx_header.id,
+                                        false, 0U, rx_header.id, 0U,
                                         false,
                                         "want-response", psk_override, frame);
 }
