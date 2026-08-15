@@ -3774,9 +3774,9 @@ static lv_obj_t *chip(lv_obj_t *parent, const char *text, uint32_t color)
 
 static void create_status_bar(lv_obj_t *scr)
 {
-    const int status_chip_w = 52;
+    const int status_chip_w = 58;
     const int status_chip_h = 24;
-    const int status_chip_gap = 6;
+    const int status_chip_gap = 5;
     const int status_chip_count = 4;
     const int status_group_w =
         status_chip_w * status_chip_count + status_chip_gap * (status_chip_count - 1);
@@ -3803,25 +3803,32 @@ static void create_status_bar(lv_obj_t *scr)
     lv_obj_set_flex_align(status_group, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(status_group, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(status_group, LV_ALIGN_RIGHT_MID, -24, 0);
+    lv_obj_align(status_group, LV_ALIGN_RIGHT_MID, -8, 0);
 
     lv_obj_t *ble = lv_obj_create(status_group);
     lv_obj_add_style(ble, &style_chip, 0);
     lv_obj_set_size(ble, status_chip_w, status_chip_h);
     lv_obj_set_style_pad_all(ble, 0, 0);
     lv_obj_clear_flag(ble, LV_OBJ_FLAG_SCROLLABLE);
-    status_ble_label = label(ble, "BLE", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_align(status_ble_label, LV_ALIGN_LEFT_MID, 6, 0);
-    status_ble_led = lv_obj_create(ble);
+    lv_obj_t *ble_row = lv_obj_create(ble);
+    lv_obj_set_size(ble_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(ble_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ble_row, 0, 0);
+    lv_obj_set_style_pad_all(ble_row, 0, 0);
+    lv_obj_set_style_pad_column(ble_row, 3, 0);
+    lv_obj_set_flex_flow(ble_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ble_row, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(ble_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(ble_row);
+    status_ble_label = label(ble_row, "BLE", &lv_font_montserrat_16, 0x9AA4AF);
+    status_ble_led = lv_obj_create(ble_row);
     lv_obj_set_size(status_ble_led, 9, 9);
     lv_obj_set_style_radius(status_ble_led, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(status_ble_led, 0, 0);
     lv_obj_set_style_bg_opa(status_ble_led, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(0x59616C), 0);
     lv_obj_clear_flag(status_ble_led, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_update_layout(status_ble_label);
-    lv_obj_align_to(status_ble_led, status_ble_label,
-                    LV_ALIGN_OUT_RIGHT_MID, 3, 0);
 
     lv_obj_t *wifi = chip(status_group, "WiFi", path_exists("/sys/class/net/wlan0") ? 0x25C281 : 0x9AA4AF);
     lv_obj_set_size(wifi, status_chip_w, status_chip_h);
