@@ -705,6 +705,7 @@ typedef struct {
     bool client_log = false;
     bool client_chat = false;
     bool client_nodes = false;
+    bool client_channel_url = false;
     bool client_quit = false;
     bool rebroadcast = true;
     bool advertise_nodeinfo = true;
@@ -2560,6 +2561,117 @@ static bool encode_phoneapi_config_bluetooth(std::vector<uint8_t> *out)
     append_uint32_field(&bluetooth, 2U, 2U);
     append_bytes_field(out, 7U, bluetooth);
     return true;
+}
+
+static std::string base64url_encode_no_pad(const std::vector<uint8_t> &data)
+{
+    static const char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    size_t i = 0;
+
+    out.reserve(((data.size() + 2U) / 3U) * 4U);
+    while(i + 3U <= data.size()) {
+        uint32_t v = ((uint32_t)data[i] << 16U) |
+                     ((uint32_t)data[i + 1U] << 8U) |
+                     (uint32_t)data[i + 2U];
+        out.push_back(table[(v >> 18U) & 0x3fU]);
+        out.push_back(table[(v >> 12U) & 0x3fU]);
+        out.push_back(table[(v >> 6U) & 0x3fU]);
+        out.push_back(table[v & 0x3fU]);
+        i += 3U;
+    }
+    if(i < data.size()) {
+        uint32_t v = (uint32_t)data[i] << 16U;
+        out.push_back(table[(v >> 18U) & 0x3fU]);
+        if(i + 1U < data.size()) {
+            v |= (uint32_t)data[i + 1U] << 8U;
+            out.push_back(table[(v >> 12U) & 0x3fU]);
+            out.push_back(table[(v >> 6U) & 0x3fU]);
+        } else {
+            out.push_back(table[(v >> 12U) & 0x3fU]);
+        }
+    }
+    return out;
+}
+
+static bool encode_meshtastic_channelset_settings(const probe_options_t &opts,
+                                                  std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> psk;
+
+    if(!out || !parse_psk(opts.psk, &key)) {
+        return false;
+    }
+    out->clear();
+    if(key.empty()) {
+        psk.clear();
+    } else if(key.size() == sizeof(default_psk) &&
+              memcmp(key.data(), default_psk, sizeof(default_psk)) == 0) {
+        psk.push_back(1U);
+    } else {
+        psk = key;
+    }
+    append_bytes_field(out, 2U, psk);
+    if(!opts.channel_name.empty()) {
+        append_string_field(out, 3U, opts.channel_name, 12U);
+    }
+    return true;
+}
+
+static bool encode_meshtastic_channelset_lora(const probe_options_t &opts,
+                                              std::vector<uint8_t> *out)
+{
+    uint32_t region = phoneapi_region_enum(
+        opts.resolved_region.empty() ? opts.region : opts.resolved_region);
+    uint32_t preset = phoneapi_preset_enum(
+        opts.resolved_preset.empty() ? opts.preset : opts.resolved_preset);
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_bool_field(out, 1U, true);
+    append_uint32_field(out, 2U, preset);
+    append_uint32_field(out, 7U, region);
+    append_uint32_field(out, 8U, opts.hop_limit);
+    append_bool_field(out, 9U, true);
+    if(opts.profile.power > 0) {
+        append_uint32_field(out, 10U, (uint32_t)opts.profile.power);
+    }
+    if(opts.resolved_slot > 0U) {
+        append_uint32_field(out, 11U, opts.resolved_slot);
+    }
+    return !out->empty();
+}
+
+static bool encode_meshtastic_channelset(const probe_options_t &opts,
+                                         std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> settings;
+    std::vector<uint8_t> lora;
+
+    if(!out ||
+       !encode_meshtastic_channelset_settings(opts, &settings) ||
+       !encode_meshtastic_channelset_lora(opts, &lora)) {
+        return false;
+    }
+    out->clear();
+    append_bytes_field(out, 1U, settings);
+    append_bytes_field(out, 2U, lora);
+    return !out->empty();
+}
+
+static std::string meshtastic_channel_url(const probe_options_t &opts)
+{
+    std::vector<uint8_t> channel_set;
+
+    if(!encode_meshtastic_channelset(opts, &channel_set)) {
+        return std::string();
+    }
+    return std::string("https://meshtastic.org/e/#") +
+           base64url_encode_no_pad(channel_set);
 }
 
 static bool encode_phoneapi_channel(const probe_options_t &opts,
@@ -6533,12 +6645,13 @@ static std::string daemon_status_response(const probe_options_t &opts,
                                           chip_type_t chip,
                                           const std::string &pending_send)
 {
-    char buf[1280];
+    char buf[1800];
     char ble_detail[160];
     char ble_pair[16];
     phoneapi_bridge_state_t ble_state;
     const char *queued = pending_send.empty() ? "0" : "1";
     uint64_t now = monotonic_us();
+    std::string channel_url = meshtastic_channel_url(opts);
 
     ble_state = phoneapi_bridge_get_state(ble_detail, sizeof(ble_detail));
     if(!phoneapi_bridge_get_pairing_code(ble_pair, sizeof(ble_pair))) {
@@ -6553,7 +6666,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
              "region=%s preset=%s freq=%.3f bw=%.1f sf=%u cr=4/%u sw=0x%02x manual_power=%s power=%d node=%s "
-             "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s socket=%s\n",
+             "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s channel_url=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
              (unsigned long)tx_count, (unsigned long)rx_count, queued,
              phoneapi_bridge_state_name(ble_state), ble_detail, ble_pair,
@@ -6582,8 +6695,19 @@ static std::string daemon_status_response(const probe_options_t &opts,
              opts.to_node, opts.want_ack ? "on" : "off",
              opts.rebroadcast ? "on" : "off",
              effective_mesh_channel_name(opts).c_str(),
+             channel_url.empty() ? "-" : channel_url.c_str(),
              opts.socket_path.c_str());
     return std::string(buf);
+}
+
+static std::string daemon_channel_url_response(const probe_options_t &opts)
+{
+    std::string url = meshtastic_channel_url(opts);
+
+    if(url.empty()) {
+        return "ERR channel-url\n";
+    }
+    return std::string("OK channel_url=") + url + "\n";
 }
 
 static std::string daemon_event_log_response(void)
@@ -6717,6 +6841,10 @@ static std::string handle_daemon_command(const std::string &line,
     if(line == "NODES" || line == "nodes") {
         return daemon_nodes_response();
     }
+    if(line == "CHANNEL_URL" || line == "channel_url" ||
+       line == "CHANNELURL" || line == "channelurl") {
+        return daemon_channel_url_response(opts);
+    }
     if(line == "QUIT" || line == "quit") {
         running = 0;
         return "OK quitting\n";
@@ -6802,6 +6930,8 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "CHAT\n";
     } else if(opts.client_nodes) {
         command = "NODES\n";
+    } else if(opts.client_channel_url) {
+        command = "CHANNEL_URL\n";
     } else if(opts.client_quit) {
         command = "QUIT\n";
     } else if(opts.client_send_requested) {
@@ -6873,7 +7003,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-send \"hello\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-send \"hello\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -6881,6 +7011,7 @@ static void print_usage(const char *argv0)
             "  --cmd-log       Query recent daemon TX/RX event log and exit\n"
             "  --cmd-chat      Query recent decoded text messages and exit\n"
             "  --cmd-nodes     Query recently seen mesh nodes and exit\n"
+            "  --cmd-channel-url Query Meshtastic channel sharing URL and exit\n"
             "  --cmd-send MSG  Ask running daemon to transmit MSG and exit\n"
             "  --cmd-quit      Ask running daemon to exit\n\n"
             "Profile options:\n"
@@ -6979,6 +7110,8 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_chat = true;
         } else if(strcmp(arg, "--cmd-nodes") == 0) {
             opts->client_nodes = true;
+        } else if(strcmp(arg, "--cmd-channel-url") == 0) {
+            opts->client_channel_url = true;
         } else if(strcmp(arg, "--cmd-quit") == 0) {
             opts->client_quit = true;
         } else if(strcmp(arg, "--cmd-send") == 0 && i + 1 < argc) {
@@ -7552,6 +7685,7 @@ int main(int argc, char **argv)
                               (opts.client_log ? 1 : 0) +
                               (opts.client_chat ? 1 : 0) +
                               (opts.client_nodes ? 1 : 0) +
+                              (opts.client_channel_url ? 1 : 0) +
                               (opts.client_quit ? 1 : 0) +
                               (opts.client_send_requested ? 1 : 0);
         if(client_commands > 1) {
@@ -7602,6 +7736,8 @@ int main(int argc, char **argv)
                opts.rebroadcast ? "on" : "off",
                channel_name.c_str(), key.empty() ? "none" : opts.psk.c_str(),
                mesh_channel_hash(channel_name, key));
+        printf("Meshtastic channel URL: %s\n",
+               meshtastic_channel_url(opts).c_str());
     }
 
     hal = new K230LinuxHal(opts.spi_path.c_str(), LORA_SPI_SPEED_HZ);
