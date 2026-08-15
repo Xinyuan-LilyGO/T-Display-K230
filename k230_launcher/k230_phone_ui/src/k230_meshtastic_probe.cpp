@@ -1080,6 +1080,9 @@ static pthread_mutex_t phoneapi_uart_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int phoneapi_uart_fd = -1;
 static pthread_mutex_t phoneapi_tx_mutex = PTHREAD_MUTEX_INITIALIZER;
 static phoneapi_mesh_tx_t phoneapi_pending_tx;
+static pthread_mutex_t phoneapi_opts_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool phoneapi_opts_update_available;
+static bool phoneapi_reconfigure_requested;
 static pthread_mutex_t phoneapi_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static phoneapi_bridge_state_t phoneapi_bridge_state = PHONEAPI_BRIDGE_OFFLINE;
 static char phoneapi_bridge_detail[160] = "not-started";
@@ -1224,6 +1227,38 @@ static bool phoneapi_bridge_can_send(void)
 
     return state == PHONEAPI_BRIDGE_READY ||
            state == PHONEAPI_BRIDGE_CONNECTED;
+}
+
+static void phoneapi_store_runtime_opts(const probe_options_t &opts,
+                                        bool request_reconfigure)
+{
+    pthread_mutex_lock(&phoneapi_opts_mutex);
+    phoneapi_opts = opts;
+    phoneapi_opts_update_available = true;
+    if(request_reconfigure) {
+        phoneapi_reconfigure_requested = true;
+    }
+    pthread_mutex_unlock(&phoneapi_opts_mutex);
+}
+
+static bool phoneapi_take_runtime_opts(probe_options_t *opts,
+                                       bool *request_reconfigure)
+{
+    bool changed = false;
+
+    if(!opts || !request_reconfigure) {
+        return false;
+    }
+    pthread_mutex_lock(&phoneapi_opts_mutex);
+    if(phoneapi_opts_update_available || phoneapi_reconfigure_requested) {
+        *opts = phoneapi_opts;
+        *request_reconfigure = phoneapi_reconfigure_requested;
+        phoneapi_opts_update_available = false;
+        phoneapi_reconfigure_requested = false;
+        changed = true;
+    }
+    pthread_mutex_unlock(&phoneapi_opts_mutex);
+    return changed;
 }
 
 static bool phoneapi_bridge_status_line(const std::string &line)
@@ -2527,6 +2562,14 @@ typedef struct {
     bool get_device_metadata_request = false;
     bool has_set_time_only = false;
     uint32_t set_time_only = 0;
+    bool has_set_owner = false;
+    std::vector<uint8_t> set_owner;
+    bool has_set_channel = false;
+    std::vector<uint8_t> set_channel;
+    bool has_set_config = false;
+    std::vector<uint8_t> set_config;
+    bool has_set_module_config = false;
+    std::vector<uint8_t> set_module_config;
 } phoneapi_admin_request_t;
 
 static bool phoneapi_proto_skip(const uint8_t *data, size_t len, size_t *pos,
@@ -2667,6 +2710,32 @@ static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
             out->set_time_only = get_le32(payload.data() + pos);
             out->has_set_time_only = true;
             pos += 4U;
+        } else if((field == 32U || field == 33U || field == 34U ||
+                   field == 35U) && wire == 2U) {
+            uint32_t l;
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            if(field == 32U) {
+                out->set_owner.assign(payload.begin() + (long)pos,
+                                      payload.begin() + (long)(pos + l));
+                out->has_set_owner = true;
+            } else if(field == 33U) {
+                out->set_channel.assign(payload.begin() + (long)pos,
+                                        payload.begin() + (long)(pos + l));
+                out->has_set_channel = true;
+            } else if(field == 34U) {
+                out->set_config.assign(payload.begin() + (long)pos,
+                                       payload.begin() + (long)(pos + l));
+                out->has_set_config = true;
+            } else {
+                out->set_module_config.assign(
+                    payload.begin() + (long)pos,
+                    payload.begin() + (long)(pos + l));
+                out->has_set_module_config = true;
+            }
+            pos += l;
         } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
                                        wire)) {
             return false;
@@ -2738,6 +2807,333 @@ static bool phoneapi_parse_mesh_packet(const std::vector<uint8_t> &packet,
     }
     found.active = true;
     *out = found;
+    return true;
+}
+
+typedef struct {
+    bool has_name = false;
+    std::string name;
+} phoneapi_owner_update_t;
+
+typedef struct {
+    bool has_name = false;
+    bool has_psk = false;
+    std::string name;
+    std::string psk;
+} phoneapi_channel_update_t;
+
+typedef struct {
+    bool has_lora = false;
+    bool has_region = false;
+    bool has_preset = false;
+    bool has_hop_limit = false;
+    bool has_tx_power = false;
+    std::string region;
+    std::string preset;
+    uint32_t hop_limit = 0;
+    int32_t tx_power = 0;
+} phoneapi_config_update_t;
+
+static bool phoneapi_read_length_delimited(const std::vector<uint8_t> &payload,
+                                           size_t *pos,
+                                           std::vector<uint8_t> *out)
+{
+    uint32_t l;
+
+    if(!pos || !out ||
+       !read_varint(payload.data(), payload.size(), pos, &l) ||
+       *pos + l > payload.size()) {
+        return false;
+    }
+    out->assign(payload.begin() + (long)*pos,
+                payload.begin() + (long)(*pos + l));
+    *pos += l;
+    return true;
+}
+
+static bool phoneapi_read_string_field(const std::vector<uint8_t> &payload,
+                                       size_t *pos, std::string *out)
+{
+    std::vector<uint8_t> bytes;
+
+    if(!out || !phoneapi_read_length_delimited(payload, pos, &bytes)) {
+        return false;
+    }
+    out->assign((const char *)bytes.data(), bytes.size());
+    return true;
+}
+
+static bool phoneapi_parse_user_update(const std::vector<uint8_t> &payload,
+                                       phoneapi_owner_update_t *out)
+{
+    size_t pos = 0;
+    std::string short_name;
+
+    if(!out) {
+        return false;
+    }
+    *out = phoneapi_owner_update_t();
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 2U && wire == 2U) {
+            if(!phoneapi_read_string_field(payload, &pos, &out->name)) {
+                return false;
+            }
+            out->has_name = !mesh_clean_text(out->name).empty();
+        } else if(field == 3U && wire == 2U) {
+            if(!phoneapi_read_string_field(payload, &pos, &short_name)) {
+                return false;
+            }
+            if(!out->has_name && !mesh_clean_text(short_name).empty()) {
+                out->name = short_name;
+                out->has_name = true;
+            }
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static std::string phoneapi_psk_bytes_to_text(const std::vector<uint8_t> &psk)
+{
+    if(psk.empty()) {
+        return "none";
+    }
+    if(psk.size() == sizeof(default_psk) &&
+       memcmp(psk.data(), default_psk, sizeof(default_psk)) == 0) {
+        return "default";
+    }
+    return phoneapi_hex_encode(psk);
+}
+
+static bool phoneapi_parse_channel_settings(
+    const std::vector<uint8_t> &payload, phoneapi_channel_update_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
+    }
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 2U && wire == 2U) {
+            std::vector<uint8_t> key;
+            if(!phoneapi_read_length_delimited(payload, &pos, &key)) {
+                return false;
+            }
+            out->psk = phoneapi_psk_bytes_to_text(key);
+            out->has_psk = true;
+        } else if(field == 3U && wire == 2U) {
+            if(!phoneapi_read_string_field(payload, &pos, &out->name)) {
+                return false;
+            }
+            out->name = mesh_clean_text(out->name);
+            out->has_name = true;
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool phoneapi_parse_channel_update(const std::vector<uint8_t> &payload,
+                                          phoneapi_channel_update_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
+    }
+    *out = phoneapi_channel_update_t();
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 2U && wire == 2U) {
+            std::vector<uint8_t> settings;
+            if(!phoneapi_read_length_delimited(payload, &pos, &settings) ||
+               !phoneapi_parse_channel_settings(settings, out)) {
+                return false;
+            }
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static const char *phoneapi_region_name_from_enum(uint32_t value)
+{
+    struct map_t {
+        uint32_t value;
+        const char *name;
+    };
+    static const map_t map[] = {
+        {0, "UNSET"}, {1, "US"}, {2, "EU_433"}, {3, "EU_868"},
+        {4, "CN"}, {5, "JP"}, {6, "ANZ"}, {7, "KR"},
+        {8, "TW"}, {9, "RU"}, {10, "IN"}, {11, "NZ_865"},
+        {12, "TH"}, {13, "LORA_24"}, {14, "UA_433"},
+        {16, "MY_433"}, {17, "MY_919"}, {18, "SG_923"},
+        {19, "PH_433"}, {20, "PH_868"}, {21, "PH_915"},
+        {22, "ANZ_433"}, {23, "KZ_433"}, {24, "KZ_863"},
+        {25, "NP_865"}, {26, "BR_902"}, {27, "ITU1_2M"},
+        {28, "ITU2_2M"}, {29, "EU_866"}, {32, "EU_N_868"},
+        {33, "ITU3_2M"}, {34, "ITU1_70CM"}, {35, "ITU2_70CM"},
+        {36, "ITU3_70CM"}, {37, "ITU2_125CM"},
+    };
+
+    for(size_t i = 0; i < ARRAY_SIZE(map); i++) {
+        if(map[i].value == value) {
+            return map[i].name;
+        }
+    }
+    return nullptr;
+}
+
+static const char *phoneapi_preset_name_from_enum(uint32_t value)
+{
+    struct map_t {
+        uint32_t value;
+        const char *name;
+    };
+    static const map_t map[] = {
+        {0, "LONG_FAST"}, {1, "LONG_SLOW"}, {3, "MEDIUM_SLOW"},
+        {4, "MEDIUM_FAST"}, {5, "SHORT_SLOW"}, {6, "SHORT_FAST"},
+        {7, "LONG_MODERATE"}, {8, "SHORT_TURBO"}, {9, "LONG_TURBO"},
+        {10, "LITE_FAST"}, {11, "LITE_SLOW"}, {12, "NARROW_FAST"},
+        {13, "NARROW_SLOW"}, {14, "TINY_FAST"}, {15, "TINY_SLOW"},
+        {16, "MEDIUM_TURBO"},
+    };
+
+    for(size_t i = 0; i < ARRAY_SIZE(map); i++) {
+        if(map[i].value == value) {
+            return map[i].name;
+        }
+    }
+    return nullptr;
+}
+
+static bool phoneapi_parse_lora_config_update(
+    const std::vector<uint8_t> &payload, phoneapi_config_update_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
+    }
+    out->has_lora = true;
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 2U && wire == 0U) {
+            uint32_t value;
+            const char *name;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            name = phoneapi_preset_name_from_enum(value);
+            if(name) {
+                out->preset = name;
+                out->has_preset = true;
+            }
+        } else if(field == 7U && wire == 0U) {
+            uint32_t value;
+            const char *name;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            name = phoneapi_region_name_from_enum(value);
+            if(name) {
+                out->region = name;
+                out->has_region = true;
+            }
+        } else if(field == 8U && wire == 0U) {
+            if(!read_varint(payload.data(), payload.size(), &pos,
+                            &out->hop_limit)) {
+                return false;
+            }
+            if(out->hop_limit > 7U) {
+                out->hop_limit = 7U;
+            }
+            out->has_hop_limit = true;
+        } else if(field == 10U && wire == 0U) {
+            uint64_t value;
+            if(!read_varint64(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->tx_power = (int32_t)value;
+            out->has_tx_power = true;
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool phoneapi_parse_config_update(const std::vector<uint8_t> &payload,
+                                         phoneapi_config_update_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
+    }
+    *out = phoneapi_config_update_t();
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 6U && wire == 2U) {
+            std::vector<uint8_t> lora;
+            if(!phoneapi_read_length_delimited(payload, &pos, &lora) ||
+               !phoneapi_parse_lora_config_update(lora, out)) {
+                return false;
+            }
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -3071,6 +3467,93 @@ static bool encode_phoneapi_admin_metadata_response(const probe_options_t &opts,
     return encode_phoneapi_admin_response_bytes(opts, 13U, metadata, out);
 }
 
+static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
+                                        probe_options_t *opts,
+                                        bool *request_reconfigure,
+                                        bool *request_adv_refresh)
+{
+    bool ok_all = true;
+
+    if(!opts || !request_reconfigure || !request_adv_refresh) {
+        return false;
+    }
+    *request_reconfigure = false;
+    *request_adv_refresh = false;
+
+    if(admin.has_set_owner) {
+        phoneapi_owner_update_t owner;
+        bool ok = phoneapi_parse_user_update(admin.set_owner, &owner);
+
+        if(ok && owner.has_name) {
+            std::string clean = mesh_clean_text(owner.name);
+            if(!clean.empty()) {
+                opts->node_name = clean;
+                *request_adv_refresh = true;
+                daemon_event("PhoneAPI local admin set_owner name=%s",
+                             opts->node_name.c_str());
+            }
+        }
+        ok_all = ok_all && ok;
+    }
+
+    if(admin.has_set_channel) {
+        phoneapi_channel_update_t channel;
+        bool ok = phoneapi_parse_channel_update(admin.set_channel, &channel);
+
+        if(ok) {
+            if(channel.has_name) {
+                opts->channel_name = mesh_clean_text(channel.name);
+            }
+            if(channel.has_psk) {
+                opts->psk = channel.psk;
+            }
+            *request_reconfigure = true;
+            daemon_event("PhoneAPI local admin set_channel name=%s psk=%s",
+                         opts->channel_name.empty() ? "<preset>" :
+                         opts->channel_name.c_str(),
+                         opts->psk.c_str());
+        }
+        ok_all = ok_all && ok;
+    }
+
+    if(admin.has_set_config) {
+        phoneapi_config_update_t config;
+        bool ok = phoneapi_parse_config_update(admin.set_config, &config);
+
+        if(ok && config.has_lora) {
+            if(config.has_region) {
+                opts->region = config.region;
+            }
+            if(config.has_preset) {
+                opts->preset = config.preset;
+            }
+            if(config.has_hop_limit) {
+                opts->hop_limit = config.hop_limit;
+            }
+            if(config.has_tx_power && config.tx_power >= -9 &&
+               config.tx_power <= MESHTASTIC_MAX_K230_TX_POWER_DBM) {
+                opts->profile.power = (int8_t)config.tx_power;
+                opts->manual_power = config.tx_power != 0;
+            }
+            *request_reconfigure = true;
+            daemon_event("PhoneAPI local admin set_config lora region=%s preset=%s hop=%u power=%d",
+                         opts->region.c_str(), opts->preset.c_str(),
+                         opts->hop_limit, opts->profile.power);
+        }
+        ok_all = ok_all && ok;
+    }
+
+    if(admin.has_set_module_config) {
+        daemon_event("PhoneAPI local admin set_module_config ignored len=%u",
+                     (unsigned)admin.set_module_config.size());
+    }
+
+    if(*request_reconfigure) {
+        ok_all = apply_meshtastic_profile(opts) && ok_all;
+    }
+    return ok_all;
+}
+
 static bool phoneapi_send_local_admin_response(int fd,
                                                const phoneapi_mesh_tx_t &tx,
                                                const std::vector<uint8_t> &admin_payload,
@@ -3103,8 +3586,11 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
                                         bool *accepted)
 {
     phoneapi_admin_request_t admin;
+    probe_options_t runtime_opts;
     bool handled = false;
     bool ok_all = true;
+    bool request_reconfigure = false;
+    bool request_adv_refresh = false;
 
     if(accepted) {
         *accepted = false;
@@ -3121,14 +3607,36 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
                      tx.packet_id, (unsigned)tx.data.payload.size());
         return true;
     }
+    pthread_mutex_lock(&phoneapi_opts_mutex);
+    runtime_opts = phoneapi_opts;
+    pthread_mutex_unlock(&phoneapi_opts_mutex);
+
     if(admin.has_set_time_only) {
         daemon_event("PhoneAPI local admin set_time_only=%u id=0x%08x",
                      admin.set_time_only, tx.packet_id);
         handled = true;
     }
+    if(admin.has_set_owner || admin.has_set_channel || admin.has_set_config ||
+       admin.has_set_module_config) {
+        bool ok = phoneapi_apply_admin_writes(admin, &runtime_opts,
+                                              &request_reconfigure,
+                                              &request_adv_refresh);
+        if(ok) {
+            phoneapi_store_runtime_opts(runtime_opts, request_reconfigure);
+            if(request_adv_refresh) {
+                (void)phoneapi_send_adv_start(fd, "admin-update");
+            }
+        }
+        daemon_event("PhoneAPI local admin write id=0x%08x ok=%s reconfig=%s adv=%s",
+                     tx.packet_id, ok ? "yes" : "no",
+                     request_reconfigure ? "yes" : "no",
+                     request_adv_refresh ? "yes" : "no");
+        ok_all = ok_all && ok;
+        handled = true;
+    }
     if(admin.get_owner_request) {
         std::vector<uint8_t> response;
-        bool ok = encode_phoneapi_admin_owner_response(phoneapi_opts,
+        bool ok = encode_phoneapi_admin_owner_response(runtime_opts,
                                                        &response) &&
                   phoneapi_send_local_admin_response(fd, tx, response,
                                                      "admin_owner");
@@ -3140,7 +3648,7 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
     if(admin.has_get_channel_request) {
         std::vector<uint8_t> response;
         bool ok = encode_phoneapi_admin_channel_response(
-                      phoneapi_opts, admin.get_channel_request, &response) &&
+                      runtime_opts, admin.get_channel_request, &response) &&
                   phoneapi_send_local_admin_response(fd, tx, response,
                                                      "admin_channel");
         daemon_event("PhoneAPI local admin channel_response id=0x%08x req=%u ok=%s",
@@ -3152,7 +3660,7 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
     if(admin.has_get_config_request) {
         std::vector<uint8_t> response;
         bool ok = encode_phoneapi_admin_config_response(
-                      phoneapi_opts, admin.get_config_request, &response) &&
+                      runtime_opts, admin.get_config_request, &response) &&
                   phoneapi_send_local_admin_response(fd, tx, response,
                                                      "admin_config");
         daemon_event("PhoneAPI local admin config_response id=0x%08x type=%u ok=%s",
@@ -3164,7 +3672,7 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
     if(admin.has_get_module_config_request) {
         std::vector<uint8_t> response;
         bool ok = encode_phoneapi_admin_module_config_response(
-                      phoneapi_opts, admin.get_module_config_request,
+                      runtime_opts, admin.get_module_config_request,
                       &response) &&
                   phoneapi_send_local_admin_response(fd, tx, response,
                                                      "admin_module_config");
@@ -3176,7 +3684,7 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
     }
     if(admin.get_device_metadata_request) {
         std::vector<uint8_t> response;
-        bool ok = encode_phoneapi_admin_metadata_response(phoneapi_opts,
+        bool ok = encode_phoneapi_admin_metadata_response(runtime_opts,
                                                           &response) &&
                   phoneapi_send_local_admin_response(fd, tx, response,
                                                      "admin_metadata");
@@ -3500,7 +4008,7 @@ static void phoneapi_start(const probe_options_t &opts)
     if(phoneapi_thread_started) {
         return;
     }
-    phoneapi_opts = opts;
+    phoneapi_store_runtime_opts(opts, false);
     phoneapi_bridge_set_state(PHONEAPI_BRIDGE_PROBING, "starting");
     phoneapi_thread_running = true;
     if(pthread_create(&phoneapi_thread, nullptr, phoneapi_thread_main,
@@ -6516,6 +7024,35 @@ int main(int argc, char **argv)
 
         if(daemon_fd >= 0) {
             accept_daemon_clients(daemon_fd, opts, chip, &pending_daemon_send);
+        }
+
+        if(active_op != OP_TX) {
+            probe_options_t updated_opts;
+            bool request_reconfigure = false;
+
+            if(phoneapi_take_runtime_opts(&updated_opts,
+                                          &request_reconfigure)) {
+                opts = updated_opts;
+                if(request_reconfigure) {
+                    int16_t state;
+
+                    active_op = OP_IDLE;
+                    (void)radio->standby();
+                    state = begin_chip(chip, radio, sx1262, lr2021,
+                                       &opts.profile);
+                    if(state == RADIOLIB_ERR_NONE && start_rx(radio) == 0) {
+                        daemon_event("PhoneAPI radio reconfigured region=%s preset=%s freq=%.3f power=%d",
+                                     opts.resolved_region.empty() ? "-" :
+                                     opts.resolved_region.c_str(),
+                                     opts.resolved_preset.empty() ? "-" :
+                                     opts.resolved_preset.c_str(),
+                                     opts.profile.freq, opts.profile.power);
+                    } else {
+                        daemon_event("PhoneAPI radio reconfigure failed state=%d",
+                                     state);
+                    }
+                }
+            }
         }
 
         mesh_history_expire(now);
