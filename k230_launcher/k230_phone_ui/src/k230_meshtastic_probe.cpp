@@ -2418,7 +2418,7 @@ static bool nrf9151_nmea_coord_to_double(const char *value, const char *dir,
 
 static void nrf9151_gnss_apply_fix(double lat, double lon, bool has_alt,
                                    double alt_m, bool has_speed,
-                                   double speed_kmh, bool has_track,
+                                   double speed_mps, bool has_track,
                                    double track_deg, uint32_t sats)
 {
     if(!isfinite(lat) || !isfinite(lon) || lat < -90.0 || lat > 90.0 ||
@@ -2436,9 +2436,9 @@ static void nrf9151_gnss_apply_fix(double lat, double lon, bool has_alt,
         mesh_gnss.position.has_altitude = true;
         mesh_gnss.position.altitude_m = (int32_t)llround(alt_m);
     }
-    if(has_speed && isfinite(speed_kmh) && speed_kmh >= 0.0) {
+    if(has_speed && isfinite(speed_mps) && speed_mps >= 0.0) {
         mesh_gnss.position.has_ground_speed = true;
-        mesh_gnss.position.ground_speed_cms = (uint32_t)llround(speed_kmh);
+        mesh_gnss.position.ground_speed_cms = (uint32_t)llround(speed_mps);
     }
     if(has_track && isfinite(track_deg) && track_deg >= 0.0) {
         mesh_gnss.position.has_ground_track = true;
@@ -2484,7 +2484,7 @@ static void nrf9151_gnss_parse_rmc(char **fields, int count)
 {
     double lat = 0.0;
     double lon = 0.0;
-    double speed_kmh = 0.0;
+    double speed_mps = 0.0;
     double track = 0.0;
 
     if(count <= 8 || fields[2][0] != 'A' ||
@@ -2493,13 +2493,13 @@ static void nrf9151_gnss_parse_rmc(char **fields, int count)
         return;
     }
     if(fields[7] && fields[7][0]) {
-        speed_kmh = strtod(fields[7], nullptr) * 1.852;
+        speed_mps = strtod(fields[7], nullptr) * 0.514444;
     }
     if(fields[8] && fields[8][0]) {
         track = strtod(fields[8], nullptr);
     }
     nrf9151_gnss_apply_fix(lat, lon, false, 0.0,
-                           fields[7] && fields[7][0], speed_kmh,
+                           fields[7] && fields[7][0], speed_mps,
                            fields[8] && fields[8][0], track,
                            mesh_gnss.position.sats_in_view);
 }
@@ -2567,7 +2567,7 @@ static void nrf9151_gnss_parse_pos_urc(const char *line)
     (void)acc;
     (void)datetime;
     nrf9151_gnss_apply_fix(lat, lon, parsed >= 3, alt, parsed >= 5,
-                           speed * 3.6, parsed >= 6, heading,
+                           speed, parsed >= 6, heading,
                            mesh_gnss.position.sats_in_view);
 }
 
@@ -7537,7 +7537,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                 snprintf(alt_text, sizeof(alt_text), "-");
             }
             if(position_ok && position.has_ground_speed) {
-                snprintf(speed_text, sizeof(speed_text), "%ukm/h",
+                snprintf(speed_text, sizeof(speed_text), "%um/s",
                          position.ground_speed_cms);
             } else {
                 snprintf(speed_text, sizeof(speed_text), "-");
@@ -8163,14 +8163,14 @@ static std::string daemon_nodes_response(void)
                 snprintf(alt_text, sizeof(alt_text), "-");
             }
             if(mesh_nodes[i].has_ground_speed) {
-                snprintf(speed_text, sizeof(speed_text), "%.2fm/s",
-                         mesh_nodes[i].ground_speed_cms / 100.0);
+                snprintf(speed_text, sizeof(speed_text), "%um/s",
+                         mesh_nodes[i].ground_speed_cms);
             } else {
                 snprintf(speed_text, sizeof(speed_text), "-");
             }
             if(mesh_nodes[i].has_ground_track) {
                 snprintf(track_text, sizeof(track_text), "%.1fdeg",
-                         mesh_nodes[i].ground_track_1e5 / 100000.0);
+                         mesh_nodes[i].ground_track_1e5 / 100.0);
             } else {
                 snprintf(track_text, sizeof(track_text), "-");
             }
