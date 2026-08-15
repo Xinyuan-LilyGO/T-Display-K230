@@ -782,8 +782,13 @@ typedef struct {
     bool position_enabled = true;
     bool telemetry_enabled = true;
     bool environment_telemetry_enabled = true;
+    bool fixed_position_enabled = false;
+    bool fixed_position_has_altitude = false;
     bool want_ack = false;
     bool want_ack_set = false;
+    int32_t fixed_position_latitude_i = 0;
+    int32_t fixed_position_longitude_i = 0;
+    int32_t fixed_position_altitude_m = 0;
     uint32_t from_node = 0;
     uint32_t to_node = MESHTASTIC_NODENUM_BROADCAST;
     uint32_t packet_id = 0;
@@ -4048,6 +4053,25 @@ static void nrf9151_gnss_close(void)
     mesh_gnss.configured = false;
 }
 
+static bool fixed_position_from_opts(const probe_options_t &opts,
+                                     mesh_position_info_t *position)
+{
+    if(!position || !opts.fixed_position_enabled ||
+       opts.fixed_position_latitude_i == 0 ||
+       opts.fixed_position_longitude_i == 0) {
+        return false;
+    }
+    *position = mesh_position_info_t();
+    position->has_latitude = true;
+    position->has_longitude = true;
+    position->latitude_i = opts.fixed_position_latitude_i;
+    position->longitude_i = opts.fixed_position_longitude_i;
+    position->has_altitude = opts.fixed_position_has_altitude;
+    position->altitude_m = opts.fixed_position_altitude_m;
+    position->timestamp = mesh_now_epoch();
+    return true;
+}
+
 static bool encode_position_proto(const mesh_position_info_t &position,
                                   uint32_t next_update_sec,
                                   std::vector<uint8_t> *out)
@@ -4644,7 +4668,7 @@ static bool encode_phoneapi_config_position(const probe_options_t &opts,
     }
     append_uint32_field(&position, 1U, opts.position_interval_sec);
     append_bool_field(&position, 2U, false);
-    append_bool_field(&position, 3U, false);
+    append_bool_field(&position, 3U, opts.fixed_position_enabled);
     append_uint32_field(&position, 5U, 30U);
     append_uint32_field(&position, 7U, flags);
     append_uint32_field(&position, 8U, 29U);
@@ -5214,6 +5238,8 @@ static bool mesh_header_want_ack(const mesh_header_t &header);
 static uint32_t mesh_prng_u32(uint32_t salt);
 static bool decode_data_proto(const uint8_t *data, size_t len,
                               mesh_data_proto_t *decoded);
+static bool decode_position_proto(const std::vector<uint8_t> &payload,
+                                  mesh_position_info_t *position);
 static bool phoneapi_send_from_payload(int fd, uint32_t field,
                                        const std::vector<uint8_t> &payload,
                                        const char *label);
@@ -5245,6 +5271,7 @@ typedef struct {
     bool get_device_connection_status_request = false;
     bool begin_edit_settings = false;
     bool commit_edit_settings = false;
+    bool remove_fixed_position = false;
     bool has_set_time_only = false;
     uint32_t set_time_only = 0;
     bool has_set_owner = false;
@@ -5259,6 +5286,8 @@ typedef struct {
     std::string set_canned_message_module_messages;
     bool has_set_ringtone_message = false;
     std::string set_ringtone_message;
+    bool has_set_fixed_position = false;
+    mesh_position_info_t set_fixed_position;
     bool has_remove_by_nodenum = false;
     uint32_t remove_by_nodenum = 0;
     bool has_set_favorite_node = false;
@@ -5506,6 +5535,27 @@ static bool phoneapi_parse_admin_request(const std::vector<uint8_t> &payload,
                 return false;
             }
             out->has_remove_favorite_node = true;
+        } else if(field == 41U && wire == 2U) {
+            std::vector<uint8_t> position;
+            uint32_t l;
+
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            position.assign(payload.begin() + (long)pos,
+                            payload.begin() + (long)(pos + l));
+            pos += l;
+            if(!decode_position_proto(position, &out->set_fixed_position)) {
+                return false;
+            }
+            out->has_set_fixed_position = true;
+        } else if(field == 42U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->remove_fixed_position = value != 0U;
         } else if(field == 47U && wire == 0U) {
             if(!read_varint(payload.data(), payload.size(), &pos,
                             &out->set_ignored_node)) {
@@ -5630,6 +5680,7 @@ typedef struct {
     bool has_tx_power = false;
     bool has_channel_num = false;
     bool has_position_enabled = false;
+    bool has_fixed_position = false;
     bool has_position_interval = false;
     bool has_telemetry_enabled = false;
     bool has_environment_telemetry_enabled = false;
@@ -5641,6 +5692,7 @@ typedef struct {
     int32_t tx_power = 0;
     uint32_t channel_num = 0;
     bool position_enabled = false;
+    bool fixed_position = false;
     uint32_t position_interval_sec = 0;
     bool telemetry_enabled = false;
     bool environment_telemetry_enabled = false;
@@ -5966,6 +6018,13 @@ static bool phoneapi_parse_position_config_update(
                 out->position_interval_sec = value;
                 out->has_position_interval = true;
             }
+        } else if(field == 3U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->fixed_position = value != 0U;
+            out->has_fixed_position = true;
         } else if(field == 4U && wire == 0U) {
             uint32_t value;
             if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
@@ -6635,6 +6694,10 @@ static bool encode_phoneapi_admin_connection_status_response(
 #define K230_MESH_PREF_REBROADCAST "meshtastic.rebroadcast"
 #define K230_MESH_PREF_POSITION "meshtastic.position"
 #define K230_MESH_PREF_POSITION_INTERVAL "meshtastic.position_interval"
+#define K230_MESH_PREF_FIXED_POSITION "meshtastic.fixed_position"
+#define K230_MESH_PREF_FIXED_LATITUDE "meshtastic.fixed_latitude_i"
+#define K230_MESH_PREF_FIXED_LONGITUDE "meshtastic.fixed_longitude_i"
+#define K230_MESH_PREF_FIXED_ALTITUDE "meshtastic.fixed_altitude_m"
 #define K230_MESH_PREF_TELEMETRY "meshtastic.telemetry"
 #define K230_MESH_PREF_TELEMETRY_ENV "meshtastic.telemetry_env"
 #define K230_MESH_PREF_TELEMETRY_DEVICE_INTERVAL "meshtastic.telemetry_device_interval"
@@ -7012,6 +7075,14 @@ static bool phoneapi_persist_meshtastic_opts(const probe_options_t &opts)
                           opts.position_enabled ? "1" : "0");
         snprintf(value, sizeof(value), "%u", opts.position_interval_sec);
         phoneapi_pref_set(&entries, K230_MESH_PREF_POSITION_INTERVAL, value);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_FIXED_POSITION,
+                          opts.fixed_position_enabled ? "1" : "0");
+        snprintf(value, sizeof(value), "%d", opts.fixed_position_latitude_i);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_FIXED_LATITUDE, value);
+        snprintf(value, sizeof(value), "%d", opts.fixed_position_longitude_i);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_FIXED_LONGITUDE, value);
+        snprintf(value, sizeof(value), "%d", opts.fixed_position_altitude_m);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_FIXED_ALTITUDE, value);
         phoneapi_pref_set(&entries, K230_MESH_PREF_TELEMETRY,
                           opts.telemetry_enabled ? "1" : "0");
         phoneapi_pref_set(&entries, K230_MESH_PREF_TELEMETRY_ENV,
@@ -7126,6 +7197,9 @@ static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
             if(config.has_position_enabled) {
                 opts->position_enabled = config.position_enabled;
             }
+            if(config.has_fixed_position) {
+                opts->fixed_position_enabled = config.fixed_position;
+            }
             if(config.has_position_interval) {
                 opts->position_interval_sec = config.position_interval_sec;
             }
@@ -7136,11 +7210,42 @@ static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
                                    "off",
                                    opts->position_enabled ?
                                    "PhoneAPI update" : "Disabled");
-            daemon_event("PhoneAPI local admin set_config position enabled=%s interval=%u",
+            daemon_event("PhoneAPI local admin set_config position enabled=%s fixed=%s interval=%u",
                          opts->position_enabled ? "yes" : "no",
+                         opts->fixed_position_enabled ? "yes" : "no",
                          opts->position_interval_sec);
         }
         ok_all = ok_all && ok;
+    }
+
+    if(admin.has_set_fixed_position) {
+        const mesh_position_info_t &position = admin.set_fixed_position;
+        bool ok = position.has_latitude && position.has_longitude;
+
+        if(ok) {
+            opts->position_enabled = true;
+            opts->fixed_position_enabled = true;
+            opts->fixed_position_latitude_i = position.latitude_i;
+            opts->fixed_position_longitude_i = position.longitude_i;
+            opts->fixed_position_has_altitude = position.has_altitude;
+            opts->fixed_position_altitude_m = position.has_altitude ?
+                position.altitude_m : 0;
+            mesh_next_position_us = monotonic_us() + 2000000ULL;
+            mesh_node_update_position(opts->from_node, position);
+        }
+        daemon_event("PhoneAPI local admin set_fixed_position lat=%.7f lon=%.7f alt=%d ok=%s",
+                     position.latitude_i * 1e-7,
+                     position.longitude_i * 1e-7,
+                     position.has_altitude ? position.altitude_m : 0,
+                     ok ? "yes" : "no");
+        ok_all = ok_all && ok;
+    }
+
+    if(admin.remove_fixed_position) {
+        opts->fixed_position_enabled = false;
+        mesh_next_position_us = opts->position_enabled ?
+            monotonic_us() + 5000000ULL : 0ULL;
+        daemon_event("PhoneAPI local admin remove_fixed_position");
     }
 
     if(admin.has_set_module_config) {
@@ -7368,10 +7473,13 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
         ok_all = ok_all && save_ok;
     }
     if(admin.has_set_owner || admin.has_set_channel || admin.has_set_config ||
-       admin.has_set_module_config) {
+       admin.has_set_module_config || admin.has_set_fixed_position ||
+       admin.remove_fixed_position) {
         bool persist_required = admin.has_set_owner || admin.has_set_channel ||
                                 admin.has_set_config ||
-                                admin.has_set_module_config;
+                                admin.has_set_module_config ||
+                                admin.has_set_fixed_position ||
+                                admin.remove_fixed_position;
         bool persist_ok = true;
         bool ok = phoneapi_apply_admin_writes(admin, &runtime_opts,
                                               &request_reconfigure,
@@ -10532,9 +10640,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
-             "position=%s nrf9151=%s gps=%s gps_detail=%s "
+             "position=%s fixed=%s nrf9151=%s gps=%s gps_detail=%s "
              "position_tx=%lu position_drop=%lu next_position_ms=%u "
-             "lat=%.7f lon=%.7f sats=%u "
+             "lat=%.7f lon=%.7f sats=%u fixed_lat=%.7f fixed_lon=%.7f "
              "telemetry=%s telemetry_env=%s telemetry_tx=%lu telemetry_drop=%lu next_telemetry_ms=%u "
              "nodedb=%u nodedb_load=%u nodedb_save=%u nodedb_fail=%u nodedb_dirty=%s "
              "region=%s preset=%s slot=%s resolved_slot=%u slots=%u freq=%.3f bw=%.1f sf=%u cr=4/%u sw=0x%02x manual_power=%s power=%d node=%s "
@@ -10560,6 +10668,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_nodeinfo_drop_count,
              mesh_nodeinfo_next_ms(now),
              opts.position_enabled ? "on" : "off",
+             opts.fixed_position_enabled ? "on" : "off",
              mesh_gnss.modem_state, mesh_gnss.gps_state, gps_detail,
              (unsigned long)mesh_position_tx_count,
              (unsigned long)mesh_position_drop_count,
@@ -10567,6 +10676,10 @@ static std::string daemon_status_response(const probe_options_t &opts,
              mesh_gnss.has_fix ? mesh_gnss.position.latitude_i * 1e-7 : 0.0,
              mesh_gnss.has_fix ? mesh_gnss.position.longitude_i * 1e-7 : 0.0,
              mesh_gnss.has_fix ? mesh_gnss.position.sats_in_view : 0U,
+             opts.fixed_position_enabled ?
+             opts.fixed_position_latitude_i * 1e-7 : 0.0,
+             opts.fixed_position_enabled ?
+             opts.fixed_position_longitude_i * 1e-7 : 0.0,
              opts.telemetry_enabled ? "on" : "off",
              opts.environment_telemetry_enabled ? "on" : "off",
              (unsigned long)mesh_telemetry_tx_count,
@@ -11081,11 +11194,26 @@ static std::string handle_daemon_command(const std::string &line,
         return "OK nodeinfo queued\n";
     }
     if(line == "PUBLISH_POSITION" || line == "publish_position") {
+        mesh_position_info_t fixed_position;
+
         if(!opts.mesh_mode) {
             return "ERR mesh-disabled\n";
         }
         if(!opts.position_enabled) {
             return "ERR position-disabled\n";
+        }
+        if(fixed_position_from_opts(opts, &fixed_position)) {
+            char buf[160];
+
+            mesh_manual_position_requested = true;
+            daemon_event("Manual Position publish requested fixed lat=%.7f lon=%.7f",
+                         fixed_position.latitude_i * 1e-7,
+                         fixed_position.longitude_i * 1e-7);
+            snprintf(buf, sizeof(buf),
+                     "OK position queued fixed lat=%.7f lon=%.7f\n",
+                     fixed_position.latitude_i * 1e-7,
+                     fixed_position.longitude_i * 1e-7);
+            return std::string(buf);
         }
         daemon_event("Manual Position publish requested nrf9151=%s gps=%s",
                      mesh_gnss.modem_state, mesh_gnss.gps_state);
@@ -11441,6 +11569,8 @@ static void print_usage(const char *argv0)
             "  --position       Enable nRF9151 GNSS Position broadcast (default)\n"
             "  --no-position    Disable GNSS Position broadcast\n"
             "  --position-interval SEC  Periodic Position interval, default 900\n"
+            "  --fixed-position-i LAT_I,LON_I[,ALT_M]  Use fixed 1e-7 degree position\n"
+            "  --no-fixed-position  Clear fixed-position CLI override\n"
             "  --gps-uart PATH  nRF9151 AT UART for GNSS, default " MESHTASTIC_NRF9151_UART_DEV "\n"
             "  --telemetry      Enable device telemetry broadcast (default)\n"
             "  --no-telemetry   Disable device telemetry broadcast\n"
@@ -11468,6 +11598,51 @@ static bool parse_u32(const char *text, uint32_t *out, int base)
         return false;
     }
     *out = (uint32_t)value;
+    return true;
+}
+
+static bool parse_fixed_position_i(const char *text, probe_options_t *opts)
+{
+    char buf[96];
+    char *lat_text;
+    char *lon_text;
+    char *alt_text;
+    int32_t lat;
+    int32_t lon;
+    int32_t alt = 0;
+
+    if(!text || !opts || strlen(text) >= sizeof(buf)) {
+        return false;
+    }
+    snprintf(buf, sizeof(buf), "%s", text);
+    lat_text = buf;
+    lon_text = strchr(lat_text, ',');
+    if(!lon_text) {
+        return false;
+    }
+    *lon_text++ = '\0';
+    alt_text = strchr(lon_text, ',');
+    if(alt_text) {
+        *alt_text++ = '\0';
+    }
+    if(!mesh_parse_i32_text(lat_text, &lat) ||
+       !mesh_parse_i32_text(lon_text, &lon)) {
+        return false;
+    }
+    if(alt_text && !mesh_parse_i32_text(alt_text, &alt)) {
+        return false;
+    }
+    if(lat < -900000000 || lat > 900000000 ||
+       lon < -1800000000 || lon > 1800000000 ||
+       lat == 0 || lon == 0) {
+        return false;
+    }
+    opts->position_enabled = true;
+    opts->fixed_position_enabled = true;
+    opts->fixed_position_latitude_i = lat;
+    opts->fixed_position_longitude_i = lon;
+    opts->fixed_position_has_altitude = alt_text && alt_text[0];
+    opts->fixed_position_altitude_m = alt;
     return true;
 }
 
@@ -11511,6 +11686,15 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
                 tmp = 60U;
             }
             opts->position_interval_sec = tmp;
+        } else if(strcmp(arg, "--fixed-position-i") == 0 &&
+                  i + 1 < argc) {
+            if(!parse_fixed_position_i(argv[++i], opts)) {
+                fprintf(stderr, "Invalid --fixed-position-i value\n");
+                return false;
+            }
+        } else if(strcmp(arg, "--no-fixed-position") == 0) {
+            opts->fixed_position_enabled = false;
+            opts->fixed_position_has_altitude = false;
         } else if(strcmp(arg, "--gps-uart") == 0 && i + 1 < argc) {
             opts->gps_uart_path = argv[++i];
         } else if(strcmp(arg, "--telemetry") == 0) {
@@ -12382,7 +12566,11 @@ int main(int argc, char **argv)
         mesh_nodedb_maybe_save(now);
 
         if(opts.mesh_mode && opts.position_enabled) {
-            nrf9151_gnss_poll(opts, now);
+            mesh_position_info_t fixed_check;
+
+            if(!fixed_position_from_opts(opts, &fixed_check)) {
+                nrf9151_gnss_poll(opts, now);
+            }
         }
 
         if((mesh_manual_nodeinfo_requested ||
@@ -12426,12 +12614,15 @@ int main(int argc, char **argv)
             (mesh_next_position_us != 0ULL && now >= mesh_next_position_us)) &&
            active_op != OP_TX) {
             tx_frame_t frame;
+            mesh_position_info_t position;
             bool manual_publish = mesh_manual_position_requested;
+            bool using_fixed = fixed_position_from_opts(opts, &position);
+            bool position_ready = using_fixed;
             uint64_t interval_us =
                 (uint64_t)opts.position_interval_sec * 1000000ULL;
 
             mesh_manual_position_requested = false;
-            if(!mesh_gnss.present || !mesh_gnss.has_fix) {
+            if(!using_fixed && (!mesh_gnss.present || !mesh_gnss.has_fix)) {
                 mesh_position_drop_count++;
                 mesh_next_position_us = opts.position_enabled ?
                                        now + MESHTASTIC_POSITION_RETRY_US :
@@ -12439,19 +12630,24 @@ int main(int argc, char **argv)
                 daemon_event("Position TX skipped nrf9151=%s gps=%s manual=%s",
                              mesh_gnss.modem_state, mesh_gnss.gps_state,
                              manual_publish ? "yes" : "no");
-            } else if(build_mesh_position_frame(opts, mesh_gnss.position,
-                                                &frame)) {
+            } else if(!using_fixed) {
+                position = mesh_gnss.position;
+                position_ready = true;
+            }
+
+            if(position_ready &&
+               build_mesh_position_frame(opts, position, &frame)) {
                 if(start_tx(radio, frame) == 0) {
                     mesh_position_tx_count++;
                     mesh_next_position_us = opts.position_enabled ?
                                            now + interval_us : 0ULL;
-                    mesh_node_update_position(opts.from_node,
-                                              mesh_gnss.position);
-                    daemon_event("Position TX start from=0x%08x lat=%.7f lon=%.7f sats=%u manual=%s",
+                    mesh_node_update_position(opts.from_node, position);
+                    daemon_event("Position TX start from=0x%08x source=%s lat=%.7f lon=%.7f sats=%u manual=%s",
                                  opts.from_node,
-                                 mesh_gnss.position.latitude_i * 1e-7,
-                                 mesh_gnss.position.longitude_i * 1e-7,
-                                 mesh_gnss.position.sats_in_view,
+                                 using_fixed ? "fixed" : "gnss",
+                                 position.latitude_i * 1e-7,
+                                 position.longitude_i * 1e-7,
+                                 position.sats_in_view,
                                  manual_publish ? "yes" : "no");
                 } else {
                     mesh_position_drop_count++;
@@ -12462,7 +12658,7 @@ int main(int argc, char **argv)
                                  opts.from_node,
                                  manual_publish ? "yes" : "no");
                 }
-            } else {
+            } else if(position_ready) {
                 mesh_position_drop_count++;
                 mesh_next_position_us = opts.position_enabled ?
                                        now + MESHTASTIC_POSITION_RETRY_US :

@@ -58,6 +58,10 @@
 #define MESHTASTIC_PREF_AUTOSTART "meshtastic.autostart"
 #define MESHTASTIC_PREF_POSITION "meshtastic.position"
 #define MESHTASTIC_PREF_POSITION_INTERVAL "meshtastic.position_interval"
+#define MESHTASTIC_PREF_FIXED_POSITION "meshtastic.fixed_position"
+#define MESHTASTIC_PREF_FIXED_LATITUDE "meshtastic.fixed_latitude_i"
+#define MESHTASTIC_PREF_FIXED_LONGITUDE "meshtastic.fixed_longitude_i"
+#define MESHTASTIC_PREF_FIXED_ALTITUDE "meshtastic.fixed_altitude_m"
 #define MESHTASTIC_PREF_TELEMETRY "meshtastic.telemetry"
 #define MESHTASTIC_PREF_TELEMETRY_ENV "meshtastic.telemetry_env"
 #define MESHTASTIC_PREF_TELEMETRY_DEVICE_INTERVAL "meshtastic.telemetry_device_interval"
@@ -105,11 +109,15 @@ static char mesh_from_node[24] = "0";
 static char mesh_to_node[24] = "0xffffffff";
 static char mesh_hop_limit[8] = "3";
 static char mesh_position_interval[8] = "900";
+static char mesh_fixed_latitude_i[16] = "0";
+static char mesh_fixed_longitude_i[16] = "0";
+static char mesh_fixed_altitude_m[12] = "0";
 static char mesh_telemetry_device_interval[8] = "300";
 static char mesh_telemetry_environment_interval[8] = "300";
 static int mesh_ack_enabled = 0;
 static int mesh_rebroadcast_enabled = 0;
 static int mesh_position_enabled = 1;
+static int mesh_fixed_position_enabled = 0;
 static int mesh_telemetry_enabled = 1;
 static int mesh_environment_telemetry_enabled = 1;
 static lv_obj_t *mesh_settings_overlay;
@@ -951,6 +959,18 @@ static void mesh_load_profile_prefs(void)
     ui_prefs_get(MESHTASTIC_PREF_POSITION_INTERVAL, mesh_position_interval,
                  sizeof(mesh_position_interval), "900");
     {
+        char fixed[8];
+        ui_prefs_get(MESHTASTIC_PREF_FIXED_POSITION, fixed, sizeof(fixed),
+                     "0");
+        mesh_fixed_position_enabled = strcmp(fixed, "0") != 0;
+    }
+    ui_prefs_get(MESHTASTIC_PREF_FIXED_LATITUDE, mesh_fixed_latitude_i,
+                 sizeof(mesh_fixed_latitude_i), "0");
+    ui_prefs_get(MESHTASTIC_PREF_FIXED_LONGITUDE, mesh_fixed_longitude_i,
+                 sizeof(mesh_fixed_longitude_i), "0");
+    ui_prefs_get(MESHTASTIC_PREF_FIXED_ALTITUDE, mesh_fixed_altitude_m,
+                 sizeof(mesh_fixed_altitude_m), "0");
+    {
         char telemetry[8];
         ui_prefs_get(MESHTASTIC_PREF_TELEMETRY, telemetry, sizeof(telemetry),
                      "1");
@@ -993,6 +1013,11 @@ static void mesh_save_profile_prefs(void)
     ui_prefs_set(MESHTASTIC_PREF_POSITION,
                  mesh_position_enabled ? "1" : "0");
     ui_prefs_set(MESHTASTIC_PREF_POSITION_INTERVAL, mesh_position_interval);
+    ui_prefs_set(MESHTASTIC_PREF_FIXED_POSITION,
+                 mesh_fixed_position_enabled ? "1" : "0");
+    ui_prefs_set(MESHTASTIC_PREF_FIXED_LATITUDE, mesh_fixed_latitude_i);
+    ui_prefs_set(MESHTASTIC_PREF_FIXED_LONGITUDE, mesh_fixed_longitude_i);
+    ui_prefs_set(MESHTASTIC_PREF_FIXED_ALTITUDE, mesh_fixed_altitude_m);
     ui_prefs_set(MESHTASTIC_PREF_TELEMETRY,
                  mesh_telemetry_enabled ? "1" : "0");
     ui_prefs_set(MESHTASTIC_PREF_TELEMETRY_ENV,
@@ -2000,6 +2025,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     char relay_option[24];
     char position_option[80];
     char position_interval_arg[16];
+    char fixed_position_option[96];
     char telemetry_option[160];
     char telemetry_device_interval_arg[16];
     char telemetry_environment_interval_arg[16];
@@ -2059,6 +2085,21 @@ static void mesh_start_event_cb(lv_event_t *event)
     snprintf(position_option, sizeof(position_option), "%s --position-interval %s ",
              mesh_position_enabled ? "--position" : "--no-position",
              position_interval_arg);
+    fixed_position_option[0] = '\0';
+    if(mesh_fixed_position_enabled) {
+        long lat_i;
+        long lon_i;
+        long alt_m;
+
+        if(mesh_parse_i32_text(mesh_fixed_latitude_i, &lat_i) == 0 &&
+           mesh_parse_i32_text(mesh_fixed_longitude_i, &lon_i) == 0 &&
+           mesh_parse_i32_text(mesh_fixed_altitude_m, &alt_m) == 0 &&
+           lat_i != 0 && lon_i != 0) {
+            snprintf(fixed_position_option, sizeof(fixed_position_option),
+                     "--fixed-position-i %ld,%ld,%ld ",
+                     lat_i, lon_i, alt_m);
+        }
+    }
     mesh_safe_or_default(telemetry_device_interval_arg,
                          sizeof(telemetry_device_interval_arg),
                          mesh_telemetry_device_interval, "300");
@@ -2076,22 +2117,22 @@ static void mesh_start_event_cb(lv_event_t *event)
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s"
+                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, channel_arg, slot_option, psk_arg,
                  power_option, node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
-                 position_option, telemetry_option);
+                 position_option, fixed_position_option, telemetry_option);
     } else {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s"
+                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, slot_option, psk_arg, power_option,
                  node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
-                 position_option, telemetry_option);
+                 position_option, fixed_position_option, telemetry_option);
     }
     rc = system(command);
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
