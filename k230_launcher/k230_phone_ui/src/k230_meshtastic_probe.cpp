@@ -4577,6 +4577,61 @@ static bool encode_phoneapi_module_config_telemetry(
     return true;
 }
 
+static bool encode_phoneapi_module_config_default(
+    uint32_t module_config_type, std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> module;
+    uint32_t module_field = module_config_type + 1U;
+
+    if(!out || module_config_type > 16U) {
+        return false;
+    }
+    out->clear();
+    switch(module_config_type) {
+    case 0U:
+        append_bool_field(&module, 1U, false);
+        append_bool_field(&module, 5U, true);
+        append_string_field(&module, 8U, "msh", 15U);
+        break;
+    case 1U:
+        append_bool_field(&module, 1U, false);
+        append_uint32_field(&module, 5U, 0U);
+        append_uint32_field(&module, 7U, 0U);
+        break;
+    case 2U:
+        append_bool_field(&module, 1U, false);
+        append_uint32_field(&module, 2U, 1000U);
+        break;
+    case 9U:
+        append_bool_field(&module, 1U, false);
+        append_uint32_field(&module, 2U, 14400U);
+        append_bool_field(&module, 3U, false);
+        break;
+    case 10U:
+        append_bool_field(&module, 1U, false);
+        append_uint32_field(&module, 2U, 10U);
+        break;
+    case 16U:
+        append_uint32_field(&module, 1U, 0U);
+        append_uint32_field(&module, 11U, 3600U);
+        break;
+    default:
+        break;
+    }
+    append_bytes_field(out, module_field, module);
+    return true;
+}
+
+static bool encode_phoneapi_module_config_by_type(
+    const probe_options_t &opts, uint32_t module_config_type,
+    std::vector<uint8_t> *out)
+{
+    if(module_config_type == 5U) {
+        return encode_phoneapi_module_config_telemetry(opts, out);
+    }
+    return encode_phoneapi_module_config_default(module_config_type, out);
+}
+
 static std::string base64url_encode_no_pad(const std::vector<uint8_t> &data)
 {
     static const char table[] =
@@ -6137,8 +6192,25 @@ static bool encode_phoneapi_admin_module_config_response(
         return false;
     }
     switch(module_config_type) {
+    case 0U:
+    case 1U:
+    case 2U:
+    case 3U:
+    case 4U:
     case 5U:
-        ok = encode_phoneapi_module_config_telemetry(opts, &module_config);
+    case 6U:
+    case 7U:
+    case 8U:
+    case 9U:
+    case 10U:
+    case 11U:
+    case 12U:
+    case 13U:
+    case 14U:
+    case 15U:
+    case 16U:
+        ok = encode_phoneapi_module_config_by_type(opts, module_config_type,
+                                                   &module_config);
         break;
     default:
         module_config.clear();
@@ -6758,6 +6830,24 @@ static bool phoneapi_send_nodeinfo_entries(int fd, const probe_options_t &opts,
     return ok;
 }
 
+static bool phoneapi_send_module_config_entries(int fd,
+                                                const probe_options_t &opts)
+{
+    std::vector<uint8_t> payload;
+    bool ok = true;
+
+    for(uint32_t type = 0U; type <= 16U; type++) {
+        char label[32];
+        if(!encode_phoneapi_module_config_by_type(opts, type, &payload)) {
+            ok = false;
+            continue;
+        }
+        snprintf(label, sizeof(label), "module_config_%u", type);
+        ok = phoneapi_send_from_payload(fd, 9U, payload, label) && ok;
+    }
+    return ok;
+}
+
 static bool phoneapi_send_config_stage(int fd, const probe_options_t &opts,
                                        uint32_t nonce)
 {
@@ -6781,8 +6871,7 @@ static bool phoneapi_send_config_stage(int fd, const probe_options_t &opts,
          phoneapi_send_from_payload(fd, 5U, payload, "config_position") && ok;
     ok = encode_phoneapi_config_bluetooth(&payload) &&
          phoneapi_send_from_payload(fd, 5U, payload, "config_bluetooth") && ok;
-    ok = encode_phoneapi_module_config_telemetry(opts, &payload) &&
-         phoneapi_send_from_payload(fd, 9U, payload, "module_telemetry") && ok;
+    ok = phoneapi_send_module_config_entries(fd, opts) && ok;
     ok = encode_phoneapi_channel(opts, &payload) &&
          phoneapi_send_from_payload(fd, 10U, payload, "channel") && ok;
     ok = phoneapi_send_nodeinfo_entries(fd, opts, "config",
