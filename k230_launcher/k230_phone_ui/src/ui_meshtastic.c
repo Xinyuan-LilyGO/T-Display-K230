@@ -121,6 +121,7 @@ static lv_obj_t *mesh_channel_profile_delete_overlay;
 static lv_obj_t *mesh_channel_import_overlay;
 static lv_obj_t *mesh_channel_import_status_label;
 static lv_obj_t *mesh_canned_overlay;
+static lv_obj_t *mesh_canned_delete_overlay;
 static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
@@ -134,6 +135,7 @@ static char mesh_channel_import_pending_url[1024];
 static char mesh_channel_scan_pending_url[1024];
 static char mesh_canned_messages[MESHTASTIC_CANNED_MAX][160];
 static int mesh_canned_manage_mode;
+static int mesh_canned_delete_index = -1;
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
 static lv_timer_t *mesh_channel_scan_timer;
@@ -5129,6 +5131,16 @@ static void mesh_canned_close(void)
     mesh_canned_overlay = NULL;
 }
 
+static void mesh_canned_delete_confirm_close(void)
+{
+    if(mesh_canned_delete_overlay &&
+       lv_obj_is_valid(mesh_canned_delete_overlay)) {
+        lv_obj_delete(mesh_canned_delete_overlay);
+    }
+    mesh_canned_delete_overlay = NULL;
+    mesh_canned_delete_index = -1;
+}
+
 static int mesh_canned_load(void)
 {
     static const char *defaults[] = {
@@ -5286,9 +5298,9 @@ static void mesh_canned_edit_event_cb(lv_event_t *event)
     ui_input_dialog_open(&config);
 }
 
-static void mesh_canned_delete_event_cb(lv_event_t *event)
+static void mesh_canned_delete_accept_event_cb(lv_event_t *event)
 {
-    int index = (int)(intptr_t)lv_event_get_user_data(event);
+    int index = mesh_canned_delete_index;
     int count;
 
     if(event) {
@@ -5308,7 +5320,109 @@ static void mesh_canned_delete_event_cb(lv_event_t *event)
     } else {
         mesh_append_log("canned message delete failed");
     }
+    mesh_canned_delete_confirm_close();
     mesh_canned_open(1);
+}
+
+static void mesh_canned_delete_cancel_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_canned_delete_confirm_close();
+}
+
+static void mesh_canned_delete_event_cb(lv_event_t *event)
+{
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+    lv_obj_t *dialog;
+    lv_obj_t *title;
+    lv_obj_t *message;
+    lv_obj_t *note;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int dialog_w = ui_is_landscape() ? 560 : 500;
+    int dialog_h = ui_is_landscape() ? 236 : 260;
+    int pad = 24;
+    int gap = 18;
+    int button_w;
+    int button_y;
+    int count;
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    count = mesh_canned_load();
+    if(index < 0 || index >= count) {
+        return;
+    }
+    mesh_canned_delete_confirm_close();
+    mesh_canned_delete_index = index;
+    if(dialog_w > screen_w - 48) {
+        dialog_w = screen_w - 48;
+    }
+    if(dialog_w < 320) {
+        dialog_w = 320;
+    }
+    if(dialog_h > screen_h - 48) {
+        dialog_h = screen_h - 48;
+    }
+    if(dialog_h < 216) {
+        dialog_h = 216;
+    }
+    button_w = (dialog_w - pad * 2 - gap) / 2;
+    button_y = dialog_h - pad - 58;
+
+    mesh_canned_delete_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_canned_delete_overlay);
+    lv_obj_set_style_bg_color(mesh_canned_delete_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_canned_delete_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(mesh_canned_delete_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_canned_delete_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_canned_delete_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    dialog = ui_panel(mesh_canned_delete_overlay, 0, 0, dialog_w, dialog_h);
+    lv_obj_align(dialog, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(dialog, 16, 0);
+    lv_obj_set_style_border_color(dialog, lv_color_hex(0x3A2630), 0);
+    lv_obj_set_style_pad_all(dialog, 0, 0);
+
+    title = ui_label(dialog, ui_tr("Delete message?"),
+                     &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_pos(title, pad, pad);
+    lv_obj_set_width(title, dialog_w - pad * 2);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    message = ui_label(dialog, mesh_canned_messages[index],
+                       &lv_font_montserrat_18, 0xF5A524);
+    lv_obj_set_pos(message, pad, pad + 52);
+    lv_obj_set_width(message, dialog_w - pad * 2);
+    lv_label_set_long_mode(message, LV_LABEL_LONG_DOT);
+
+    note = ui_label(dialog, ui_tr("This cannot be undone."),
+                    &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(note, pad, pad + 88);
+    lv_obj_set_width(note, dialog_w - pad * 2);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(dialog, pad, button_y, button_w,
+                            ui_tr("Cancel"), 0x9AA4AF);
+    lv_obj_set_height(btn, 58);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A222C), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x2A3644), 0);
+    lv_obj_add_event_cb(btn, mesh_canned_delete_cancel_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    btn = ui_command_button(dialog, pad + button_w + gap, button_y,
+                            button_w, ui_tr("Delete"), 0xEF4D5A);
+    lv_obj_set_height(btn, 58);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A1D24), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0xEF4D5A), 0);
+    lv_obj_add_event_cb(btn, mesh_canned_delete_accept_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 }
 
 static void mesh_canned_manage_event_cb(lv_event_t *event)
@@ -5655,6 +5769,7 @@ void ui_meshtastic_cleanup(void)
     mesh_send_button = NULL;
     mesh_canned_button = NULL;
     mesh_choice_close();
+    mesh_canned_delete_confirm_close();
     mesh_canned_close();
     mesh_channel_profiles_close();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
@@ -5697,6 +5812,10 @@ int ui_meshtastic_handle_back(void)
     if(mesh_channel_import_overlay &&
        lv_obj_is_valid(mesh_channel_import_overlay)) {
         mesh_channel_import_confirm_close();
+        return 1;
+    }
+    if(mesh_canned_delete_overlay && lv_obj_is_valid(mesh_canned_delete_overlay)) {
+        mesh_canned_delete_confirm_close();
         return 1;
     }
     if(mesh_canned_overlay && lv_obj_is_valid(mesh_canned_overlay)) {

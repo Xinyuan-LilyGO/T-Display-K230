@@ -191,6 +191,7 @@ static const ui_translation_t ui_translations[] = {
     { "Add", "添加", "追加" },
     { "Add message", "添加消息", "メッセージ追加" },
     { "Edit message", "编辑消息", "メッセージ編集" },
+    { "Delete message?", "删除消息？", "メッセージを削除しますか？" },
     { "Message is empty", "消息不能为空", "メッセージが空です" },
     { "Keyboard test", "键盘测试", "キーボードテスト" },
     { "Keyboard backlight", "键盘背光", "キーボードバックライト" },
