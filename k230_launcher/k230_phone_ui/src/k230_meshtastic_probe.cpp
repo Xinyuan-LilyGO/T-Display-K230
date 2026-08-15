@@ -6278,12 +6278,14 @@ static bool encode_phoneapi_admin_channel_response(const probe_options_t &opts,
                                                    std::vector<uint8_t> *out)
 {
     std::vector<uint8_t> channel;
+    uint32_t index = channel_request == 0U ? 0U : channel_request - 1U;
 
-    if(!out || channel_request >= MESHTASTIC_PHONEAPI_MAX_CHANNELS ||
-       !encode_phoneapi_channel_at(opts, channel_request, &channel)) {
+    if(!out || index >= MESHTASTIC_PHONEAPI_MAX_CHANNELS ||
+       !encode_phoneapi_channel_at(opts, index, &channel)) {
         return false;
     }
-    daemon_event("PhoneAPI local admin channel request=%u", channel_request);
+    daemon_event("PhoneAPI local admin channel request=%u index=%u",
+                 channel_request, index);
     return encode_phoneapi_admin_response_bytes(opts, 2U, channel, out);
 }
 
