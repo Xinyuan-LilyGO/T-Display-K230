@@ -974,6 +974,11 @@ typedef struct {
 } mesh_remote_request_t;
 
 typedef struct {
+    std::string message;
+    uint32_t channel_index = 0;
+} mesh_send_request_t;
+
+typedef struct {
     uint32_t portnum = 0;
     std::vector<uint8_t> payload;
     uint32_t request_id = 0;
@@ -986,6 +991,7 @@ typedef struct {
     uint32_t to_node = MESHTASTIC_NODENUM_BROADCAST;
     uint32_t from_node = 0;
     uint32_t packet_id = 0;
+    uint32_t channel_index = 0;
     uint8_t hop_limit = 3;
     bool want_ack = false;
     mesh_data_proto_t data;
@@ -2986,6 +2992,56 @@ static uint8_t mesh_channel_hash(const std::string &name,
         h ^= xor_hash(key.data(), key.size());
     }
     return h;
+}
+
+static uint32_t mesh_tx_channel_slot_index(const probe_options_t &opts,
+                                           uint32_t requested_index)
+{
+    if(requested_index == 0U &&
+       opts.primary_channel_index < MESHTASTIC_PHONEAPI_MAX_CHANNELS) {
+        return opts.primary_channel_index;
+    }
+    return requested_index;
+}
+
+static bool mesh_resolve_tx_channel(const probe_options_t &opts,
+                                    uint32_t requested_index,
+                                    std::string *channel_name,
+                                    std::string *psk,
+                                    std::vector<uint8_t> *key,
+                                    uint8_t *hash)
+{
+    uint32_t index = mesh_tx_channel_slot_index(opts, requested_index);
+    uint32_t role;
+    std::string local_name;
+    std::string local_psk;
+    std::vector<uint8_t> local_key;
+
+    if(index >= MESHTASTIC_PHONEAPI_MAX_CHANNELS) {
+        return false;
+    }
+    role = mesh_channel_slot_role(opts, index);
+    if(role == MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+        return false;
+    }
+    local_name = mesh_channel_slot_name(opts, index);
+    local_psk = mesh_channel_slot_psk(opts, index);
+    if(!parse_psk(local_psk, &local_key)) {
+        return false;
+    }
+    if(channel_name) {
+        *channel_name = local_name;
+    }
+    if(psk) {
+        *psk = local_psk;
+    }
+    if(key) {
+        *key = local_key;
+    }
+    if(hash) {
+        *hash = mesh_channel_hash(local_name, local_key);
+    }
+    return true;
 }
 
 static void append_varint(std::vector<uint8_t> *out, uint32_t value)
@@ -5812,6 +5868,11 @@ static bool phoneapi_parse_mesh_packet(const std::vector<uint8_t> &packet,
         } else if(field == 2U && wire == 5U && pos + 4U <= packet.size()) {
             found.to_node = get_le32(packet.data() + pos);
             pos += 4U;
+        } else if(field == 3U && wire == 0U) {
+            if(!read_varint(packet.data(), packet.size(), &pos,
+                            &found.channel_index)) {
+                return false;
+            }
         } else if(field == 4U && wire == 2U) {
             uint32_t l;
             if(!read_varint(packet.data(), packet.size(), &pos, &l) ||
@@ -6471,6 +6532,7 @@ static bool phoneapi_take_mesh_tx(phoneapi_mesh_tx_t *tx)
 
 static bool encode_phoneapi_mesh_packet_decoded(const mesh_header_t &header,
                                                 const std::vector<uint8_t> &decoded,
+                                                uint32_t channel_index,
                                                 float rssi, float snr,
                                                 std::vector<uint8_t> *out)
 {
@@ -6484,7 +6546,7 @@ static bool encode_phoneapi_mesh_packet_decoded(const mesh_header_t &header,
     append_fixed32(out, header.from);
     append_varint(out, (2U << 3U) | 5U);
     append_fixed32(out, header.to);
-    append_uint32_field(out, 3U, 0U);
+    append_uint32_field(out, 3U, channel_index);
     append_bytes_field(out, 4U, decoded);
     append_varint(out, (6U << 3U) | 5U);
     append_fixed32(out, header.id);
@@ -6523,11 +6585,13 @@ static bool phoneapi_send_from_payload_global(uint32_t field,
 
 static void phoneapi_notify_mesh_rx(const mesh_header_t &header,
                                     const std::vector<uint8_t> &decoded,
+                                    uint32_t channel_index,
                                     float rssi, float snr)
 {
     std::vector<uint8_t> packet;
 
-    if(!encode_phoneapi_mesh_packet_decoded(header, decoded, rssi, snr,
+    if(!encode_phoneapi_mesh_packet_decoded(header, decoded, channel_index,
+                                            rssi, snr,
                                             &packet)) {
         return;
     }
@@ -6571,8 +6635,8 @@ static bool phoneapi_notify_routing_result(uint32_t from_node,
     header.next_hop = 0U;
     header.relay_node = (uint8_t)(from_node & 0xffU);
 
-    if(!encode_phoneapi_mesh_packet_decoded(header, data_proto, 0.0f, 0.0f,
-                                            &packet)) {
+    if(!encode_phoneapi_mesh_packet_decoded(header, data_proto, 0U, 0.0f,
+                                            0.0f, &packet)) {
         return false;
     }
     if(phoneapi_send_from_payload_global(2U, packet, "routing_result")) {
@@ -6608,8 +6672,9 @@ static bool phoneapi_send_local_loopback(int fd, const probe_options_t &opts,
     header.to = opts.from_node;
     header.id = packet_id;
     header.flags = tx.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK;
-    header.channel = 0U;
-    if(!encode_phoneapi_mesh_packet_decoded(header, data_proto, 0.0f, 0.0f,
+    header.channel = (uint8_t)(tx.channel_index & 0xffU);
+    if(!encode_phoneapi_mesh_packet_decoded(header, data_proto,
+                                            tx.channel_index, 0.0f, 0.0f,
                                             &packet)) {
         return false;
     }
@@ -7697,8 +7762,8 @@ static bool phoneapi_send_local_admin_response(int fd,
     if(header.id == 0U) {
         header.id = 1U;
     }
-    if(!encode_phoneapi_mesh_packet_decoded(header, decoded, 0.0f, 0.0f,
-                                            &packet)) {
+    if(!encode_phoneapi_mesh_packet_decoded(header, decoded, tx.channel_index,
+                                            0.0f, 0.0f, &packet)) {
         return false;
     }
     return phoneapi_send_from_payload(fd, 2U, packet,
@@ -9949,16 +10014,21 @@ static bool build_mesh_rebroadcast_frame(const probe_options_t &opts,
 
 static bool build_mesh_frame(const probe_options_t &opts,
                              const std::string &message,
+                             uint32_t channel_index,
                              tx_frame_t *frame)
 {
     std::vector<uint8_t> key;
     std::vector<uint8_t> data_proto;
     std::string channel_name;
+    std::string psk;
+    uint8_t channel_hash = 0U;
     mesh_header_t header;
     uint32_t packet_id = opts.packet_id;
     char summary[220];
 
-    if(!frame || !parse_psk(opts.psk, &key)) {
+    if(!frame ||
+       !mesh_resolve_tx_channel(opts, channel_index, &channel_name, &psk,
+                                &key, &channel_hash)) {
         return false;
     }
     if(packet_id == 0U) {
@@ -9988,8 +10058,7 @@ static bool build_mesh_frame(const probe_options_t &opts,
     if(opts.want_ack && !meshtastic_node_is_broadcast(header.to)) {
         header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
     }
-    channel_name = effective_mesh_channel_name(opts);
-    header.channel = mesh_channel_hash(channel_name, key);
+    header.channel = channel_hash;
     header.next_hop = 0;
     header.relay_node = (uint8_t)(opts.from_node & 0xffU);
 
@@ -10011,7 +10080,7 @@ static bool build_mesh_frame(const probe_options_t &opts,
              header.id, header.from, header.to, header.channel,
              channel_name.c_str(), opts.hop_limit,
              frame->want_ack ? "on" : "off",
-             key.empty() ? "none" : opts.psk.c_str(), message.c_str());
+             key.empty() ? "none" : psk.c_str(), message.c_str());
     frame->summary = summary;
     return true;
 }
@@ -10023,12 +10092,16 @@ static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
     std::vector<uint8_t> key;
     std::vector<uint8_t> data_proto;
     std::string channel_name;
+    std::string psk;
+    uint8_t channel_hash = 0U;
     mesh_header_t header;
     uint32_t packet_id = tx.packet_id;
     uint8_t hop_limit = tx.hop_limit != 0U ? tx.hop_limit : opts.hop_limit;
     char summary[220];
 
-    if(!frame || !parse_psk(opts.psk, &key)) {
+    if(!frame ||
+       !mesh_resolve_tx_channel(opts, tx.channel_index, &channel_name, &psk,
+                                &key, &channel_hash)) {
         return false;
     }
     if(packet_id == 0U) {
@@ -10060,8 +10133,7 @@ static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
     if(tx.want_ack && !meshtastic_node_is_broadcast(header.to)) {
         header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
     }
-    channel_name = effective_mesh_channel_name(opts);
-    header.channel = mesh_channel_hash(channel_name, key);
+    header.channel = channel_hash;
     header.next_hop = 0;
     header.relay_node = (uint8_t)(opts.from_node & 0xffU);
 
@@ -10079,9 +10151,10 @@ static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
     frame->ack_request_id = 0;
     frame->channel = header.channel;
     snprintf(summary, sizeof(summary),
-             "phoneapi mesh id=0x%08x from=0x%08x to=0x%08x ch=0x%02x port=%u payload=%u hop=%u ack=%s",
-             header.id, header.from, header.to, header.channel,
-             tx.data.portnum, (unsigned)tx.data.payload.size(), hop_limit,
+             "phoneapi mesh id=0x%08x from=0x%08x to=0x%08x slot=%u ch=0x%02x name=%s port=%u payload=%u hop=%u ack=%s",
+             header.id, header.from, header.to, tx.channel_index,
+             header.channel, channel_name.c_str(), tx.data.portnum,
+             (unsigned)tx.data.payload.size(), hop_limit,
              frame->want_ack ? "on" : "off");
     frame->summary = summary;
     return true;
@@ -10667,10 +10740,12 @@ static tx_frame_t build_raw_frame(const probe_options_t &opts,
 }
 
 static bool build_tx_frame(const probe_options_t &opts,
-                           const std::string &message, tx_frame_t *frame)
+                           const std::string &message,
+                           uint32_t channel_index,
+                           tx_frame_t *frame)
 {
     if(opts.mesh_mode) {
-        return build_mesh_frame(opts, message, frame);
+        return build_mesh_frame(opts, message, channel_index, frame);
     }
     if(!frame) {
         return false;
@@ -10788,7 +10863,12 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
             }
         }
         if(channel_match && !duplicate && header.from != opts.from_node) {
-            phoneapi_notify_mesh_rx(header, payload, rssi, snr);
+            uint32_t phoneapi_channel =
+                channel_info.role == MESHTASTIC_CHANNEL_ROLE_PRIMARY ?
+                0U : channel_info.index;
+
+            phoneapi_notify_mesh_rx(header, payload, phoneapi_channel,
+                                    rssi, snr);
         }
         if(decoded.portnum == MESHTASTIC_TEXT_MESSAGE_APP) {
             std::string text;
@@ -11677,7 +11757,8 @@ static std::string daemon_queue_remote_request(
 static std::string handle_daemon_command(const std::string &line,
                                          const probe_options_t &opts,
                                          chip_type_t chip,
-                                         std::deque<std::string> *send_queue,
+                                         std::deque<mesh_send_request_t> *
+                                             send_queue,
                                          std::deque<mesh_remote_request_t> *
                                              request_queue)
 {
@@ -11860,7 +11941,59 @@ static std::string handle_daemon_command(const std::string &line,
         running = 0;
         return "OK quitting\n";
     }
+    if(line.compare(0, 13, "SEND_CHANNEL ") == 0 ||
+       line.compare(0, 13, "send_channel ") == 0) {
+        const char *arg = line.c_str() + 13;
+        char *endp = nullptr;
+        uint32_t channel_index;
+        mesh_send_request_t request;
+
+        if(!send_queue) {
+            return "ERR internal\n";
+        }
+        errno = 0;
+        channel_index = (uint32_t)strtoul(arg, &endp, 10);
+        if(errno != 0 || endp == arg ||
+           channel_index >= MESHTASTIC_PHONEAPI_MAX_CHANNELS) {
+            return "ERR invalid-channel\n";
+        }
+        while(*endp && isspace((unsigned char)*endp)) {
+            endp++;
+        }
+        message = trim_ipc_line(endp);
+        if(message.empty()) {
+            return "ERR empty-message\n";
+        }
+        if(message.size() > MESHTASTIC_MAX_IPC_MESSAGE_LEN) {
+            return "ERR message-too-long\n";
+        }
+        if(mesh_channel_slot_role(opts,
+                                  mesh_tx_channel_slot_index(
+                                      opts, channel_index)) ==
+           MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+            return "ERR channel-disabled\n";
+        }
+        if(send_queue->size() >= MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+            daemon_event("Daemon SEND_CHANNEL queue full slot=%u len=%u depth=%u",
+                         channel_index, (unsigned)message.size(),
+                         (unsigned)send_queue->size());
+            return "ERR queue-full\n";
+        }
+        request.message = message;
+        request.channel_index = channel_index;
+        send_queue->push_back(request);
+        daemon_event("Daemon SEND_CHANNEL queued slot=%u len=%u depth=%u op=%s",
+                     channel_index, (unsigned)message.size(),
+                     (unsigned)send_queue->size(), op_name(active_op));
+        char buf[112];
+        snprintf(buf, sizeof(buf), "OK queued slot=%u len=%u depth=%u\n",
+                 channel_index, (unsigned)message.size(),
+                 (unsigned)send_queue->size());
+        return std::string(buf);
+    }
     if(line.compare(0, 5, "SEND ") == 0 || line.compare(0, 5, "send ") == 0) {
+        mesh_send_request_t request;
+
         if(!send_queue) {
             return "ERR internal\n";
         }
@@ -11877,7 +12010,9 @@ static std::string handle_daemon_command(const std::string &line,
                          (unsigned)send_queue->size());
             return "ERR queue-full\n";
         }
-        send_queue->push_back(message);
+        request.message = message;
+        request.channel_index = 0U;
+        send_queue->push_back(request);
         daemon_event("Daemon SEND queued len=%u depth=%u op=%s",
                      (unsigned)message.size(),
                      (unsigned)send_queue->size(),
@@ -11892,7 +12027,7 @@ static std::string handle_daemon_command(const std::string &line,
 
 static void accept_daemon_clients(int server_fd, const probe_options_t &opts,
                                   chip_type_t chip,
-                                  std::deque<std::string> *send_queue,
+                                  std::deque<mesh_send_request_t> *send_queue,
                                   std::deque<mesh_remote_request_t> *
                                       request_queue)
 {
@@ -12967,7 +13102,7 @@ int main(int argc, char **argv)
     bool send_once_finished = false;
     bool send_once_awaiting_ack = false;
     int daemon_fd = -1;
-    std::deque<std::string> pending_daemon_sends;
+    std::deque<mesh_send_request_t> pending_daemon_sends;
     std::deque<mesh_remote_request_t> pending_remote_requests;
 
     setvbuf(stdout, nullptr, _IOLBF, 0);
@@ -13401,33 +13536,38 @@ int main(int argc, char **argv)
 
         if(!pending_daemon_sends.empty() && active_op != OP_TX) {
             tx_frame_t frame;
-            std::string message = pending_daemon_sends.front();
+            mesh_send_request_t request = pending_daemon_sends.front();
             pending_daemon_sends.pop_front();
-            daemon_event("Daemon SEND dequeue depth=%u len=%u",
+            daemon_event("Daemon SEND dequeue depth=%u slot=%u len=%u",
                          (unsigned)pending_daemon_sends.size(),
-                         (unsigned)message.size());
-            if(build_tx_frame(opts, message, &frame)) {
+                         request.channel_index,
+                         (unsigned)request.message.size());
+            if(build_tx_frame(opts, request.message, request.channel_index,
+                              &frame)) {
                 if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
                     bool ack_tracked = true;
                     if(frame.want_ack) {
                         ack_tracked = mesh_ack_track_frame(frame);
                     }
-                    std::string clean = mesh_clean_text(message);
+                    std::string clean = mesh_clean_text(request.message);
                     if(!clean.empty()) {
-                        daemon_chat("TX 0x%08x id=0x%08x ack=%s: %s",
+                        daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",
                                     opts.from_node, frame.packet_id,
+                                    request.channel_index,
                                     frame.want_ack ?
                                     (ack_tracked ? "pending" : "dropped") :
                                     "air",
                                     clean.c_str());
                     }
                 } else {
-                    daemon_event("Daemon SEND start failed len=%u",
-                                 (unsigned)message.size());
+                    daemon_event("Daemon SEND start failed slot=%u len=%u",
+                                 request.channel_index,
+                                 (unsigned)request.message.size());
                 }
             } else {
-                daemon_event("Daemon SEND build failed len=%u",
-                             (unsigned)message.size());
+                daemon_event("Daemon SEND build failed slot=%u len=%u",
+                             request.channel_index,
+                             (unsigned)request.message.size());
             }
         }
 
@@ -13481,7 +13621,7 @@ int main(int argc, char **argv)
         if(!opts.send_once.empty() && !send_once_started &&
            active_op != OP_TX) {
             tx_frame_t frame;
-            if(build_tx_frame(opts, opts.send_once, &frame) &&
+            if(build_tx_frame(opts, opts.send_once, 0U, &frame) &&
                start_tx(radio, frame) == 0) {
                 send_once_started = true;
                 send_once_awaiting_ack = frame.want_ack;
@@ -13497,7 +13637,7 @@ int main(int argc, char **argv)
            now - last_tx_us >= (uint64_t)opts.interval_ms * 1000ULL) {
             tx_frame_t frame;
             last_tx_us = now;
-            if(build_tx_frame(opts, opts.message, &frame)) {
+            if(build_tx_frame(opts, opts.message, 0U, &frame)) {
                 if(start_tx(radio, frame) == 0 && frame.want_ack) {
                     (void)mesh_ack_track_frame(frame);
                 }
