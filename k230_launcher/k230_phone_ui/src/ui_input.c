@@ -122,6 +122,9 @@ static void ui_input_pinyin_commit_best(ui_input_dialog_state_t *state);
 static int ui_input_pinyin_commit_candidate(ui_input_dialog_state_t *state,
                                             unsigned int index);
 static void ui_input_hardware_sync_pinyin_mode(ui_input_dialog_state_t *state);
+static lv_obj_t *ui_input_create_candidate_bar(lv_obj_t *parent, int height,
+                                               int landscape,
+                                               ui_input_dialog_state_t *state);
 
 static void ui_input_log(const char *fmt, ...)
 {
@@ -173,19 +176,21 @@ static int ui_input_inline_reserved_h(ui_input_dialog_state_t *state)
 {
     int reserved_h = 0;
 
-    if(!state || !state->inline_mode || !state->keyboard ||
-       !lv_obj_is_valid(state->keyboard) ||
-       lv_obj_has_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN)) {
+    if(!state || !state->inline_mode) {
         return 0;
     }
 
-    lv_obj_update_layout(state->keyboard);
-    reserved_h = lv_obj_get_height(state->keyboard);
+    if(state->keyboard && lv_obj_is_valid(state->keyboard) &&
+       !lv_obj_has_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_update_layout(state->keyboard);
+        reserved_h = lv_obj_get_height(state->keyboard);
+    }
     if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar) &&
        state->keyboard_mode == UI_INPUT_KBD_PINYIN &&
        !lv_obj_has_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN)) {
         lv_obj_update_layout(state->candidate_bar);
-        reserved_h += lv_obj_get_height(state->candidate_bar) + 6;
+        reserved_h += lv_obj_get_height(state->candidate_bar) +
+                      (reserved_h > 0 ? 6 : 0);
     }
     return reserved_h;
 }
@@ -243,6 +248,9 @@ static void ui_input_inline_show_state(ui_input_dialog_state_t *state)
     } else {
         state->hardware_keyboard = 1;
         ui_input_hardware_sync_pinyin_mode(state);
+        if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar)) {
+            lv_obj_move_foreground(state->candidate_bar);
+        }
         ui_extension_keyboard_set_key_cb(ui_input_hardware_key_cb, state);
     }
     lv_obj_add_state(state->textarea, LV_STATE_FOCUSED);
@@ -272,6 +280,12 @@ static void ui_input_align_dialog(ui_input_dialog_state_t *state)
     if(!state->keyboard) {
         lv_obj_align(state->dialog, LV_ALIGN_CENTER, 0, 0);
         lv_obj_move_foreground(state->dialog);
+        if(state->candidate_bar) {
+            lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+            if(state->keyboard_mode == UI_INPUT_KBD_PINYIN) {
+                lv_obj_move_foreground(state->candidate_bar);
+            }
+        }
         return;
     }
 
@@ -477,6 +491,10 @@ static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state)
         return;
     }
 
+    if(state->inline_mode && active_inline != state) {
+        lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
     if(state->keyboard_mode != UI_INPUT_KBD_PINYIN) {
         lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
         return;
@@ -557,6 +575,10 @@ static void ui_input_hardware_sync_pinyin_mode(ui_input_dialog_state_t *state)
     mode = ui_extension_keyboard_pinyin_enabled() ?
            UI_INPUT_KBD_PINYIN : UI_INPUT_KBD_LOWER;
     if(state->keyboard_mode == mode) {
+        if(mode == UI_INPUT_KBD_PINYIN) {
+            ui_input_pinyin_update_candidates(state);
+            ui_input_align_dialog(state);
+        }
         return;
     }
     state->keyboard_mode = mode;
@@ -564,6 +586,7 @@ static void ui_input_hardware_sync_pinyin_mode(ui_input_dialog_state_t *state)
         state->pinyin_comp[0] = '\0';
     }
     ui_input_pinyin_update_candidates(state);
+    ui_input_align_dialog(state);
     app_request_fast_refresh();
 }
 
@@ -842,6 +865,32 @@ static void ui_input_style_keyboard(lv_obj_t *obj, int landscape)
     lv_obj_set_style_radius(obj, 8, LV_PART_ITEMS);
 }
 
+static lv_obj_t *ui_input_create_candidate_bar(lv_obj_t *parent, int height,
+                                               int landscape,
+                                               ui_input_dialog_state_t *state)
+{
+    lv_obj_t *bar;
+
+    if(!parent || !state) {
+        return NULL;
+    }
+    bar = lv_buttonmatrix_create(parent);
+    lv_obj_set_size(bar, ui_screen_width(), height);
+    ui_input_style_keyboard(bar, landscape);
+    lv_obj_set_style_text_font(bar,
+                               ui_font_for_text("中文",
+                                                &lv_font_montserrat_16),
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_font(bar,
+                               ui_font_for_text("中文",
+                                                &lv_font_montserrat_16),
+                               LV_PART_ITEMS);
+    lv_obj_add_event_cb(bar, ui_input_candidate_event_cb,
+                        LV_EVENT_VALUE_CHANGED, state);
+    lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+    return bar;
+}
+
 void ui_input_dialog_open(const ui_input_dialog_config_t *config)
 {
     ui_input_dialog_state_t *state;
@@ -1017,22 +1066,10 @@ void ui_input_dialog_open(const ui_input_dialog_config_t *config)
     lv_obj_add_event_cb(btn, ui_input_button_event_cb, LV_EVENT_CLICKED, state);
 
     if(use_soft_keyboard) {
-        state->candidate_bar = lv_buttonmatrix_create(state->overlay);
-        lv_obj_set_size(state->candidate_bar, ui_screen_width(), candidate_h);
+        state->candidate_bar =
+            ui_input_create_candidate_bar(state->overlay, candidate_h,
+                                          landscape, state);
         lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, -keyboard_h);
-        ui_input_style_keyboard(state->candidate_bar, landscape);
-        lv_obj_set_style_text_font(state->candidate_bar,
-                                   ui_font_for_text("中文",
-                                                    &lv_font_montserrat_16),
-                                   LV_PART_MAIN);
-        lv_obj_set_style_text_font(state->candidate_bar,
-                                   ui_font_for_text("中文",
-                                                    &lv_font_montserrat_16),
-                                   LV_PART_ITEMS);
-        lv_obj_add_event_cb(state->candidate_bar,
-                            ui_input_candidate_event_cb,
-                            LV_EVENT_VALUE_CHANGED, state);
-        lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
 
         state->keyboard = lv_buttonmatrix_create(state->overlay);
         lv_obj_set_size(state->keyboard, ui_screen_width(), keyboard_h);
@@ -1043,6 +1080,12 @@ void ui_input_dialog_open(const ui_input_dialog_config_t *config)
                             state);
         ui_input_keyboard_set_mode(state, UI_INPUT_KBD_LOWER);
     } else {
+        state->candidate_bar =
+            ui_input_create_candidate_bar(state->overlay, candidate_h,
+                                          landscape, state);
+        if(state->candidate_bar) {
+            lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+        }
         state->hardware_keyboard = 1;
         ui_input_hardware_sync_pinyin_mode(state);
         ui_extension_keyboard_set_key_cb(ui_input_hardware_key_cb, state);
@@ -1107,22 +1150,10 @@ ui_input_inline_t *ui_input_inline_create(lv_obj_t *textarea,
     use_soft_keyboard = ui_input_soft_keyboard_enabled() ||
                         !ui_extension_keyboard_active();
     if(use_soft_keyboard) {
-        state->candidate_bar = lv_buttonmatrix_create(state->keyboard_parent);
-        lv_obj_set_size(state->candidate_bar, ui_screen_width(), candidate_h);
+        state->candidate_bar =
+            ui_input_create_candidate_bar(state->keyboard_parent, candidate_h,
+                                          landscape, state);
         lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, -keyboard_h);
-        ui_input_style_keyboard(state->candidate_bar, landscape);
-        lv_obj_set_style_text_font(state->candidate_bar,
-                                   ui_font_for_text("中文",
-                                                    &lv_font_montserrat_16),
-                                   LV_PART_MAIN);
-        lv_obj_set_style_text_font(state->candidate_bar,
-                                   ui_font_for_text("中文",
-                                                    &lv_font_montserrat_16),
-                                   LV_PART_ITEMS);
-        lv_obj_add_event_cb(state->candidate_bar,
-                            ui_input_candidate_event_cb,
-                            LV_EVENT_VALUE_CHANGED, state);
-        lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
 
         state->keyboard = lv_buttonmatrix_create(state->keyboard_parent);
         lv_obj_set_size(state->keyboard, ui_screen_width(), keyboard_h);
@@ -1137,6 +1168,12 @@ ui_input_inline_t *ui_input_inline_create(lv_obj_t *textarea,
         }
         ui_input_inline_apply_layout(state, 0);
     } else {
+        state->candidate_bar =
+            ui_input_create_candidate_bar(state->keyboard_parent, candidate_h,
+                                          landscape, state);
+        if(state->candidate_bar) {
+            lv_obj_align(state->candidate_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+        }
         state->hardware_keyboard = 1;
         ui_input_hardware_sync_pinyin_mode(state);
     }
