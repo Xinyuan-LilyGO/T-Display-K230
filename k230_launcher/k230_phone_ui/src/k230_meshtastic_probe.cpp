@@ -2,6 +2,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <gpiod.h>
+#include <linux/i2c-dev.h>
 #include <linux/spi/spidev.h>
 #include <math.h>
 #include <poll.h>
@@ -87,6 +88,9 @@
 #define MESHTASTIC_NODEINFO_RETRY_US (60ULL * 1000000ULL)
 #define MESHTASTIC_POSITION_INTERVAL_US (15ULL * 60ULL * 1000000ULL)
 #define MESHTASTIC_POSITION_RETRY_US (30ULL * 1000000ULL)
+#define MESHTASTIC_DEVICE_TELEMETRY_INTERVAL_US (5ULL * 60ULL * 1000000ULL)
+#define MESHTASTIC_ENV_TELEMETRY_INTERVAL_US (5ULL * 60ULL * 1000000ULL)
+#define MESHTASTIC_TELEMETRY_RETRY_US (60ULL * 1000000ULL)
 #define MESHTASTIC_PHONEAPI_UART_DEV "/dev/ttyS1"
 #define MESHTASTIC_NRF9151_UART_DEV "/dev/ttyS3"
 #define MESHTASTIC_NRF9151_UART_BAUD B115200
@@ -94,6 +98,10 @@
 #define MESHTASTIC_NRF9151_CMD_TIMEOUT_US 1800000ULL
 #define MESHTASTIC_NRF9151_LINE_MAX 256U
 #define MESHTASTIC_NRF9151_RESPONSE_MAX 1024U
+#define MESHTASTIC_AHT20_I2C_DEV "/dev/i2c-0"
+#define MESHTASTIC_AHT20_ADDR 0x38
+#define MESHTASTIC_AHT20_STATUS_BUSY 0x80
+#define MESHTASTIC_AHT20_STATUS_CALIBRATED 0x08
 #define K230_MESH_IOMUX_BASE 0x91105000UL
 #define K230_MESH_IOMUX_SIZE 0x1000UL
 #define K230_MESH_IOMUX_IO28_OFFSET (28U * 4U)
@@ -743,6 +751,8 @@ typedef struct {
     bool rebroadcast = true;
     bool advertise_nodeinfo = true;
     bool position_enabled = true;
+    bool telemetry_enabled = true;
+    bool environment_telemetry_enabled = true;
     bool want_ack = false;
     bool want_ack_set = false;
     uint32_t from_node = 0;
@@ -755,6 +765,10 @@ typedef struct {
         (uint32_t)(MESHTASTIC_NODEINFO_INTERVAL_US / 1000000ULL);
     uint32_t position_interval_sec =
         (uint32_t)(MESHTASTIC_POSITION_INTERVAL_US / 1000000ULL);
+    uint32_t telemetry_device_interval_sec =
+        (uint32_t)(MESHTASTIC_DEVICE_TELEMETRY_INTERVAL_US / 1000000ULL);
+    uint32_t telemetry_environment_interval_sec =
+        (uint32_t)(MESHTASTIC_ENV_TELEMETRY_INTERVAL_US / 1000000ULL);
     std::string region;
     std::string preset;
     uint32_t frequency_slot = 0;
@@ -1119,6 +1133,10 @@ static uint64_t mesh_next_nodeinfo_us;
 static uint32_t mesh_position_tx_count;
 static uint32_t mesh_position_drop_count;
 static uint64_t mesh_next_position_us;
+static uint32_t mesh_telemetry_tx_count;
+static uint32_t mesh_telemetry_drop_count;
+static uint64_t mesh_next_device_telemetry_us;
+static uint64_t mesh_next_environment_telemetry_us;
 static nrf9151_gnss_state_t mesh_gnss;
 static LR2021 *active_lr2021;
 static mesh_history_entry_t mesh_history[MESHTASTIC_PACKET_HISTORY_SIZE];
@@ -2303,6 +2321,262 @@ static void append_float_field(std::vector<uint8_t> *out, uint32_t field,
     append_fixed32(out, raw);
 }
 
+static int mesh_read_first_line(const char *path, char *buf, size_t len)
+{
+    FILE *fp;
+
+    if(!path || !buf || len == 0U) {
+        return -1;
+    }
+    fp = fopen(path, "r");
+    if(!fp) {
+        return -1;
+    }
+    if(!fgets(buf, len, fp)) {
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    buf[strcspn(buf, "\r\n")] = '\0';
+    return 0;
+}
+
+static int mesh_read_scaled_double(const char *path, double scale,
+                                   double *out)
+{
+    char line[64];
+    char *endp = nullptr;
+    double value;
+
+    if(!out || mesh_read_first_line(path, line, sizeof(line)) != 0 ||
+       scale == 0.0) {
+        return -1;
+    }
+    errno = 0;
+    value = strtod(line, &endp);
+    if(errno != 0 || endp == line || !isfinite(value)) {
+        return -1;
+    }
+    *out = value / scale;
+    return 0;
+}
+
+static bool mesh_read_power_supply_attr(const char *supply, const char *attr,
+                                        double scale, double *out)
+{
+    char path[128];
+
+    if(!supply || !attr || !out) {
+        return false;
+    }
+    snprintf(path, sizeof(path), "/sys/class/power_supply/%s/%s", supply,
+             attr);
+    return mesh_read_scaled_double(path, scale, out) == 0;
+}
+
+static bool mesh_read_power_supply_online(void)
+{
+    static const char *const supplies[] = {
+        "usb", "USB", "ac", "AC", "bq25890-charger", "bq25896-charger"
+    };
+    double online = 0.0;
+
+    for(size_t i = 0; i < ARRAY_SIZE(supplies); i++) {
+        if(mesh_read_power_supply_attr(supplies[i], "online", 1.0,
+                                       &online)) {
+            return online > 0.5;
+        }
+    }
+    return false;
+}
+
+static bool mesh_read_power_supply_device_metrics(
+    mesh_telemetry_info_t *telemetry)
+{
+    static const char *const supplies[] = {
+        "battery", "Battery", "BAT0", "bq27220-battery", "bq27220"
+    };
+    bool found = false;
+
+    if(!telemetry) {
+        return false;
+    }
+    for(size_t i = 0; i < ARRAY_SIZE(supplies); i++) {
+        double value = 0.0;
+
+        if(!telemetry->has_battery_level &&
+           mesh_read_power_supply_attr(supplies[i], "capacity", 1.0,
+                                       &value) &&
+           value >= 0.0 && value <= 100.0) {
+            telemetry->has_battery_level = true;
+            telemetry->battery_level = (uint32_t)llround(value);
+            found = true;
+        }
+        if(!telemetry->has_device_voltage &&
+           (mesh_read_power_supply_attr(supplies[i], "voltage_now",
+                                        1000000.0, &value) ||
+            mesh_read_power_supply_attr(supplies[i], "voltage_avg",
+                                        1000000.0, &value)) &&
+           value > 0.0 && value < 20.0) {
+            telemetry->has_device_voltage = true;
+            telemetry->device_voltage = (float)value;
+            found = true;
+        }
+        if(telemetry->has_battery_level && telemetry->has_device_voltage) {
+            break;
+        }
+    }
+    if(!telemetry->has_battery_level && mesh_read_power_supply_online()) {
+        telemetry->has_battery_level = true;
+        telemetry->battery_level = 101U;
+        found = true;
+    }
+    return found;
+}
+
+static bool mesh_read_aht20_hwmon(mesh_telemetry_info_t *telemetry)
+{
+    char name_path[96];
+    char name[64];
+
+    if(!telemetry) {
+        return false;
+    }
+    for(int i = 0; i < 16; i++) {
+        char temp_path[96];
+        char hum_path[96];
+        double temp = 0.0;
+        double hum = 0.0;
+
+        snprintf(name_path, sizeof(name_path), "/sys/class/hwmon/hwmon%d/name",
+                 i);
+        if(mesh_read_first_line(name_path, name, sizeof(name)) != 0) {
+            continue;
+        }
+        if(strcmp(name, "aht10") != 0 && strcmp(name, "aht20") != 0) {
+            continue;
+        }
+        snprintf(temp_path, sizeof(temp_path),
+                 "/sys/class/hwmon/hwmon%d/temp1_input", i);
+        snprintf(hum_path, sizeof(hum_path),
+                 "/sys/class/hwmon/hwmon%d/humidity1_input", i);
+        if(mesh_read_scaled_double(temp_path, 1000.0, &temp) == 0 &&
+           mesh_read_scaled_double(hum_path, 1000.0, &hum) == 0 &&
+           temp > -40.0 && temp < 125.0 && hum >= 0.0 && hum <= 100.0) {
+            telemetry->has_temperature = true;
+            telemetry->temperature_c = (float)temp;
+            telemetry->has_humidity = true;
+            telemetry->humidity_percent = (float)hum;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int mesh_aht20_select_addr(int fd)
+{
+    if(ioctl(fd, I2C_SLAVE, MESHTASTIC_AHT20_ADDR) == 0) {
+        return 0;
+    }
+    return ioctl(fd, I2C_SLAVE_FORCE, MESHTASTIC_AHT20_ADDR);
+}
+
+static int mesh_aht20_prepare(int fd)
+{
+    unsigned char status = 0;
+    unsigned char init_cmd[3] = {0xBE, 0x08, 0x00};
+
+    if(read(fd, &status, 1) == 1 &&
+       (status & MESHTASTIC_AHT20_STATUS_CALIBRATED)) {
+        return 0;
+    }
+    if(write(fd, init_cmd, sizeof(init_cmd)) != (ssize_t)sizeof(init_cmd)) {
+        return -1;
+    }
+    usleep(10000);
+    return 0;
+}
+
+static bool mesh_read_aht20_i2c(mesh_telemetry_info_t *telemetry)
+{
+    int fd;
+    unsigned char measure_cmd[3] = {0xAC, 0x33, 0x00};
+    unsigned char data[7];
+    uint32_t raw_hum;
+    uint32_t raw_temp;
+    ssize_t got;
+    double temp;
+    double hum;
+
+    if(!telemetry) {
+        return false;
+    }
+    fd = open(MESHTASTIC_AHT20_I2C_DEV, O_RDWR | O_CLOEXEC);
+    if(fd < 0) {
+        return false;
+    }
+    if(mesh_aht20_select_addr(fd) != 0 || mesh_aht20_prepare(fd) != 0 ||
+       write(fd, measure_cmd, sizeof(measure_cmd)) !=
+           (ssize_t)sizeof(measure_cmd)) {
+        close(fd);
+        return false;
+    }
+    usleep(90000);
+    got = read(fd, data, sizeof(data));
+    if(got >= 1 && (data[0] & MESHTASTIC_AHT20_STATUS_BUSY)) {
+        usleep(20000);
+        got = read(fd, data, sizeof(data));
+    }
+    close(fd);
+    if(got < 6 || (data[0] & MESHTASTIC_AHT20_STATUS_BUSY)) {
+        return false;
+    }
+
+    raw_hum = ((uint32_t)data[1] << 12) |
+              ((uint32_t)data[2] << 4) |
+              ((uint32_t)data[3] >> 4);
+    raw_temp = (((uint32_t)data[3] & 0x0FU) << 16) |
+               ((uint32_t)data[4] << 8) |
+               (uint32_t)data[5];
+    hum = (double)raw_hum * 100.0 / 1048576.0;
+    temp = (double)raw_temp * 200.0 / 1048576.0 - 50.0;
+    if(temp <= -40.0 || temp >= 125.0 || hum < 0.0 || hum > 100.0) {
+        return false;
+    }
+    telemetry->has_temperature = true;
+    telemetry->temperature_c = (float)temp;
+    telemetry->has_humidity = true;
+    telemetry->humidity_percent = (float)hum;
+    return true;
+}
+
+static bool mesh_collect_device_telemetry(mesh_telemetry_info_t *telemetry)
+{
+    if(!telemetry) {
+        return false;
+    }
+    *telemetry = mesh_telemetry_info_t();
+    telemetry->has_device_metrics = true;
+    telemetry->timestamp = (uint32_t)time(nullptr);
+    telemetry->uptime_seconds = (uint32_t)(monotonic_us() / 1000000ULL);
+    (void)mesh_read_power_supply_device_metrics(telemetry);
+    return true;
+}
+
+static bool mesh_collect_environment_telemetry(mesh_telemetry_info_t *telemetry)
+{
+    bool ok;
+
+    if(!telemetry) {
+        return false;
+    }
+    *telemetry = mesh_telemetry_info_t();
+    telemetry->timestamp = (uint32_t)time(nullptr);
+    ok = mesh_read_aht20_hwmon(telemetry) || mesh_read_aht20_i2c(telemetry);
+    telemetry->has_environment_metrics = ok;
+    return ok;
+}
+
 static void nrf9151_gnss_set_state(const char *modem, const char *gps,
                                    const char *detail)
 {
@@ -3040,6 +3314,81 @@ static bool encode_position_proto(const mesh_position_info_t &position,
     return !out->empty();
 }
 
+static bool encode_device_metrics_proto(const mesh_telemetry_info_t &telemetry,
+                                        std::vector<uint8_t> *out)
+{
+    if(!out || !telemetry.has_device_metrics) {
+        return false;
+    }
+    out->clear();
+    if(telemetry.has_battery_level) {
+        append_uint32_field(out, 1U, telemetry.battery_level);
+    }
+    if(telemetry.has_device_voltage) {
+        append_float_field(out, 2U, telemetry.device_voltage);
+    }
+    if(telemetry.has_channel_utilization) {
+        append_float_field(out, 3U, telemetry.channel_utilization);
+    }
+    if(telemetry.has_air_util_tx) {
+        append_float_field(out, 4U, telemetry.air_util_tx);
+    }
+    if(telemetry.uptime_seconds != 0U) {
+        append_uint32_field(out, 5U, telemetry.uptime_seconds);
+    }
+    return !out->empty();
+}
+
+static bool encode_environment_metrics_proto(
+    const mesh_telemetry_info_t &telemetry, std::vector<uint8_t> *out)
+{
+    if(!out || !telemetry.has_environment_metrics) {
+        return false;
+    }
+    out->clear();
+    if(telemetry.has_temperature) {
+        append_float_field(out, 1U, telemetry.temperature_c);
+    }
+    if(telemetry.has_humidity) {
+        append_float_field(out, 2U, telemetry.humidity_percent);
+    }
+    if(telemetry.has_pressure) {
+        append_float_field(out, 3U, telemetry.pressure_hpa);
+    }
+    if(telemetry.has_environment_voltage) {
+        append_float_field(out, 5U, telemetry.environment_voltage);
+    }
+    if(telemetry.has_iaq) {
+        append_uint32_field(out, 7U, telemetry.iaq);
+    }
+    return !out->empty();
+}
+
+static bool encode_telemetry_proto(const mesh_telemetry_info_t &telemetry,
+                                   bool environment,
+                                   std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> metrics;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    if(environment) {
+        if(!encode_environment_metrics_proto(telemetry, &metrics)) {
+            return false;
+        }
+    } else if(!encode_device_metrics_proto(telemetry, &metrics)) {
+        return false;
+    }
+    if(telemetry.timestamp != 0U) {
+        append_varint(out, (1U << 3U) | 5U);
+        append_fixed32(out, telemetry.timestamp);
+    }
+    append_bytes_field(out, environment ? 3U : 2U, metrics);
+    return !out->empty();
+}
+
 static uint32_t phoneapi_region_enum(const std::string &name)
 {
     struct region_map_t {
@@ -3385,6 +3734,26 @@ static bool encode_phoneapi_config_bluetooth(std::vector<uint8_t> *out)
     append_bool_field(&bluetooth, 1U, true);
     append_uint32_field(&bluetooth, 2U, 2U);
     append_bytes_field(out, 7U, bluetooth);
+    return true;
+}
+
+static bool encode_phoneapi_module_config_telemetry(
+    const probe_options_t &opts, std::vector<uint8_t> *out)
+{
+    std::vector<uint8_t> telemetry;
+
+    if(!out) {
+        return false;
+    }
+    out->clear();
+    append_uint32_field(&telemetry, 1U, opts.telemetry_device_interval_sec);
+    append_uint32_field(&telemetry, 2U,
+                        opts.telemetry_environment_interval_sec);
+    append_bool_field(&telemetry, 3U,
+                      opts.environment_telemetry_enabled);
+    append_bool_field(&telemetry, 4U, true);
+    append_bool_field(&telemetry, 14U, opts.telemetry_enabled);
+    append_bytes_field(out, 6U, telemetry);
     return true;
 }
 
@@ -4043,6 +4412,7 @@ typedef struct {
 typedef struct {
     bool has_lora = false;
     bool has_position = false;
+    bool has_telemetry = false;
     bool has_region = false;
     bool has_preset = false;
     bool has_hop_limit = false;
@@ -4050,6 +4420,10 @@ typedef struct {
     bool has_channel_num = false;
     bool has_position_enabled = false;
     bool has_position_interval = false;
+    bool has_telemetry_enabled = false;
+    bool has_environment_telemetry_enabled = false;
+    bool has_telemetry_device_interval = false;
+    bool has_telemetry_environment_interval = false;
     std::string region;
     std::string preset;
     uint32_t hop_limit = 0;
@@ -4057,6 +4431,10 @@ typedef struct {
     uint32_t channel_num = 0;
     bool position_enabled = false;
     uint32_t position_interval_sec = 0;
+    bool telemetry_enabled = false;
+    bool environment_telemetry_enabled = false;
+    uint32_t telemetry_device_interval_sec = 0;
+    uint32_t telemetry_environment_interval_sec = 0;
 } phoneapi_config_update_t;
 
 static bool phoneapi_read_length_delimited(const std::vector<uint8_t> &payload,
@@ -4377,6 +4755,97 @@ static bool phoneapi_parse_position_config_update(
             }
             out->position_enabled = value == 1U;
             out->has_position_enabled = true;
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool phoneapi_parse_telemetry_module_update(
+    const std::vector<uint8_t> &payload, phoneapi_config_update_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
+    }
+    out->has_telemetry = true;
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 1U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            if(value >= 60U && value <= 86400U) {
+                out->telemetry_device_interval_sec = value;
+                out->has_telemetry_device_interval = true;
+            }
+        } else if(field == 2U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            if(value >= 60U && value <= 86400U) {
+                out->telemetry_environment_interval_sec = value;
+                out->has_telemetry_environment_interval = true;
+            }
+        } else if(field == 3U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->environment_telemetry_enabled = value != 0U;
+            out->has_environment_telemetry_enabled = true;
+        } else if(field == 14U && wire == 0U) {
+            uint32_t value;
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            out->telemetry_enabled = value != 0U;
+            out->has_telemetry_enabled = true;
+        } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
+                                       wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool phoneapi_parse_module_config_update(
+    const std::vector<uint8_t> &payload, phoneapi_config_update_t *out)
+{
+    size_t pos = 0;
+
+    if(!out) {
+        return false;
+    }
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if(field == 6U && wire == 2U) {
+            std::vector<uint8_t> telemetry;
+            if(!phoneapi_read_length_delimited(payload, &pos, &telemetry) ||
+               !phoneapi_parse_telemetry_module_update(telemetry, out)) {
+                return false;
+            }
         } else if(!phoneapi_proto_skip(payload.data(), payload.size(), &pos,
                                        wire)) {
             return false;
@@ -4834,13 +5303,23 @@ static bool encode_phoneapi_admin_module_config_response(
     std::vector<uint8_t> *out)
 {
     std::vector<uint8_t> module_config;
+    bool ok = true;
 
     if(!out) {
         return false;
     }
-    daemon_event("PhoneAPI local admin module config type %u returns empty",
-                 module_config_type);
-    return encode_phoneapi_admin_response_bytes(opts, 8U, module_config, out);
+    switch(module_config_type) {
+    case 5U:
+        ok = encode_phoneapi_module_config_telemetry(opts, &module_config);
+        break;
+    default:
+        module_config.clear();
+        daemon_event("PhoneAPI local admin module config type %u returns empty",
+                     module_config_type);
+        break;
+    }
+    return ok && encode_phoneapi_admin_response_bytes(opts, 8U, module_config,
+                                                      out);
 }
 
 static bool encode_phoneapi_admin_channel_response(const probe_options_t &opts,
@@ -4883,6 +5362,10 @@ static bool encode_phoneapi_admin_metadata_response(const probe_options_t &opts,
 #define K230_MESH_PREF_REBROADCAST "meshtastic.rebroadcast"
 #define K230_MESH_PREF_POSITION "meshtastic.position"
 #define K230_MESH_PREF_POSITION_INTERVAL "meshtastic.position_interval"
+#define K230_MESH_PREF_TELEMETRY "meshtastic.telemetry"
+#define K230_MESH_PREF_TELEMETRY_ENV "meshtastic.telemetry_env"
+#define K230_MESH_PREF_TELEMETRY_DEVICE_INTERVAL "meshtastic.telemetry_device_interval"
+#define K230_MESH_PREF_TELEMETRY_ENV_INTERVAL "meshtastic.telemetry_env_interval"
 #define K230_PHONE_UI_PREF_VALUE_MAX 159U
 
 typedef struct {
@@ -5073,6 +5556,18 @@ static bool phoneapi_persist_meshtastic_opts(const probe_options_t &opts)
                           opts.position_enabled ? "1" : "0");
         snprintf(value, sizeof(value), "%u", opts.position_interval_sec);
         phoneapi_pref_set(&entries, K230_MESH_PREF_POSITION_INTERVAL, value);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_TELEMETRY,
+                          opts.telemetry_enabled ? "1" : "0");
+        phoneapi_pref_set(&entries, K230_MESH_PREF_TELEMETRY_ENV,
+                          opts.environment_telemetry_enabled ? "1" : "0");
+        snprintf(value, sizeof(value), "%u",
+                 opts.telemetry_device_interval_sec);
+        phoneapi_pref_set(&entries,
+                          K230_MESH_PREF_TELEMETRY_DEVICE_INTERVAL, value);
+        snprintf(value, sizeof(value), "%u",
+                 opts.telemetry_environment_interval_sec);
+        phoneapi_pref_set(&entries, K230_MESH_PREF_TELEMETRY_ENV_INTERVAL,
+                          value);
         ok = phoneapi_pref_write(entries);
     }
     if(!ok) {
@@ -5182,8 +5677,44 @@ static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
     }
 
     if(admin.has_set_module_config) {
-        daemon_event("PhoneAPI local admin set_module_config ignored len=%u",
-                     (unsigned)admin.set_module_config.size());
+        phoneapi_config_update_t config;
+        bool ok = phoneapi_parse_module_config_update(
+                      admin.set_module_config, &config);
+
+        if(ok && config.has_telemetry) {
+            uint64_t now = monotonic_us();
+
+            if(config.has_telemetry_enabled) {
+                opts->telemetry_enabled = config.telemetry_enabled;
+            }
+            if(config.has_environment_telemetry_enabled) {
+                opts->environment_telemetry_enabled =
+                    config.environment_telemetry_enabled;
+            }
+            if(config.has_telemetry_device_interval) {
+                opts->telemetry_device_interval_sec =
+                    config.telemetry_device_interval_sec;
+            }
+            if(config.has_telemetry_environment_interval) {
+                opts->telemetry_environment_interval_sec =
+                    config.telemetry_environment_interval_sec;
+            }
+            mesh_next_device_telemetry_us = opts->telemetry_enabled ?
+                now + 5000000ULL : 0ULL;
+            mesh_next_environment_telemetry_us =
+                opts->environment_telemetry_enabled ?
+                now + 7000000ULL : 0ULL;
+            daemon_event("PhoneAPI local admin set_module_config telemetry device=%s device_interval=%u env=%s env_interval=%u",
+                         opts->telemetry_enabled ? "yes" : "no",
+                         opts->telemetry_device_interval_sec,
+                         opts->environment_telemetry_enabled ? "yes" : "no",
+                         opts->telemetry_environment_interval_sec);
+        } else {
+            daemon_event("PhoneAPI local admin set_module_config unsupported len=%u ok=%s",
+                         (unsigned)admin.set_module_config.size(),
+                         ok ? "yes" : "no");
+        }
+        ok_all = ok_all && ok;
     }
 
     if(*request_reconfigure) {
@@ -5257,7 +5788,8 @@ static bool phoneapi_handle_local_admin(int fd, const phoneapi_mesh_tx_t &tx,
     if(admin.has_set_owner || admin.has_set_channel || admin.has_set_config ||
        admin.has_set_module_config) {
         bool persist_required = admin.has_set_owner || admin.has_set_channel ||
-                                admin.has_set_config;
+                                admin.has_set_config ||
+                                admin.has_set_module_config;
         bool persist_ok = true;
         bool ok = phoneapi_apply_admin_writes(admin, &runtime_opts,
                                               &request_reconfigure,
@@ -5428,6 +5960,8 @@ static bool phoneapi_send_config_stage(int fd, const probe_options_t &opts,
          phoneapi_send_from_payload(fd, 5U, payload, "config_position") && ok;
     ok = encode_phoneapi_config_bluetooth(&payload) &&
          phoneapi_send_from_payload(fd, 5U, payload, "config_bluetooth") && ok;
+    ok = encode_phoneapi_module_config_telemetry(opts, &payload) &&
+         phoneapi_send_from_payload(fd, 9U, payload, "module_telemetry") && ok;
     ok = encode_phoneapi_channel(opts, &payload) &&
          phoneapi_send_from_payload(fd, 10U, payload, "channel") && ok;
     ok = phoneapi_send_nodeinfo_entries(fd, opts, "config",
@@ -6890,6 +7424,23 @@ static uint32_t mesh_position_next_ms(uint64_t now_us)
     return (uint32_t)((mesh_next_position_us - now_us + 999ULL) / 1000ULL);
 }
 
+static uint32_t mesh_telemetry_next_ms(uint64_t now_us)
+{
+    uint64_t next_us = 0ULL;
+
+    if(mesh_next_device_telemetry_us != 0ULL) {
+        next_us = mesh_next_device_telemetry_us;
+    }
+    if(mesh_next_environment_telemetry_us != 0ULL &&
+       (next_us == 0ULL || mesh_next_environment_telemetry_us < next_us)) {
+        next_us = mesh_next_environment_telemetry_us;
+    }
+    if(next_us == 0ULL || next_us <= now_us) {
+        return 0U;
+    }
+    return (uint32_t)((next_us - now_us + 999ULL) / 1000ULL);
+}
+
 static bool mesh_ack_track_frame(const tx_frame_t &frame)
 {
     size_t slot = MESHTASTIC_ACK_RETRY_QUEUE_SIZE;
@@ -7332,6 +7883,72 @@ static bool build_mesh_position_frame(const probe_options_t &opts,
              header.id, header.from, header.channel,
              position.latitude_i * 1e-7, position.longitude_i * 1e-7,
              position.sats_in_view);
+    frame->summary = summary;
+    return true;
+}
+
+static bool build_mesh_telemetry_frame(const probe_options_t &opts,
+                                       const mesh_telemetry_info_t &telemetry,
+                                       bool environment,
+                                       tx_frame_t *frame)
+{
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> telemetry_proto;
+    std::vector<uint8_t> data_proto;
+    std::string channel_name;
+    mesh_header_t header;
+    uint32_t packet_id;
+    std::string summary_text;
+    char summary[260];
+
+    if(!frame || !parse_psk(opts.psk, &key) ||
+       !encode_telemetry_proto(telemetry, environment, &telemetry_proto) ||
+       !encode_data_proto(MESHTASTIC_TELEMETRY_APP, telemetry_proto, 0, 0,
+                          &data_proto)) {
+        return false;
+    }
+    packet_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+    if(packet_id == 0U) {
+        packet_id = 1U;
+    }
+    if(!aes_ctr_crypt(key, opts.from_node, packet_id, &data_proto)) {
+        return false;
+    }
+    if(data_proto.size() + MESHTASTIC_HEADER_LENGTH >
+       MESHTASTIC_MAX_LORA_PAYLOAD_LEN) {
+        return false;
+    }
+
+    memset(&header, 0, sizeof(header));
+    header.to = MESHTASTIC_NODENUM_BROADCAST;
+    header.from = opts.from_node;
+    header.id = packet_id;
+    header.flags = (opts.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
+                   ((opts.hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
+                    MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
+    channel_name = effective_mesh_channel_name(opts);
+    header.channel = mesh_channel_hash(channel_name, key);
+    header.next_hop = 0;
+    header.relay_node = (uint8_t)(opts.from_node & 0xffU);
+
+    frame->bytes.clear();
+    append_mesh_header(&frame->bytes, header);
+    frame->bytes.insert(frame->bytes.end(), data_proto.begin(),
+                        data_proto.end());
+    frame->rebroadcast = false;
+    frame->want_ack = false;
+    frame->routing_ack = false;
+    frame->phoneapi_origin = false;
+    frame->to_node = header.to;
+    frame->from_node = header.from;
+    frame->packet_id = header.id;
+    frame->ack_request_id = 0;
+    frame->channel = header.channel;
+    summary_text = telemetry_summary(telemetry);
+    snprintf(summary, sizeof(summary),
+             "mesh telemetry id=0x%08x from=0x%08x ch=0x%02x type=%s %s",
+             header.id, header.from, header.channel,
+             environment ? "environment" : "device", summary_text.c_str());
     frame->summary = summary;
     return true;
 }
@@ -7828,6 +8445,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "position=%s nrf9151=%s gps=%s gps_detail=%s "
              "position_tx=%lu position_drop=%lu next_position_ms=%u "
              "lat=%.7f lon=%.7f sats=%u "
+             "telemetry=%s telemetry_env=%s telemetry_tx=%lu telemetry_drop=%lu next_telemetry_ms=%u "
              "region=%s preset=%s slot=%s resolved_slot=%u slots=%u freq=%.3f bw=%.1f sf=%u cr=4/%u sw=0x%02x manual_power=%s power=%d node=%s "
              "from=0x%08x to=0x%08x want_ack=%s relay=%s channel=%s channel_url=%s socket=%s\n",
              PROBE_VERSION, chip_name(chip), op_name(active_op),
@@ -7858,6 +8476,11 @@ static std::string daemon_status_response(const probe_options_t &opts,
              mesh_gnss.has_fix ? mesh_gnss.position.latitude_i * 1e-7 : 0.0,
              mesh_gnss.has_fix ? mesh_gnss.position.longitude_i * 1e-7 : 0.0,
              mesh_gnss.has_fix ? mesh_gnss.position.sats_in_view : 0U,
+             opts.telemetry_enabled ? "on" : "off",
+             opts.environment_telemetry_enabled ? "on" : "off",
+             (unsigned long)mesh_telemetry_tx_count,
+             (unsigned long)mesh_telemetry_drop_count,
+             mesh_telemetry_next_ms(now),
              opts.resolved_region.empty() ? "-" : opts.resolved_region.c_str(),
              opts.resolved_preset.empty() ? "-" : opts.resolved_preset.c_str(),
              slot_text, opts.resolved_slot, opts.resolved_slot_count,
@@ -8437,6 +9060,12 @@ static void print_usage(const char *argv0)
             "  --no-position    Disable GNSS Position broadcast\n"
             "  --position-interval SEC  Periodic Position interval, default 900\n"
             "  --gps-uart PATH  nRF9151 AT UART for GNSS, default " MESHTASTIC_NRF9151_UART_DEV "\n"
+            "  --telemetry      Enable device telemetry broadcast (default)\n"
+            "  --no-telemetry   Disable device telemetry broadcast\n"
+            "  --telemetry-interval SEC  Device telemetry interval, default 300\n"
+            "  --env-telemetry  Enable AHT20 environment telemetry (default)\n"
+            "  --no-env-telemetry Disable AHT20 environment telemetry\n"
+            "  --env-telemetry-interval SEC  Environment telemetry interval, default 300\n"
             "  --no-rebroadcast Disable minimal broadcast flood forwarding\n"
             "  --channel-name S Default primary channel name, empty uses preset name\n"
             "  --psk VALUE      default, none/off/0, or 16/32-byte hex key\n",
@@ -8502,6 +9131,26 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->position_interval_sec = tmp;
         } else if(strcmp(arg, "--gps-uart") == 0 && i + 1 < argc) {
             opts->gps_uart_path = argv[++i];
+        } else if(strcmp(arg, "--telemetry") == 0) {
+            opts->telemetry_enabled = true;
+        } else if(strcmp(arg, "--no-telemetry") == 0) {
+            opts->telemetry_enabled = false;
+        } else if(strcmp(arg, "--telemetry-interval") == 0 &&
+                  i + 1 < argc && parse_u32(argv[++i], &tmp, 10)) {
+            if(tmp < 60U) {
+                tmp = 60U;
+            }
+            opts->telemetry_device_interval_sec = tmp;
+        } else if(strcmp(arg, "--env-telemetry") == 0) {
+            opts->environment_telemetry_enabled = true;
+        } else if(strcmp(arg, "--no-env-telemetry") == 0) {
+            opts->environment_telemetry_enabled = false;
+        } else if(strcmp(arg, "--env-telemetry-interval") == 0 &&
+                  i + 1 < argc && parse_u32(argv[++i], &tmp, 10)) {
+            if(tmp < 60U) {
+                tmp = 60U;
+            }
+            opts->telemetry_environment_interval_sec = tmp;
         } else if(strcmp(arg, "--ack") == 0) {
             opts->want_ack = true;
             opts->want_ack_set = true;
@@ -9209,6 +9858,12 @@ int main(int argc, char **argv)
         mesh_next_position_us =
             (opts.mesh_mode && opts.position_enabled) ?
             monotonic_us() + 5000000ULL : 0ULL;
+        mesh_next_device_telemetry_us =
+            (opts.mesh_mode && opts.telemetry_enabled) ?
+            monotonic_us() + 8000000ULL : 0ULL;
+        mesh_next_environment_telemetry_us =
+            (opts.mesh_mode && opts.environment_telemetry_enabled) ?
+            monotonic_us() + 11000000ULL : 0ULL;
         mesh_gnss = nrf9151_gnss_state_t();
         nrf9151_gnss_set_state(opts.position_enabled ? "probing" : "off",
                                opts.position_enabled ? "unavailable" : "off",
@@ -9349,6 +10004,71 @@ int main(int argc, char **argv)
                 mesh_position_drop_count++;
                 mesh_next_position_us = now + MESHTASTIC_POSITION_RETRY_US;
                 daemon_event("Position build failed from=0x%08x",
+                             opts.from_node);
+            }
+        }
+
+        if(mesh_next_device_telemetry_us != 0ULL &&
+           now >= mesh_next_device_telemetry_us && active_op != OP_TX) {
+            tx_frame_t frame;
+            mesh_telemetry_info_t telemetry;
+            uint64_t interval_us =
+                (uint64_t)opts.telemetry_device_interval_sec * 1000000ULL;
+
+            if(mesh_collect_device_telemetry(&telemetry) &&
+               build_mesh_telemetry_frame(opts, telemetry, false, &frame)) {
+                if(start_tx(radio, frame) == 0) {
+                    mesh_telemetry_tx_count++;
+                    mesh_next_device_telemetry_us = now + interval_us;
+                    mesh_node_update_telemetry(opts.from_node, telemetry);
+                    daemon_event("Telemetry TX start type=device from=0x%08x %s",
+                                 opts.from_node,
+                                 telemetry_summary(telemetry).c_str());
+                } else {
+                    mesh_telemetry_drop_count++;
+                    mesh_next_device_telemetry_us =
+                        now + MESHTASTIC_TELEMETRY_RETRY_US;
+                    daemon_event("Telemetry TX start failed type=device from=0x%08x",
+                                 opts.from_node);
+                }
+            } else {
+                mesh_telemetry_drop_count++;
+                mesh_next_device_telemetry_us =
+                    now + MESHTASTIC_TELEMETRY_RETRY_US;
+                daemon_event("Telemetry build failed type=device from=0x%08x",
+                             opts.from_node);
+            }
+        }
+
+        if(mesh_next_environment_telemetry_us != 0ULL &&
+           now >= mesh_next_environment_telemetry_us && active_op != OP_TX) {
+            tx_frame_t frame;
+            mesh_telemetry_info_t telemetry;
+            uint64_t interval_us =
+                (uint64_t)opts.telemetry_environment_interval_sec *
+                1000000ULL;
+
+            if(mesh_collect_environment_telemetry(&telemetry) &&
+               build_mesh_telemetry_frame(opts, telemetry, true, &frame)) {
+                if(start_tx(radio, frame) == 0) {
+                    mesh_telemetry_tx_count++;
+                    mesh_next_environment_telemetry_us = now + interval_us;
+                    mesh_node_update_telemetry(opts.from_node, telemetry);
+                    daemon_event("Telemetry TX start type=environment from=0x%08x %s",
+                                 opts.from_node,
+                                 telemetry_summary(telemetry).c_str());
+                } else {
+                    mesh_telemetry_drop_count++;
+                    mesh_next_environment_telemetry_us =
+                        now + MESHTASTIC_TELEMETRY_RETRY_US;
+                    daemon_event("Telemetry TX start failed type=environment from=0x%08x",
+                                 opts.from_node);
+                }
+            } else {
+                mesh_telemetry_drop_count++;
+                mesh_next_environment_telemetry_us =
+                    now + MESHTASTIC_TELEMETRY_RETRY_US;
+                daemon_event("Telemetry build skipped type=environment from=0x%08x",
                              opts.from_node);
             }
         }

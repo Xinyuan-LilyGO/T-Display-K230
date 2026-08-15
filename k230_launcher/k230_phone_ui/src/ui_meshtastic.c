@@ -53,6 +53,10 @@
 #define MESHTASTIC_PREF_AUTOSTART "meshtastic.autostart"
 #define MESHTASTIC_PREF_POSITION "meshtastic.position"
 #define MESHTASTIC_PREF_POSITION_INTERVAL "meshtastic.position_interval"
+#define MESHTASTIC_PREF_TELEMETRY "meshtastic.telemetry"
+#define MESHTASTIC_PREF_TELEMETRY_ENV "meshtastic.telemetry_env"
+#define MESHTASTIC_PREF_TELEMETRY_DEVICE_INTERVAL "meshtastic.telemetry_device_interval"
+#define MESHTASTIC_PREF_TELEMETRY_ENV_INTERVAL "meshtastic.telemetry_env_interval"
 #define MESHTASTIC_DEFAULT_UI_REGION "EU_868"
 #define MESHTASTIC_DEFAULT_UI_PRESET "LONG_FAST"
 #define MESHTASTIC_QR_PREVIEW_FILE "/tmp/k230_mesh_qr_preview.rgb565"
@@ -95,9 +99,13 @@ static char mesh_from_node[24] = "0";
 static char mesh_to_node[24] = "0xffffffff";
 static char mesh_hop_limit[8] = "3";
 static char mesh_position_interval[8] = "900";
+static char mesh_telemetry_device_interval[8] = "300";
+static char mesh_telemetry_environment_interval[8] = "300";
 static int mesh_ack_enabled = 0;
 static int mesh_rebroadcast_enabled = 0;
 static int mesh_position_enabled = 1;
+static int mesh_telemetry_enabled = 1;
+static int mesh_environment_telemetry_enabled = 1;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_choice_overlay;
@@ -106,7 +114,7 @@ static lv_obj_t *mesh_channel_url_label;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
 static lv_obj_t *mesh_pairing_overlay;
-static lv_obj_t *mesh_settings_value_labels[16];
+static lv_obj_t *mesh_settings_value_labels[24];
 static char mesh_last_pairing_code[16];
 static char mesh_channel_url_text[1024];
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
@@ -144,6 +152,10 @@ typedef enum {
     MESH_FIELD_REBROADCAST,
     MESH_FIELD_POSITION,
     MESH_FIELD_POSITION_INTERVAL,
+    MESH_FIELD_TELEMETRY,
+    MESH_FIELD_TELEMETRY_INTERVAL,
+    MESH_FIELD_ENV_TELEMETRY,
+    MESH_FIELD_ENV_TELEMETRY_INTERVAL,
     MESH_FIELD_COUNT,
 } mesh_setting_field_t;
 
@@ -912,6 +924,25 @@ static void mesh_load_profile_prefs(void)
     }
     ui_prefs_get(MESHTASTIC_PREF_POSITION_INTERVAL, mesh_position_interval,
                  sizeof(mesh_position_interval), "900");
+    {
+        char telemetry[8];
+        ui_prefs_get(MESHTASTIC_PREF_TELEMETRY, telemetry, sizeof(telemetry),
+                     "1");
+        mesh_telemetry_enabled = strcmp(telemetry, "0") != 0;
+    }
+    {
+        char telemetry_env[8];
+        ui_prefs_get(MESHTASTIC_PREF_TELEMETRY_ENV, telemetry_env,
+                     sizeof(telemetry_env), "1");
+        mesh_environment_telemetry_enabled =
+            strcmp(telemetry_env, "0") != 0;
+    }
+    ui_prefs_get(MESHTASTIC_PREF_TELEMETRY_DEVICE_INTERVAL,
+                 mesh_telemetry_device_interval,
+                 sizeof(mesh_telemetry_device_interval), "300");
+    ui_prefs_get(MESHTASTIC_PREF_TELEMETRY_ENV_INTERVAL,
+                 mesh_telemetry_environment_interval,
+                 sizeof(mesh_telemetry_environment_interval), "300");
     mesh_normalize_power();
     mesh_normalize_hop();
     mesh_normalize_slot();
@@ -936,6 +967,14 @@ static void mesh_save_profile_prefs(void)
     ui_prefs_set(MESHTASTIC_PREF_POSITION,
                  mesh_position_enabled ? "1" : "0");
     ui_prefs_set(MESHTASTIC_PREF_POSITION_INTERVAL, mesh_position_interval);
+    ui_prefs_set(MESHTASTIC_PREF_TELEMETRY,
+                 mesh_telemetry_enabled ? "1" : "0");
+    ui_prefs_set(MESHTASTIC_PREF_TELEMETRY_ENV,
+                 mesh_environment_telemetry_enabled ? "1" : "0");
+    ui_prefs_set(MESHTASTIC_PREF_TELEMETRY_DEVICE_INTERVAL,
+                 mesh_telemetry_device_interval);
+    ui_prefs_set(MESHTASTIC_PREF_TELEMETRY_ENV_INTERVAL,
+                 mesh_telemetry_environment_interval);
 }
 
 int ui_meshtastic_autostart_enabled(void)
@@ -1708,6 +1747,7 @@ static void mesh_refresh_status(void)
         char gps[24];
         char sats[16];
         char position_tx[16];
+        char telemetry_tx[16];
 
         mesh_status_field(mesh_status_text, "queued_count", queued_count,
                           sizeof(queued_count), "0");
@@ -1729,13 +1769,15 @@ static void mesh_refresh_status(void)
         mesh_status_field(mesh_status_text, "sats", sats, sizeof(sats), "0");
         mesh_status_field(mesh_status_text, "position_tx", position_tx,
                           sizeof(position_tx), "0");
+        mesh_status_field(mesh_status_text, "telemetry_tx", telemetry_tx,
+                          sizeof(telemetry_tx), "0");
         snprintf(detail, sizeof(detail),
-                 "%s -> %s  GPS %s/%s S%s TX%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
+                 "%s -> %s  GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
                  mesh_node_name,
                  mesh_to_text_is_broadcast(mesh_to_node) ? "broadcast" :
                  mesh_to_node,
                  nrf9151, gps, sats, position_tx,
-                 queued_count, mesh_ack_enabled ? "on" : "off",
+                 telemetry_tx, queued_count, mesh_ack_enabled ? "on" : "off",
                  ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
                  ack_drop);
         lv_label_set_text(mesh_detail_label, detail);
@@ -1795,7 +1837,10 @@ static void mesh_start_event_cb(lv_event_t *event)
     char relay_option[24];
     char position_option[80];
     char position_interval_arg[16];
-    char command[1280];
+    char telemetry_option[160];
+    char telemetry_device_interval_arg[16];
+    char telemetry_environment_interval_arg[16];
+    char command[1536];
     int rc;
 
     (void)event;
@@ -1851,26 +1896,39 @@ static void mesh_start_event_cb(lv_event_t *event)
     snprintf(position_option, sizeof(position_option), "%s --position-interval %s ",
              mesh_position_enabled ? "--position" : "--no-position",
              position_interval_arg);
+    mesh_safe_or_default(telemetry_device_interval_arg,
+                         sizeof(telemetry_device_interval_arg),
+                         mesh_telemetry_device_interval, "300");
+    mesh_safe_or_default(telemetry_environment_interval_arg,
+                         sizeof(telemetry_environment_interval_arg),
+                         mesh_telemetry_environment_interval, "300");
+    snprintf(telemetry_option, sizeof(telemetry_option),
+             "%s --telemetry-interval %s %s --env-telemetry-interval %s ",
+             mesh_telemetry_enabled ? "--telemetry" : "--no-telemetry",
+             telemetry_device_interval_arg,
+             mesh_environment_telemetry_enabled ? "--env-telemetry" :
+                                                  "--no-env-telemetry",
+             telemetry_environment_interval_arg);
     if(mesh_channel_name[0]) {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s"
+                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, channel_arg, slot_option, psk_arg,
                  power_option, node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
-                 position_option);
+                 position_option, telemetry_option);
     } else {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s"
+                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, slot_option, psk_arg, power_option,
                  node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
-                 position_option);
+                 position_option, telemetry_option);
     }
     rc = system(command);
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
@@ -1998,6 +2056,14 @@ static const char *mesh_setting_name(mesh_setting_field_t field)
         return "Position";
     case MESH_FIELD_POSITION_INTERVAL:
         return "Position interval";
+    case MESH_FIELD_TELEMETRY:
+        return "Device telemetry";
+    case MESH_FIELD_TELEMETRY_INTERVAL:
+        return "Device telemetry interval";
+    case MESH_FIELD_ENV_TELEMETRY:
+        return "Environment telemetry";
+    case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
+        return "Environment telemetry interval";
     default:
         return "Setting";
     }
@@ -2015,6 +2081,10 @@ static int mesh_setting_uses_choice(mesh_setting_field_t field)
     case MESH_FIELD_REBROADCAST:
     case MESH_FIELD_POSITION:
     case MESH_FIELD_POSITION_INTERVAL:
+    case MESH_FIELD_TELEMETRY:
+    case MESH_FIELD_TELEMETRY_INTERVAL:
+    case MESH_FIELD_ENV_TELEMETRY:
+    case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
         return 1;
     default:
         return 0;
@@ -2080,6 +2150,35 @@ static const char *mesh_setting_value(mesh_setting_field_t field,
             snprintf(buf, len, "60 min");
         } else {
             snprintf(buf, len, "15 min");
+        }
+        return buf;
+    case MESH_FIELD_TELEMETRY:
+        snprintf(buf, len, "%s", mesh_telemetry_enabled ? "On" : "Off");
+        return buf;
+    case MESH_FIELD_TELEMETRY_INTERVAL:
+        if(strcmp(mesh_telemetry_device_interval, "900") == 0) {
+            snprintf(buf, len, "15 min");
+        } else if(strcmp(mesh_telemetry_device_interval, "1800") == 0) {
+            snprintf(buf, len, "30 min");
+        } else if(strcmp(mesh_telemetry_device_interval, "3600") == 0) {
+            snprintf(buf, len, "60 min");
+        } else {
+            snprintf(buf, len, "5 min");
+        }
+        return buf;
+    case MESH_FIELD_ENV_TELEMETRY:
+        snprintf(buf, len, "%s",
+                 mesh_environment_telemetry_enabled ? "On" : "Off");
+        return buf;
+    case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
+        if(strcmp(mesh_telemetry_environment_interval, "900") == 0) {
+            snprintf(buf, len, "15 min");
+        } else if(strcmp(mesh_telemetry_environment_interval, "1800") == 0) {
+            snprintf(buf, len, "30 min");
+        } else if(strcmp(mesh_telemetry_environment_interval, "3600") == 0) {
+            snprintf(buf, len, "60 min");
+        } else {
+            snprintf(buf, len, "5 min");
         }
         return buf;
     default:
@@ -2247,6 +2346,15 @@ static int mesh_choice_is_selected(mesh_setting_field_t field,
         return mesh_position_enabled == (strcmp(value, "0") != 0);
     case MESH_FIELD_POSITION_INTERVAL:
         return strcmp(mesh_position_interval, value) == 0;
+    case MESH_FIELD_TELEMETRY:
+        return mesh_telemetry_enabled == (strcmp(value, "0") != 0);
+    case MESH_FIELD_TELEMETRY_INTERVAL:
+        return strcmp(mesh_telemetry_device_interval, value) == 0;
+    case MESH_FIELD_ENV_TELEMETRY:
+        return mesh_environment_telemetry_enabled ==
+               (strcmp(value, "0") != 0);
+    case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
+        return strcmp(mesh_telemetry_environment_interval, value) == 0;
     default:
         return 0;
     }
@@ -2288,12 +2396,16 @@ static const char *mesh_choice_value_at(mesh_setting_field_t field, int index)
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
     case MESH_FIELD_POSITION:
+    case MESH_FIELD_TELEMETRY:
+    case MESH_FIELD_ENV_TELEMETRY:
         if(index >= 0 && index < (int)(sizeof(mesh_bool_choices) /
            sizeof(mesh_bool_choices[0]))) {
             return mesh_bool_choices[index].value;
         }
         break;
     case MESH_FIELD_POSITION_INTERVAL:
+    case MESH_FIELD_TELEMETRY_INTERVAL:
+    case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
         if(index >= 0 && index < (int)(sizeof(mesh_position_interval_choices) /
            sizeof(mesh_position_interval_choices[0]))) {
             return mesh_position_interval_choices[index].value;
@@ -2359,6 +2471,22 @@ static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
     case MESH_FIELD_POSITION_INTERVAL:
         mesh_safe_or_default(mesh_position_interval,
                              sizeof(mesh_position_interval), value, "900");
+        break;
+    case MESH_FIELD_TELEMETRY:
+        mesh_telemetry_enabled = strcmp(value, "0") != 0;
+        break;
+    case MESH_FIELD_TELEMETRY_INTERVAL:
+        mesh_safe_or_default(mesh_telemetry_device_interval,
+                             sizeof(mesh_telemetry_device_interval), value,
+                             "300");
+        break;
+    case MESH_FIELD_ENV_TELEMETRY:
+        mesh_environment_telemetry_enabled = strcmp(value, "0") != 0;
+        break;
+    case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
+        mesh_safe_or_default(mesh_telemetry_environment_interval,
+                             sizeof(mesh_telemetry_environment_interval),
+                             value, "300");
         break;
     default:
         return;
@@ -2432,8 +2560,12 @@ static const char *mesh_choice_label_at(mesh_setting_field_t field, int index)
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
     case MESH_FIELD_POSITION:
+    case MESH_FIELD_TELEMETRY:
+    case MESH_FIELD_ENV_TELEMETRY:
         return mesh_bool_choices[index].label;
     case MESH_FIELD_POSITION_INTERVAL:
+    case MESH_FIELD_TELEMETRY_INTERVAL:
+    case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
         return mesh_position_interval_choices[index].label;
     default:
         return "";
@@ -2456,8 +2588,12 @@ static int mesh_choice_count(mesh_setting_field_t field)
     case MESH_FIELD_ACK:
     case MESH_FIELD_REBROADCAST:
     case MESH_FIELD_POSITION:
+    case MESH_FIELD_TELEMETRY:
+    case MESH_FIELD_ENV_TELEMETRY:
         return (int)(sizeof(mesh_bool_choices) / sizeof(mesh_bool_choices[0]));
     case MESH_FIELD_POSITION_INTERVAL:
+    case MESH_FIELD_TELEMETRY_INTERVAL:
+    case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
         return (int)(sizeof(mesh_position_interval_choices) /
                      sizeof(mesh_position_interval_choices[0]));
     default:
