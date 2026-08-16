@@ -24,6 +24,8 @@ NODE_A=""
 NODE_B=""
 OFFICIAL_NODE="${OFFICIAL_NODE:-}"
 RUN_POSITION=1
+RUN_NODEINFO=1
+RUN_REMOTE_TRACEROUTE=1
 FAILURES=0
 STEP_INDEX=0
 
@@ -58,6 +60,9 @@ Options:
                           Default: 2.
   --official-node NODE    Official device node ID for K230-to-official ACK tests.
   --skip-position         Skip position requests when GPS is unavailable.
+  --skip-nodeinfo         Skip K230-originated NodeInfo request checks.
+  --skip-traceroute-request
+                          Skip K230-originated traceroute request checks.
   -h, --help              Show this help.
 
 Environment:
@@ -489,6 +494,14 @@ while [[ $# -gt 0 ]]; do
             RUN_POSITION=0
             shift
             ;;
+        --skip-nodeinfo)
+            RUN_NODEINFO=0
+            shift
+            ;;
+        --skip-traceroute-request)
+            RUN_REMOTE_TRACEROUTE=0
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -537,14 +550,18 @@ LOG_B="${LOG_DIR%/}/meshtastic_official_cli_matrix_${TS}_${K230_B//[^A-Za-z0-9]/
             "${OFFICIAL_NODE}" "${TEST_TEXT} a-to-official ${TS}"
         run_k230_send_ack_step "b-to-official-text-ack" "${K230_B}" \
             "${OFFICIAL_NODE}" "${TEST_TEXT} b-to-official ${TS}"
-        run_k230_remote_request_step "a-to-official-nodeinfo-request" \
-            "${K230_A}" "${OFFICIAL_NODE}" "nodeinfo"
-        run_k230_remote_request_step "b-to-official-nodeinfo-request" \
-            "${K230_B}" "${OFFICIAL_NODE}" "nodeinfo"
-        run_k230_remote_request_step "a-to-official-traceroute-request" \
-            "${K230_A}" "${OFFICIAL_NODE}" "traceroute"
-        run_k230_remote_request_step "b-to-official-traceroute-request" \
-            "${K230_B}" "${OFFICIAL_NODE}" "traceroute"
+        if [[ "${RUN_NODEINFO}" -ne 0 ]]; then
+            run_k230_remote_request_step "a-to-official-nodeinfo-request" \
+                "${K230_A}" "${OFFICIAL_NODE}" "nodeinfo"
+            run_k230_remote_request_step "b-to-official-nodeinfo-request" \
+                "${K230_B}" "${OFFICIAL_NODE}" "nodeinfo"
+        fi
+        if [[ "${RUN_REMOTE_TRACEROUTE}" -ne 0 ]]; then
+            run_k230_remote_request_step "a-to-official-traceroute-request" \
+                "${K230_A}" "${OFFICIAL_NODE}" "traceroute"
+            run_k230_remote_request_step "b-to-official-traceroute-request" \
+                "${K230_B}" "${OFFICIAL_NODE}" "traceroute"
+        fi
     fi
     run_matrix_step "a-device-telemetry" --dest "${NODE_A}" --request-telemetry
     run_matrix_step "b-device-telemetry" --dest "${NODE_B}" --request-telemetry
