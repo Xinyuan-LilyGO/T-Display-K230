@@ -21,6 +21,7 @@ K230_A=""
 K230_B=""
 NODE_A=""
 NODE_B=""
+OFFICIAL_NODE="${OFFICIAL_NODE:-}"
 RUN_POSITION=1
 FAILURES=0
 STEP_INDEX=0
@@ -35,6 +36,7 @@ two already-running K230 Meshtastic daemons:
   - reads node IDs from each K230 daemon status
   - lists nodes through the official serial device
   - sends reliable text from the official device to each K230
+  - optionally sends reliable text from each K230 to the official device
   - requests device telemetry from each K230
   - optionally requests position from each K230
   - runs traceroute from the official device to each K230
@@ -49,6 +51,7 @@ Options:
   --timeout SEC           Remote operation timeout. Default: 70.
   --step-delay SEC        Delay between LoRa operations. Default: 8.
   --traceroute-retries N  Retry traceroute steps after a timeout. Default: 2.
+  --official-node NODE    Official device node ID for K230-to-official ACK tests.
   --skip-position         Skip position requests when GPS is unavailable.
   -h, --help              Show this help.
 
@@ -60,6 +63,7 @@ Environment:
   LOG_DIR=/tmp
   STEP_DELAY=8
   TRACEROUTE_RETRIES=2
+  OFFICIAL_NODE=!050da224
 USAGE
 }
 
@@ -95,6 +99,18 @@ node_cli_id() {
     node="${node#!}"
     node="${node#0x}"
     printf '!%08x' "0x${node}"
+}
+
+node_probe_id() {
+    local node="$1"
+    node="${node#!}"
+    node="${node#0x}"
+    printf '0x%08x' "0x${node}"
+}
+
+shell_quote() {
+    local value="$1"
+    printf "'%s'" "${value//\'/\'\\\'\'}"
 }
 
 run_cli() {
@@ -160,6 +176,63 @@ run_matrix_step_retry() {
     FAILURES=$((FAILURES + 1))
 }
 
+run_k230_send_ack_step() {
+    local name="$1"
+    local host="$2"
+    local target="$3"
+    local text="$4"
+    local target_probe
+    local quoted_target
+    local quoted_text
+    local response
+    local chat
+    local line
+    local attempt
+
+    echo
+    echo "== ${name} =="
+    if [[ "${STEP_INDEX}" -gt 0 && "${STEP_DELAY}" -gt 0 ]]; then
+        echo "settle=${STEP_DELAY}s"
+        sleep "${STEP_DELAY}"
+    fi
+    STEP_INDEX=$((STEP_INDEX + 1))
+    target_probe="$(node_probe_id "${target}")"
+    quoted_target="$(shell_quote "${target_probe}")"
+    quoted_text="$(shell_quote "${text}")"
+    echo "target=${target_probe}"
+    echo "text=${text}"
+    if ! response="$(ssh_run "${host}" "${PROBE} --cmd-send-to-ack ${quoted_target} ${quoted_text} 2>/dev/null")"; then
+        echo "RESULT ${name}: FAIL queue-command"
+        FAILURES=$((FAILURES + 1))
+        return 0
+    fi
+    echo "${response}"
+    if ! printf '%s\n' "${response}" | grep -q '^OK queued'; then
+        echo "RESULT ${name}: FAIL queue-response"
+        FAILURES=$((FAILURES + 1))
+        return 0
+    fi
+    for attempt in $(seq 1 8); do
+        sleep 5
+        chat="$(ssh_run "${host}" "${PROBE} --cmd-chat 2>/dev/null" || true)"
+        line="$(printf '%s\n' "${chat}" | grep -F "${text}" | tail -1 || true)"
+        if [[ -n "${line}" ]]; then
+            echo "chat=${line}"
+            if printf '%s\n' "${line}" | grep -q 'ack=ack'; then
+                echo "RESULT ${name}: PASS attempt=${attempt}"
+                return 0
+            fi
+            if printf '%s\n' "${line}" | grep -Eq 'ack=(timeout|dropped)'; then
+                echo "RESULT ${name}: FAIL ${line}"
+                FAILURES=$((FAILURES + 1))
+                return 0
+            fi
+        fi
+    done
+    echo "RESULT ${name}: FAIL ack-timeout"
+    FAILURES=$((FAILURES + 1))
+}
+
 tail_k230_log() {
     local host="$1"
     local out="$2"
@@ -210,6 +283,11 @@ while [[ $# -gt 0 ]]; do
             TRACEROUTE_RETRIES="$2"
             shift 2
             ;;
+        --official-node)
+            [[ $# -ge 2 ]] || die "--official-node requires a node ID"
+            OFFICIAL_NODE="$2"
+            shift 2
+            ;;
         --skip-position)
             RUN_POSITION=0
             shift
@@ -248,12 +326,21 @@ LOG_B="${LOG_DIR%/}/meshtastic_official_cli_matrix_${TS}_${K230_B//[^A-Za-z0-9]/
     echo "port=${PORT}"
     echo "k230_a=${K230_A} node=${NODE_A}"
     echo "k230_b=${K230_B} node=${NODE_B}"
+    if [[ -n "${OFFICIAL_NODE}" ]]; then
+        echo "official_node=$(node_cli_id "${OFFICIAL_NODE}")"
+    fi
 
     run_matrix_step "nodes" --nodes
     run_matrix_step "official-to-a-text-ack" \
         --dest "${NODE_A}" --sendtext "${TEST_TEXT} official-to-a ${TS}" --ack
     run_matrix_step "official-to-b-text-ack" \
         --dest "${NODE_B}" --sendtext "${TEST_TEXT} official-to-b ${TS}" --ack
+    if [[ -n "${OFFICIAL_NODE}" ]]; then
+        run_k230_send_ack_step "a-to-official-text-ack" "${K230_A}" \
+            "${OFFICIAL_NODE}" "${TEST_TEXT} a-to-official ${TS}"
+        run_k230_send_ack_step "b-to-official-text-ack" "${K230_B}" \
+            "${OFFICIAL_NODE}" "${TEST_TEXT} b-to-official ${TS}"
+    fi
     run_matrix_step "a-device-telemetry" --dest "${NODE_A}" --request-telemetry
     run_matrix_step "b-device-telemetry" --dest "${NODE_B}" --request-telemetry
     if [[ "${RUN_POSITION}" -ne 0 ]]; then
