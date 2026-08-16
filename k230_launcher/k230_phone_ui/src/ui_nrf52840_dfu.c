@@ -57,11 +57,13 @@ static lv_obj_t *nrf_dfu_overlay;
 static lv_obj_t *nrf_dfu_overlay_status;
 static lv_obj_t *nrf_dfu_overlay_bar;
 static lv_obj_t *nrf_dfu_overlay_percent;
+static lv_obj_t *nrf_dfu_overlay_close_btn;
 
 static nrf_dfu_file_t nrf_dfu_files[NRF_DFU_MAX_FILES];
 static int nrf_dfu_file_count;
 static int nrf_dfu_selected_index = -1;
 static int nrf_dfu_running;
+static int nrf_dfu_overlay_hold;
 static int nrf_dfu_progress;
 static int nrf_dfu_last_rc;
 static char nrf_dfu_status_text[192] = "Ready";
@@ -629,6 +631,16 @@ static void nrf_dfu_dialog_close_event_cb(lv_event_t *event)
     }
 }
 
+static void nrf_dfu_overlay_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+
+    pthread_mutex_lock(&nrf_dfu_lock);
+    nrf_dfu_overlay_hold = 0;
+    pthread_mutex_unlock(&nrf_dfu_lock);
+    nrf_dfu_update_ui();
+}
+
 static void nrf_dfu_select_dialog_delete_cb(lv_event_t *event)
 {
     (void)event;
@@ -815,21 +827,6 @@ static void *nrf_dfu_worker(void *arg)
         req->package_path,
         NULL
     };
-    char *dfu_argv_recovery[] = {
-        (char *)NRF_DFU_TOOL,
-        (char *)"--no-trigger",
-        (char *)"--baud", (char *)"115200",
-        (char *)"--post-start-delay-ms", (char *)"0",
-        (char *)"--post-init-delay-ms", (char *)"0",
-        (char *)"--ack-timeout-ms", (char *)"4000",
-        (char *)"--retries", (char *)"8",
-        (char *)"--chunk-size", (char *)"512",
-        (char *)"--throttle-every", (char *)"0",
-        (char *)"--throttle-ms", (char *)"0",
-        (char *)"-p", (char *)NRF_DFU_PORT,
-        req->package_path,
-        NULL
-    };
     char *verify_argv[] = {
         (char *)NRF_DFU_TOOL,
         (char *)"--at", (char *)"AT+VER?",
@@ -843,7 +840,8 @@ static void *nrf_dfu_worker(void *arg)
     char msg[224];
     int probe_rc;
     int rc;
-    int use_recovery;
+    int probe_attempt;
+    int probed_version;
 
     pthread_mutex_lock(&nrf_dfu_lock);
     nrf_dfu_set_status_locked("Preparing update...", "Preparing", 0, 0);
@@ -897,39 +895,53 @@ static void *nrf_dfu_worker(void *arg)
     if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
         nrf_dfu_append_log("failed to stop Meshtastic worker");
     }
-    usleep(250000);
+    usleep(600000);
 
     pthread_mutex_lock(&nrf_dfu_lock);
     nrf_dfu_set_status_locked("Checking nRF52840...", "Probing", 2, 0);
     pthread_mutex_unlock(&nrf_dfu_lock);
-    probe_rc = nrf_dfu_run_argv(probe_argv, 0, response, sizeof(response));
-    use_recovery = probe_rc != 0 || strstr(response, "OK") == NULL;
+    probe_rc = -1;
     current_version[0] = '\0';
-    if(!use_recovery &&
-       nrf_dfu_extract_at_version(response, current_version,
-                                  sizeof(current_version)) == 0) {
+    probed_version = 0;
+    for(probe_attempt = 1; probe_attempt <= 4; ++probe_attempt) {
+        response[0] = '\0';
+        probe_rc = nrf_dfu_run_argv(probe_argv, 0, response, sizeof(response));
+        if(probe_rc == 0 && strstr(response, "OK") != NULL &&
+           nrf_dfu_extract_at_version(response, current_version,
+                                      sizeof(current_version)) == 0) {
+            probed_version = 1;
+            break;
+        }
+        snprintf(msg, sizeof(msg), "AT version probe retry %d/4: %s",
+                 probe_attempt, response[0] ? response : "no response");
+        nrf_dfu_append_log(msg);
+        usleep(300000);
+    }
+    if(probed_version) {
         pthread_mutex_lock(&nrf_dfu_lock);
         snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version),
                  "%s", current_version);
         pthread_mutex_unlock(&nrf_dfu_lock);
         if(strcmp(current_version, target_version) == 0) {
-            snprintf(msg, sizeof(msg), "Version already installed: %s",
+            snprintf(msg, sizeof(msg), "Firmware already up to date: %s",
                      current_version);
             pthread_mutex_lock(&nrf_dfu_lock);
-            nrf_dfu_set_status_locked("Version already installed", "Ready",
-                                      100, -1);
+            nrf_dfu_set_status_locked("Firmware already up to date", "Ready",
+                                      100, 0);
             nrf_dfu_append_log_locked(msg);
+            nrf_dfu_overlay_hold = 1;
             nrf_dfu_running = 0;
             pthread_mutex_unlock(&nrf_dfu_lock);
             free(req);
             app_request_fast_refresh();
             return NULL;
         }
-    } else if(!use_recovery) {
+    } else {
         pthread_mutex_lock(&nrf_dfu_lock);
         snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version), "--");
-        nrf_dfu_set_status_locked("Current version unavailable", "Failed", 0,
-                                  -1);
+        nrf_dfu_set_status_locked("nRF52840 AT response unavailable", "Failed",
+                                  0, -1);
+        nrf_dfu_overlay_hold = 1;
         nrf_dfu_running = 0;
         pthread_mutex_unlock(&nrf_dfu_lock);
         free(req);
@@ -938,18 +950,11 @@ static void *nrf_dfu_worker(void *arg)
     }
 
     pthread_mutex_lock(&nrf_dfu_lock);
-    if(use_recovery) {
-        snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version), "--");
-        nrf_dfu_set_status_locked("No AT response, trying bootloader recovery",
-                                  "Recovery", 4, 0);
-    } else {
-        nrf_dfu_set_status_locked("AT app detected, entering DFU",
-                                  "AT+DFU", 4, 0);
-    }
+    nrf_dfu_set_status_locked("AT app detected, entering DFU",
+                              "AT+DFU", 4, 0);
     pthread_mutex_unlock(&nrf_dfu_lock);
 
-    rc = nrf_dfu_run_argv(use_recovery ? dfu_argv_recovery : dfu_argv_trigger,
-                          1, NULL, 0);
+    rc = nrf_dfu_run_argv(dfu_argv_trigger, 1, NULL, 0);
 
     if(rc == 0) {
         pthread_mutex_lock(&nrf_dfu_lock);
@@ -964,16 +969,19 @@ static void *nrf_dfu_worker(void *arg)
             snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version),
                      "%s", current_version);
             nrf_dfu_set_status_locked("Update successful", "Ready", 100, 0);
+            nrf_dfu_overlay_hold = 1;
             pthread_mutex_unlock(&nrf_dfu_lock);
         } else {
             pthread_mutex_lock(&nrf_dfu_lock);
             nrf_dfu_set_status_locked("Update written, verify later", "Ready",
                                       100, 0);
+            nrf_dfu_overlay_hold = 1;
             pthread_mutex_unlock(&nrf_dfu_lock);
         }
     } else {
         pthread_mutex_lock(&nrf_dfu_lock);
         nrf_dfu_set_status_locked("Update failed, check log", "Failed", -1, rc);
+        nrf_dfu_overlay_hold = 1;
         pthread_mutex_unlock(&nrf_dfu_lock);
     }
 
@@ -1003,6 +1011,7 @@ static void nrf_dfu_start_confirmed(void)
         return;
     }
     nrf_dfu_running = 1;
+    nrf_dfu_overlay_hold = 0;
     nrf_dfu_progress = 0;
     nrf_dfu_last_rc = 0;
     nrf_dfu_set_status_locked("Starting update...", "Starting", 0, 0);
@@ -1132,6 +1141,7 @@ static void nrf_dfu_start_event_cb(lv_event_t *event)
 static void nrf_dfu_update_ui(void)
 {
     int running;
+    int hold;
     int progress;
     int rc;
     char status[192];
@@ -1142,6 +1152,7 @@ static void nrf_dfu_update_ui(void)
 
     pthread_mutex_lock(&nrf_dfu_lock);
     running = nrf_dfu_running;
+    hold = nrf_dfu_overlay_hold;
     progress = nrf_dfu_progress;
     rc = nrf_dfu_last_rc;
     snprintf(status, sizeof(status), "%s", nrf_dfu_status_text);
@@ -1219,7 +1230,7 @@ static void nrf_dfu_update_ui(void)
     }
 
     if(nrf_dfu_overlay) {
-        if(running) {
+        if(running || hold) {
             lv_obj_clear_flag(nrf_dfu_overlay, LV_OBJ_FLAG_HIDDEN);
             if(nrf_dfu_overlay_status) {
                 lv_label_set_text(nrf_dfu_overlay_status, ui_tr(status));
@@ -1231,6 +1242,15 @@ static void nrf_dfu_update_ui(void)
                 char percent[48];
                 snprintf(percent, sizeof(percent), "%d%%", progress);
                 lv_label_set_text(nrf_dfu_overlay_percent, percent);
+            }
+            if(nrf_dfu_overlay_close_btn) {
+                if(running) {
+                    lv_obj_add_flag(nrf_dfu_overlay_close_btn,
+                                    LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_clear_flag(nrf_dfu_overlay_close_btn,
+                                      LV_OBJ_FLAG_HIDDEN);
+                }
             }
         } else {
             lv_obj_add_flag(nrf_dfu_overlay, LV_OBJ_FLAG_HIDDEN);
@@ -1280,10 +1300,11 @@ static void nrf_dfu_create_overlay(lv_obj_t *scr)
     lv_obj_t *card;
     lv_obj_t *title;
     lv_obj_t *hint;
+    lv_obj_t *label;
     int w;
     int h;
     int card_w = ui_is_landscape() ? 560 : 472;
-    int card_h = 300;
+    int card_h = 330;
 
     (void)scr;
     nrf_dfu_screen_metrics(&w, &h);
@@ -1340,6 +1361,24 @@ static void nrf_dfu_create_overlay(lv_obj_t *scr)
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 214);
+
+    nrf_dfu_overlay_close_btn = lv_obj_create(card);
+    lv_obj_set_size(nrf_dfu_overlay_close_btn, 160, 46);
+    lv_obj_align(nrf_dfu_overlay_close_btn, LV_ALIGN_BOTTOM_MID, 0, -22);
+    lv_obj_set_style_radius(nrf_dfu_overlay_close_btn, 8, 0);
+    lv_obj_set_style_border_width(nrf_dfu_overlay_close_btn, 0, 0);
+    lv_obj_set_style_bg_color(nrf_dfu_overlay_close_btn,
+                              lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_opa(nrf_dfu_overlay_close_btn, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(nrf_dfu_overlay_close_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(nrf_dfu_overlay_close_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(nrf_dfu_overlay_close_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(nrf_dfu_overlay_close_btn,
+                        nrf_dfu_overlay_close_event_cb, LV_EVENT_CLICKED, NULL);
+    label = ui_label(nrf_dfu_overlay_close_btn, ui_tr("Close"),
+                     &lv_font_montserrat_18, 0xFFFFFF);
+    lv_obj_center(label);
+    ui_make_click_forwarder(label);
 }
 
 void ui_nrf52840_dfu_create(lv_obj_t *scr)
@@ -1501,6 +1540,8 @@ void ui_nrf52840_dfu_cleanup(void)
     nrf_dfu_overlay_status = NULL;
     nrf_dfu_overlay_bar = NULL;
     nrf_dfu_overlay_percent = NULL;
+    nrf_dfu_overlay_close_btn = NULL;
+    nrf_dfu_overlay_hold = 0;
 }
 
 int ui_nrf52840_dfu_is_running(void)
