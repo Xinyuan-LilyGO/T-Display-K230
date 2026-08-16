@@ -17,6 +17,7 @@ LOG_DIR="${LOG_DIR:-/tmp}"
 TEST_TEXT="${TEST_TEXT:-k230 official cli matrix}"
 STEP_DELAY="${STEP_DELAY:-8}"
 TRACEROUTE_RETRIES="${TRACEROUTE_RETRIES:-2}"
+REMOTE_REQUEST_RETRIES="${REMOTE_REQUEST_RETRIES:-2}"
 K230_A=""
 K230_B=""
 NODE_A=""
@@ -37,6 +38,7 @@ two already-running K230 Meshtastic daemons:
   - lists nodes through the official serial device
   - sends reliable text from the official device to each K230
   - optionally sends reliable text from each K230 to the official device
+  - optionally asks the official device for NodeInfo and traceroute from K230
   - requests device telemetry from each K230
   - optionally requests position from each K230
   - runs traceroute from the official device to each K230
@@ -51,6 +53,9 @@ Options:
   --timeout SEC           Remote operation timeout. Default: 70.
   --step-delay SEC        Delay between LoRa operations. Default: 8.
   --traceroute-retries N  Retry traceroute steps after a timeout. Default: 2.
+  --remote-request-retries N
+                          Retry K230-originated remote request steps after a timeout.
+                          Default: 2.
   --official-node NODE    Official device node ID for K230-to-official ACK tests.
   --skip-position         Skip position requests when GPS is unavailable.
   -h, --help              Show this help.
@@ -63,6 +68,7 @@ Environment:
   LOG_DIR=/tmp
   STEP_DELAY=8
   TRACEROUTE_RETRIES=2
+  REMOTE_REQUEST_RETRIES=2
   OFFICIAL_NODE=!050da224
 USAGE
 }
@@ -233,6 +239,122 @@ run_k230_send_ack_step() {
     FAILURES=$((FAILURES + 1))
 }
 
+node_line_for() {
+    local nodes="$1"
+    local target="$2"
+    local target_probe
+
+    target_probe="$(node_probe_id "${target}")"
+    printf '%s\n' "${nodes}" | awk -v node="${target_probe}" '
+        tolower($1) == tolower(node) {
+            print
+            exit
+        }
+    '
+}
+
+node_rx_from_line() {
+    local line="$1"
+
+    printf '%s\n' "${line}" | tr ' ' '\n' |
+        awk -F= '$1 == "rx" { print $2; exit }'
+}
+
+node_line_has_request_result() {
+    local request_type="$1"
+    local line="$2"
+
+    case "${request_type}" in
+        nodeinfo)
+            [[ "${line}" == *"name="* && "${line}" != *"name=-"* ]]
+            ;;
+        traceroute)
+            [[ "${line}" == *"trace="* && "${line}" != *"trace=-"* ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+run_k230_remote_request_step() {
+    local name="$1"
+    local host="$2"
+    local target="$3"
+    local request_type="$4"
+    local target_probe
+    local quoted_target
+    local before_nodes
+    local before_line
+    local before_rx
+    local response
+    local nodes
+    local line
+    local rx
+    local attempt
+    local request_attempt
+    local max_request_attempts
+
+    echo
+    echo "== ${name} =="
+    if [[ "${STEP_INDEX}" -gt 0 && "${STEP_DELAY}" -gt 0 ]]; then
+        echo "settle=${STEP_DELAY}s"
+        sleep "${STEP_DELAY}"
+    fi
+    STEP_INDEX=$((STEP_INDEX + 1))
+
+    target_probe="$(node_probe_id "${target}")"
+    quoted_target="$(shell_quote "${target_probe}")"
+    before_nodes="$(ssh_run "${host}" "${PROBE} --cmd-nodes 2>/dev/null" || true)"
+    before_line="$(node_line_for "${before_nodes}" "${target_probe}")"
+    before_rx="$(node_rx_from_line "${before_line}")"
+    if [[ ! "${before_rx}" =~ ^[0-9]+$ ]]; then
+        before_rx=0
+    fi
+    echo "target=${target_probe}"
+    echo "request=${request_type}"
+    echo "before_rx=${before_rx}"
+    max_request_attempts=$((REMOTE_REQUEST_RETRIES + 1))
+    for request_attempt in $(seq 1 "${max_request_attempts}"); do
+        echo "request_attempt=${request_attempt}/${max_request_attempts}"
+        if ! response="$(ssh_run "${host}" "${PROBE} --cmd-request-${request_type} ${quoted_target} 2>/dev/null")"; then
+            echo "RESULT ${name}: FAIL queue-command"
+            FAILURES=$((FAILURES + 1))
+            return 0
+        fi
+        echo "${response}"
+        if ! printf '%s\n' "${response}" | grep -q '^OK request queued'; then
+            echo "RESULT ${name}: FAIL queue-response"
+            FAILURES=$((FAILURES + 1))
+            return 0
+        fi
+        for attempt in $(seq 1 8); do
+            sleep 5
+            nodes="$(ssh_run "${host}" "${PROBE} --cmd-nodes 2>/dev/null" || true)"
+            line="$(node_line_for "${nodes}" "${target_probe}")"
+            rx="$(node_rx_from_line "${line}")"
+            if [[ "${rx}" =~ ^[0-9]+$ ]] &&
+               [[ "${rx}" -gt "${before_rx}" ]] &&
+               node_line_has_request_result "${request_type}" "${line}"; then
+                echo "node=${line}"
+                echo "RESULT ${name}: PASS request_attempt=${request_attempt} poll_attempt=${attempt}"
+                return 0
+            fi
+        done
+        if [[ "${request_attempt}" -lt "${max_request_attempts}" ]]; then
+            echo "RESULT ${name}: RETRY request_attempt=${request_attempt}"
+            if [[ "${STEP_DELAY}" -gt 0 ]]; then
+                sleep "${STEP_DELAY}"
+            fi
+        fi
+    done
+    echo "RESULT ${name}: FAIL request-timeout"
+    if [[ -n "${line:-}" ]]; then
+        echo "last_node=${line}"
+    fi
+    FAILURES=$((FAILURES + 1))
+}
+
 tail_k230_log() {
     local host="$1"
     local out="$2"
@@ -281,6 +403,11 @@ while [[ $# -gt 0 ]]; do
         --traceroute-retries)
             [[ $# -ge 2 ]] || die "--traceroute-retries requires a value"
             TRACEROUTE_RETRIES="$2"
+            shift 2
+            ;;
+        --remote-request-retries)
+            [[ $# -ge 2 ]] || die "--remote-request-retries requires a value"
+            REMOTE_REQUEST_RETRIES="$2"
             shift 2
             ;;
         --official-node)
@@ -340,6 +467,14 @@ LOG_B="${LOG_DIR%/}/meshtastic_official_cli_matrix_${TS}_${K230_B//[^A-Za-z0-9]/
             "${OFFICIAL_NODE}" "${TEST_TEXT} a-to-official ${TS}"
         run_k230_send_ack_step "b-to-official-text-ack" "${K230_B}" \
             "${OFFICIAL_NODE}" "${TEST_TEXT} b-to-official ${TS}"
+        run_k230_remote_request_step "a-to-official-nodeinfo-request" \
+            "${K230_A}" "${OFFICIAL_NODE}" "nodeinfo"
+        run_k230_remote_request_step "b-to-official-nodeinfo-request" \
+            "${K230_B}" "${OFFICIAL_NODE}" "nodeinfo"
+        run_k230_remote_request_step "a-to-official-traceroute-request" \
+            "${K230_A}" "${OFFICIAL_NODE}" "traceroute"
+        run_k230_remote_request_step "b-to-official-traceroute-request" \
+            "${K230_B}" "${OFFICIAL_NODE}" "traceroute"
     fi
     run_matrix_step "a-device-telemetry" --dest "${NODE_A}" --request-telemetry
     run_matrix_step "b-device-telemetry" --dest "${NODE_B}" --request-telemetry
