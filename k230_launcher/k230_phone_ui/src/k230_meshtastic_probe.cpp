@@ -38,7 +38,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.26"
+#define PROBE_VERSION "0.27"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 8U
@@ -11590,12 +11590,10 @@ static bool build_mesh_remote_request_frame(const probe_options_t &opts,
     case MESH_REMOTE_REQ_TRACEROUTE:
         portnum = MESHTASTIC_TRACEROUTE_APP;
         data_dest = req.to_node;
-        request_ack = true;
         break;
     case MESH_REMOTE_REQ_NEIGHBORINFO:
         portnum = MESHTASTIC_NEIGHBORINFO_APP;
         data_dest = req.to_node;
-        request_ack = true;
         break;
     default:
         return false;
