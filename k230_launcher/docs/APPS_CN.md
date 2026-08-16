@@ -31,6 +31,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `/root/recordings` | 录音文件 |
 | `/root/lorawan` | LoRaWAN 配置文件 |
 | `/root/notification` | 通知音效文件 |
+| `/root/nrf52840/firmware` | nRF52840 DFU 应用升级包 |
 
 需要从电脑管理这些文件时，可以打开 `MTP` 应用，将文件目录通过 USB 暴露给电脑
 
@@ -53,6 +54,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Halow` | 通过接在以太网口上的 Wi-Fi HaLow 链路，在两台设备之间发送或接收摄像头视频帧 | 将 HaLow 设备接到网口，先设置本机静态 IP，再输入对端 IP摄像头端点击 `Start TX`，显示端点击 `Start RX`分辨率档位为 `320x240`、`640x480`、`720p`，默认使用 `320x240`接收帧会保存到 `/root/videos/halow_rx` |
 | `Wi-Fi` | 扫描 Wi-Fi、保存密码、连接网络和自动回连 | 打开 Wi-Fi，点击网络名称，输入不少于 8 位的密码，等待连接结果 |
 | `Bluetooth` / 蓝牙 | 扫描有名称的 BLE 设备，连接设备，并显示 GATT 服务、特征和描述符 | 打开蓝牙，点击设备名称，确认连接后进入设备详情页 |
+| `nRF DFU` | 通过 K230 的 UART 给板载 nRF52840 更新 AT 固件 | 先打开 `MTP`，将 Adafruit/nrfutil 生成的应用 `.zip` 升级包放到 `/root/nrf52840/firmware`，回到 `nRF DFU` 选择固件包并点击升级。升级过程中界面会锁定并显示进度，不要断电。失败时查看 `/tmp/k230_nrf52840_dfu_ui.log` |
 | `MTP` | 开启 USB MTP 文件管理 | 点击开启后，通过 USB 连接电脑，管理照片、截图、音乐、视频、ROM 等文件 |
 | `Gallery` / 图库 | 以缩略图浏览照片，并全屏查看 | 点击缩略图查看照片，左右滑动切换上一张或下一张 |
 | `Screenshot` / 截图 | 将当前屏幕保存为 PNG 文件到 `/root/screenshots` | 点击主页 Screenshot 图标，或在硬件键盘上按 `FN + LILYGO`文件可通过 MTP 导出 |

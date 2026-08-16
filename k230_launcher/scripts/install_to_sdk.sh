@@ -64,7 +64,8 @@ install -D -m 0755 "$LAUNCHER_DIR/rootfs_overlay/etc/init.d/S99zz_k230_phone_ui"
 mkdir -p "$ROOTFS_DIR/root/music" "$ROOTFS_DIR/root/nes" "$ROOTFS_DIR/root/videos" \
     "$ROOTFS_DIR/root/photos" "$ROOTFS_DIR/root/screenshots" \
     "$ROOTFS_DIR/root/recordings" "$ROOTFS_DIR/root/lorawan" \
-    "$ROOTFS_DIR/root/meshtastic" "$ROOTFS_DIR/root/notification"
+    "$ROOTFS_DIR/root/meshtastic" "$ROOTFS_DIR/root/notification" \
+    "$ROOTFS_DIR/root/nrf52840/firmware"
 
 sync_media_dir() {
     local src="$1"

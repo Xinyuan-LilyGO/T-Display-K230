@@ -151,6 +151,7 @@
 #include "ui_meshtastic.h"
 #include "ui_mic_spectrum.h"
 #include "ui_nes.h"
+#include "ui_nrf52840_dfu.h"
 #include "ui_prefs.h"
 #include "ui_rtsp.h"
 #include "ui_settings.h"
@@ -497,6 +498,7 @@ static const app_item_t app_items[] = {
     {"Wi-Fi", "WiFi", 0x25C281, PAGE_WIFI},
     {"WiFi Test", "iperf", 0x10B981, PAGE_WIFI_IPERF},
     {"Bluetooth", "BT", 0x3B82F6, PAGE_BLE},
+    {"nRF DFU", "DFU", 0x3B82F6, PAGE_NRF52840_DFU},
     {"MTP", "MTP", 0x41C7C7, PAGE_FILES},
     {"Gallery", LV_SYMBOL_IMAGE, 0xEC4899, PAGE_GALLERY},
     {"Screenshot", LV_SYMBOL_IMAGE, 0x22C55E, PAGE_SCREENSHOT},
@@ -577,6 +579,8 @@ static const char *page_name(page_id_t page)
         return "Ethernet";
     case PAGE_BLE:
         return "Bluetooth";
+    case PAGE_NRF52840_DFU:
+        return "nRF52840 DFU";
     case PAGE_MUSIC:
         return "Music";
     case PAGE_VIDEO:
@@ -3381,6 +3385,9 @@ static void nav_to(page_id_t page)
 
 static void nav_back(void)
 {
+    if(current_page == PAGE_NRF52840_DFU && ui_nrf52840_dfu_is_running()) {
+        return;
+    }
     if(current_page == PAGE_NES && ui_nes_handle_back()) {
         return;
     }
@@ -8181,6 +8188,7 @@ static void cleanup_page_state(void)
     ui_rtsp_cleanup();
     ui_video_player_cleanup();
     ui_ble_cleanup();
+    ui_nrf52840_dfu_cleanup();
     ui_cellular_cleanup();
     ui_usb_modem_cleanup();
     ui_terminal_cleanup();
@@ -9130,6 +9138,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_BLE:
         ui_ble_create(scr);
+        break;
+    case PAGE_NRF52840_DFU:
+        ui_nrf52840_dfu_create(scr);
         break;
     case PAGE_MUSIC:
         ui_music_create(scr);

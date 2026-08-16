@@ -45,7 +45,7 @@ The script installs:
 - `buildroot-overlay/package/k230_phone_ui`
 - `BR2_PACKAGE_K230_PHONE_UI=y` in `k230_canmv_t_display_rm69a10_defconfig`
 - `S99zz_k230_phone_ui` autostart service
-- default media folders: `/root/music`, `/root/nes`, `/root/videos`, `/root/photos`, `/root/screenshots`, `/root/recordings`, `/root/lorawan`, `/root/notification`
+- default media folders: `/root/music`, `/root/nes`, `/root/videos`, `/root/photos`, `/root/screenshots`, `/root/recordings`, `/root/lorawan`, `/root/notification`, `/root/nrf52840/firmware`
 - optional bundled media from `resources/videos` into `/root/videos`
 - optional bundled media from `resources/music` into `/root/music`
 - optional bundled notification sounds from `resources/notification` into `/root/notification`
