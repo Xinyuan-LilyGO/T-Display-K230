@@ -111,6 +111,17 @@
 #define MESHTASTIC_AHT20_ADDR 0x38
 #define MESHTASTIC_AHT20_STATUS_BUSY 0x80
 #define MESHTASTIC_AHT20_STATUS_CALIBRATED 0x08
+#define MESHTASTIC_I2C4_IOMUX_BASE 0x91105000UL
+#define MESHTASTIC_I2C4_IOMUX_SIZE 0x1000UL
+#define MESHTASTIC_I2C4_IOMUX_IO46_OFFSET (46U * 4U)
+#define MESHTASTIC_I2C4_IOMUX_IO47_OFFSET (47U * 4U)
+#define MESHTASTIC_I2C4_GPIO_CHIP "/dev/gpiochip1"
+#define MESHTASTIC_I2C4_GPIO_SCL_OFFSET 14U
+#define MESHTASTIC_I2C4_GPIO_SDA_OFFSET 15U
+#define MESHTASTIC_BQ27220_ADDR 0x55
+#define MESHTASTIC_BQ27220_REG_VOLTAGE 0x08
+#define MESHTASTIC_BQ27220_REG_CURRENT 0x0C
+#define MESHTASTIC_BQ27220_REG_SOC 0x2C
 #define K230_PHONE_UI_CONFIG_PARENT "/root/.config"
 #define K230_PHONE_UI_PREFS_DIR K230_PHONE_UI_CONFIG_PARENT "/k230_phone_ui"
 #define K230_MESH_NODEDB_FILE K230_PHONE_UI_PREFS_DIR "/meshtastic_nodes.tsv"
@@ -3803,6 +3814,318 @@ static bool mesh_read_aht20_i2c(mesh_telemetry_info_t *telemetry)
     return true;
 }
 
+typedef struct {
+    struct gpiod_chip *chip = nullptr;
+    struct gpiod_line_request *request = nullptr;
+} mesh_gpio_i2c_t;
+
+static uint32_t mesh_i2c4_iomux_value(unsigned int sel)
+{
+    return (sel << 11U) | (1U << 8U) | (1U << 7U) | (8U << 1U) | 1U;
+}
+
+static int mesh_i2c4_iomux_set(unsigned int sel)
+{
+    int fd;
+    void *map;
+    volatile uint32_t *regs;
+
+    fd = open("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC);
+    if(fd < 0) {
+        return -1;
+    }
+    map = mmap(NULL, MESHTASTIC_I2C4_IOMUX_SIZE, PROT_READ | PROT_WRITE,
+               MAP_SHARED, fd, MESHTASTIC_I2C4_IOMUX_BASE);
+    close(fd);
+    if(map == MAP_FAILED) {
+        return -1;
+    }
+    regs = (volatile uint32_t *)map;
+    regs[MESHTASTIC_I2C4_IOMUX_IO46_OFFSET / 4U] =
+        mesh_i2c4_iomux_value(sel);
+    regs[MESHTASTIC_I2C4_IOMUX_IO47_OFFSET / 4U] =
+        mesh_i2c4_iomux_value(sel);
+    munmap(map, MESHTASTIC_I2C4_IOMUX_SIZE);
+    return 0;
+}
+
+static void mesh_gpio_i2c_delay(void)
+{
+    usleep(8);
+}
+
+static int mesh_gpio_i2c_request(mesh_gpio_i2c_t *bus)
+{
+    struct gpiod_line_settings *settings = nullptr;
+    struct gpiod_line_config *line_config = nullptr;
+    struct gpiod_request_config *request_config = nullptr;
+    unsigned int offsets[2] = {
+        MESHTASTIC_I2C4_GPIO_SCL_OFFSET,
+        MESHTASTIC_I2C4_GPIO_SDA_OFFSET
+    };
+    int ret = -1;
+
+    if(!bus) {
+        return -1;
+    }
+    bus->chip = nullptr;
+    bus->request = nullptr;
+    bus->chip = gpiod_chip_open(MESHTASTIC_I2C4_GPIO_CHIP);
+    if(!bus->chip) {
+        return -1;
+    }
+    settings = gpiod_line_settings_new();
+    line_config = gpiod_line_config_new();
+    request_config = gpiod_request_config_new();
+    if(!settings || !line_config || !request_config) {
+        goto out;
+    }
+    gpiod_line_settings_set_direction(settings,
+                                      GPIOD_LINE_DIRECTION_OUTPUT);
+    gpiod_line_settings_set_output_value(settings,
+                                         GPIOD_LINE_VALUE_ACTIVE);
+    gpiod_line_settings_set_drive(settings, GPIOD_LINE_DRIVE_OPEN_DRAIN);
+    gpiod_request_config_set_consumer(request_config,
+                                      "k230-meshtastic-i2c4");
+    if(gpiod_line_config_add_line_settings(line_config, offsets, 2,
+                                           settings) != 0) {
+        goto out;
+    }
+    bus->request = gpiod_chip_request_lines(bus->chip, request_config,
+                                            line_config);
+    if(!bus->request) {
+        goto out;
+    }
+    ret = 0;
+
+out:
+    if(settings) {
+        gpiod_line_settings_free(settings);
+    }
+    if(line_config) {
+        gpiod_line_config_free(line_config);
+    }
+    if(request_config) {
+        gpiod_request_config_free(request_config);
+    }
+    if(ret != 0) {
+        if(bus->request) {
+            gpiod_line_request_release(bus->request);
+            bus->request = nullptr;
+        }
+        if(bus->chip) {
+            gpiod_chip_close(bus->chip);
+            bus->chip = nullptr;
+        }
+    }
+    return ret;
+}
+
+static void mesh_gpio_i2c_release(mesh_gpio_i2c_t *bus)
+{
+    if(!bus) {
+        return;
+    }
+    if(bus->request) {
+        gpiod_line_request_release(bus->request);
+        bus->request = nullptr;
+    }
+    if(bus->chip) {
+        gpiod_chip_close(bus->chip);
+        bus->chip = nullptr;
+    }
+}
+
+static int mesh_gpio_i2c_set(mesh_gpio_i2c_t *bus, unsigned int offset,
+                             int high)
+{
+    if(!bus || !bus->request) {
+        return -1;
+    }
+    return gpiod_line_request_set_value(
+               bus->request, offset,
+               high ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE);
+}
+
+static int mesh_gpio_i2c_get(mesh_gpio_i2c_t *bus, unsigned int offset)
+{
+    enum gpiod_line_value value;
+
+    if(!bus || !bus->request) {
+        return -1;
+    }
+    value = gpiod_line_request_get_value(bus->request, offset);
+    if(value < 0) {
+        return -1;
+    }
+    return value == GPIOD_LINE_VALUE_ACTIVE ? 1 : 0;
+}
+
+static void mesh_gpio_i2c_scl(mesh_gpio_i2c_t *bus, int high)
+{
+    (void)mesh_gpio_i2c_set(bus, MESHTASTIC_I2C4_GPIO_SCL_OFFSET, high);
+    mesh_gpio_i2c_delay();
+}
+
+static void mesh_gpio_i2c_sda(mesh_gpio_i2c_t *bus, int high)
+{
+    (void)mesh_gpio_i2c_set(bus, MESHTASTIC_I2C4_GPIO_SDA_OFFSET, high);
+    mesh_gpio_i2c_delay();
+}
+
+static int mesh_gpio_i2c_read_sda(mesh_gpio_i2c_t *bus)
+{
+    mesh_gpio_i2c_delay();
+    return mesh_gpio_i2c_get(bus, MESHTASTIC_I2C4_GPIO_SDA_OFFSET);
+}
+
+static void mesh_gpio_i2c_start(mesh_gpio_i2c_t *bus)
+{
+    mesh_gpio_i2c_sda(bus, 1);
+    mesh_gpio_i2c_scl(bus, 1);
+    mesh_gpio_i2c_sda(bus, 0);
+    mesh_gpio_i2c_scl(bus, 0);
+}
+
+static void mesh_gpio_i2c_stop(mesh_gpio_i2c_t *bus)
+{
+    mesh_gpio_i2c_sda(bus, 0);
+    mesh_gpio_i2c_scl(bus, 1);
+    mesh_gpio_i2c_sda(bus, 1);
+}
+
+static int mesh_gpio_i2c_write_byte(mesh_gpio_i2c_t *bus, uint8_t value)
+{
+    for(int bit = 7; bit >= 0; bit--) {
+        mesh_gpio_i2c_sda(bus, (value >> bit) & 1U);
+        mesh_gpio_i2c_scl(bus, 1);
+        mesh_gpio_i2c_scl(bus, 0);
+    }
+    mesh_gpio_i2c_sda(bus, 1);
+    mesh_gpio_i2c_scl(bus, 1);
+    int ack = mesh_gpio_i2c_read_sda(bus) == 0;
+    mesh_gpio_i2c_scl(bus, 0);
+    return ack ? 0 : -1;
+}
+
+static uint8_t mesh_gpio_i2c_read_byte(mesh_gpio_i2c_t *bus, int ack)
+{
+    uint8_t value = 0;
+
+    mesh_gpio_i2c_sda(bus, 1);
+    for(int bit = 7; bit >= 0; bit--) {
+        mesh_gpio_i2c_scl(bus, 1);
+        if(mesh_gpio_i2c_read_sda(bus) > 0) {
+            value |= (uint8_t)(1U << bit);
+        }
+        mesh_gpio_i2c_scl(bus, 0);
+    }
+    mesh_gpio_i2c_sda(bus, ack ? 0 : 1);
+    mesh_gpio_i2c_scl(bus, 1);
+    mesh_gpio_i2c_scl(bus, 0);
+    mesh_gpio_i2c_sda(bus, 1);
+    return value;
+}
+
+static int mesh_gpio_i2c_begin(mesh_gpio_i2c_t *bus)
+{
+    if(mesh_i2c4_iomux_set(0) != 0) {
+        return -1;
+    }
+    if(mesh_gpio_i2c_request(bus) != 0) {
+        (void)mesh_i2c4_iomux_set(3);
+        return -1;
+    }
+    return 0;
+}
+
+static void mesh_gpio_i2c_end(mesh_gpio_i2c_t *bus)
+{
+    mesh_gpio_i2c_release(bus);
+    (void)mesh_i2c4_iomux_set(3);
+}
+
+static int mesh_gpio_i2c_read_block(uint8_t addr, uint8_t reg,
+                                    uint8_t *buf, size_t len)
+{
+    mesh_gpio_i2c_t bus;
+    int ret = -1;
+
+    if(!buf || len == 0U || mesh_gpio_i2c_begin(&bus) != 0) {
+        return -1;
+    }
+    mesh_gpio_i2c_start(&bus);
+    if(mesh_gpio_i2c_write_byte(&bus, (uint8_t)(addr << 1U)) != 0) {
+        goto out_stop;
+    }
+    if(mesh_gpio_i2c_write_byte(&bus, reg) != 0) {
+        goto out_stop;
+    }
+    mesh_gpio_i2c_start(&bus);
+    if(mesh_gpio_i2c_write_byte(&bus, (uint8_t)((addr << 1U) | 1U)) != 0) {
+        goto out_stop;
+    }
+    for(size_t i = 0; i < len; i++) {
+        buf[i] = mesh_gpio_i2c_read_byte(&bus, i + 1U < len);
+    }
+    ret = 0;
+
+out_stop:
+    mesh_gpio_i2c_stop(&bus);
+    mesh_gpio_i2c_end(&bus);
+    return ret;
+}
+
+static int mesh_gpio_i2c_read_word_le(uint8_t addr, uint8_t reg,
+                                      uint16_t *value)
+{
+    uint8_t buf[2];
+
+    if(!value || mesh_gpio_i2c_read_block(addr, reg, buf, sizeof(buf)) != 0) {
+        return -1;
+    }
+    *value = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8U);
+    return 0;
+}
+
+static bool mesh_read_bq27220_device_metrics(mesh_telemetry_info_t *telemetry)
+{
+    uint16_t voltage = 0;
+    uint16_t soc = 0;
+    uint16_t current = 0;
+    bool found = false;
+
+    if(!telemetry ||
+       mesh_gpio_i2c_read_word_le(MESHTASTIC_BQ27220_ADDR,
+                                  MESHTASTIC_BQ27220_REG_VOLTAGE,
+                                  &voltage) != 0) {
+        return false;
+    }
+    if(voltage > 2500U && voltage < 6000U) {
+        telemetry->has_device_voltage = true;
+        telemetry->device_voltage = (float)voltage / 1000.0f;
+        found = true;
+    }
+    if(mesh_gpio_i2c_read_word_le(MESHTASTIC_BQ27220_ADDR,
+                                  MESHTASTIC_BQ27220_REG_SOC,
+                                  &soc) == 0 &&
+       soc <= 100U) {
+        telemetry->has_battery_level = true;
+        telemetry->battery_level = soc;
+        found = true;
+    }
+    if(mesh_gpio_i2c_read_word_le(MESHTASTIC_BQ27220_ADDR,
+                                  MESHTASTIC_BQ27220_REG_CURRENT,
+                                  &current) == 0) {
+        daemon_event("Telemetry BQ27220 voltage=%umV soc=%u%% current=%dmA",
+                     voltage, soc, (int)(int16_t)current);
+    } else {
+        daemon_event("Telemetry BQ27220 voltage=%umV soc=%u%% current=NA",
+                     voltage, soc);
+    }
+    return found;
+}
+
 static bool mesh_collect_device_telemetry(mesh_telemetry_info_t *telemetry)
 {
     if(!telemetry) {
@@ -3813,6 +4136,7 @@ static bool mesh_collect_device_telemetry(mesh_telemetry_info_t *telemetry)
     telemetry->timestamp = (uint32_t)time(nullptr);
     telemetry->uptime_seconds = (uint32_t)(monotonic_us() / 1000000ULL);
     (void)mesh_read_power_supply_device_metrics(telemetry);
+    (void)mesh_read_bq27220_device_metrics(telemetry);
     return true;
 }
 
