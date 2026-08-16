@@ -38,7 +38,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.25"
+#define PROBE_VERSION "0.26"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 8U
@@ -11998,6 +11998,29 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                                 header.from, (int)roundf(rssi), snr,
                                 clean.c_str());
                 }
+            }
+        } else if(decoded.portnum == MESHTASTIC_TEXT_MESSAGE_COMPRESSED_APP) {
+            size_t preview_len = decoded.payload.size();
+            std::string preview;
+
+            if(preview_len > 24U) {
+                preview_len = 24U;
+            }
+            preview = mesh_hex_encode_bytes(decoded.payload.data(), preview_len);
+            daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u ack=%s rssi=%.1f snr=%.1f port=%u compressed_text_len=%u preview=%s%s%s",
+                         (unsigned long)rx_count, header.from, header.to,
+                         header.id, header.channel, hop_limit, hop_start,
+                         mesh_header_want_ack(header) ? "yes" : "no",
+                         rssi, snr, decoded.portnum,
+                         (unsigned)decoded.payload.size(),
+                         preview.empty() ? "-" : preview.c_str(),
+                         decoded.payload.size() > preview_len ? "..." : "",
+                         duplicate ? " duplicate" : "");
+            if(!duplicate && secure_match &&
+               (header.to == MESHTASTIC_NODENUM_BROADCAST ||
+                header.to == opts.from_node || header.from == opts.from_node)) {
+                daemon_chat("RX 0x%08x compressed text len=%u unsupported: unishox2 decoder required",
+                            header.from, (unsigned)decoded.payload.size());
             }
         } else if(decoded.portnum == MESHTASTIC_POSITION_APP) {
             mesh_position_info_t position;
