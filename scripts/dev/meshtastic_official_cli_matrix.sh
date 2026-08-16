@@ -131,8 +131,14 @@ run_cli() {
         --timeout "${TIMEOUT}" --wait-to-disconnect "${WAIT_TO_DISCONNECT}"
 }
 
+cli_output_has_failure() {
+    grep -Eq 'Received a NAK|Aborting due to:|Timed out waiting|Timed out|Resource temporarily unavailable'
+}
+
 run_matrix_step() {
     local name="$1"
+    local output
+    local rc=0
     shift
 
     echo
@@ -142,7 +148,13 @@ run_matrix_step() {
         sleep "${STEP_DELAY}"
     fi
     STEP_INDEX=$((STEP_INDEX + 1))
-    if run_cli "$@"; then
+    if output="$(run_cli "$@" 2>&1)"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    printf '%s\n' "${output}"
+    if [[ "${rc}" -eq 0 ]] && ! printf '%s\n' "${output}" | cli_output_has_failure; then
         echo "RESULT ${name}: PASS"
     else
         echo "RESULT ${name}: FAIL"
@@ -155,6 +167,8 @@ run_matrix_step_retry() {
     local retries="$2"
     local attempt=1
     local max_attempts=$((retries + 1))
+    local output
+    local rc=0
     shift 2
 
     echo
@@ -166,7 +180,14 @@ run_matrix_step_retry() {
     STEP_INDEX=$((STEP_INDEX + 1))
     while [[ "${attempt}" -le "${max_attempts}" ]]; do
         echo "attempt=${attempt}/${max_attempts}"
-        if run_cli "$@"; then
+        if output="$(run_cli "$@" 2>&1)"; then
+            rc=0
+        else
+            rc=$?
+        fi
+        printf '%s\n' "${output}"
+        if [[ "${rc}" -eq 0 ]] &&
+           ! printf '%s\n' "${output}" | cli_output_has_failure; then
             echo "RESULT ${name}: PASS attempt=${attempt}"
             return 0
         fi
