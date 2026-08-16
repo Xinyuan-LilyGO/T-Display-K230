@@ -68,9 +68,15 @@
 #define MESHTASTIC_PACKET_FLAGS_HOP_START_MASK 0xE0U
 #define MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT 5U
 #define MESHTASTIC_ROUTING_ERROR_NONE 0U
+#define MESHTASTIC_ROUTING_ERROR_NO_ROUTE 1U
+#define MESHTASTIC_ROUTING_ERROR_GOT_NAK 2U
 #define MESHTASTIC_ROUTING_ERROR_TIMEOUT 3U
 #define MESHTASTIC_ROUTING_ERROR_NO_INTERFACE 4U
+#define MESHTASTIC_ROUTING_ERROR_MAX_RETRANSMIT 5U
+#define MESHTASTIC_ROUTING_ERROR_NO_CHANNEL 6U
 #define MESHTASTIC_ROUTING_ERROR_TOO_LARGE 7U
+#define MESHTASTIC_ROUTING_ERROR_NO_RESPONSE 8U
+#define MESHTASTIC_ROUTING_ERROR_DUTY_CYCLE_LIMIT 9U
 #define MESHTASTIC_SYNC_WORD 0x2BU
 #define MESHTASTIC_DEFAULT_REGION "US"
 #define MESHTASTIC_DEFAULT_PRESET "LONG_FAST"
@@ -6126,6 +6132,7 @@ static bool phoneapi_hex_decode(const char *hex, size_t len,
 static uint8_t mesh_header_hop_limit(const mesh_header_t &header);
 static uint8_t mesh_header_hop_start(const mesh_header_t &header);
 static bool mesh_header_want_ack(const mesh_header_t &header);
+static const char *mesh_routing_error_name(uint32_t error_reason);
 static uint32_t mesh_prng_u32(uint32_t salt);
 static bool mesh_portnum_uses_pki_direct(uint32_t portnum);
 static bool build_mesh_pki_direct_data_frame(const probe_options_t &opts,
@@ -7300,8 +7307,9 @@ static bool phoneapi_notify_routing_result(uint32_t from_node,
         return false;
     }
     if(phoneapi_send_from_payload_global(2U, packet, "routing_result")) {
-        daemon_event("PhoneAPI routing result req=0x%08x from=0x%08x err=%u reason=%s",
+        daemon_event("PhoneAPI routing result req=0x%08x from=0x%08x err=%u(%s) reason=%s",
                      request_id, from_node, error_reason,
+                     mesh_routing_error_name(error_reason),
                      reason && reason[0] ? reason : "-");
         return true;
     }
@@ -10416,6 +10424,34 @@ static bool mesh_header_want_ack(const mesh_header_t &header)
     return (header.flags & MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK) != 0U;
 }
 
+static const char *mesh_routing_error_name(uint32_t error_reason)
+{
+    switch(error_reason) {
+    case MESHTASTIC_ROUTING_ERROR_NONE:
+        return "NONE";
+    case MESHTASTIC_ROUTING_ERROR_NO_ROUTE:
+        return "NO_ROUTE";
+    case MESHTASTIC_ROUTING_ERROR_GOT_NAK:
+        return "GOT_NAK";
+    case MESHTASTIC_ROUTING_ERROR_TIMEOUT:
+        return "TIMEOUT";
+    case MESHTASTIC_ROUTING_ERROR_NO_INTERFACE:
+        return "NO_INTERFACE";
+    case MESHTASTIC_ROUTING_ERROR_MAX_RETRANSMIT:
+        return "MAX_RETRANSMIT";
+    case MESHTASTIC_ROUTING_ERROR_NO_CHANNEL:
+        return "NO_CHANNEL";
+    case MESHTASTIC_ROUTING_ERROR_TOO_LARGE:
+        return "TOO_LARGE";
+    case MESHTASTIC_ROUTING_ERROR_NO_RESPONSE:
+        return "NO_RESPONSE";
+    case MESHTASTIC_ROUTING_ERROR_DUTY_CYCLE_LIMIT:
+        return "DUTY_CYCLE_LIMIT";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 static void mesh_header_set_hop_limit(mesh_header_t *header, uint8_t hop_limit)
 {
     if(!header) {
@@ -10807,8 +10843,9 @@ static bool mesh_ack_complete(uint32_t from_node, uint32_t packet_id,
         } else {
             mesh_nak_rx_count++;
             (void)daemon_chat_update_tx_status(packet_id, "nak");
-            daemon_event("Mesh NAK received id=0x%08x from=0x%08x err=%u nak=%lu pending=%u",
+            daemon_event("Mesh NAK received id=0x%08x from=0x%08x err=%u(%s) nak=%lu pending=%u",
                          packet_id, from_node, error_reason,
+                         mesh_routing_error_name(error_reason),
                          (unsigned long)mesh_nak_rx_count,
                          mesh_ack_pending_count());
         }
@@ -11752,9 +11789,10 @@ static bool build_mesh_ack_frame(const probe_options_t &opts,
     frame->ack_request_id = rx_header.id;
     frame->channel = header.channel;
     snprintf(summary, sizeof(summary),
-             "mesh ack id=0x%08x req=0x%08x from=0x%08x to=0x%08x ch=0x%02x hop=%u err=%u ack=%s",
+             "mesh ack id=0x%08x req=0x%08x from=0x%08x to=0x%08x ch=0x%02x hop=%u err=%u(%s) ack=%s",
              header.id, rx_header.id, header.from, header.to, header.channel,
-             ack_hop, error_reason, frame->want_ack ? "on" : "off");
+             ack_hop, error_reason, mesh_routing_error_name(error_reason),
+             frame->want_ack ? "on" : "off");
     frame->summary = summary;
     return true;
 }
@@ -12136,19 +12174,21 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
             uint32_t error_reason = MESHTASTIC_ROUTING_ERROR_NONE;
             bool routing_ok = decode_routing_error_proto(decoded.payload,
                                                          &error_reason);
-            daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u request=0x%08x routing=%s err=%u%s",
+            daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u request=0x%08x routing=%s err=%u(%s)%s",
                          (unsigned long)rx_count, header.from, header.to,
                          header.id, header.channel, hop_limit, hop_start,
                          rssi, snr, decoded.portnum, decoded.request_id,
                          routing_ok ? "ok" : "decode-failed",
-                         error_reason, duplicate ? " duplicate" : "");
+                         error_reason, mesh_routing_error_name(error_reason),
+                         duplicate ? " duplicate" : "");
             if(secure_match && routing_ok && header.to == opts.from_node &&
                decoded.request_id != 0U) {
                 if(!mesh_ack_complete(header.from, decoded.request_id,
                                       error_reason)) {
-                    daemon_event("Mesh ACK no pending id=0x%08x from=0x%08x err=%u",
+                    daemon_event("Mesh ACK no pending id=0x%08x from=0x%08x err=%u(%s)",
                                  decoded.request_id, header.from,
-                                 error_reason);
+                                 error_reason,
+                                 mesh_routing_error_name(error_reason));
                 }
             }
         } else {
@@ -12189,7 +12229,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                     (decoded.portnum != MESHTASTIC_ROUTING_APP ||
                      decoded.request_id != 0U);
     if(ack_candidate) {
-        ack_wants_ack = meshtastic_port_is_text(decoded.portnum);
+        ack_wants_ack = false;
     }
     if(ack_candidate) {
         mesh_header_t ack_source_header = header;

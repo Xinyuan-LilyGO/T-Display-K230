@@ -193,6 +193,14 @@ run_k230_send_ack_step() {
     local response
     local chat
     local line
+    local before_status
+    local before_ack_rx
+    local before_nak_rx
+    local before_timeout
+    local status
+    local ack_rx
+    local nak_rx
+    local timeout_count
     local attempt
 
     echo
@@ -207,6 +215,17 @@ run_k230_send_ack_step() {
     quoted_text="$(shell_quote "${text}")"
     echo "target=${target_probe}"
     echo "text=${text}"
+    before_status="$(ssh_run "${host}" "${PROBE} --cmd-status 2>/dev/null" || true)"
+    before_ack_rx="$(printf '%s\n' "${before_status}" | tr ' ' '\n' |
+        awk -F= '$1 == "ack_rx" { print $2; exit }')"
+    before_nak_rx="$(printf '%s\n' "${before_status}" | tr ' ' '\n' |
+        awk -F= '$1 == "nak_rx" { print $2; exit }')"
+    before_timeout="$(printf '%s\n' "${before_status}" | tr ' ' '\n' |
+        awk -F= '$1 == "ack_timeout" { print $2; exit }')"
+    [[ "${before_ack_rx}" =~ ^[0-9]+$ ]] || before_ack_rx=0
+    [[ "${before_nak_rx}" =~ ^[0-9]+$ ]] || before_nak_rx=0
+    [[ "${before_timeout}" =~ ^[0-9]+$ ]] || before_timeout=0
+    echo "before_ack_rx=${before_ack_rx} before_nak_rx=${before_nak_rx} before_timeout=${before_timeout}"
     if ! response="$(ssh_run "${host}" "${PROBE} --cmd-send-to-ack ${quoted_target} ${quoted_text} 2>/dev/null")"; then
         echo "RESULT ${name}: FAIL queue-command"
         FAILURES=$((FAILURES + 1))
@@ -220,6 +239,36 @@ run_k230_send_ack_step() {
     fi
     for attempt in $(seq 1 8); do
         sleep 5
+        status="$(ssh_run "${host}" "${PROBE} --cmd-status 2>/dev/null" || true)"
+        ack_rx="$(printf '%s\n' "${status}" | tr ' ' '\n' |
+            awk -F= '$1 == "ack_rx" { print $2; exit }')"
+        nak_rx="$(printf '%s\n' "${status}" | tr ' ' '\n' |
+            awk -F= '$1 == "nak_rx" { print $2; exit }')"
+        timeout_count="$(printf '%s\n' "${status}" | tr ' ' '\n' |
+            awk -F= '$1 == "ack_timeout" { print $2; exit }')"
+        [[ "${ack_rx}" =~ ^[0-9]+$ ]] || ack_rx=0
+        [[ "${nak_rx}" =~ ^[0-9]+$ ]] || nak_rx=0
+        [[ "${timeout_count}" =~ ^[0-9]+$ ]] || timeout_count=0
+        if [[ "${ack_rx}" -gt "${before_ack_rx}" ]]; then
+            echo "status_ack_rx=${ack_rx}"
+            chat="$(ssh_run "${host}" "${PROBE} --cmd-chat 2>/dev/null" || true)"
+            line="$(printf '%s\n' "${chat}" | grep -F "${text}" | tail -1 || true)"
+            [[ -z "${line}" ]] || echo "chat=${line}"
+            echo "RESULT ${name}: PASS attempt=${attempt}"
+            return 0
+        fi
+        if [[ "${nak_rx}" -gt "${before_nak_rx}" ]]; then
+            echo "status_nak_rx=${nak_rx}"
+            echo "RESULT ${name}: FAIL nak"
+            FAILURES=$((FAILURES + 1))
+            return 0
+        fi
+        if [[ "${timeout_count}" -gt "${before_timeout}" ]]; then
+            echo "status_ack_timeout=${timeout_count}"
+            echo "RESULT ${name}: FAIL timeout"
+            FAILURES=$((FAILURES + 1))
+            return 0
+        fi
         chat="$(ssh_run "${host}" "${PROBE} --cmd-chat 2>/dev/null" || true)"
         line="$(printf '%s\n' "${chat}" | grep -F "${text}" | tail -1 || true)"
         if [[ -n "${line}" ]]; then
