@@ -1125,12 +1125,22 @@ static void nrf_dfu_update_ui(void)
         lv_label_set_text(nrf_dfu_target_label, target_version);
     }
     if(nrf_dfu_bar) {
-        lv_bar_set_value(nrf_dfu_bar, progress, LV_ANIM_ON);
+        if(running) {
+            lv_obj_clear_flag(nrf_dfu_bar, LV_OBJ_FLAG_HIDDEN);
+            lv_bar_set_value(nrf_dfu_bar, progress, LV_ANIM_ON);
+        } else {
+            lv_obj_add_flag(nrf_dfu_bar, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     if(nrf_dfu_bar_label) {
-        char percent[32];
-        snprintf(percent, sizeof(percent), "%d%%", progress);
-        lv_label_set_text(nrf_dfu_bar_label, percent);
+        if(running) {
+            char percent[32];
+            lv_obj_clear_flag(nrf_dfu_bar_label, LV_OBJ_FLAG_HIDDEN);
+            snprintf(percent, sizeof(percent), "%d%%", progress);
+            lv_label_set_text(nrf_dfu_bar_label, percent);
+        } else {
+            lv_obj_add_flag(nrf_dfu_bar_label, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     if(nrf_dfu_log_label) {
         lv_label_set_text(nrf_dfu_log_label, log_text);
@@ -1190,21 +1200,31 @@ static void nrf_dfu_timer_cb(lv_timer_t *timer)
     nrf_dfu_update_ui();
 }
 
-static lv_obj_t *nrf_dfu_info_pair(lv_obj_t *parent, int y,
-                                   const char *name, lv_obj_t **value_out)
+static lv_obj_t *nrf_dfu_info_pair(lv_obj_t *parent, int x, int y, int w,
+                                   int label_w, const char *name,
+                                   lv_obj_t **value_out)
 {
     lv_obj_t *name_label = ui_label(parent, name, &lv_font_montserrat_16,
                                     0x9AA4AF);
     lv_obj_t *value = ui_label(parent, "--", &lv_font_montserrat_18,
                                0xF2F5F8);
-    int w = lv_obj_get_width(parent);
-    int margin = 24;
-    int label_w = 116;
-    lv_obj_set_pos(name_label, margin, y);
-    lv_obj_set_width(value, w > 220 ? w - margin * 2 - label_w : 160);
+    int gap = 16;
+    int value_w;
+
+    if(label_w < 112) {
+        label_w = 112;
+    }
+    value_w = w - label_w - gap;
+    if(value_w < 160) {
+        value_w = 160;
+    }
+    lv_obj_set_pos(name_label, x, y);
+    lv_obj_set_width(name_label, label_w);
+    lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(value, value_w);
     lv_label_set_long_mode(value, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(value, w > 220 ? margin + label_w : 88, y - 2);
+    lv_obj_set_pos(value, x + label_w + gap, y - 2);
     if(value_out) {
         *value_out = value;
     }
@@ -1286,78 +1306,132 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     int top_y = ui_page_top_y(154);
     int summary_w = body_w;
     int card_h = body_h - 24;
+    int margin;
+    int icon_size;
+    int action_x;
+    int action_w;
+    int button_y;
+    int content_x;
+    int content_w;
+    int info_x;
+    int info_w;
+    int info_label_w;
+    int row_step;
     int y;
-    int button_w;
 
     ui_create_header(scr, "nRF52840 DFU");
     body = ui_scroll_panel(scr, body_x, top_y, body_w, body_h);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
 
-    if(card_h < (landscape ? 390 : 540)) {
-        card_h = landscape ? 390 : 540;
+    if(card_h < (landscape ? 330 : 540)) {
+        card_h = landscape ? 330 : 540;
     }
 
     summary = ui_panel(body, 0, 0, summary_w, card_h);
     lv_obj_set_style_bg_color(summary, lv_color_hex(0x121820), 0);
     lv_obj_clear_flag(summary, LV_OBJ_FLAG_SCROLLABLE);
 
+    margin = landscape ? 18 : 24;
+    icon_size = landscape ? 68 : 84;
+    if(landscape) {
+        action_w = summary_w >= 760 ? 188 : 164;
+        if(action_w > summary_w / 3) {
+            action_w = summary_w / 3;
+        }
+        action_x = summary_w - margin - action_w;
+        content_x = margin;
+        content_w = action_x - margin * 2;
+        if(content_w < 420) {
+            content_w = summary_w - margin * 2;
+            action_x = summary_w - margin - action_w;
+        }
+        info_x = content_x;
+        info_w = content_w;
+        info_label_w = content_w >= 620 ? 178 : 150;
+        row_step = 38;
+        button_y = (card_h - 60) / 2 - 18;
+        if(button_y < 94) {
+            button_y = 94;
+        }
+    } else {
+        action_w = summary_w - margin * 2;
+        action_x = margin;
+        content_x = margin;
+        content_w = summary_w - margin * 2;
+        info_x = content_x;
+        info_w = content_w;
+        info_label_w = content_w >= 430 ? 166 : 136;
+        row_step = 54;
+        button_y = card_h - 76;
+    }
+
     icon_box = lv_obj_create(summary);
-    lv_obj_set_size(icon_box, 84, 84);
-    lv_obj_set_pos(icon_box, 24, 24);
+    lv_obj_set_size(icon_box, icon_size, icon_size);
+    lv_obj_set_pos(icon_box, content_x, 24);
     lv_obj_set_style_radius(icon_box, 8, 0);
     lv_obj_set_style_border_width(icon_box, 0, 0);
     lv_obj_set_style_bg_color(icon_box, lv_color_hex(0x3B82F6), 0);
     lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
-    icon = ui_label(icon_box, "DFU", &lv_font_montserrat_24, 0xFFFFFF);
+    icon = ui_label(icon_box, "DFU",
+                    landscape ? &lv_font_montserrat_22 :
+                    &lv_font_montserrat_24, 0xFFFFFF);
     lv_obj_center(icon);
 
     title = ui_label(summary, "nRF52840 firmware update",
                      &lv_font_montserrat_22, 0xF2F5F8);
-    lv_obj_set_width(title, summary_w - 140);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(title, 124, 28);
+    lv_obj_set_width(title, content_w - icon_size - 16);
+    lv_label_set_long_mode(title, landscape ? LV_LABEL_LONG_DOT :
+                           LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(title, content_x + icon_size + 16, 28);
 
     hint = ui_label(summary,
                     "Copy firmware.zip to /root/nrf52840/firmware with MTP, then tap Update.",
                     &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(hint, summary_w - 48);
+    lv_obj_set_width(hint, content_w);
     lv_label_set_long_mode(hint, landscape ? LV_LABEL_LONG_DOT :
                            LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(hint, 24, landscape ? 124 : 128);
+    lv_obj_set_pos(hint, content_x, landscape ? 104 : 128);
 
-    y = landscape ? 174 : 212;
-    nrf_dfu_info_pair(summary, y, "Package", &nrf_dfu_file_label);
-    y += landscape ? 46 : 54;
-    nrf_dfu_info_pair(summary, y, "Current version", &nrf_dfu_current_label);
-    y += landscape ? 46 : 54;
-    nrf_dfu_info_pair(summary, y, "Target version", &nrf_dfu_target_label);
-    y += landscape ? 46 : 54;
-    nrf_dfu_info_pair(summary, y, "Status", &nrf_dfu_status_label);
-    y += landscape ? 46 : 54;
-    nrf_dfu_info_pair(summary, y, "Mode", &nrf_dfu_mode_label);
+    y = landscape ? 144 : 212;
+    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+                      "Package", &nrf_dfu_file_label);
+    y += row_step;
+    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+                      "Current version", &nrf_dfu_current_label);
+    y += row_step;
+    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+                      "Target version", &nrf_dfu_target_label);
+    y += row_step;
+    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+                      "Status", &nrf_dfu_status_label);
+    y += row_step;
+    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+                      "Mode", &nrf_dfu_mode_label);
 
     nrf_dfu_bar = lv_bar_create(summary);
-    lv_obj_set_pos(nrf_dfu_bar, 24, card_h - 92);
-    lv_obj_set_size(nrf_dfu_bar, summary_w - 48, 18);
+    if(landscape) {
+        lv_obj_set_pos(nrf_dfu_bar, action_x, button_y + 78);
+        lv_obj_set_size(nrf_dfu_bar, action_w, 16);
+    } else {
+        lv_obj_set_pos(nrf_dfu_bar, margin, card_h - 126);
+        lv_obj_set_size(nrf_dfu_bar, action_w, 18);
+    }
     lv_bar_set_range(nrf_dfu_bar, 0, 100);
     lv_bar_set_value(nrf_dfu_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(nrf_dfu_bar, lv_color_hex(0x27313C),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_color(nrf_dfu_bar, lv_color_hex(0x25C281),
                               LV_PART_INDICATOR);
+    lv_obj_add_flag(nrf_dfu_bar, LV_OBJ_FLAG_HIDDEN);
     nrf_dfu_bar_label = ui_label(summary, "0%", &lv_font_montserrat_16,
                                  0xF2F5F8);
     lv_obj_align_to(nrf_dfu_bar_label, nrf_dfu_bar, LV_ALIGN_OUT_BOTTOM_RIGHT,
                     0, 6);
+    lv_obj_add_flag(nrf_dfu_bar_label, LV_OBJ_FLAG_HIDDEN);
 
-    button_w = landscape ? 260 : summary_w - 48;
-    if(button_w > summary_w - 48) {
-        button_w = summary_w - 48;
-    }
     nrf_dfu_update_btn = ui_command_button(summary,
-                                           (summary_w - button_w) / 2,
-                                           card_h - 52, button_w,
-                                           "Update nRF52840", 0x25C281);
+                                           action_x, button_y, action_w,
+                                           "Update", 0x25C281);
     lv_obj_add_event_cb(nrf_dfu_update_btn, nrf_dfu_start_event_cb,
                         LV_EVENT_CLICKED, NULL);
 
