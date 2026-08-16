@@ -7,5 +7,6 @@ These scripts are kept on the `dev` branch for experimental FLRC throughput and 
 - `lora_flrc_verified_probe.sh`: verified FLRC parameter probe.
 - `meshtastic_pair_test.sh`: two-device Meshtastic probe smoke test over SSH; add `--ack` to include one direct-message ACK check.
 - `meshtastic_official_cli_matrix.sh`: official-device interoperability matrix using the Meshtastic Python CLI and two already-running K230 daemons.
+- `meshtastic_fixed_position_cli_test.sh`: temporary fixed-position interoperability test for validating official-device position requests without enabling fake GPS as a release default.
 
 They are not part of the stable `main` branch release flow.
