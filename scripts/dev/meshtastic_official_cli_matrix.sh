@@ -16,6 +16,7 @@ WAIT_TO_DISCONNECT="${WAIT_TO_DISCONNECT:-3}"
 LOG_DIR="${LOG_DIR:-/tmp}"
 TEST_TEXT="${TEST_TEXT:-k230 official cli matrix}"
 STEP_DELAY="${STEP_DELAY:-8}"
+TRACEROUTE_RETRIES="${TRACEROUTE_RETRIES:-2}"
 K230_A=""
 K230_B=""
 NODE_A=""
@@ -47,6 +48,7 @@ Options:
   --text TEXT             Base text payload.
   --timeout SEC           Remote operation timeout. Default: 70.
   --step-delay SEC        Delay between LoRa operations. Default: 8.
+  --traceroute-retries N  Retry traceroute steps after a timeout. Default: 2.
   --skip-position         Skip position requests when GPS is unavailable.
   -h, --help              Show this help.
 
@@ -57,6 +59,7 @@ Environment:
   CONNECT_TIMEOUT=8
   LOG_DIR=/tmp
   STEP_DELAY=8
+  TRACEROUTE_RETRIES=2
 USAGE
 }
 
@@ -125,6 +128,38 @@ run_matrix_step() {
     fi
 }
 
+run_matrix_step_retry() {
+    local name="$1"
+    local retries="$2"
+    local attempt=1
+    local max_attempts=$((retries + 1))
+    shift 2
+
+    echo
+    echo "== ${name} =="
+    if [[ "${STEP_INDEX}" -gt 0 && "${STEP_DELAY}" -gt 0 ]]; then
+        echo "settle=${STEP_DELAY}s"
+        sleep "${STEP_DELAY}"
+    fi
+    STEP_INDEX=$((STEP_INDEX + 1))
+    while [[ "${attempt}" -le "${max_attempts}" ]]; do
+        echo "attempt=${attempt}/${max_attempts}"
+        if run_cli "$@"; then
+            echo "RESULT ${name}: PASS attempt=${attempt}"
+            return 0
+        fi
+        if [[ "${attempt}" -lt "${max_attempts}" ]]; then
+            echo "RESULT ${name}: RETRY attempt=${attempt}"
+            if [[ "${STEP_DELAY}" -gt 0 ]]; then
+                sleep "${STEP_DELAY}"
+            fi
+        fi
+        attempt=$((attempt + 1))
+    done
+    echo "RESULT ${name}: FAIL attempts=${max_attempts}"
+    FAILURES=$((FAILURES + 1))
+}
+
 tail_k230_log() {
     local host="$1"
     local out="$2"
@@ -168,6 +203,11 @@ while [[ $# -gt 0 ]]; do
         --step-delay)
             [[ $# -ge 2 ]] || die "--step-delay requires a value"
             STEP_DELAY="$2"
+            shift 2
+            ;;
+        --traceroute-retries)
+            [[ $# -ge 2 ]] || die "--traceroute-retries requires a value"
+            TRACEROUTE_RETRIES="$2"
             shift 2
             ;;
         --skip-position)
@@ -220,8 +260,10 @@ LOG_B="${LOG_DIR%/}/meshtastic_official_cli_matrix_${TS}_${K230_B//[^A-Za-z0-9]/
         run_matrix_step "a-position" --dest "${NODE_A}" --request-position
         run_matrix_step "b-position" --dest "${NODE_B}" --request-position
     fi
-    run_matrix_step "a-traceroute" --traceroute "${NODE_A}"
-    run_matrix_step "b-traceroute" --traceroute "${NODE_B}"
+    run_matrix_step_retry "a-traceroute" "${TRACEROUTE_RETRIES}" \
+        --traceroute "${NODE_A}"
+    run_matrix_step_retry "b-traceroute" "${TRACEROUTE_RETRIES}" \
+        --traceroute "${NODE_B}"
     echo
     echo "failures=${FAILURES}"
 } > >(tee "${LOG}") 2>&1
