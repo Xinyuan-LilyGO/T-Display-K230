@@ -1587,3 +1587,10 @@ int ui_input_inline_is_active(ui_input_inline_t *state)
 {
     return state && active_inline == state;
 }
+
+void ui_input_hide_inline_active(void)
+{
+    if(active_inline) {
+        ui_input_inline_hide_state(active_inline);
+    }
+}

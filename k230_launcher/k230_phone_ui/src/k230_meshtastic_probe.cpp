@@ -3696,11 +3696,6 @@ static bool mesh_read_power_supply_device_metrics(
             break;
         }
     }
-    if(!telemetry->has_battery_level && mesh_read_power_supply_online()) {
-        telemetry->has_battery_level = true;
-        telemetry->battery_level = 101U;
-        found = true;
-    }
     return found;
 }
 
@@ -4187,8 +4182,7 @@ static bool mesh_collect_device_telemetry(mesh_telemetry_info_t *telemetry)
     (void)mesh_read_power_supply_device_metrics(telemetry);
     bq_ok = mesh_read_bq27220_device_metrics(telemetry);
     if(!bq_ok && (!telemetry->has_device_voltage ||
-                  !telemetry->has_battery_level ||
-                  telemetry->battery_level == 101U)) {
+                  !telemetry->has_battery_level)) {
         (void)mesh_apply_cached_bq27220_device_metrics(telemetry);
     }
     return true;

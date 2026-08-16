@@ -70,6 +70,7 @@ struct Options {
     bool trigger = true;
     bool verbose = false;
     bool dry_run = false;
+    bool package_version = false;
 };
 
 void usage(const char *argv0) {
@@ -94,6 +95,7 @@ void usage(const char *argv0) {
             "      --throttle-every N Sleep after each N DFU data packets. Default: 8, 0 disables.\n"
             "      --throttle-ms N    Sleep duration for --throttle-every. Default: 120\n"
             "      --no-trigger      Do not send AT+DFU before transfer.\n"
+            "      --package-version Print the AT firmware version embedded in the package and exit.\n"
             "      --dry-run         Parse package and exit without serial access.\n"
             "  -v, --verbose         Print packet progress details.\n"
             "  -h, --help            Show this help.\n",
@@ -222,6 +224,68 @@ bool parse_stored_zip_package(const std::string &path, PackageData *pkg, std::st
         return false;
     }
     return true;
+}
+
+bool is_version_char(char ch) {
+    return (ch >= '0' && ch <= '9') ||
+           (ch >= 'A' && ch <= 'Z') ||
+           (ch >= 'a' && ch <= 'z') ||
+           ch == '-' || ch == '_' || ch == '.' || ch == '+';
+}
+
+bool looks_like_at_version(const std::string &text) {
+    if (text.size() < 8 || text.size() > 96) {
+        return false;
+    }
+    if (text.rfind("20", 0) == 0 && text.size() >= 10 &&
+        text[4] == '-' && text[7] == '-') {
+        return true;
+    }
+    if (text.find("uart") != std::string::npos ||
+        text.find("dfu") != std::string::npos ||
+        text.find("k230") != std::string::npos ||
+        text.find("K230") != std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
+std::string extract_at_package_version(const PackageData &pkg) {
+    const std::vector<uint8_t> &data = pkg.firmware;
+    std::string best;
+
+    for (size_t i = 0; i < data.size();) {
+        while (i < data.size() &&
+               (data[i] < 0x20 || data[i] > 0x7e)) {
+            i++;
+        }
+        const size_t start = i;
+        while (i < data.size() && data[i] >= 0x20 && data[i] <= 0x7e) {
+            i++;
+        }
+        if (i <= start) {
+            continue;
+        }
+        std::string text(reinterpret_cast<const char *>(&data[start]),
+                         i - start);
+        size_t pos = text.find("+VER:K230_NRF52840_AT,");
+        if (pos != std::string::npos) {
+            pos += strlen("+VER:K230_NRF52840_AT,");
+            std::string value;
+            while (pos < text.size() && is_version_char(text[pos])) {
+                value.push_back(text[pos++]);
+            }
+            if (looks_like_at_version(value)) {
+                return value;
+            }
+        }
+        if (looks_like_at_version(text)) {
+            if (best.empty() || text.rfind("20", 0) == 0) {
+                best = text;
+            }
+        }
+    }
+    return best;
 }
 
 speed_t baud_to_speed(int baud) {
@@ -816,6 +880,8 @@ bool parse_args(int argc, char **argv, Options *opt) {
             }
         } else if (arg == "--no-trigger") {
             opt->trigger = false;
+        } else if (arg == "--package-version") {
+            opt->package_version = true;
         } else if (arg == "--dry-run") {
             opt->dry_run = true;
         } else if (arg == "-v" || arg == "--verbose") {
@@ -855,6 +921,15 @@ int main(int argc, char **argv) {
     if (!parse_stored_zip_package(opt.package_path, &pkg, &err)) {
         fprintf(stderr, "package error: %s\n", err.c_str());
         return 1;
+    }
+    if (opt.package_version) {
+        const std::string version = extract_at_package_version(pkg);
+        if (version.empty()) {
+            fprintf(stderr, "package version unavailable\n");
+            return 1;
+        }
+        printf("%s\n", version.c_str());
+        return 0;
     }
     fprintf(stderr, "Package: bin=%s dat=%s\n", pkg.firmware_name.c_str(), pkg.init_name.c_str());
     fprintf(stderr, "Package sizes: app=%zu init=%zu\n", pkg.firmware.size(), pkg.init_packet.size());

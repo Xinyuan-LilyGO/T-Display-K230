@@ -210,6 +210,7 @@ void ui_usb_storage_create(lv_obj_t *scr)
     int right_w;
     int button_w;
     int value_w;
+    int value_x = 0;
 
     if(left_w < 260) {
         left_w = 260;
@@ -226,9 +227,16 @@ void ui_usb_storage_create(lv_obj_t *scr)
     if(button_w < 118) {
         button_w = 118;
     }
-    value_w = landscape ? right_w / 2 : 300;
+    value_w = landscape ? right_w - 150 : 300;
     if(value_w < 180) {
         value_w = 180;
+    }
+    if(landscape) {
+        value_x = right_x + right_w - value_w - 18;
+        if(value_x < right_x + 124) {
+            value_x = right_x + 124;
+            value_w = right_w - 142;
+        }
     }
 
     ui_create_header(scr, "MTP");
@@ -282,9 +290,10 @@ void ui_usb_storage_create(lv_obj_t *scr)
     usb_storage_state_label = ui_label(body, "--", &lv_font_montserrat_20,
                                        0xF2F5F8);
     lv_obj_set_width(usb_storage_state_label, landscape ? value_w : 260);
+    lv_label_set_long_mode(usb_storage_state_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(usb_storage_state_label, LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_state_label, right_x + right_w - value_w, 100);
+        lv_obj_set_pos(usb_storage_state_label, value_x, 100);
     } else {
         lv_obj_align(usb_storage_state_label, LV_ALIGN_TOP_RIGHT, 0, 240);
     }
@@ -297,7 +306,7 @@ void ui_usb_storage_create(lv_obj_t *scr)
     lv_label_set_long_mode(usb_storage_image_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(usb_storage_image_label, LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_image_label, right_x + right_w - value_w, 164);
+        lv_obj_set_pos(usb_storage_image_label, value_x, 164);
     } else {
         lv_obj_align(usb_storage_image_label, LV_ALIGN_TOP_RIGHT, 0, 304);
     }
@@ -310,7 +319,7 @@ void ui_usb_storage_create(lv_obj_t *scr)
     lv_label_set_long_mode(usb_storage_mount_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(usb_storage_mount_label, LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_mount_label, right_x + right_w - value_w, 226);
+        lv_obj_set_pos(usb_storage_mount_label, value_x, 226);
     } else {
         lv_obj_align(usb_storage_mount_label, LV_ALIGN_TOP_RIGHT, 0, 366);
     }
@@ -324,8 +333,7 @@ void ui_usb_storage_create(lv_obj_t *scr)
     lv_obj_set_style_text_align(usb_storage_screenshot_label,
                                 LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_screenshot_label,
-                       right_x + right_w - value_w, 284);
+        lv_obj_set_pos(usb_storage_screenshot_label, value_x, 284);
     } else {
         lv_obj_align(usb_storage_screenshot_label, LV_ALIGN_TOP_RIGHT, 0, 428);
     }

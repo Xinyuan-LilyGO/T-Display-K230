@@ -30,6 +30,8 @@ cd t-display-k230
 ## 应用使用说明
 
 每个 launcher 应用的用途和用法请看 [docs/APPS_CN.md](docs/APPS_CN.md)。
+新增应用和可选外设处理规则请看
+[docs/APP_DEVELOPMENT_RULES_CN.md](docs/APP_DEVELOPMENT_RULES_CN.md)。
 
 ## 安装到 SDK
 

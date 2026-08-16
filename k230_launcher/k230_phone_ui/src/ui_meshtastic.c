@@ -2945,6 +2945,7 @@ static void mesh_channel_profiles_event_cb(lv_event_t *event)
     int count;
 
     (void)event;
+    ui_input_hide_inline_active();
     mesh_channel_profiles_close();
     memset(mesh_channel_profile_paths, 0, sizeof(mesh_channel_profile_paths));
     count = mesh_channel_profile_collect(mesh_channel_profile_paths,
@@ -4571,6 +4572,7 @@ static void mesh_channel_event_cb(lv_event_t *event)
     int y;
 
     (void)event;
+    ui_input_hide_inline_active();
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
         mesh_close_channel_page();
     }
@@ -5304,6 +5306,7 @@ static void mesh_profile_event_cb(lv_event_t *event)
     int y = 0;
 
     (void)event;
+    ui_input_hide_inline_active();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
         lv_obj_delete(mesh_settings_overlay);
     }
@@ -5479,6 +5482,7 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     int shown_count = 0;
 
     (void)event;
+    ui_input_hide_inline_active();
     if(mesh_ipc_command("NODES\n", response, sizeof(response)) != 0) {
         ui_trim_text(response);
         mesh_append_log("nodes failed: %s", response);
@@ -5930,6 +5934,7 @@ static void mesh_canned_open(int manage_mode)
     int col_w;
 
     mesh_canned_manage_mode = manage_mode ? 1 : 0;
+    ui_input_hide_inline_active();
     count = mesh_canned_load();
     if(columns < 1) {
         columns = 1;

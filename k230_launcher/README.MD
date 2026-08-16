@@ -31,6 +31,8 @@ The BSP README explains the full SDK dependency setup and image build flow.
 ## App Guide
 
 See [docs/APPS.md](docs/APPS.md) for the usage guide of each launcher app.
+See [docs/APP_DEVELOPMENT_RULES.md](docs/APP_DEVELOPMENT_RULES.md) for
+launcher app development rules and optional-peripheral handling.
 
 ## Install Into The SDK
 

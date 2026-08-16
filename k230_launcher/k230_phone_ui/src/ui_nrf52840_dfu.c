@@ -19,6 +19,7 @@
 
 #define NRF_DFU_TOOL "/root/app/k230_phone_ui/k230_nrf52840_dfu"
 #define NRF_DFU_DIR "/root/nrf52840/firmware"
+#define NRF_DFU_PACKAGE NRF_DFU_DIR "/firmware.zip"
 #define NRF_DFU_PORT "/dev/ttyS1"
 #define NRF_DFU_LOG "/tmp/k230_nrf52840_dfu_ui.log"
 #define NRF_DFU_MAX_FILES 16
@@ -39,6 +40,8 @@ static lv_timer_t *nrf_dfu_timer;
 static lv_obj_t *nrf_dfu_status_label;
 static lv_obj_t *nrf_dfu_mode_label;
 static lv_obj_t *nrf_dfu_file_label;
+static lv_obj_t *nrf_dfu_current_label;
+static lv_obj_t *nrf_dfu_target_label;
 static lv_obj_t *nrf_dfu_list_panel;
 static lv_obj_t *nrf_dfu_log_label;
 static lv_obj_t *nrf_dfu_bar;
@@ -49,6 +52,7 @@ static lv_obj_t *nrf_dfu_log_btn;
 static lv_obj_t *nrf_dfu_mtp_btn;
 static lv_obj_t *nrf_dfu_select_dialog;
 static lv_obj_t *nrf_dfu_log_dialog;
+static lv_obj_t *nrf_dfu_confirm_dialog;
 static lv_obj_t *nrf_dfu_overlay;
 static lv_obj_t *nrf_dfu_overlay_status;
 static lv_obj_t *nrf_dfu_overlay_bar;
@@ -62,6 +66,8 @@ static int nrf_dfu_progress;
 static int nrf_dfu_last_rc;
 static char nrf_dfu_status_text[192] = "Ready";
 static char nrf_dfu_mode_text[96] = "Idle";
+static char nrf_dfu_current_version[96] = "--";
+static char nrf_dfu_target_version[96] = "--";
 static char nrf_dfu_log_text[NRF_DFU_LOG_TEXT_MAX] = "No log yet";
 
 static void nrf_dfu_update_ui(void);
@@ -147,6 +153,93 @@ static void nrf_dfu_append_log(const char *line)
     pthread_mutex_lock(&nrf_dfu_lock);
     nrf_dfu_append_log_locked(line);
     pthread_mutex_unlock(&nrf_dfu_lock);
+}
+
+static int nrf_dfu_version_char(int ch)
+{
+    return (ch >= '0' && ch <= '9') ||
+           (ch >= 'A' && ch <= 'Z') ||
+           (ch >= 'a' && ch <= 'z') ||
+           ch == '-' || ch == '_' || ch == '.' || ch == '+';
+}
+
+static int nrf_dfu_version_looks_valid(const char *text)
+{
+    size_t len;
+
+    if(!text || !text[0]) {
+        return 0;
+    }
+    len = strlen(text);
+    if(len < 8U || len >= 96U) {
+        return 0;
+    }
+    if(strncmp(text, "20", 2) == 0 && len >= 10U &&
+       text[4] == '-' && text[7] == '-') {
+        return 1;
+    }
+    return strstr(text, "uart") || strstr(text, "dfu") ||
+           strstr(text, "k230") || strstr(text, "K230");
+}
+
+static int nrf_dfu_extract_at_version(const char *response,
+                                      char *out, size_t out_len)
+{
+    const char *marker = "+VER:K230_NRF52840_AT,";
+    const char *pos;
+    size_t i = 0;
+
+    if(!response || !out || out_len == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    pos = strstr(response, marker);
+    if(!pos) {
+        return -1;
+    }
+    pos += strlen(marker);
+    while(pos[i] && nrf_dfu_version_char((unsigned char)pos[i]) &&
+          i + 1U < out_len) {
+        out[i] = pos[i];
+        i++;
+    }
+    out[i] = '\0';
+    return nrf_dfu_version_looks_valid(out) ? 0 : -1;
+}
+
+static int nrf_dfu_extract_plain_version(const char *response,
+                                         char *out, size_t out_len)
+{
+    const char *p = response;
+
+    if(!response || !out || out_len == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    while(*p) {
+        char line[128];
+        size_t i = 0;
+
+        while(*p == '\r' || *p == '\n' || *p == ' ' || *p == '\t') {
+            p++;
+        }
+        while(p[i] && p[i] != '\r' && p[i] != '\n' &&
+              i + 1U < sizeof(line)) {
+            line[i] = p[i];
+            i++;
+        }
+        line[i] = '\0';
+        ui_trim_text(line);
+        if(nrf_dfu_version_looks_valid(line)) {
+            snprintf(out, out_len, "%s", line);
+            return 0;
+        }
+        p += i;
+        while(*p && *p != '\r' && *p != '\n') {
+            p++;
+        }
+    }
+    return -1;
 }
 
 static void nrf_dfu_parse_line(const char *line)
@@ -265,6 +358,47 @@ static int nrf_dfu_run_argv(char *const argv[], int parse_progress,
     return -1;
 }
 
+static int nrf_dfu_query_current_version(char *out, size_t out_len,
+                                         char *response, size_t response_len)
+{
+    char *argv[] = {
+        (char *)NRF_DFU_TOOL,
+        (char *)"--at", (char *)"AT+VER?",
+        (char *)"--at-read-ms", (char *)"1200",
+        (char *)"-p", (char *)NRF_DFU_PORT,
+        NULL
+    };
+    char local_response[512];
+    char *resp = response ? response : local_response;
+    size_t resp_len = response ? response_len : sizeof(local_response);
+    int rc;
+
+    rc = nrf_dfu_run_argv(argv, 0, resp, resp_len);
+    if(rc != 0 || !strstr(resp, "OK")) {
+        return -1;
+    }
+    return nrf_dfu_extract_at_version(resp, out, out_len);
+}
+
+static int nrf_dfu_query_package_version(const char *path,
+                                         char *out, size_t out_len)
+{
+    char *argv[] = {
+        (char *)NRF_DFU_TOOL,
+        (char *)"--package-version",
+        (char *)path,
+        NULL
+    };
+    char response[512];
+    int rc;
+
+    rc = nrf_dfu_run_argv(argv, 0, response, sizeof(response));
+    if(rc != 0) {
+        return -1;
+    }
+    return nrf_dfu_extract_plain_version(response, out, out_len);
+}
+
 static int nrf_dfu_scan_files(void)
 {
     DIR *dir;
@@ -317,15 +451,16 @@ static int nrf_dfu_scan_files(void)
 static void nrf_dfu_refresh_file_label(void)
 {
     char text[256];
+    struct stat st;
 
     if(!nrf_dfu_file_label) {
         return;
     }
-    if(nrf_dfu_selected_index >= 0 &&
-       nrf_dfu_selected_index < nrf_dfu_file_count) {
-        snprintf(text, sizeof(text), "%s", nrf_dfu_files[nrf_dfu_selected_index].name);
+    if(stat(NRF_DFU_PACKAGE, &st) == 0 && S_ISREG(st.st_mode)) {
+        snprintf(text, sizeof(text), "firmware.zip  %ld KB",
+                 (long)((st.st_size + 1023) / 1024));
     } else {
-        snprintf(text, sizeof(text), "%s", ui_tr("No firmware package"));
+        snprintf(text, sizeof(text), "firmware.zip missing");
     }
     lv_label_set_text(nrf_dfu_file_label, text);
 }
@@ -410,20 +545,38 @@ static void nrf_dfu_rebuild_file_list(void)
 
 static void nrf_dfu_refresh_files(void)
 {
-    int count;
+    struct stat st;
+    char version[96];
 
-    count = nrf_dfu_scan_files();
+    mkdir("/root/nrf52840", 0755);
+    mkdir(NRF_DFU_DIR, 0755);
     pthread_mutex_lock(&nrf_dfu_lock);
-    if(count < 0) {
-        nrf_dfu_set_status_locked("Firmware folder unavailable", "Error", -1, -1);
-    } else if(count == 0) {
-        nrf_dfu_set_status_locked("Copy a .zip package with MTP", "Waiting", 0, 0);
+    if(stat(NRF_DFU_PACKAGE, &st) != 0 || !S_ISREG(st.st_mode)) {
+        nrf_dfu_selected_index = -1;
+        snprintf(nrf_dfu_target_version, sizeof(nrf_dfu_target_version), "--");
+        nrf_dfu_set_status_locked("firmware.zip missing", "Waiting", 0, -1);
     } else {
-        nrf_dfu_set_status_locked("Select firmware package", "Ready", 0, 0);
+        nrf_dfu_selected_index = 0;
+        nrf_dfu_set_status_locked("Ready to update", "Ready", 0, 0);
     }
     pthread_mutex_unlock(&nrf_dfu_lock);
 
-    nrf_dfu_rebuild_file_list();
+    if(nrf_dfu_selected_index == 0 && access(NRF_DFU_TOOL, X_OK) == 0) {
+        if(nrf_dfu_query_package_version(NRF_DFU_PACKAGE, version,
+                                         sizeof(version)) == 0) {
+            pthread_mutex_lock(&nrf_dfu_lock);
+            snprintf(nrf_dfu_target_version, sizeof(nrf_dfu_target_version),
+                     "%s", version);
+            pthread_mutex_unlock(&nrf_dfu_lock);
+        } else {
+            pthread_mutex_lock(&nrf_dfu_lock);
+            snprintf(nrf_dfu_target_version, sizeof(nrf_dfu_target_version),
+                     "--");
+            nrf_dfu_set_status_locked("Package version unavailable", "Error",
+                                      -1, -1);
+            pthread_mutex_unlock(&nrf_dfu_lock);
+        }
+    }
     nrf_dfu_refresh_file_label();
 }
 
@@ -644,6 +797,9 @@ static void *nrf_dfu_worker(void *arg)
         NULL
     };
     char response[512];
+    char current_version[96];
+    char target_version[96];
+    char msg[224];
     int probe_rc;
     int rc;
     int use_recovery;
@@ -667,6 +823,36 @@ static void *nrf_dfu_worker(void *arg)
         return NULL;
     }
 
+    if(access(req->package_path, R_OK) != 0) {
+        pthread_mutex_lock(&nrf_dfu_lock);
+        nrf_dfu_set_status_locked("firmware.zip missing", "Failed", 0, -1);
+        nrf_dfu_running = 0;
+        pthread_mutex_unlock(&nrf_dfu_lock);
+        free(req);
+        app_request_fast_refresh();
+        return NULL;
+    }
+
+    pthread_mutex_lock(&nrf_dfu_lock);
+    nrf_dfu_set_status_locked("Checking package version...", "Preparing", 1, 0);
+    pthread_mutex_unlock(&nrf_dfu_lock);
+    if(nrf_dfu_query_package_version(req->package_path, target_version,
+                                     sizeof(target_version)) != 0) {
+        pthread_mutex_lock(&nrf_dfu_lock);
+        snprintf(nrf_dfu_target_version, sizeof(nrf_dfu_target_version), "--");
+        nrf_dfu_set_status_locked("Package version unavailable", "Failed", 0,
+                                  -1);
+        nrf_dfu_running = 0;
+        pthread_mutex_unlock(&nrf_dfu_lock);
+        free(req);
+        app_request_fast_refresh();
+        return NULL;
+    }
+    pthread_mutex_lock(&nrf_dfu_lock);
+    snprintf(nrf_dfu_target_version, sizeof(nrf_dfu_target_version), "%s",
+             target_version);
+    pthread_mutex_unlock(&nrf_dfu_lock);
+
     if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
         nrf_dfu_append_log("failed to stop Meshtastic worker");
     }
@@ -677,9 +863,42 @@ static void *nrf_dfu_worker(void *arg)
     pthread_mutex_unlock(&nrf_dfu_lock);
     probe_rc = nrf_dfu_run_argv(probe_argv, 0, response, sizeof(response));
     use_recovery = probe_rc != 0 || strstr(response, "OK") == NULL;
+    current_version[0] = '\0';
+    if(!use_recovery &&
+       nrf_dfu_extract_at_version(response, current_version,
+                                  sizeof(current_version)) == 0) {
+        pthread_mutex_lock(&nrf_dfu_lock);
+        snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version),
+                 "%s", current_version);
+        pthread_mutex_unlock(&nrf_dfu_lock);
+        if(strcmp(current_version, target_version) == 0) {
+            snprintf(msg, sizeof(msg), "Version already installed: %s",
+                     current_version);
+            pthread_mutex_lock(&nrf_dfu_lock);
+            nrf_dfu_set_status_locked("Version already installed", "Ready",
+                                      100, -1);
+            nrf_dfu_append_log_locked(msg);
+            nrf_dfu_running = 0;
+            pthread_mutex_unlock(&nrf_dfu_lock);
+            free(req);
+            app_request_fast_refresh();
+            return NULL;
+        }
+    } else if(!use_recovery) {
+        pthread_mutex_lock(&nrf_dfu_lock);
+        snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version), "--");
+        nrf_dfu_set_status_locked("Current version unavailable", "Failed", 0,
+                                  -1);
+        nrf_dfu_running = 0;
+        pthread_mutex_unlock(&nrf_dfu_lock);
+        free(req);
+        app_request_fast_refresh();
+        return NULL;
+    }
 
     pthread_mutex_lock(&nrf_dfu_lock);
     if(use_recovery) {
+        snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version), "--");
         nrf_dfu_set_status_locked("No AT response, trying bootloader recovery",
                                   "Recovery", 4, 0);
     } else {
@@ -697,8 +916,12 @@ static void *nrf_dfu_worker(void *arg)
         pthread_mutex_unlock(&nrf_dfu_lock);
         sleep(2);
         if(nrf_dfu_run_argv(verify_argv, 0, response, sizeof(response)) == 0 &&
-           strstr(response, "OK")) {
+           strstr(response, "OK") &&
+           nrf_dfu_extract_at_version(response, current_version,
+                                      sizeof(current_version)) == 0) {
             pthread_mutex_lock(&nrf_dfu_lock);
+            snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version),
+                     "%s", current_version);
             nrf_dfu_set_status_locked("Update successful", "Ready", 100, 0);
             pthread_mutex_unlock(&nrf_dfu_lock);
         } else {
@@ -723,22 +946,18 @@ static void *nrf_dfu_worker(void *arg)
     return NULL;
 }
 
-static void nrf_dfu_start_event_cb(lv_event_t *event)
+static void nrf_dfu_start_confirmed(void)
 {
     pthread_t thread;
     nrf_dfu_request_t *req;
-    int index;
 
-    (void)event;
     pthread_mutex_lock(&nrf_dfu_lock);
     if(nrf_dfu_running) {
         pthread_mutex_unlock(&nrf_dfu_lock);
         return;
     }
-    index = nrf_dfu_selected_index;
-    if(index < 0 || index >= nrf_dfu_file_count) {
-        nrf_dfu_set_status_locked("Select firmware package first", "Waiting",
-                                  -1, -1);
+    if(access(NRF_DFU_PACKAGE, R_OK) != 0) {
+        nrf_dfu_set_status_locked("firmware.zip missing", "Waiting", -1, -1);
         pthread_mutex_unlock(&nrf_dfu_lock);
         return;
     }
@@ -757,7 +976,7 @@ static void nrf_dfu_start_event_cb(lv_event_t *event)
         return;
     }
     snprintf(req->package_path, sizeof(req->package_path), "%s",
-             nrf_dfu_files[index].path);
+             NRF_DFU_PACKAGE);
 
     if(pthread_create(&thread, NULL, nrf_dfu_worker, req) == 0) {
         pthread_detach(thread);
@@ -770,6 +989,102 @@ static void nrf_dfu_start_event_cb(lv_event_t *event)
     }
 }
 
+static void nrf_dfu_confirm_cancel_event_cb(lv_event_t *event)
+{
+    (void)event;
+    if(nrf_dfu_confirm_dialog && lv_obj_is_valid(nrf_dfu_confirm_dialog)) {
+        lv_obj_delete(nrf_dfu_confirm_dialog);
+    }
+}
+
+static void nrf_dfu_confirm_update_event_cb(lv_event_t *event)
+{
+    (void)event;
+    if(nrf_dfu_confirm_dialog && lv_obj_is_valid(nrf_dfu_confirm_dialog)) {
+        lv_obj_delete(nrf_dfu_confirm_dialog);
+    }
+    nrf_dfu_start_confirmed();
+}
+
+static void nrf_dfu_confirm_delete_cb(lv_event_t *event)
+{
+    (void)event;
+    nrf_dfu_confirm_dialog = NULL;
+}
+
+static void nrf_dfu_start_event_cb(lv_event_t *event)
+{
+    lv_obj_t *card;
+    lv_obj_t *title;
+    lv_obj_t *text;
+    lv_obj_t *btn;
+    int w = ui_screen_width();
+    int h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 520 : 456;
+    int card_h = 250;
+    int button_w = 180;
+
+    (void)event;
+    pthread_mutex_lock(&nrf_dfu_lock);
+    if(nrf_dfu_running) {
+        pthread_mutex_unlock(&nrf_dfu_lock);
+        return;
+    }
+    pthread_mutex_unlock(&nrf_dfu_lock);
+
+    if(access(NRF_DFU_PACKAGE, R_OK) != 0) {
+        pthread_mutex_lock(&nrf_dfu_lock);
+        nrf_dfu_set_status_locked("firmware.zip missing", "Waiting", -1, -1);
+        pthread_mutex_unlock(&nrf_dfu_lock);
+        nrf_dfu_update_ui();
+        return;
+    }
+
+    if(card_w > w - 48) {
+        card_w = w - 48;
+    }
+    if(nrf_dfu_confirm_dialog && lv_obj_is_valid(nrf_dfu_confirm_dialog)) {
+        lv_obj_delete(nrf_dfu_confirm_dialog);
+    }
+    nrf_dfu_confirm_dialog = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(nrf_dfu_confirm_dialog);
+    lv_obj_set_style_bg_color(nrf_dfu_confirm_dialog, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(nrf_dfu_confirm_dialog, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(nrf_dfu_confirm_dialog, 0, 0);
+    lv_obj_clear_flag(nrf_dfu_confirm_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(nrf_dfu_confirm_dialog, nrf_dfu_confirm_delete_cb,
+                        LV_EVENT_DELETE, NULL);
+
+    card = ui_panel(nrf_dfu_confirm_dialog, (w - card_w) / 2,
+                    (h - card_h) / 2, card_w, card_h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x121820), 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    title = ui_label(card, "Confirm update", &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_width(title, card_w - 48);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(title, 24, 24);
+
+    text = ui_label(card, "Update nRF52840 firmware now?",
+                    &lv_font_montserrat_18, 0xCBD5E1);
+    lv_obj_set_width(text, card_w - 48);
+    lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(text, 24, 78);
+
+    if(button_w * 2 + 18 > card_w - 48) {
+        button_w = (card_w - 66) / 2;
+    }
+    btn = ui_command_button(card, card_w - 24 - button_w * 2 - 18,
+                            card_h - 76, button_w, "Cancel", 0x374151);
+    lv_obj_add_event_cb(btn, nrf_dfu_confirm_cancel_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(card, card_w - 24 - button_w, card_h - 76,
+                            button_w, "Update", 0x25C281);
+    lv_obj_add_event_cb(btn, nrf_dfu_confirm_update_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+}
+
 static void nrf_dfu_update_ui(void)
 {
     int running;
@@ -777,6 +1092,8 @@ static void nrf_dfu_update_ui(void)
     int rc;
     char status[192];
     char mode[96];
+    char current_version[96];
+    char target_version[96];
     char log_text[NRF_DFU_LOG_TEXT_MAX];
 
     pthread_mutex_lock(&nrf_dfu_lock);
@@ -785,6 +1102,10 @@ static void nrf_dfu_update_ui(void)
     rc = nrf_dfu_last_rc;
     snprintf(status, sizeof(status), "%s", nrf_dfu_status_text);
     snprintf(mode, sizeof(mode), "%s", nrf_dfu_mode_text);
+    snprintf(current_version, sizeof(current_version), "%s",
+             nrf_dfu_current_version);
+    snprintf(target_version, sizeof(target_version), "%s",
+             nrf_dfu_target_version);
     snprintf(log_text, sizeof(log_text), "%s", nrf_dfu_log_text);
     pthread_mutex_unlock(&nrf_dfu_lock);
 
@@ -796,6 +1117,12 @@ static void nrf_dfu_update_ui(void)
     }
     if(nrf_dfu_mode_label) {
         lv_label_set_text(nrf_dfu_mode_label, ui_tr(mode));
+    }
+    if(nrf_dfu_current_label) {
+        lv_label_set_text(nrf_dfu_current_label, current_version);
+    }
+    if(nrf_dfu_target_label) {
+        lv_label_set_text(nrf_dfu_target_label, target_version);
     }
     if(nrf_dfu_bar) {
         lv_bar_set_value(nrf_dfu_bar, progress, LV_ANIM_ON);
@@ -809,7 +1136,7 @@ static void nrf_dfu_update_ui(void)
         lv_label_set_text(nrf_dfu_log_label, log_text);
     }
     if(nrf_dfu_update_btn) {
-        if(running || nrf_dfu_selected_index < 0) {
+        if(running || access(NRF_DFU_PACKAGE, R_OK) != 0) {
             lv_obj_add_state(nrf_dfu_update_btn, LV_STATE_DISABLED);
         } else {
             lv_obj_clear_state(nrf_dfu_update_btn, LV_STATE_DISABLED);
@@ -948,7 +1275,6 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
     lv_obj_t *summary;
-    lv_obj_t *actions;
     lv_obj_t *icon_box;
     lv_obj_t *icon;
     lv_obj_t *title;
@@ -958,31 +1284,17 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     int body_w = ui_page_panel_width();
     int body_h = ui_body_height(154);
     int top_y = ui_page_top_y(154);
-    int gap = 24;
-    int summary_w = landscape ? (body_w - gap) * 54 / 100 : body_w;
-    int actions_w = landscape ? body_w - summary_w - gap : body_w;
-    int card_h = landscape ? body_h - 24 : 430;
-    int actions_x = landscape ? summary_w + gap : 0;
-    int actions_y = landscape ? 0 : card_h + gap;
-    int actions_h = landscape ? card_h : 250;
+    int summary_w = body_w;
+    int card_h = body_h - 24;
+    int y;
     int button_w;
 
     ui_create_header(scr, "nRF52840 DFU");
     body = ui_scroll_panel(scr, body_x, top_y, body_w, body_h);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
 
-    if(card_h < 350) {
-        card_h = 350;
-    }
-    if(summary_w < 360) {
-        summary_w = landscape ? 360 : body_w;
-        actions_x = landscape ? summary_w + gap : 0;
-        actions_w = landscape ? body_w - summary_w - gap : body_w;
-    }
-    if(actions_w < 240 && landscape) {
-        actions_w = 240;
-        summary_w = body_w - actions_w - gap;
-        actions_x = summary_w + gap;
+    if(card_h < (landscape ? 390 : 540)) {
+        card_h = landscape ? 390 : 540;
     }
 
     summary = ui_panel(body, 0, 0, summary_w, card_h);
@@ -1006,18 +1318,26 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     lv_obj_set_pos(title, 124, 28);
 
     hint = ui_label(summary,
-                    "Copy an Adafruit/nrfutil application .zip package to the firmware folder with MTP, select it here, then update.",
+                    "Copy firmware.zip to /root/nrf52840/firmware with MTP, then tap Update.",
                     &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_width(hint, summary_w - 48);
-    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(hint, 24, 128);
+    lv_label_set_long_mode(hint, landscape ? LV_LABEL_LONG_DOT :
+                           LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(hint, 24, landscape ? 124 : 128);
 
-    nrf_dfu_info_pair(summary, 214, "Status", &nrf_dfu_status_label);
-    nrf_dfu_info_pair(summary, 268, "Mode", &nrf_dfu_mode_label);
-    nrf_dfu_info_pair(summary, 322, "Package", &nrf_dfu_file_label);
+    y = landscape ? 174 : 212;
+    nrf_dfu_info_pair(summary, y, "Package", &nrf_dfu_file_label);
+    y += landscape ? 46 : 54;
+    nrf_dfu_info_pair(summary, y, "Current version", &nrf_dfu_current_label);
+    y += landscape ? 46 : 54;
+    nrf_dfu_info_pair(summary, y, "Target version", &nrf_dfu_target_label);
+    y += landscape ? 46 : 54;
+    nrf_dfu_info_pair(summary, y, "Status", &nrf_dfu_status_label);
+    y += landscape ? 46 : 54;
+    nrf_dfu_info_pair(summary, y, "Mode", &nrf_dfu_mode_label);
 
     nrf_dfu_bar = lv_bar_create(summary);
-    lv_obj_set_pos(nrf_dfu_bar, 24, card_h - 58);
+    lv_obj_set_pos(nrf_dfu_bar, 24, card_h - 92);
     lv_obj_set_size(nrf_dfu_bar, summary_w - 48, 18);
     lv_bar_set_range(nrf_dfu_bar, 0, 100);
     lv_bar_set_value(nrf_dfu_bar, 0, LV_ANIM_OFF);
@@ -1030,58 +1350,15 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     lv_obj_align_to(nrf_dfu_bar_label, nrf_dfu_bar, LV_ALIGN_OUT_BOTTOM_RIGHT,
                     0, 6);
 
-    actions = ui_panel(body, actions_x, actions_y, actions_w, actions_h);
-    lv_obj_set_style_bg_color(actions, lv_color_hex(0x121820), 0);
-    lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
-    title = ui_label(actions, "Actions", &lv_font_montserrat_22, 0xF2F5F8);
-    lv_obj_set_pos(title, 24, 22);
-
-    if(landscape) {
-        button_w = actions_w - 48;
-        nrf_dfu_select_btn = ui_command_button(actions, 24, 72, button_w,
-                                               "Select firmware", 0x3DA5FF);
-        nrf_dfu_log_btn = ui_command_button(actions, 24, 140, button_w,
-                                            "Update log", 0xF5A524);
-        nrf_dfu_update_btn = ui_command_button(actions, 24, 208, button_w,
-                                               "Update nRF52840", 0x25C281);
-        nrf_dfu_mtp_btn = ui_command_button(actions, 24, 276, button_w,
-                                            "Open MTP", 0x41C7C7);
-    } else {
-        button_w = (actions_w - 60) / 2;
-        if(button_w < 160) {
-            button_w = actions_w - 48;
-            nrf_dfu_select_btn = ui_command_button(actions, 24, 72, button_w,
-                                                   "Select firmware",
-                                                   0x3DA5FF);
-            nrf_dfu_log_btn = ui_command_button(actions, 24, 140, button_w,
-                                                "Update log", 0xF5A524);
-            nrf_dfu_update_btn = ui_command_button(actions, 24, 208, button_w,
-                                                   "Update nRF52840",
-                                                   0x25C281);
-            nrf_dfu_mtp_btn = ui_command_button(actions, 24, 276, button_w,
-                                                "Open MTP", 0x41C7C7);
-        } else {
-            nrf_dfu_select_btn = ui_command_button(actions, 24, 72, button_w,
-                                                   "Select firmware",
-                                                   0x3DA5FF);
-            nrf_dfu_log_btn = ui_command_button(actions, 36 + button_w, 72,
-                                                button_w, "Update log",
-                                                0xF5A524);
-            nrf_dfu_update_btn = ui_command_button(actions, 24, 148, button_w,
-                                                   "Update nRF52840",
-                                                   0x25C281);
-            nrf_dfu_mtp_btn = ui_command_button(actions, 36 + button_w, 148,
-                                                button_w, "Open MTP",
-                                                0x41C7C7);
-        }
+    button_w = landscape ? 260 : summary_w - 48;
+    if(button_w > summary_w - 48) {
+        button_w = summary_w - 48;
     }
-    lv_obj_add_event_cb(nrf_dfu_select_btn, nrf_dfu_select_open_event_cb,
-                        LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(nrf_dfu_log_btn, nrf_dfu_log_open_event_cb,
-                        LV_EVENT_CLICKED, NULL);
+    nrf_dfu_update_btn = ui_command_button(summary,
+                                           (summary_w - button_w) / 2,
+                                           card_h - 52, button_w,
+                                           "Update nRF52840", 0x25C281);
     lv_obj_add_event_cb(nrf_dfu_update_btn, nrf_dfu_start_event_cb,
-                        LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(nrf_dfu_mtp_btn, nrf_dfu_open_mtp_event_cb,
                         LV_EVENT_CLICKED, NULL);
 
     nrf_dfu_create_overlay(scr);
@@ -1099,6 +1376,8 @@ void ui_nrf52840_dfu_cleanup(void)
     nrf_dfu_status_label = NULL;
     nrf_dfu_mode_label = NULL;
     nrf_dfu_file_label = NULL;
+    nrf_dfu_current_label = NULL;
+    nrf_dfu_target_label = NULL;
     nrf_dfu_list_panel = NULL;
     nrf_dfu_log_label = NULL;
     nrf_dfu_bar = NULL;
@@ -1109,6 +1388,7 @@ void ui_nrf52840_dfu_cleanup(void)
     nrf_dfu_mtp_btn = NULL;
     nrf_dfu_select_dialog = NULL;
     nrf_dfu_log_dialog = NULL;
+    nrf_dfu_confirm_dialog = NULL;
     nrf_dfu_overlay = NULL;
     nrf_dfu_overlay_status = NULL;
     nrf_dfu_overlay_bar = NULL;

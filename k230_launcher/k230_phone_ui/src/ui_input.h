@@ -42,6 +42,7 @@ void ui_input_inline_focus(ui_input_inline_t *state);
 void ui_input_inline_submit(ui_input_inline_t *state);
 void ui_input_inline_hide(ui_input_inline_t *state);
 int ui_input_inline_is_active(ui_input_inline_t *state);
+void ui_input_hide_inline_active(void);
 
 #ifdef __cplusplus
 }
