@@ -724,6 +724,7 @@ static const ui_translation_t ui_translations[] = {
     { "Nodes", "节点", "ノード" },
     { "AHT20 not detected", "未检测到 AHT20", "AHT20 未検出" },
     { "Factory", "Factory", "ファクトリー" },
+    { "RF Test", "射频测试", "RF テスト" },
     { "User", "用户", "ユーザー" },
     { "Profiles", "配置", "プロファイル" },
     { "Publish now", "立即发布", "今すぐ公開" },

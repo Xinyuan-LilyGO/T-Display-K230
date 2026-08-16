@@ -60,7 +60,7 @@
 #define LORA_LR2021_BOOTSTRAP_CR 6
 #define LORA_LR2021_BOOTSTRAP_SW 0x12
 #define LORA_LR2021_BOOTSTRAP_PRE 15
-#define LORA_SESSION_BUTTON_COUNT 4
+#define LORA_SESSION_BUTTON_COUNT 3
 #define LORA_MAX_PROFILES 16
 #define LORA_UI_TICK_MS 50
 #define LORA_STARTUP_DELAY_MS 160
@@ -173,7 +173,6 @@ static lora_profile_t lora_profiles[LORA_MAX_PROFILES];
 
 typedef enum {
     LORA_SESSION_LISTEN = 0,
-    LORA_SESSION_CHAT,
     LORA_SESSION_AUTO_TX,
     LORA_SESSION_CARRIER,
 } lora_session_mode_t;
@@ -775,7 +774,7 @@ static lv_obj_t *lora_log_label;
 static lv_obj_t *lora_auto_label;
 static lv_obj_t *lora_payload_label;
 static lv_obj_t *lora_tab_factory;
-static lv_obj_t *lora_tab_chat;
+static lv_obj_t *lora_tab_radio;
 static lv_obj_t *lora_tab_log;
 static lv_obj_t *lora_factory_panel;
 static lv_obj_t *lora_chat_panel;
@@ -789,7 +788,6 @@ static lv_obj_t *lora_profile_buttons[LORA_MAX_PROFILES];
 static lv_obj_t *lora_session_buttons[LORA_SESSION_BUTTON_COUNT];
 static lv_obj_t *lora_payload_buttons[2];
 static lv_obj_t *lora_payload_row_label;
-static lv_obj_t *lora_input_row;
 static lv_obj_t *lora_message_page;
 static lv_obj_t *lora_message_cont;
 static int lora_active_profile = LORA_DEFAULT_PROFILE_INDEX;
@@ -1207,8 +1205,6 @@ static void lora_save_profiles(void)
 static const char *lora_session_text(void)
 {
     switch(lora_session_mode) {
-    case LORA_SESSION_CHAT:
-        return "Chat";
     case LORA_SESSION_AUTO_TX:
         return "Auto TX";
     case LORA_SESSION_CARRIER:
@@ -1726,8 +1722,6 @@ static int lora_start_rx(void)
     if(lora_session_mode == LORA_SESSION_AUTO_TX) {
         lora_set_status("Auto TX %ums %s", lora_profiles[lora_active_profile].interval_ms,
                         lora_payload_mode_text());
-    } else if(lora_session_mode == LORA_SESSION_CHAT) {
-        lora_set_status("Chat");
     } else if(lora_session_mode == LORA_SESSION_CARRIER) {
         lora_set_status("Carrier ready");
     } else {
@@ -2151,8 +2145,6 @@ static void lora_reflow_chat_layout(void)
     int panel_h;
     int inner_w;
     int msg_y;
-    int input_h;
-    int input_y;
     int msg_h;
 
     if(!lora_chat_panel || !lora_message_page ||
@@ -2165,42 +2157,23 @@ static void lora_reflow_chat_layout(void)
     panel_h = lv_obj_get_height(lora_chat_panel);
     inner_w = lora_panel_content_width(lora_chat_panel);
     msg_y = landscape ? 164 : 234;
-    input_h = landscape ? 70 : 80;
-    input_y = landscape ? panel_h - input_h - 12 : 642;
-
-    if(input_y < msg_y + 118 + 12) {
-        input_y = msg_y + 118 + 12;
-    }
 
     lv_obj_set_pos(lora_message_page, 0, msg_y);
     lv_obj_set_width(lora_message_page, inner_w);
 
-    if(lora_input_row && lv_obj_is_valid(lora_input_row)) {
-        lv_obj_set_pos(lora_input_row, 0, input_y);
-        lv_obj_set_size(lora_input_row, inner_w, input_h);
-    }
-
-    if(lora_session_mode == LORA_SESSION_CHAT && lora_input_row &&
-       lv_obj_is_valid(lora_input_row)) {
-        msg_h = input_y - msg_y - 12;
-    } else {
-        msg_h = panel_h - msg_y - 4;
-    }
+    msg_h = panel_h - msg_y - 4;
     if(msg_h < 118) {
         msg_h = 118;
     }
     lv_obj_set_height(lora_message_page, msg_h);
 
     lv_obj_move_foreground(lora_message_page);
-    if(lora_input_row && lv_obj_is_valid(lora_input_row)) {
-        lv_obj_move_foreground(lora_input_row);
-    }
 }
 
 static void lora_update_session_ui(void)
 {
     uint32_t mode_colors[LORA_SESSION_BUTTON_COUNT] = {
-        0x25C281, 0x3DA5FF, 0xF5A524, 0xEF4D5A
+        0x25C281, 0xF5A524, 0xEF4D5A
     };
 
     for(size_t i = 0; i < sizeof(lora_profile_buttons) / sizeof(lora_profile_buttons[0]); i++) {
@@ -2223,7 +2196,6 @@ static void lora_update_session_ui(void)
                     lora_session_mode != LORA_SESSION_AUTO_TX);
     lora_set_hidden(lora_payload_buttons[1],
                     lora_session_mode != LORA_SESSION_AUTO_TX);
-    lora_set_hidden(lora_input_row, lora_session_mode != LORA_SESSION_CHAT);
 
     lora_reflow_chat_layout();
 }
@@ -2307,21 +2279,6 @@ static int lora_enter_listen_mode(void)
         lora_add_message("Listening with selected profile.", 0, "local");
         lora_log("Mode Listen profile=%s",
                  lora_profiles[lora_active_profile].name);
-    }
-    lora_update_stats();
-    return rc;
-}
-
-static int lora_enter_chat_mode(void)
-{
-    lora_session_mode = LORA_SESSION_CHAT;
-    lora_auto_tx = 0;
-    lora_last_auto_tx_us = 0;
-    lora_abort_radio_op();
-    int rc = lora_apply_profile(lora_active_profile);
-    if(rc == 0) {
-        lora_add_message("Chat mode ready.", 0, "local");
-        lora_log("Mode Chat profile=%s", lora_profiles[lora_active_profile].name);
     }
     lora_update_stats();
     return rc;
@@ -2674,7 +2631,7 @@ static void lora_editor_save_cb(lv_event_t *event)
     if(lora_message_cont && lv_obj_is_valid(lora_message_cont)) {
         lv_obj_clean(lora_message_cont);
     }
-    lora_enter_chat_mode();
+    lora_enter_listen_mode();
 }
 
 static void lora_editor_delete_cb(lv_event_t *event)
@@ -2838,13 +2795,7 @@ static void lora_profile_event_cb(lv_event_t *event)
         lv_obj_clean(lora_message_cont);
     }
     lora_show_tab(0);
-    lora_enter_chat_mode();
-}
-
-static void lora_send_event_cb(lv_event_t *event)
-{
-    (void)event;
-    lora_send_payload(lora_payload_text, 0);
+    lora_enter_listen_mode();
 }
 
 static void lora_session_event_cb(lv_event_t *event)
@@ -2854,8 +2805,6 @@ static void lora_session_event_cb(lv_event_t *event)
 
     if(mode == LORA_SESSION_AUTO_TX) {
         lora_enter_auto_tx_mode();
-    } else if(mode == LORA_SESSION_CHAT) {
-        lora_enter_chat_mode();
     } else if(mode == LORA_SESSION_CARRIER) {
         lora_open_carrier_confirm();
     } else {
@@ -2869,36 +2818,6 @@ static void lora_payload_mode_event_cb(lv_event_t *event)
         (lora_payload_mode_t)(intptr_t)lv_event_get_user_data(event);
     lora_update_stats();
     lora_log("Payload mode %s", lora_payload_mode_text());
-}
-
-static void lora_chat_submit_cb(const char *text, void *user_data)
-{
-    (void)user_data;
-    if(!text || !text[0]) {
-        return;
-    }
-    snprintf(lora_payload_text, sizeof(lora_payload_text), "%s", text);
-    lora_update_stats();
-    if(lora_session_mode != LORA_SESSION_CHAT) {
-        lora_enter_chat_mode();
-    }
-    lora_send_payload(lora_payload_text, 0);
-}
-
-static void lora_message_event_cb(lv_event_t *event)
-{
-    ui_input_dialog_config_t config;
-
-    (void)event;
-    memset(&config, 0, sizeof(config));
-    config.title = "LoRa Message";
-    config.placeholder = "Message";
-    config.initial_text = "";
-    config.password_mode = 0;
-    config.max_length = sizeof(lora_payload_text) - 1U;
-    config.submit_cb = lora_chat_submit_cb;
-    config.submit_text = "Send";
-    ui_input_dialog_open(&config);
 }
 
 static void lora_show_tab(int tab)
@@ -2927,8 +2846,8 @@ static void lora_show_tab(int tab)
     if(lora_tab_factory) {
         lora_style_button_selected(lora_tab_factory, tab == 1, 0x7C3AED);
     }
-    if(lora_tab_chat) {
-        lora_style_button_selected(lora_tab_chat, tab == 0, 0x7C3AED);
+    if(lora_tab_radio) {
+        lora_style_button_selected(lora_tab_radio, tab == 0, 0x7C3AED);
     }
     if(lora_tab_log) {
         lora_style_button_selected(lora_tab_log, tab == 2, 0x7C3AED);
@@ -3174,8 +3093,6 @@ static void lora_create_chat(lv_obj_t *body)
     int payload_y;
     int payload_btn_y;
     int msg_y;
-    int input_h;
-    int input_y;
     int msg_h;
     int session_gap = landscape ? 12 : 14;
     int label_w;
@@ -3192,7 +3109,7 @@ static void lora_create_chat(lv_obj_t *body)
                                landscape ? lora_landscape_panel_h() : 744);
     panel_h = lv_obj_get_height(lora_chat_panel);
     int inner_w = lora_panel_content_width(lora_chat_panel);
-    lv_obj_t *title = ui_label(lora_chat_panel, "Chat", &lv_font_montserrat_22,
+    lv_obj_t *title = ui_label(lora_chat_panel, "RF Test", &lv_font_montserrat_22,
                                0xF2F5F8);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
@@ -3212,8 +3129,6 @@ static void lora_create_chat(lv_obj_t *body)
         payload_y = 120;
         payload_btn_y = 108;
         msg_y = 164;
-        input_h = 70;
-        input_y = panel_h - input_h - 12;
         session_w = (inner_w - controls_x -
                      session_gap * (LORA_SESSION_BUTTON_COUNT - 1)) /
                     LORA_SESSION_BUTTON_COUNT;
@@ -3228,8 +3143,6 @@ static void lora_create_chat(lv_obj_t *body)
         payload_y = 188;
         payload_btn_y = 174;
         msg_y = 234;
-        input_h = 80;
-        input_y = 642;
         session_w = (inner_w - controls_x -
                      session_gap * (LORA_SESSION_BUTTON_COUNT - 1)) /
                     LORA_SESSION_BUTTON_COUNT;
@@ -3237,7 +3150,7 @@ static void lora_create_chat(lv_obj_t *body)
         payload_x = 104;
         payload_w = 178;
     }
-    msg_h = input_y - msg_y - 12;
+    msg_h = panel_h - msg_y - 4;
     if(msg_h < 118) {
         msg_h = 118;
     }
@@ -3250,18 +3163,14 @@ static void lora_create_chat(lv_obj_t *body)
     lora_session_buttons[LORA_SESSION_LISTEN] =
         lora_button(lora_chat_panel, controls_x, session_y,
                     session_w, 46, "Listen", 0x25C281);
-    lora_session_buttons[LORA_SESSION_CHAT] =
-        lora_button(lora_chat_panel,
-                    controls_x + session_w + session_gap, session_y,
-                    session_w, 46, "Chat", 0x3DA5FF);
     lora_session_buttons[LORA_SESSION_AUTO_TX] =
         lora_button(lora_chat_panel,
-                    controls_x + (session_w + session_gap) * 2,
+                    controls_x + session_w + session_gap,
                     session_y, session_w, 46, "Auto TX",
                     0xF5A524);
     lora_session_buttons[LORA_SESSION_CARRIER] =
         lora_button(lora_chat_panel,
-                    controls_x + (session_w + session_gap) * 3,
+                    controls_x + (session_w + session_gap) * 2,
                     session_y, session_w, 46, "Carrier",
                     0xEF4D5A);
     for(int i = 0; i < LORA_SESSION_BUTTON_COUNT; i++) {
@@ -3306,24 +3215,6 @@ static void lora_create_chat(lv_obj_t *body)
     lv_obj_set_style_pad_row(lora_message_cont, 4, 0);
     lv_obj_set_flex_flow(lora_message_cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_clear_flag(lora_message_cont, LV_OBJ_FLAG_SCROLLABLE);
-
-    lora_input_row = lv_obj_create(lora_chat_panel);
-    lv_obj_set_pos(lora_input_row, 0, input_y);
-    lv_obj_set_size(lora_input_row, inner_w, input_h);
-    lv_obj_set_style_bg_opa(lora_input_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(lora_input_row, 0, 0);
-    lv_obj_set_style_pad_all(lora_input_row, 0, 0);
-    lv_obj_clear_flag(lora_input_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *msg = lora_button(lora_input_row, 0, landscape ? 5 : 8,
-                                inner_w / 2 - 12, landscape ? 56 : 64,
-                                "Message", 0xF2F5F8);
-    lv_obj_add_event_cb(msg, lora_message_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *send = lora_button(lora_input_row, inner_w / 2 + 12,
-                                 landscape ? 5 : 8, inner_w / 2 - 12,
-                                 landscape ? 56 : 64,
-                                 "Send", 0x3DA5FF);
-    lv_obj_add_event_cb(send, lora_send_event_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_add_flag(lora_chat_panel, LV_OBJ_FLAG_HIDDEN);
 }
@@ -3371,11 +3262,11 @@ void ui_lora_create(lv_obj_t *scr)
                                   0xF2F5F8);
     lv_obj_add_event_cb(lora_tab_factory, lora_tab_event_cb, LV_EVENT_CLICKED,
                         (void *)1);
-    lora_tab_chat = lora_button(body, landscape ? 24 : 204,
-                                landscape ? 366 : 254,
-                                landscape ? left_w : 160, 56, "Chat",
-                                0xF2F5F8);
-    lv_obj_add_event_cb(lora_tab_chat, lora_tab_event_cb, LV_EVENT_CLICKED,
+    lora_tab_radio = lora_button(body, landscape ? 24 : 204,
+                                 landscape ? 366 : 254,
+                                 landscape ? left_w : 160, 56, "RF Test",
+                                 0xF2F5F8);
+    lv_obj_add_event_cb(lora_tab_radio, lora_tab_event_cb, LV_EVENT_CLICKED,
                         (void *)0);
     lora_tab_log = lora_button(body, landscape ? 24 : 384,
                                landscape ? 430 : 254,
@@ -5526,7 +5417,7 @@ void ui_lora_cleanup(void)
     lora_auto_label = NULL;
     lora_payload_label = NULL;
     lora_tab_factory = NULL;
-    lora_tab_chat = NULL;
+    lora_tab_radio = NULL;
     lora_tab_log = NULL;
     lora_factory_panel = NULL;
     lora_chat_panel = NULL;
@@ -5540,7 +5431,6 @@ void ui_lora_cleanup(void)
     memset(lora_session_buttons, 0, sizeof(lora_session_buttons));
     memset(lora_payload_buttons, 0, sizeof(lora_payload_buttons));
     lora_payload_row_label = NULL;
-    lora_input_row = NULL;
     lora_message_page = NULL;
     lora_message_cont = NULL;
 }
