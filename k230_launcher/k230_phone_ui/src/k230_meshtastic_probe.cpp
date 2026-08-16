@@ -3491,7 +3491,7 @@ static bool encode_user_proto(const probe_options_t &opts,
     append_string_field(out, 2U, long_name, 39U);
     append_string_field(out, 3U, short_name, 4U);
     append_varint(out, (5U << 3U) | 0U);
-    append_varint(out, 0U);
+    append_varint(out, MESHTASTIC_HW_MODEL_NRF52840_PCA10059);
     if(mesh_pki_public_key_available()) {
         append_varint(out, (8U << 3U) | 2U);
         append_varint(out, MESHTASTIC_CURVE25519_KEY_LEN);
