@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <string>
 #include <thread>
 #include <vector>
@@ -250,9 +251,31 @@ bool looks_like_at_version(const std::string &text) {
     return false;
 }
 
+std::string lower_ascii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+bool looks_like_k230_package_version(const std::string &text) {
+    if (!looks_like_at_version(text)) {
+        return false;
+    }
+    std::string lower = lower_ascii(text);
+    if (lower.find("pca10056") != std::string::npos ||
+        lower.find("cp2104") != std::string::npos) {
+        return false;
+    }
+    return text.rfind("20", 0) == 0 &&
+           lower.find("k230") != std::string::npos &&
+           lower.find("uart") != std::string::npos;
+}
+
 std::string extract_at_package_version(const PackageData &pkg) {
     const std::vector<uint8_t> &data = pkg.firmware;
     std::string best;
+    bool has_k230_at_marker = false;
 
     for (size_t i = 0; i < data.size();) {
         while (i < data.size() &&
@@ -270,22 +293,23 @@ std::string extract_at_package_version(const PackageData &pkg) {
                          i - start);
         size_t pos = text.find("+VER:K230_NRF52840_AT,");
         if (pos != std::string::npos) {
+            has_k230_at_marker = true;
             pos += strlen("+VER:K230_NRF52840_AT,");
             std::string value;
             while (pos < text.size() && is_version_char(text[pos])) {
                 value.push_back(text[pos++]);
             }
-            if (looks_like_at_version(value)) {
+            if (looks_like_k230_package_version(value)) {
                 return value;
             }
         }
-        if (looks_like_at_version(text)) {
+        if (looks_like_k230_package_version(text)) {
             if (best.empty() || text.rfind("20", 0) == 0) {
                 best = text;
             }
         }
     }
-    return best;
+    return has_k230_at_marker ? best : std::string();
 }
 
 speed_t baud_to_speed(int baud) {

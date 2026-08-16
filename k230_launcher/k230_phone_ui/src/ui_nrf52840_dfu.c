@@ -72,6 +72,46 @@ static char nrf_dfu_log_text[NRF_DFU_LOG_TEXT_MAX] = "No log yet";
 
 static void nrf_dfu_update_ui(void);
 
+static void nrf_dfu_screen_metrics(int *out_w, int *out_h)
+{
+    lv_obj_t *top = lv_layer_top();
+    int w;
+    int h;
+
+    if(top) {
+        lv_obj_update_layout(top);
+        w = lv_obj_get_width(top);
+        h = lv_obj_get_height(top);
+    } else {
+        w = 0;
+        h = 0;
+    }
+    if(w <= 0) {
+        w = ui_screen_width();
+    }
+    if(h <= 0) {
+        h = ui_screen_height();
+    }
+    if(out_w) {
+        *out_w = w;
+    }
+    if(out_h) {
+        *out_h = h;
+    }
+}
+
+static void nrf_dfu_set_screen_overlay(lv_obj_t *overlay, int w, int h)
+{
+    lv_obj_set_pos(overlay, 0, 0);
+    lv_obj_set_size(overlay, w, h);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_set_style_pad_all(overlay, 0, 0);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+}
+
 static int nrf_dfu_ends_with(const char *text, const char *suffix)
 {
     size_t text_len;
@@ -614,11 +654,12 @@ static lv_obj_t *nrf_dfu_dialog_card(lv_obj_t **dialog_out,
     lv_obj_t *title;
     lv_obj_t *close_btn;
     lv_obj_t *close_label;
-    int w = ui_screen_width();
-    int h = ui_screen_height();
+    int w;
+    int h;
     int card_w = preferred_w;
     int card_h = preferred_h;
 
+    nrf_dfu_screen_metrics(&w, &h);
     if(card_w > w - 48) {
         card_w = w - 48;
     }
@@ -1018,8 +1059,8 @@ static void nrf_dfu_start_event_cb(lv_event_t *event)
     lv_obj_t *title;
     lv_obj_t *text;
     lv_obj_t *btn;
-    int w = ui_screen_width();
-    int h = ui_screen_height();
+    int w;
+    int h;
     int card_w = ui_is_landscape() ? 520 : 456;
     int card_h = 250;
     int button_w = 180;
@@ -1040,6 +1081,7 @@ static void nrf_dfu_start_event_cb(lv_event_t *event)
         return;
     }
 
+    nrf_dfu_screen_metrics(&w, &h);
     if(card_w > w - 48) {
         card_w = w - 48;
     }
@@ -1047,17 +1089,13 @@ static void nrf_dfu_start_event_cb(lv_event_t *event)
         lv_obj_delete(nrf_dfu_confirm_dialog);
     }
     nrf_dfu_confirm_dialog = lv_obj_create(lv_layer_top());
-    ui_set_fullscreen(nrf_dfu_confirm_dialog);
-    lv_obj_set_style_bg_color(nrf_dfu_confirm_dialog, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(nrf_dfu_confirm_dialog, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(nrf_dfu_confirm_dialog, 0, 0);
-    lv_obj_clear_flag(nrf_dfu_confirm_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    nrf_dfu_set_screen_overlay(nrf_dfu_confirm_dialog, w, h);
     lv_obj_add_event_cb(nrf_dfu_confirm_dialog, nrf_dfu_confirm_delete_cb,
                         LV_EVENT_DELETE, NULL);
 
     card = lv_obj_create(nrf_dfu_confirm_dialog);
-    lv_obj_set_pos(card, (w - card_w) / 2, (h - card_h) / 2);
     lv_obj_set_size(card, card_w, card_h);
+    lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x121820), 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(card, 8, 0);
@@ -1242,27 +1280,27 @@ static void nrf_dfu_create_overlay(lv_obj_t *scr)
     lv_obj_t *card;
     lv_obj_t *title;
     lv_obj_t *hint;
-    int w = ui_screen_width();
-    int h = ui_screen_height();
+    int w;
+    int h;
     int card_w = ui_is_landscape() ? 560 : 472;
     int card_h = 300;
 
+    (void)scr;
+    nrf_dfu_screen_metrics(&w, &h);
     if(card_w > w - 48) {
         card_w = w - 48;
     }
 
-    nrf_dfu_overlay = lv_obj_create(scr);
-    ui_set_fullscreen(nrf_dfu_overlay);
-    lv_obj_set_style_bg_color(nrf_dfu_overlay, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(nrf_dfu_overlay, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(nrf_dfu_overlay, 0, 0);
-    lv_obj_add_flag(nrf_dfu_overlay, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(nrf_dfu_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    if(nrf_dfu_overlay && lv_obj_is_valid(nrf_dfu_overlay)) {
+        lv_obj_delete(nrf_dfu_overlay);
+    }
+    nrf_dfu_overlay = lv_obj_create(lv_layer_top());
+    nrf_dfu_set_screen_overlay(nrf_dfu_overlay, w, h);
     lv_obj_add_flag(nrf_dfu_overlay, LV_OBJ_FLAG_HIDDEN);
 
     card = lv_obj_create(nrf_dfu_overlay);
-    lv_obj_set_pos(card, (w - card_w) / 2, (h - card_h) / 2);
     lv_obj_set_size(card, card_w, card_h);
+    lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x121820), 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(card, 8, 0);
@@ -1338,7 +1376,13 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
         card_h = landscape ? 330 : 540;
     }
 
-    margin = landscape ? 18 : 24;
+    margin = landscape ? 56 : 34;
+    if(body_w - margin * 2 < 320) {
+        margin = (body_w - 320) / 2;
+        if(margin < 24) {
+            margin = 24;
+        }
+    }
     icon_size = landscape ? 68 : 84;
     content_x = margin;
     content_w = body_w - margin * 2;
@@ -1446,7 +1490,13 @@ void ui_nrf52840_dfu_cleanup(void)
     nrf_dfu_mtp_btn = NULL;
     nrf_dfu_select_dialog = NULL;
     nrf_dfu_log_dialog = NULL;
+    if(nrf_dfu_confirm_dialog && lv_obj_is_valid(nrf_dfu_confirm_dialog)) {
+        lv_obj_delete(nrf_dfu_confirm_dialog);
+    }
     nrf_dfu_confirm_dialog = NULL;
+    if(nrf_dfu_overlay && lv_obj_is_valid(nrf_dfu_overlay)) {
+        lv_obj_delete(nrf_dfu_overlay);
+    }
     nrf_dfu_overlay = NULL;
     nrf_dfu_overlay_status = NULL;
     nrf_dfu_overlay_bar = NULL;
