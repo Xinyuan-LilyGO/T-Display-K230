@@ -1055,9 +1055,15 @@ static void nrf_dfu_start_event_cb(lv_event_t *event)
     lv_obj_add_event_cb(nrf_dfu_confirm_dialog, nrf_dfu_confirm_delete_cb,
                         LV_EVENT_DELETE, NULL);
 
-    card = ui_panel(nrf_dfu_confirm_dialog, (w - card_w) / 2,
-                    (h - card_h) / 2, card_w, card_h);
+    card = lv_obj_create(nrf_dfu_confirm_dialog);
+    lv_obj_set_pos(card, (w - card_w) / 2, (h - card_h) / 2);
+    lv_obj_set_size(card, card_w, card_h);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x121820), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x27313C), 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
     title = ui_label(card, "Confirm update", &lv_font_montserrat_24,
@@ -1254,9 +1260,16 @@ static void nrf_dfu_create_overlay(lv_obj_t *scr)
     lv_obj_clear_flag(nrf_dfu_overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(nrf_dfu_overlay, LV_OBJ_FLAG_HIDDEN);
 
-    card = ui_panel(nrf_dfu_overlay, (w - card_w) / 2, (h - card_h) / 2,
-                    card_w, card_h);
+    card = lv_obj_create(nrf_dfu_overlay);
+    lv_obj_set_pos(card, (w - card_w) / 2, (h - card_h) / 2);
+    lv_obj_set_size(card, card_w, card_h);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x121820), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x27313C), 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
     title = ui_label(card, "Updating nRF52840", &lv_font_montserrat_24,
                      0xF2F5F8);
@@ -1294,7 +1307,6 @@ static void nrf_dfu_create_overlay(lv_obj_t *scr)
 void ui_nrf52840_dfu_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
-    lv_obj_t *summary;
     lv_obj_t *icon_box;
     lv_obj_t *icon;
     lv_obj_t *title;
@@ -1304,7 +1316,6 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     int body_w = ui_page_panel_width();
     int body_h = ui_body_height(154);
     int top_y = ui_page_top_y(154);
-    int summary_w = body_w;
     int card_h = body_h - 24;
     int margin;
     int icon_size;
@@ -1321,51 +1332,29 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
 
     ui_create_header(scr, "nRF52840 DFU");
     body = ui_scroll_panel(scr, body_x, top_y, body_w, body_h);
-    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x121820), 0);
 
     if(card_h < (landscape ? 330 : 540)) {
         card_h = landscape ? 330 : 540;
     }
 
-    summary = ui_panel(body, 0, 0, summary_w, card_h);
-    lv_obj_set_style_bg_color(summary, lv_color_hex(0x121820), 0);
-    lv_obj_clear_flag(summary, LV_OBJ_FLAG_SCROLLABLE);
-
     margin = landscape ? 18 : 24;
     icon_size = landscape ? 68 : 84;
-    if(landscape) {
-        action_w = summary_w >= 760 ? 188 : 164;
-        if(action_w > summary_w / 3) {
-            action_w = summary_w / 3;
-        }
-        action_x = summary_w - margin - action_w;
-        content_x = margin;
-        content_w = action_x - margin * 2;
-        if(content_w < 420) {
-            content_w = summary_w - margin * 2;
-            action_x = summary_w - margin - action_w;
-        }
-        info_x = content_x;
-        info_w = content_w;
-        info_label_w = content_w >= 620 ? 178 : 150;
-        row_step = 38;
-        button_y = (card_h - 60) / 2 - 18;
-        if(button_y < 94) {
-            button_y = 94;
-        }
-    } else {
-        action_w = summary_w - margin * 2;
-        action_x = margin;
-        content_x = margin;
-        content_w = summary_w - margin * 2;
-        info_x = content_x;
-        info_w = content_w;
-        info_label_w = content_w >= 430 ? 166 : 136;
-        row_step = 54;
-        button_y = card_h - 76;
+    content_x = margin;
+    content_w = body_w - margin * 2;
+    info_x = content_x;
+    info_w = content_w;
+    info_label_w = landscape ? (content_w >= 680 ? 210 : 176) :
+                   (content_w >= 430 ? 166 : 136);
+    row_step = landscape ? 38 : 54;
+    action_w = landscape ? 220 : content_w;
+    if(action_w > content_w) {
+        action_w = content_w;
     }
+    action_x = (body_w - action_w) / 2;
+    button_y = card_h - 76;
 
-    icon_box = lv_obj_create(summary);
+    icon_box = lv_obj_create(body);
     lv_obj_set_size(icon_box, icon_size, icon_size);
     lv_obj_set_pos(icon_box, content_x, 24);
     lv_obj_set_style_radius(icon_box, 8, 0);
@@ -1377,14 +1366,14 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
                     &lv_font_montserrat_24, 0xFFFFFF);
     lv_obj_center(icon);
 
-    title = ui_label(summary, "nRF52840 firmware update",
+    title = ui_label(body, "nRF52840 firmware update",
                      &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_width(title, content_w - icon_size - 16);
     lv_label_set_long_mode(title, landscape ? LV_LABEL_LONG_DOT :
                            LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(title, content_x + icon_size + 16, 28);
 
-    hint = ui_label(summary,
+    hint = ui_label(body,
                     "Copy firmware.zip to /root/nrf52840/firmware with MTP, then tap Update.",
                     &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_width(hint, content_w);
@@ -1393,29 +1382,24 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     lv_obj_set_pos(hint, content_x, landscape ? 104 : 128);
 
     y = landscape ? 144 : 212;
-    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+    nrf_dfu_info_pair(body, info_x, y, info_w, info_label_w,
                       "Package", &nrf_dfu_file_label);
     y += row_step;
-    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+    nrf_dfu_info_pair(body, info_x, y, info_w, info_label_w,
                       "Current version", &nrf_dfu_current_label);
     y += row_step;
-    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+    nrf_dfu_info_pair(body, info_x, y, info_w, info_label_w,
                       "Target version", &nrf_dfu_target_label);
     y += row_step;
-    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+    nrf_dfu_info_pair(body, info_x, y, info_w, info_label_w,
                       "Status", &nrf_dfu_status_label);
     y += row_step;
-    nrf_dfu_info_pair(summary, info_x, y, info_w, info_label_w,
+    nrf_dfu_info_pair(body, info_x, y, info_w, info_label_w,
                       "Mode", &nrf_dfu_mode_label);
 
-    nrf_dfu_bar = lv_bar_create(summary);
-    if(landscape) {
-        lv_obj_set_pos(nrf_dfu_bar, action_x, button_y + 78);
-        lv_obj_set_size(nrf_dfu_bar, action_w, 16);
-    } else {
-        lv_obj_set_pos(nrf_dfu_bar, margin, card_h - 126);
-        lv_obj_set_size(nrf_dfu_bar, action_w, 18);
-    }
+    nrf_dfu_bar = lv_bar_create(body);
+    lv_obj_set_pos(nrf_dfu_bar, action_x, button_y - 42);
+    lv_obj_set_size(nrf_dfu_bar, action_w, landscape ? 16 : 18);
     lv_bar_set_range(nrf_dfu_bar, 0, 100);
     lv_bar_set_value(nrf_dfu_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(nrf_dfu_bar, lv_color_hex(0x27313C),
@@ -1423,13 +1407,13 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     lv_obj_set_style_bg_color(nrf_dfu_bar, lv_color_hex(0x25C281),
                               LV_PART_INDICATOR);
     lv_obj_add_flag(nrf_dfu_bar, LV_OBJ_FLAG_HIDDEN);
-    nrf_dfu_bar_label = ui_label(summary, "0%", &lv_font_montserrat_16,
+    nrf_dfu_bar_label = ui_label(body, "0%", &lv_font_montserrat_16,
                                  0xF2F5F8);
     lv_obj_align_to(nrf_dfu_bar_label, nrf_dfu_bar, LV_ALIGN_OUT_BOTTOM_RIGHT,
                     0, 6);
     lv_obj_add_flag(nrf_dfu_bar_label, LV_OBJ_FLAG_HIDDEN);
 
-    nrf_dfu_update_btn = ui_command_button(summary,
+    nrf_dfu_update_btn = ui_command_button(body,
                                            action_x, button_y, action_w,
                                            "Update", 0x25C281);
     lv_obj_add_event_cb(nrf_dfu_update_btn, nrf_dfu_start_event_cb,
