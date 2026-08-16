@@ -122,6 +122,7 @@
 #define MESHTASTIC_BQ27220_REG_VOLTAGE 0x08
 #define MESHTASTIC_BQ27220_REG_CURRENT 0x0C
 #define MESHTASTIC_BQ27220_REG_SOC 0x2C
+#define MESHTASTIC_BQ27220_CACHE_TTL_US (60ULL * 60ULL * 1000000ULL)
 #define K230_PHONE_UI_CONFIG_PARENT "/root/.config"
 #define K230_PHONE_UI_PREFS_DIR K230_PHONE_UI_CONFIG_PARENT "/k230_phone_ui"
 #define K230_MESH_NODEDB_FILE K230_PHONE_UI_PREFS_DIR "/meshtastic_nodes.tsv"
@@ -1278,6 +1279,11 @@ static uint64_t mesh_next_device_telemetry_us;
 static uint64_t mesh_next_environment_telemetry_us;
 static bool mesh_manual_device_telemetry_requested;
 static bool mesh_manual_environment_telemetry_requested;
+static uint64_t mesh_bq27220_cache_us;
+static uint16_t mesh_bq27220_cached_voltage_mv;
+static uint16_t mesh_bq27220_cached_soc;
+static int16_t mesh_bq27220_cached_current_ma;
+static uint64_t mesh_bq27220_next_fail_log_us;
 static nrf9151_gnss_state_t mesh_gnss;
 static LR2021 *active_lr2021;
 static mesh_history_entry_t mesh_history[MESHTASTIC_PACKET_HISTORY_SIZE];
@@ -4093,12 +4099,18 @@ static bool mesh_read_bq27220_device_metrics(mesh_telemetry_info_t *telemetry)
     uint16_t voltage = 0;
     uint16_t soc = 0;
     uint16_t current = 0;
+    uint64_t now_us;
     bool found = false;
 
     if(!telemetry ||
        mesh_gpio_i2c_read_word_le(MESHTASTIC_BQ27220_ADDR,
                                   MESHTASTIC_BQ27220_REG_VOLTAGE,
                                   &voltage) != 0) {
+        now_us = monotonic_us();
+        if(now_us >= mesh_bq27220_next_fail_log_us) {
+            daemon_event("Telemetry BQ27220 read failed");
+            mesh_bq27220_next_fail_log_us = now_us + 60000000ULL;
+        }
         return false;
     }
     if(voltage > 2500U && voltage < 6000U) {
@@ -4123,11 +4135,48 @@ static bool mesh_read_bq27220_device_metrics(mesh_telemetry_info_t *telemetry)
         daemon_event("Telemetry BQ27220 voltage=%umV soc=%u%% current=NA",
                      voltage, soc);
     }
+    if(found) {
+        mesh_bq27220_cache_us = monotonic_us();
+        mesh_bq27220_cached_voltage_mv = voltage;
+        mesh_bq27220_cached_soc = soc;
+        mesh_bq27220_cached_current_ma = (int16_t)current;
+    }
     return found;
+}
+
+static bool mesh_apply_cached_bq27220_device_metrics(
+    mesh_telemetry_info_t *telemetry)
+{
+    uint64_t age_us;
+
+    if(!telemetry || mesh_bq27220_cache_us == 0ULL) {
+        return false;
+    }
+    age_us = monotonic_us() - mesh_bq27220_cache_us;
+    if(age_us > MESHTASTIC_BQ27220_CACHE_TTL_US) {
+        return false;
+    }
+    if(mesh_bq27220_cached_voltage_mv > 2500U &&
+       mesh_bq27220_cached_voltage_mv < 6000U) {
+        telemetry->has_device_voltage = true;
+        telemetry->device_voltage =
+            (float)mesh_bq27220_cached_voltage_mv / 1000.0f;
+    }
+    if(mesh_bq27220_cached_soc <= 100U) {
+        telemetry->has_battery_level = true;
+        telemetry->battery_level = mesh_bq27220_cached_soc;
+    }
+    daemon_event("Telemetry BQ27220 cached voltage=%umV soc=%u%% current=%dmA age=%lus",
+                 mesh_bq27220_cached_voltage_mv, mesh_bq27220_cached_soc,
+                 (int)mesh_bq27220_cached_current_ma,
+                 (unsigned long)(age_us / 1000000ULL));
+    return telemetry->has_device_voltage || telemetry->has_battery_level;
 }
 
 static bool mesh_collect_device_telemetry(mesh_telemetry_info_t *telemetry)
 {
+    bool bq_ok;
+
     if(!telemetry) {
         return false;
     }
@@ -4136,7 +4185,12 @@ static bool mesh_collect_device_telemetry(mesh_telemetry_info_t *telemetry)
     telemetry->timestamp = (uint32_t)time(nullptr);
     telemetry->uptime_seconds = (uint32_t)(monotonic_us() / 1000000ULL);
     (void)mesh_read_power_supply_device_metrics(telemetry);
-    (void)mesh_read_bq27220_device_metrics(telemetry);
+    bq_ok = mesh_read_bq27220_device_metrics(telemetry);
+    if(!bq_ok && (!telemetry->has_device_voltage ||
+                  !telemetry->has_battery_level ||
+                  telemetry->battery_level == 101U)) {
+        (void)mesh_apply_cached_bq27220_device_metrics(telemetry);
+    }
     return true;
 }
 
