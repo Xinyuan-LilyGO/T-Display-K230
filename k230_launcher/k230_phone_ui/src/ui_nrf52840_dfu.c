@@ -44,7 +44,11 @@ static lv_obj_t *nrf_dfu_log_label;
 static lv_obj_t *nrf_dfu_bar;
 static lv_obj_t *nrf_dfu_bar_label;
 static lv_obj_t *nrf_dfu_update_btn;
-static lv_obj_t *nrf_dfu_refresh_btn;
+static lv_obj_t *nrf_dfu_select_btn;
+static lv_obj_t *nrf_dfu_log_btn;
+static lv_obj_t *nrf_dfu_mtp_btn;
+static lv_obj_t *nrf_dfu_select_dialog;
+static lv_obj_t *nrf_dfu_log_dialog;
 static lv_obj_t *nrf_dfu_overlay;
 static lv_obj_t *nrf_dfu_overlay_status;
 static lv_obj_t *nrf_dfu_overlay_bar;
@@ -59,6 +63,8 @@ static int nrf_dfu_last_rc;
 static char nrf_dfu_status_text[192] = "Ready";
 static char nrf_dfu_mode_text[96] = "Idle";
 static char nrf_dfu_log_text[NRF_DFU_LOG_TEXT_MAX] = "No log yet";
+
+static void nrf_dfu_update_ui(void);
 
 static int nrf_dfu_ends_with(const char *text, const char *suffix)
 {
@@ -334,7 +340,11 @@ static void nrf_dfu_select_event_cb(lv_event_t *event)
         nrf_dfu_set_status_locked("Firmware selected", "Ready", -1, 0);
     }
     pthread_mutex_unlock(&nrf_dfu_lock);
-    app_refresh_current_page();
+    nrf_dfu_refresh_file_label();
+    nrf_dfu_update_ui();
+    if(nrf_dfu_select_dialog && lv_obj_is_valid(nrf_dfu_select_dialog)) {
+        lv_obj_del(nrf_dfu_select_dialog);
+    }
 }
 
 static void nrf_dfu_rebuild_file_list(void)
@@ -417,8 +427,100 @@ static void nrf_dfu_refresh_files(void)
     nrf_dfu_refresh_file_label();
 }
 
-static void nrf_dfu_refresh_event_cb(lv_event_t *event)
+static void nrf_dfu_dialog_close_event_cb(lv_event_t *event)
 {
+    lv_obj_t *dialog = (lv_obj_t *)lv_event_get_user_data(event);
+
+    if(dialog && lv_obj_is_valid(dialog)) {
+        lv_obj_del(dialog);
+    }
+}
+
+static void nrf_dfu_select_dialog_delete_cb(lv_event_t *event)
+{
+    (void)event;
+    nrf_dfu_select_dialog = NULL;
+    nrf_dfu_list_panel = NULL;
+}
+
+static void nrf_dfu_log_dialog_delete_cb(lv_event_t *event)
+{
+    (void)event;
+    nrf_dfu_log_dialog = NULL;
+    nrf_dfu_log_label = NULL;
+}
+
+static lv_obj_t *nrf_dfu_dialog_card(lv_obj_t **dialog_out,
+                                     const char *title_text,
+                                     int preferred_w,
+                                     int preferred_h,
+                                     lv_event_cb_t delete_cb)
+{
+    lv_obj_t *dialog;
+    lv_obj_t *card;
+    lv_obj_t *title;
+    lv_obj_t *close_btn;
+    lv_obj_t *close_label;
+    int w = ui_screen_width();
+    int h = ui_screen_height();
+    int card_w = preferred_w;
+    int card_h = preferred_h;
+
+    if(card_w > w - 48) {
+        card_w = w - 48;
+    }
+    if(card_h > h - 48) {
+        card_h = h - 48;
+    }
+
+    dialog = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(dialog);
+    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(dialog, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(dialog, 0, 0);
+    lv_obj_clear_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(dialog, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(dialog, delete_cb, LV_EVENT_DELETE, NULL);
+
+    card = ui_panel(dialog, (w - card_w) / 2, (h - card_h) / 2,
+                    card_w, card_h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x111820), 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    title = ui_label(card, title_text, &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_width(title, card_w - 112);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(title, 20, 22);
+
+    close_btn = lv_obj_create(card);
+    lv_obj_set_size(close_btn, 42, 42);
+    lv_obj_set_pos(close_btn, card_w - 58, 14);
+    lv_obj_set_style_radius(close_btn, 8, 0);
+    lv_obj_set_style_border_width(close_btn, 1, 0);
+    lv_obj_set_style_border_color(close_btn, lv_color_hex(0x27313C), 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x18202A), 0);
+    lv_obj_clear_flag(close_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(close_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(close_btn, 8);
+    lv_obj_add_event_cb(close_btn, nrf_dfu_dialog_close_event_cb,
+                        LV_EVENT_CLICKED, dialog);
+    close_label = ui_label(close_btn, "X", &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_center(close_label);
+    ui_make_click_forwarder(close_label);
+
+    if(dialog_out) {
+        *dialog_out = dialog;
+    }
+    return card;
+}
+
+static void nrf_dfu_select_open_event_cb(lv_event_t *event)
+{
+    lv_obj_t *card;
+    lv_obj_t *hint;
+    int card_w = ui_is_landscape() ? 660 : 500;
+    int card_h = ui_is_landscape() ? 430 : 620;
+
     (void)event;
     pthread_mutex_lock(&nrf_dfu_lock);
     if(nrf_dfu_running) {
@@ -426,7 +528,59 @@ static void nrf_dfu_refresh_event_cb(lv_event_t *event)
         return;
     }
     pthread_mutex_unlock(&nrf_dfu_lock);
+
+    if(nrf_dfu_select_dialog && lv_obj_is_valid(nrf_dfu_select_dialog)) {
+        lv_obj_del(nrf_dfu_select_dialog);
+    }
+
+    card = nrf_dfu_dialog_card(&nrf_dfu_select_dialog, "Select firmware",
+                               card_w, card_h,
+                               nrf_dfu_select_dialog_delete_cb);
+    hint = ui_label(card, NRF_DFU_DIR, &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_width(hint, lv_obj_get_width(card) - 40);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(hint, 20, 62);
+
+    nrf_dfu_list_panel = ui_scroll_panel(card, 0, 92,
+                                         lv_obj_get_width(card),
+                                         lv_obj_get_height(card) - 104);
+    lv_obj_set_style_bg_opa(nrf_dfu_list_panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(nrf_dfu_list_panel, 0, 0);
     nrf_dfu_refresh_files();
+}
+
+static void nrf_dfu_log_open_event_cb(lv_event_t *event)
+{
+    lv_obj_t *card;
+    lv_obj_t *path;
+    int card_w = ui_is_landscape() ? 720 : 500;
+    int card_h = ui_is_landscape() ? 430 : 620;
+
+    (void)event;
+    pthread_mutex_lock(&nrf_dfu_lock);
+    if(nrf_dfu_running) {
+        pthread_mutex_unlock(&nrf_dfu_lock);
+        return;
+    }
+    pthread_mutex_unlock(&nrf_dfu_lock);
+
+    if(nrf_dfu_log_dialog && lv_obj_is_valid(nrf_dfu_log_dialog)) {
+        lv_obj_del(nrf_dfu_log_dialog);
+    }
+
+    card = nrf_dfu_dialog_card(&nrf_dfu_log_dialog, "Update log",
+                               card_w, card_h, nrf_dfu_log_dialog_delete_cb);
+    path = ui_label(card, NRF_DFU_LOG, &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_width(path, lv_obj_get_width(card) - 40);
+    lv_label_set_long_mode(path, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(path, 20, 62);
+
+    nrf_dfu_log_label = ui_label(card, "No log yet",
+                                 &lv_font_montserrat_14, 0xD7DEE8);
+    lv_obj_set_width(nrf_dfu_log_label, lv_obj_get_width(card) - 40);
+    lv_label_set_long_mode(nrf_dfu_log_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(nrf_dfu_log_label, 20, 96);
+    nrf_dfu_update_ui();
 }
 
 static void nrf_dfu_open_mtp_event_cb(lv_event_t *event)
@@ -661,11 +815,25 @@ static void nrf_dfu_update_ui(void)
             lv_obj_clear_state(nrf_dfu_update_btn, LV_STATE_DISABLED);
         }
     }
-    if(nrf_dfu_refresh_btn) {
+    if(nrf_dfu_select_btn) {
         if(running) {
-            lv_obj_add_state(nrf_dfu_refresh_btn, LV_STATE_DISABLED);
+            lv_obj_add_state(nrf_dfu_select_btn, LV_STATE_DISABLED);
         } else {
-            lv_obj_clear_state(nrf_dfu_refresh_btn, LV_STATE_DISABLED);
+            lv_obj_clear_state(nrf_dfu_select_btn, LV_STATE_DISABLED);
+        }
+    }
+    if(nrf_dfu_log_btn) {
+        if(running) {
+            lv_obj_add_state(nrf_dfu_log_btn, LV_STATE_DISABLED);
+        } else {
+            lv_obj_clear_state(nrf_dfu_log_btn, LV_STATE_DISABLED);
+        }
+    }
+    if(nrf_dfu_mtp_btn) {
+        if(running) {
+            lv_obj_add_state(nrf_dfu_mtp_btn, LV_STATE_DISABLED);
+        } else {
+            lv_obj_clear_state(nrf_dfu_mtp_btn, LV_STATE_DISABLED);
         }
     }
 
@@ -703,11 +871,13 @@ static lv_obj_t *nrf_dfu_info_pair(lv_obj_t *parent, int y,
     lv_obj_t *value = ui_label(parent, "--", &lv_font_montserrat_18,
                                0xF2F5F8);
     int w = lv_obj_get_width(parent);
-    lv_obj_set_pos(name_label, 0, y);
-    lv_obj_set_width(value, w > 200 ? w - 120 : 160);
+    int margin = 24;
+    int label_w = 116;
+    lv_obj_set_pos(name_label, margin, y);
+    lv_obj_set_width(value, w > 220 ? w - margin * 2 - label_w : 160);
     lv_label_set_long_mode(value, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(value, w > 200 ? 118 : 88, y - 2);
+    lv_obj_set_pos(value, w > 220 ? margin + label_w : 88, y - 2);
     if(value_out) {
         *value_out = value;
     }
@@ -778,47 +948,50 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
     lv_obj_t *summary;
-    lv_obj_t *files;
-    lv_obj_t *log_panel;
+    lv_obj_t *actions;
     lv_obj_t *icon_box;
     lv_obj_t *icon;
     lv_obj_t *title;
     lv_obj_t *hint;
-    lv_obj_t *btn;
     int landscape = ui_is_landscape();
     int body_x = ui_page_panel_x();
     int body_w = ui_page_panel_width();
     int body_h = ui_body_height(154);
     int top_y = ui_page_top_y(154);
-    int left_w = landscape ? body_w * 42 / 100 : body_w;
-    int right_x;
-    int right_w;
-    int action_y;
+    int gap = 24;
+    int summary_w = landscape ? (body_w - gap) * 54 / 100 : body_w;
+    int actions_w = landscape ? body_w - summary_w - gap : body_w;
+    int card_h = landscape ? body_h - 24 : 430;
+    int actions_x = landscape ? summary_w + gap : 0;
+    int actions_y = landscape ? 0 : card_h + gap;
+    int actions_h = landscape ? card_h : 250;
     int button_w;
-
-    if(left_w < 360) {
-        left_w = landscape ? 360 : body_w;
-    }
-    if(landscape && left_w > 480) {
-        left_w = 480;
-    }
-    right_x = landscape ? left_w + 24 : 0;
-    right_w = landscape ? body_w - right_x : body_w;
-    button_w = landscape ? (left_w - 32) / 2 : (body_w - 32) / 2;
-    if(button_w < 132) {
-        button_w = 132;
-    }
 
     ui_create_header(scr, "nRF52840 DFU");
     body = ui_scroll_panel(scr, body_x, top_y, body_w, body_h);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
 
-    summary = ui_panel(body, 0, 0, left_w, landscape ? body_h - 28 : 560);
+    if(card_h < 350) {
+        card_h = 350;
+    }
+    if(summary_w < 360) {
+        summary_w = landscape ? 360 : body_w;
+        actions_x = landscape ? summary_w + gap : 0;
+        actions_w = landscape ? body_w - summary_w - gap : body_w;
+    }
+    if(actions_w < 240 && landscape) {
+        actions_w = 240;
+        summary_w = body_w - actions_w - gap;
+        actions_x = summary_w + gap;
+    }
+
+    summary = ui_panel(body, 0, 0, summary_w, card_h);
     lv_obj_set_style_bg_color(summary, lv_color_hex(0x121820), 0);
+    lv_obj_clear_flag(summary, LV_OBJ_FLAG_SCROLLABLE);
 
     icon_box = lv_obj_create(summary);
-    lv_obj_set_size(icon_box, 92, 92);
-    lv_obj_set_pos(icon_box, 20, 24);
+    lv_obj_set_size(icon_box, 84, 84);
+    lv_obj_set_pos(icon_box, 24, 24);
     lv_obj_set_style_radius(icon_box, 8, 0);
     lv_obj_set_style_border_width(icon_box, 0, 0);
     lv_obj_set_style_bg_color(icon_box, lv_color_hex(0x3B82F6), 0);
@@ -828,24 +1001,24 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
 
     title = ui_label(summary, "nRF52840 firmware update",
                      &lv_font_montserrat_22, 0xF2F5F8);
-    lv_obj_set_width(title, left_w - 144);
+    lv_obj_set_width(title, summary_w - 140);
     lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(title, 128, 28);
+    lv_obj_set_pos(title, 124, 28);
 
     hint = ui_label(summary,
                     "Copy an Adafruit/nrfutil application .zip package to the firmware folder with MTP, select it here, then update.",
                     &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(hint, left_w - 40);
+    lv_obj_set_width(hint, summary_w - 48);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(hint, 20, 136);
+    lv_obj_set_pos(hint, 24, 128);
 
-    nrf_dfu_info_pair(summary, 236, "Status", &nrf_dfu_status_label);
-    nrf_dfu_info_pair(summary, 292, "Mode", &nrf_dfu_mode_label);
-    nrf_dfu_info_pair(summary, 348, "Package", &nrf_dfu_file_label);
+    nrf_dfu_info_pair(summary, 214, "Status", &nrf_dfu_status_label);
+    nrf_dfu_info_pair(summary, 268, "Mode", &nrf_dfu_mode_label);
+    nrf_dfu_info_pair(summary, 322, "Package", &nrf_dfu_file_label);
 
     nrf_dfu_bar = lv_bar_create(summary);
-    lv_obj_set_pos(nrf_dfu_bar, 20, 414);
-    lv_obj_set_size(nrf_dfu_bar, left_w - 40, 18);
+    lv_obj_set_pos(nrf_dfu_bar, 24, card_h - 58);
+    lv_obj_set_size(nrf_dfu_bar, summary_w - 48, 18);
     lv_bar_set_range(nrf_dfu_bar, 0, 100);
     lv_bar_set_value(nrf_dfu_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(nrf_dfu_bar, lv_color_hex(0x27313C),
@@ -857,49 +1030,59 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     lv_obj_align_to(nrf_dfu_bar_label, nrf_dfu_bar, LV_ALIGN_OUT_BOTTOM_RIGHT,
                     0, 6);
 
-    action_y = landscape ? body_h - 176 : 480;
-    btn = ui_command_button(summary, 20, action_y, button_w, "Open MTP",
-                            0x41C7C7);
-    lv_obj_add_event_cb(btn, nrf_dfu_open_mtp_event_cb, LV_EVENT_CLICKED, NULL);
-    nrf_dfu_refresh_btn = ui_command_button(summary, 20 + button_w + 12,
-                                            action_y, button_w, "Refresh",
-                                            0x3DA5FF);
-    lv_obj_add_event_cb(nrf_dfu_refresh_btn, nrf_dfu_refresh_event_cb,
+    actions = ui_panel(body, actions_x, actions_y, actions_w, actions_h);
+    lv_obj_set_style_bg_color(actions, lv_color_hex(0x121820), 0);
+    lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+    title = ui_label(actions, "Actions", &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_pos(title, 24, 22);
+
+    if(landscape) {
+        button_w = actions_w - 48;
+        nrf_dfu_select_btn = ui_command_button(actions, 24, 72, button_w,
+                                               "Select firmware", 0x3DA5FF);
+        nrf_dfu_log_btn = ui_command_button(actions, 24, 140, button_w,
+                                            "Update log", 0xF5A524);
+        nrf_dfu_update_btn = ui_command_button(actions, 24, 208, button_w,
+                                               "Update nRF52840", 0x25C281);
+        nrf_dfu_mtp_btn = ui_command_button(actions, 24, 276, button_w,
+                                            "Open MTP", 0x41C7C7);
+    } else {
+        button_w = (actions_w - 60) / 2;
+        if(button_w < 160) {
+            button_w = actions_w - 48;
+            nrf_dfu_select_btn = ui_command_button(actions, 24, 72, button_w,
+                                                   "Select firmware",
+                                                   0x3DA5FF);
+            nrf_dfu_log_btn = ui_command_button(actions, 24, 140, button_w,
+                                                "Update log", 0xF5A524);
+            nrf_dfu_update_btn = ui_command_button(actions, 24, 208, button_w,
+                                                   "Update nRF52840",
+                                                   0x25C281);
+            nrf_dfu_mtp_btn = ui_command_button(actions, 24, 276, button_w,
+                                                "Open MTP", 0x41C7C7);
+        } else {
+            nrf_dfu_select_btn = ui_command_button(actions, 24, 72, button_w,
+                                                   "Select firmware",
+                                                   0x3DA5FF);
+            nrf_dfu_log_btn = ui_command_button(actions, 36 + button_w, 72,
+                                                button_w, "Update log",
+                                                0xF5A524);
+            nrf_dfu_update_btn = ui_command_button(actions, 24, 148, button_w,
+                                                   "Update nRF52840",
+                                                   0x25C281);
+            nrf_dfu_mtp_btn = ui_command_button(actions, 36 + button_w, 148,
+                                                button_w, "Open MTP",
+                                                0x41C7C7);
+        }
+    }
+    lv_obj_add_event_cb(nrf_dfu_select_btn, nrf_dfu_select_open_event_cb,
                         LV_EVENT_CLICKED, NULL);
-    nrf_dfu_update_btn = ui_command_button(summary, 20, action_y + 76,
-                                           left_w - 40, "Update nRF52840",
-                                           0x25C281);
+    lv_obj_add_event_cb(nrf_dfu_log_btn, nrf_dfu_log_open_event_cb,
+                        LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(nrf_dfu_update_btn, nrf_dfu_start_event_cb,
                         LV_EVENT_CLICKED, NULL);
-
-    files = ui_panel(body, landscape ? right_x : 0, landscape ? 0 : 584,
-                     right_w, landscape ? (body_h - 56) / 2 : 360);
-    lv_obj_set_style_bg_color(files, lv_color_hex(0x121820), 0);
-    title = ui_label(files, "Firmware packages", &lv_font_montserrat_20,
-                     0xF2F5F8);
-    lv_obj_set_pos(title, 16, 14);
-    hint = ui_label(files, NRF_DFU_DIR, &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_width(hint, right_w - 32);
-    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(hint, 16, 48);
-
-    nrf_dfu_list_panel = ui_scroll_panel(files, 0, 78, right_w,
-                                         lv_obj_get_height(files) - 86);
-    lv_obj_set_style_bg_opa(nrf_dfu_list_panel, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(nrf_dfu_list_panel, 0, 0);
-
-    log_panel = ui_panel(body, landscape ? right_x : 0,
-                         landscape ? (body_h - 56) / 2 + 28 : 968,
-                         right_w, landscape ? (body_h - 56) / 2 : 320);
-    lv_obj_set_style_bg_color(log_panel, lv_color_hex(0x0C1117), 0);
-    title = ui_label(log_panel, "Update log", &lv_font_montserrat_20,
-                     0xF2F5F8);
-    lv_obj_set_pos(title, 16, 14);
-    nrf_dfu_log_label = ui_label(log_panel, "No log yet",
-                                 &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_width(nrf_dfu_log_label, right_w - 32);
-    lv_label_set_long_mode(nrf_dfu_log_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(nrf_dfu_log_label, 16, 52);
+    lv_obj_add_event_cb(nrf_dfu_mtp_btn, nrf_dfu_open_mtp_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 
     nrf_dfu_create_overlay(scr);
     nrf_dfu_refresh_files();
@@ -921,7 +1104,11 @@ void ui_nrf52840_dfu_cleanup(void)
     nrf_dfu_bar = NULL;
     nrf_dfu_bar_label = NULL;
     nrf_dfu_update_btn = NULL;
-    nrf_dfu_refresh_btn = NULL;
+    nrf_dfu_select_btn = NULL;
+    nrf_dfu_log_btn = NULL;
+    nrf_dfu_mtp_btn = NULL;
+    nrf_dfu_select_dialog = NULL;
+    nrf_dfu_log_dialog = NULL;
     nrf_dfu_overlay = NULL;
     nrf_dfu_overlay_status = NULL;
     nrf_dfu_overlay_bar = NULL;
