@@ -2735,7 +2735,7 @@ static void lora_open_profile_editor(int index)
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     hint = ui_label(panel,
-                    "Tap a row to edit. Factory profiles are copied when saved.",
+                    "Tap a row to edit. Built-in profiles are copied when saved.",
                     &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_width(hint, inner_w);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
@@ -3258,7 +3258,7 @@ void ui_lora_create(lv_obj_t *scr)
     lora_create_status(body);
 
     lora_tab_factory = lora_button(body, 24, landscape ? 302 : 254,
-                                  landscape ? left_w : 160, 56, "Factory",
+                                  landscape ? left_w : 160, 56, "Profiles",
                                   0xF2F5F8);
     lv_obj_add_event_cb(lora_tab_factory, lora_tab_event_cb, LV_EVENT_CLICKED,
                         (void *)1);
