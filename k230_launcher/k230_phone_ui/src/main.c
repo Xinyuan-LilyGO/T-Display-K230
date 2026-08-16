@@ -678,6 +678,13 @@ static const char *page_name(page_id_t page)
     }
 }
 
+static int page_uses_lora_radio(page_id_t page)
+{
+    return page == PAGE_LORA ||
+           page == PAGE_LORA_FLRC ||
+           page == PAGE_LORAWAN;
+}
+
 static void touch_trace_log(const char *fmt, ...)
 {
     va_list ap;
@@ -9057,6 +9064,8 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     lv_obj_t *scr;
     lv_obj_t *old_page_root = NULL;
     int root_transition = 0;
+    int leaving_lora_radio;
+    int entering_lora_radio;
     int32_t root_from_x = 0;
     int32_t root_from_y = 0;
     uint64_t start_us = monotonic_us();
@@ -9067,6 +9076,8 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
        !ui_extension_keyboard_base_available()) {
         page = PAGE_HOME;
     }
+    leaving_lora_radio = page_uses_lora_radio(current_page);
+    entering_lora_radio = page_uses_lora_radio(page);
 
     touch_trace_log("RENDER_BEGIN page=%s previous=%s", page_name(page),
                     page_name(current_page));
@@ -9092,6 +9103,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         old_page_root = page_root;
     }
 
+    if(entering_lora_radio) {
+        ui_meshtastic_pause_for_radio_owner(page_name(page));
+    }
     cleanup_page_state();
     if(root_transition) {
         page_root = create_page_root(root_from_x);
@@ -9296,6 +9310,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
 
     touch_trace_log("RENDER_END page=%s duration=%.3fms", page_name(page),
                     (double)(monotonic_us() - start_us) / 1000.0);
+    if(leaving_lora_radio && !entering_lora_radio) {
+        ui_meshtastic_resume_after_radio_owner();
+    }
     request_fast_refresh();
 }
 

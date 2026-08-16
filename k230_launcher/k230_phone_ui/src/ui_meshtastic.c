@@ -95,9 +95,11 @@ static char mesh_last_ble_state[32] = "offline";
 static char mesh_node_select_ids[MESHTASTIC_UI_NODE_SELECT_MAX][24];
 static char mesh_node_select_lines[MESHTASTIC_UI_NODE_SELECT_MAX][MESHTASTIC_UI_NODE_LINE_MAX];
 static char mesh_node_detail_target_id[24];
+static char mesh_radio_pause_owner[32];
 static int mesh_keyboard_reserved_h;
 static int mesh_status_panel_h;
 static int mesh_chat_gap;
+static int mesh_radio_pause_active;
 static char mesh_region[24] = MESHTASTIC_DEFAULT_UI_REGION;
 static char mesh_preset[32] = MESHTASTIC_DEFAULT_UI_PRESET;
 static char mesh_channel_name[64] = "";
@@ -2123,6 +2125,14 @@ static void mesh_background_monitor_start(void)
     }
 }
 
+static void mesh_background_monitor_stop(void)
+{
+    if(mesh_background_timer) {
+        lv_timer_delete(mesh_background_timer);
+        mesh_background_timer = NULL;
+    }
+}
+
 static void mesh_start_event_cb(lv_event_t *event)
 {
     char region_arg[32];
@@ -2272,6 +2282,69 @@ static void mesh_stop_event_cb(lv_event_t *event)
     }
     usleep(120000);
     mesh_refresh_status();
+}
+
+void ui_meshtastic_pause_for_radio_owner(const char *owner)
+{
+    char response[512];
+    char quit_response[256];
+
+    if(mesh_radio_pause_active) {
+        return;
+    }
+
+    mesh_radio_pause_active = 1;
+    snprintf(mesh_radio_pause_owner, sizeof(mesh_radio_pause_owner), "%s",
+             owner && owner[0] ? owner : "LoRa");
+    mesh_background_monitor_stop();
+
+    if(mesh_ipc_command("STATUS\n", response, sizeof(response)) == 0 &&
+       mesh_status_is_online(response)) {
+        if(mesh_ipc_command("QUIT\n", quit_response,
+                            sizeof(quit_response)) == 0) {
+            ui_trim_text(quit_response);
+            mesh_append_log("paused for %s: %s", mesh_radio_pause_owner,
+                            quit_response);
+        } else {
+            ui_trim_text(quit_response);
+            mesh_append_log("pause for %s failed: %s", mesh_radio_pause_owner,
+                            quit_response);
+        }
+        usleep(160000);
+    } else {
+        ui_trim_text(response);
+        mesh_append_log("pause for %s: daemon already offline (%s)",
+                        mesh_radio_pause_owner,
+                        response[0] ? response : "no status");
+    }
+
+    snprintf(mesh_status_text, sizeof(mesh_status_text), "Paused by %s",
+             mesh_radio_pause_owner);
+    mesh_apply_ble_status(mesh_status_text, 0);
+}
+
+void ui_meshtastic_resume_after_radio_owner(void)
+{
+    char owner[sizeof(mesh_radio_pause_owner)];
+
+    if(!mesh_radio_pause_active) {
+        return;
+    }
+
+    snprintf(owner, sizeof(owner), "%s",
+             mesh_radio_pause_owner[0] ? mesh_radio_pause_owner : "LoRa");
+    mesh_radio_pause_active = 0;
+    mesh_radio_pause_owner[0] = '\0';
+
+    if(!ui_meshtastic_autostart_enabled()) {
+        mesh_append_log("resume after %s skipped: autostart disabled", owner);
+        return;
+    }
+
+    mesh_append_log("resume after %s", owner);
+    mesh_load_profile_prefs();
+    mesh_start_event_cb(NULL);
+    mesh_background_monitor_start();
 }
 
 static void mesh_refresh_event_cb(lv_event_t *event)
