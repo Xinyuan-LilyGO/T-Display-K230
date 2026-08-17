@@ -2255,6 +2255,8 @@ static void mesh_refresh_status(void)
         char sats[16];
         char position_tx[16];
         char telemetry_tx[16];
+        char ch_util[16];
+        char air_tx[16];
 
         mesh_status_field(mesh_status_text, "queued_count", queued_count,
                           sizeof(queued_count), "0");
@@ -2278,6 +2280,10 @@ static void mesh_refresh_status(void)
                           sizeof(position_tx), "0");
         mesh_status_field(mesh_status_text, "telemetry_tx", telemetry_tx,
                           sizeof(telemetry_tx), "0");
+        mesh_status_field(mesh_status_text, "ch_util", ch_util,
+                          sizeof(ch_util), "0.0");
+        mesh_status_field(mesh_status_text, "air_tx", air_tx,
+                          sizeof(air_tx), "0.00");
         if(mesh_to_text_is_broadcast(mesh_to_node)) {
             snprintf(target, sizeof(target), "%s: %s",
                      ui_tr("To"), ui_tr("Channel broadcast"));
@@ -2290,8 +2296,9 @@ static void mesh_refresh_status(void)
                                         lv_color_hex(0xF5A524), 0);
         }
         snprintf(detail, sizeof(detail),
-                 "%s  |  GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
+                 "%s  |  Ch%s%% Air%s%% GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
                  target,
+                 ch_util, air_tx,
                  nrf9151, gps, sats, position_tx,
                  telemetry_tx, queued_count, mesh_ack_enabled ? "on" : "off",
                  ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
@@ -7906,6 +7913,7 @@ static void mesh_voice_preview_cancel_event_cb(lv_event_t *event)
 static void mesh_voice_preview_send_event_cb(lv_event_t *event)
 {
     char response[256];
+    const char *message;
     int ret;
 
     if(event) {
@@ -7919,8 +7927,14 @@ static void mesh_voice_preview_send_event_cb(lv_event_t *event)
         mesh_voice_preview_close();
     } else if(mesh_voice_preview_status_label &&
               lv_obj_is_valid(mesh_voice_preview_status_label)) {
+        message = response[0] ? response : ui_tr("Voice send failed");
+        if(strstr(message, "chunk count") || strstr(message, "queue") ||
+           strstr(message, "voice-airtime") || strstr(message, "channel-busy") ||
+           strstr(message, "duty-cycle") || strstr(message, "duty-budget")) {
+            message = ui_tr("Voice is too long or radio is busy");
+        }
         lv_label_set_text(mesh_voice_preview_status_label,
-                          response[0] ? response : ui_tr("Voice send failed"));
+                          message);
     }
 }
 

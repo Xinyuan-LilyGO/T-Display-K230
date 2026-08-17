@@ -72,6 +72,7 @@ static const ui_translation_t ui_translations[] = {
     { "Play it before sending, or cancel.", "发送前可以先试听，也可以取消。", "送信前に再生確認、またはキャンセルできます。" },
     { "Sending voice", "正在发送语音", "音声送信中" },
     { "Voice send failed", "语音发送失败", "音声送信失敗" },
+    { "Voice is too long or radio is busy", "语音太长或无线链路忙", "音声が長すぎるか無線が混雑しています" },
     { "Play", "播放", "再生" },
     { "Map", "地图", "地図" },
     { "Mesh Map", "Mesh 地图", "Mesh 地図" },

@@ -40,10 +40,10 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.28"
+#define PROBE_VERSION "0.30"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
-#define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 8U
+#define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 16U
 #define MESHTASTIC_DAEMON_REQUEST_QUEUE_MAX 8U
 #define LORA_PIN_CS 14U
 #define LORA_PIN_RST 5U
@@ -101,11 +101,17 @@
 #define MESHTASTIC_VOICE_FRAME_MS 20U
 #define MESHTASTIC_VOICE_FRAME_SAMPLES \
     ((MESHTASTIC_VOICE_SAMPLE_RATE * MESHTASTIC_VOICE_FRAME_MS) / 1000U)
-#define MESHTASTIC_VOICE_BITRATE_BPS 6000
+#define MESHTASTIC_VOICE_BITRATE_BPS 3600
 #define MESHTASTIC_VOICE_MAX_PCM_BYTES \
     (MESHTASTIC_VOICE_SAMPLE_RATE * 2U * 2U)
-#define MESHTASTIC_VOICE_CHUNK_TARGET_BYTES 190U
+#define MESHTASTIC_VOICE_CHUNK_TARGET_BYTES 220U
 #define MESHTASTIC_VOICE_RX_STREAMS 4U
+#define MESHTASTIC_AIRTIME_CHANNEL_PERIODS 6U
+#define MESHTASTIC_AIRTIME_CHANNEL_PERIOD_US (10ULL * 1000000ULL)
+#define MESHTASTIC_AIRTIME_TX_PERIODS 60U
+#define MESHTASTIC_AIRTIME_TX_PERIOD_US (60ULL * 1000000ULL)
+#define MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT 25.0f
+#define MESHTASTIC_AIRTIME_POLITE_DUTY_CYCLE_RATIO 0.5f
 #define MESHTASTIC_DELAYED_TX_QUEUE_SIZE 4U
 #define MESHTASTIC_REBROADCAST_MIN_DELAY_US 150000ULL
 #define MESHTASTIC_REBROADCAST_JITTER_US 700000ULL
@@ -1294,6 +1300,7 @@ static volatile unsigned int radio_event_count;
 static radio_op_t active_op = OP_IDLE;
 static uint64_t active_op_start_us;
 static size_t active_tx_len;
+static uint32_t active_tx_airtime_ms;
 static tx_frame_t active_tx_frame;
 static bool active_tx_frame_valid;
 static uint32_t tx_count;
@@ -1328,6 +1335,12 @@ static int16_t mesh_bq27220_cached_current_ma;
 static uint64_t mesh_bq27220_next_fail_log_us;
 static nrf9151_gnss_state_t mesh_gnss;
 static LR2021 *active_lr2021;
+static uint32_t mesh_airtime_channel_ms[MESHTASTIC_AIRTIME_CHANNEL_PERIODS];
+static uint32_t mesh_airtime_tx_ms[MESHTASTIC_AIRTIME_TX_PERIODS];
+static uint64_t mesh_airtime_channel_slot = UINT64_MAX;
+static uint64_t mesh_airtime_tx_slot = UINT64_MAX;
+static uint64_t mesh_airtime_tx_total_ms;
+static uint64_t mesh_airtime_rx_total_ms;
 static mesh_history_entry_t mesh_history[MESHTASTIC_PACKET_HISTORY_SIZE];
 static size_t mesh_history_count;
 static size_t mesh_history_next;
@@ -2875,6 +2888,119 @@ static const char *op_name(radio_op_t op)
     }
 }
 
+static void mesh_airtime_rotate(uint64_t now_us)
+{
+    uint64_t channel_slot = now_us / MESHTASTIC_AIRTIME_CHANNEL_PERIOD_US;
+    uint64_t tx_slot = now_us / MESHTASTIC_AIRTIME_TX_PERIOD_US;
+
+    if(mesh_airtime_channel_slot == UINT64_MAX) {
+        mesh_airtime_channel_slot = channel_slot;
+        memset(mesh_airtime_channel_ms, 0, sizeof(mesh_airtime_channel_ms));
+    } else if(channel_slot != mesh_airtime_channel_slot) {
+        uint64_t delta = channel_slot - mesh_airtime_channel_slot;
+        if(delta >= MESHTASTIC_AIRTIME_CHANNEL_PERIODS) {
+            memset(mesh_airtime_channel_ms, 0, sizeof(mesh_airtime_channel_ms));
+        } else {
+            for(uint64_t i = 1; i <= delta; i++) {
+                mesh_airtime_channel_ms[
+                    (mesh_airtime_channel_slot + i) %
+                    MESHTASTIC_AIRTIME_CHANNEL_PERIODS] = 0U;
+            }
+        }
+        mesh_airtime_channel_slot = channel_slot;
+    }
+
+    if(mesh_airtime_tx_slot == UINT64_MAX) {
+        mesh_airtime_tx_slot = tx_slot;
+        memset(mesh_airtime_tx_ms, 0, sizeof(mesh_airtime_tx_ms));
+    } else if(tx_slot != mesh_airtime_tx_slot) {
+        uint64_t delta = tx_slot - mesh_airtime_tx_slot;
+        if(delta >= MESHTASTIC_AIRTIME_TX_PERIODS) {
+            memset(mesh_airtime_tx_ms, 0, sizeof(mesh_airtime_tx_ms));
+        } else {
+            for(uint64_t i = 1; i <= delta; i++) {
+                mesh_airtime_tx_ms[
+                    (mesh_airtime_tx_slot + i) %
+                    MESHTASTIC_AIRTIME_TX_PERIODS] = 0U;
+            }
+        }
+        mesh_airtime_tx_slot = tx_slot;
+    }
+}
+
+static uint32_t mesh_radio_airtime_ms(PhysicalLayer *radio, size_t len)
+{
+    RadioLibTime_t airtime_us;
+
+    if(!radio || len == 0U) {
+        return 0U;
+    }
+    airtime_us = radio->getTimeOnAir(len);
+    if(airtime_us <= 0) {
+        return 0U;
+    }
+    return (uint32_t)(((uint64_t)airtime_us + 999ULL) / 1000ULL);
+}
+
+static void mesh_airtime_log_tx(uint32_t airtime_ms)
+{
+    uint64_t now = monotonic_us();
+    size_t channel_idx;
+    size_t tx_idx;
+
+    if(airtime_ms == 0U) {
+        return;
+    }
+    mesh_airtime_rotate(now);
+    channel_idx = (size_t)(mesh_airtime_channel_slot %
+                           MESHTASTIC_AIRTIME_CHANNEL_PERIODS);
+    tx_idx = (size_t)(mesh_airtime_tx_slot % MESHTASTIC_AIRTIME_TX_PERIODS);
+    mesh_airtime_channel_ms[channel_idx] += airtime_ms;
+    mesh_airtime_tx_ms[tx_idx] += airtime_ms;
+    mesh_airtime_tx_total_ms += airtime_ms;
+}
+
+static void mesh_airtime_log_rx(uint32_t airtime_ms)
+{
+    uint64_t now = monotonic_us();
+    size_t channel_idx;
+
+    if(airtime_ms == 0U) {
+        return;
+    }
+    mesh_airtime_rotate(now);
+    channel_idx = (size_t)(mesh_airtime_channel_slot %
+                           MESHTASTIC_AIRTIME_CHANNEL_PERIODS);
+    mesh_airtime_channel_ms[channel_idx] += airtime_ms;
+    mesh_airtime_rx_total_ms += airtime_ms;
+}
+
+static float mesh_airtime_channel_util_percent(void)
+{
+    uint64_t sum = 0ULL;
+
+    mesh_airtime_rotate(monotonic_us());
+    for(size_t i = 0; i < MESHTASTIC_AIRTIME_CHANNEL_PERIODS; i++) {
+        sum += mesh_airtime_channel_ms[i];
+    }
+    return ((float)sum /
+            (float)(MESHTASTIC_AIRTIME_CHANNEL_PERIODS * 10U * 1000U)) *
+           100.0f;
+}
+
+static float mesh_airtime_tx_util_percent(void)
+{
+    uint64_t sum = 0ULL;
+
+    mesh_airtime_rotate(monotonic_us());
+    for(size_t i = 0; i < MESHTASTIC_AIRTIME_TX_PERIODS; i++) {
+        sum += mesh_airtime_tx_ms[i];
+    }
+    return ((float)sum /
+            (float)(MESHTASTIC_AIRTIME_TX_PERIODS * 60U * 1000U)) *
+           100.0f;
+}
+
 static const char *error_name(int16_t state)
 {
     switch(state) {
@@ -2983,6 +3109,86 @@ static const meshtastic_region_t *find_meshtastic_region(const char *name)
         }
     }
     return nullptr;
+}
+
+static float meshtastic_region_duty_cycle_percent(const std::string &region)
+{
+    std::string name = normalize_token(region.c_str());
+
+    if(name == "EU433" || name == "EU868" || name == "TH" ||
+       name == "UA433") {
+        return 10.0f;
+    }
+    return 100.0f;
+}
+
+static float meshtastic_region_duty_cycle_percent(
+    const probe_options_t &opts)
+{
+    std::string region = opts.resolved_region.empty() ? opts.region :
+                                                    opts.resolved_region;
+
+    if(region.empty()) {
+        region = MESHTASTIC_DEFAULT_REGION;
+    }
+    return meshtastic_region_duty_cycle_percent(region);
+}
+
+static bool mesh_voice_airtime_allowed(const probe_options_t &opts,
+                                       uint32_t estimated_airtime_ms,
+                                       char *errbuf, size_t errbuf_len)
+{
+    float channel_util = mesh_airtime_channel_util_percent();
+    float tx_util = mesh_airtime_tx_util_percent();
+    float duty_cycle = meshtastic_region_duty_cycle_percent(opts);
+    float tx_limit = duty_cycle < 100.0f ?
+        duty_cycle * MESHTASTIC_AIRTIME_POLITE_DUTY_CYCLE_RATIO : 100.0f;
+    float channel_projected = channel_util;
+    float tx_projected = tx_util;
+
+    if(estimated_airtime_ms > 0U) {
+        channel_projected +=
+            ((float)estimated_airtime_ms /
+             (float)(MESHTASTIC_AIRTIME_CHANNEL_PERIODS * 10U * 1000U)) *
+            100.0f;
+        tx_projected +=
+            ((float)estimated_airtime_ms /
+             (float)(MESHTASTIC_AIRTIME_TX_PERIODS * 60U * 1000U)) *
+            100.0f;
+    }
+
+    if(channel_util >= MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT) {
+        snprintf(errbuf, errbuf_len,
+                 "channel-busy ch_util=%.1f limit=%.1f",
+                 channel_util,
+                 MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT);
+        return false;
+    }
+    if(channel_projected >= MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT) {
+        snprintf(errbuf, errbuf_len,
+                 "channel-budget ch_util=%.1f projected=%.1f limit=%.1f airtime_ms=%u",
+                 channel_util, channel_projected,
+                 MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT,
+                 estimated_airtime_ms);
+        return false;
+    }
+    if(tx_util >= tx_limit) {
+        snprintf(errbuf, errbuf_len,
+                 "duty-cycle air_tx=%.2f limit=%.2f duty=%.1f",
+                 tx_util, tx_limit, duty_cycle);
+        return false;
+    }
+    if(tx_projected >= tx_limit) {
+        snprintf(errbuf, errbuf_len,
+                 "duty-budget air_tx=%.2f projected=%.2f limit=%.2f duty=%.1f airtime_ms=%u",
+                 tx_util, tx_projected, tx_limit, duty_cycle,
+                 estimated_airtime_ms);
+        return false;
+    }
+    if(errbuf && errbuf_len > 0U) {
+        errbuf[0] = '\0';
+    }
+    return true;
 }
 
 static bool profile_supports_preset(region_profile_type_t profile,
@@ -4224,6 +4430,8 @@ static bool mesh_apply_cached_bq27220_device_metrics(
 static bool mesh_collect_device_telemetry(mesh_telemetry_info_t *telemetry)
 {
     bool bq_ok;
+    float channel_util;
+    float air_tx;
 
     if(!telemetry) {
         return false;
@@ -4232,6 +4440,12 @@ static bool mesh_collect_device_telemetry(mesh_telemetry_info_t *telemetry)
     telemetry->has_device_metrics = true;
     telemetry->timestamp = (uint32_t)time(nullptr);
     telemetry->uptime_seconds = (uint32_t)(monotonic_us() / 1000000ULL);
+    channel_util = mesh_airtime_channel_util_percent();
+    air_tx = mesh_airtime_tx_util_percent();
+    telemetry->has_channel_utilization = true;
+    telemetry->channel_utilization = channel_util;
+    telemetry->has_air_util_tx = true;
+    telemetry->air_util_tx = air_tx;
     (void)mesh_read_power_supply_device_metrics(telemetry);
     bq_ok = mesh_read_bq27220_device_metrics(telemetry);
     if(!bq_ok && (!telemetry->has_device_voltage ||
@@ -12673,6 +12887,32 @@ static bool mesh_voice_encode_pcm_file(const char *path, uint32_t stream_id,
     return true;
 }
 
+static uint32_t mesh_voice_estimate_chunks_airtime_ms(
+    PhysicalLayer *radio, const probe_options_t &opts,
+    const std::vector<std::vector<uint8_t>> &chunks)
+{
+    uint64_t total_ms = 0ULL;
+    probe_options_t estimate_opts = opts;
+
+    if(!radio || chunks.empty()) {
+        return 0U;
+    }
+    estimate_opts.packet_id = 1U;
+    for(size_t i = 0; i < chunks.size(); i++) {
+        tx_frame_t frame;
+
+        if(!build_tx_data_frame(estimate_opts, MESHTASTIC_PRIVATE_APP,
+                                chunks[i], 0U, "voice-estimate", &frame)) {
+            continue;
+        }
+        total_ms += mesh_radio_airtime_ms(radio, frame.bytes.size());
+        if(total_ms > UINT32_MAX) {
+            return UINT32_MAX;
+        }
+    }
+    return (uint32_t)total_ms;
+}
+
 static bool mesh_decode_payload_for_known_channel(
     const probe_options_t &opts, const mesh_header_t &header,
     const std::vector<uint8_t> &encrypted_payload,
@@ -13261,6 +13501,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
     std::string channel_url = meshtastic_channel_url(opts);
     std::string pki_key = "-";
     size_t node_public_key_count = 0;
+    float channel_util = mesh_airtime_channel_util_percent();
+    float air_tx = mesh_airtime_tx_util_percent();
+    float duty_cycle = meshtastic_region_duty_cycle_percent(opts);
 
     if(opts.position_enabled &&
        (!mesh_gnss.has_fix || strcmp(mesh_gnss.gps_state, "fix") != 0)) {
@@ -13303,6 +13546,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
              "voice_tx_streams=%lu voice_tx_chunks=%lu voice_rx_chunks=%lu "
              "voice_rx_complete=%lu voice_rx_decode_fail=%lu "
+             "ch_util=%.1f air_tx=%.2f duty=%.1f air_tx_ms=%lu air_rx_ms=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
              "position=%s fixed=%s nrf9151=%s gps=%s gnss_phase=%s gps_detail=%s "
              "nmea_rx=%lu nmea_valid=%lu nmea_nofix=%lu last_nmea_ms=%lu "
@@ -13338,6 +13582,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_voice_rx_chunk_count,
              (unsigned long)mesh_voice_rx_complete_count,
              (unsigned long)mesh_voice_rx_decode_fail_count,
+             channel_util, air_tx, duty_cycle,
+             (unsigned long)mesh_airtime_tx_total_ms,
+             (unsigned long)mesh_airtime_rx_total_ms,
              (unsigned long)mesh_nodeinfo_tx_count,
              (unsigned long)mesh_nodeinfo_drop_count,
              mesh_nodeinfo_next_ms(now),
@@ -13954,6 +14201,7 @@ static std::string daemon_queue_remote_request(
 static std::string handle_daemon_command(const std::string &line,
                                          const probe_options_t &opts,
                                          chip_type_t chip,
+                                         PhysicalLayer *radio,
                                          std::deque<mesh_send_request_t> *
                                              send_queue,
                                          std::deque<mesh_remote_request_t> *
@@ -14150,6 +14398,7 @@ static std::string handle_daemon_command(const std::string &line,
         char errbuf[128];
         char buf[160];
         uint32_t stream_id;
+        uint32_t estimated_airtime_ms = 0U;
         const char *path_arg = line.c_str() + 16;
         std::string path = trim_ipc_line(path_arg);
         struct stat voice_st;
@@ -14179,6 +14428,16 @@ static std::string handle_daemon_command(const std::string &line,
             snprintf(buf, sizeof(buf), "ERR voice-encode %s\n", errbuf);
             return std::string(buf);
         }
+        estimated_airtime_ms =
+            mesh_voice_estimate_chunks_airtime_ms(radio, opts, chunks);
+        if(!mesh_voice_airtime_allowed(opts, estimated_airtime_ms,
+                                       errbuf, sizeof(errbuf))) {
+            daemon_event("Daemon SEND_VOICE airtime rejected path=%s chunks=%u airtime_ms=%u reason=%s",
+                         path.c_str(), (unsigned)chunks.size(),
+                         estimated_airtime_ms, errbuf);
+            snprintf(buf, sizeof(buf), "ERR voice-airtime %s\n", errbuf);
+            return std::string(buf);
+        }
         if(stat(path.c_str(), &voice_st) == 0 && voice_st.st_size > 0) {
             voice_seconds = (double)std::min((off_t)MESHTASTIC_VOICE_MAX_PCM_BYTES,
                                              voice_st.st_size) /
@@ -14203,15 +14462,17 @@ static std::string handle_daemon_command(const std::string &line,
         }
         mesh_voice_tx_stream_count++;
         mesh_voice_tx_chunk_count += chunks.size();
-        daemon_chat("TX 0x%08x voice %.1fs chunks=%u queued",
-                    opts.from_node, voice_seconds, (unsigned)chunks.size());
-        daemon_event("Daemon SEND_VOICE queued stream=0x%08x chunks=%u depth=%u op=%s",
+        daemon_chat("TX 0x%08x voice %.1fs chunks=%u airtime=%.1fs queued",
+                    opts.from_node, voice_seconds, (unsigned)chunks.size(),
+                    (double)estimated_airtime_ms / 1000.0);
+        daemon_event("Daemon SEND_VOICE queued stream=0x%08x chunks=%u airtime_ms=%u depth=%u op=%s",
                      stream_id, (unsigned)chunks.size(),
-                     (unsigned)send_queue->size(), op_name(active_op));
+                     estimated_airtime_ms, (unsigned)send_queue->size(),
+                     op_name(active_op));
         snprintf(buf, sizeof(buf),
-                 "OK voice queued stream=0x%08x chunks=%u depth=%u\n",
+                 "OK voice queued stream=0x%08x chunks=%u airtime_ms=%u depth=%u\n",
                  stream_id, (unsigned)chunks.size(),
-                 (unsigned)send_queue->size());
+                 estimated_airtime_ms, (unsigned)send_queue->size());
         return std::string(buf);
     }
     if(line.compare(0, 13, "SEND_CHANNEL ") == 0 ||
@@ -14365,6 +14626,7 @@ static std::string handle_daemon_command(const std::string &line,
 
 static void accept_daemon_clients(int server_fd, const probe_options_t &opts,
                                   chip_type_t chip,
+                                  PhysicalLayer *radio,
                                   std::deque<mesh_send_request_t> *send_queue,
                                   std::deque<mesh_remote_request_t> *
                                       request_queue)
@@ -14398,7 +14660,7 @@ static void accept_daemon_clients(int server_fd, const probe_options_t &opts,
             } else {
                 buf[n] = '\0';
                 line = trim_ipc_line(buf);
-                response = handle_daemon_command(line, opts, chip,
+                response = handle_daemon_command(line, opts, chip, radio,
                                                  send_queue, request_queue);
             }
         }
@@ -15270,6 +15532,7 @@ static int start_tx(PhysicalLayer *radio, const tx_frame_t &frame)
 
     active_op = OP_TX;
     active_tx_len = len;
+    active_tx_airtime_ms = mesh_radio_airtime_ms(radio, len);
     active_tx_frame = frame;
     active_tx_frame_valid = true;
     active_op_start_us = monotonic_us();
@@ -15285,6 +15548,7 @@ static void handle_rx_event(PhysicalLayer *radio, const probe_options_t &opts)
     tx_frame_t followup_frame;
     size_t len;
     int16_t state;
+    uint32_t rx_airtime_ms = 0U;
     bool rebroadcast_pending = false;
 
     if(!radio || active_op != OP_RX) {
@@ -15296,8 +15560,10 @@ static void handle_rx_event(PhysicalLayer *radio, const probe_options_t &opts)
     if(len >= sizeof(data)) {
         len = sizeof(data) - 1U;
     }
+    rx_airtime_ms = mesh_radio_airtime_ms(radio, len);
     state = radio->readData(data, len);
     active_op = OP_IDLE;
+    mesh_airtime_log_rx(rx_airtime_ms);
     if(state == RADIOLIB_ERR_NONE) {
         float rssi = radio->getRSSI();
         float snr = radio->getSNR();
@@ -15350,7 +15616,11 @@ static void handle_tx_event(PhysicalLayer *radio)
     }
     if(state == RADIOLIB_ERR_NONE) {
         tx_count++;
-        daemon_event("TX done: %lu", (unsigned long)tx_count);
+        mesh_airtime_log_tx(active_tx_airtime_ms);
+        daemon_event("TX done: %lu airtime=%ums ch_util=%.1f air_tx=%.2f",
+                     (unsigned long)tx_count, active_tx_airtime_ms,
+                     mesh_airtime_channel_util_percent(),
+                     mesh_airtime_tx_util_percent());
         if(active_tx_frame_valid && !active_tx_frame.want_ack) {
             (void)daemon_chat_update_tx_status(active_tx_frame.packet_id,
                                                "sent");
@@ -15362,6 +15632,7 @@ static void handle_tx_event(PhysicalLayer *radio)
                                                "tx-failed");
         }
     }
+    active_tx_airtime_ms = 0U;
     active_tx_frame_valid = false;
     (void)start_rx(radio);
 }
@@ -15664,7 +15935,7 @@ int main(int argc, char **argv)
         }
 
         if(daemon_fd >= 0) {
-            accept_daemon_clients(daemon_fd, opts, chip,
+            accept_daemon_clients(daemon_fd, opts, chip, radio,
                                   &pending_daemon_sends,
                                   &pending_remote_requests);
         }
@@ -16088,6 +16359,8 @@ int main(int argc, char **argv)
            elapsed_after(now, active_op_start_us, 15000000ULL)) {
             fprintf(stderr, "TX timeout watchdog\n");
             active_op = OP_IDLE;
+            active_tx_airtime_ms = 0U;
+            active_tx_frame_valid = false;
             (void)radio->standby();
             (void)start_rx(radio);
             if(send_once_started &&
