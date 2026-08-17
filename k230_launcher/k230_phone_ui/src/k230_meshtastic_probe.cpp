@@ -40,7 +40,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.27"
+#define PROBE_VERSION "0.28"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 8U
@@ -103,7 +103,7 @@
     ((MESHTASTIC_VOICE_SAMPLE_RATE * MESHTASTIC_VOICE_FRAME_MS) / 1000U)
 #define MESHTASTIC_VOICE_BITRATE_BPS 6000
 #define MESHTASTIC_VOICE_MAX_PCM_BYTES \
-    (MESHTASTIC_VOICE_SAMPLE_RATE * 2U)
+    (MESHTASTIC_VOICE_SAMPLE_RATE * 2U * 2U)
 #define MESHTASTIC_VOICE_CHUNK_TARGET_BYTES 190U
 #define MESHTASTIC_VOICE_RX_STREAMS 4U
 #define MESHTASTIC_DELAYED_TX_QUEUE_SIZE 4U
@@ -5023,6 +5023,131 @@ static int nrf9151_response_gnss_active(const char *resp)
     return atoi(p) > 0 ? 1 : 0;
 }
 
+static int nrf9151_response_cfun_mode(const char *resp)
+{
+    const char *p;
+
+    if(!resp) {
+        return -1;
+    }
+    p = strstr(resp, "+CFUN:");
+    if(!p) {
+        return -1;
+    }
+    p = strchr(p, ':');
+    if(!p) {
+        return -1;
+    }
+    p++;
+    while(*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    return atoi(p);
+}
+
+static int nrf9151_response_systemmode(const char *resp, int *lte_m,
+                                       int *nb_iot, int *gnss,
+                                       int *preference)
+{
+    const char *p;
+    int a;
+    int b;
+    int c;
+    int d;
+
+    if(lte_m) {
+        *lte_m = -1;
+    }
+    if(nb_iot) {
+        *nb_iot = -1;
+    }
+    if(gnss) {
+        *gnss = -1;
+    }
+    if(preference) {
+        *preference = -1;
+    }
+    if(!resp) {
+        return -1;
+    }
+    p = strstr(resp, "%XSYSTEMMODE:");
+    if(!p) {
+        return -1;
+    }
+    p = strchr(p, ':');
+    if(!p) {
+        return -1;
+    }
+    p++;
+    while(*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    if(sscanf(p, "%d,%d,%d,%d", &a, &b, &c, &d) != 4) {
+        return -1;
+    }
+    if(lte_m) {
+        *lte_m = a;
+    }
+    if(nb_iot) {
+        *nb_iot = b;
+    }
+    if(gnss) {
+        *gnss = c;
+    }
+    if(preference) {
+        *preference = d;
+    }
+    return 0;
+}
+
+static bool nrf9151_gnss_prepare_lte_mode_locked(void)
+{
+    char resp[MESHTASTIC_NRF9151_RESPONSE_MAX];
+    int rc;
+    int cfun = -1;
+    int lte_m = -1;
+    int nb_iot = -1;
+    int gnss = -1;
+    int pref = -1;
+    int failures = 0;
+
+    rc = nrf9151_exchange(mesh_gnss.fd, "AT%XSYSTEMMODE?", resp, sizeof(resp),
+                          MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
+    nrf9151_gnss_process_response(resp);
+    if(rc != 0 ||
+       nrf9151_response_systemmode(resp, &lte_m, &nb_iot, &gnss,
+                                   &pref) != 0) {
+        daemon_event("nRF9151 GNSS systemmode query failed rc=%d", rc);
+        return false;
+    }
+    if(gnss != 1) {
+        daemon_event("nRF9151 GNSS not enabled in systemmode lte_m=%d nb=%d gnss=%d pref=%d; skip CFUN=0 auto-reconfigure",
+                     lte_m, nb_iot, gnss, pref);
+        return false;
+    }
+
+    rc = nrf9151_exchange(mesh_gnss.fd, "AT+CFUN?", resp, sizeof(resp),
+                          MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
+    nrf9151_gnss_process_response(resp);
+    if(rc == 0) {
+        cfun = nrf9151_response_cfun_mode(resp);
+    }
+    if(cfun == 0 || cfun == 4 || cfun < 0) {
+        rc = nrf9151_exchange(mesh_gnss.fd, "AT+CFUN=1", resp, sizeof(resp),
+                              MESHTASTIC_NRF9151_CMD_TIMEOUT_US * 3ULL);
+    } else {
+        rc = nrf9151_exchange(mesh_gnss.fd, "AT+CFUN=31", resp, sizeof(resp),
+                              MESHTASTIC_NRF9151_CMD_TIMEOUT_US * 3ULL);
+    }
+    nrf9151_gnss_process_response(resp);
+    if(rc != 0) {
+        failures++;
+    }
+    daemon_event("nRF9151 GNSS preserve LTE mode lte_m=%d nb=%d gnss=%d pref=%d cfun=%d rc=%d",
+                 lte_m, nb_iot, gnss, pref, cfun, rc);
+    return failures == 0;
+}
+
 static bool nrf9151_gnss_restart_session_locked(const probe_options_t &opts,
                                                 const char *reason)
 {
@@ -5087,14 +5212,9 @@ static bool nrf9151_gnss_restart_session_locked(const probe_options_t &opts,
 
 static bool nrf9151_gnss_start_locked(const probe_options_t &opts)
 {
-    static const char *const setup_cmds[] = {
-        "AT+CFUN=0",
-        "AT%XSYSTEMMODE=0,0,1,0",
-        "AT+CFUN=31",
-        "AT#XNMEA=1",
-    };
     char resp[MESHTASTIC_NRF9151_RESPONSE_MAX];
     int rc;
+    int failures = 0;
 
     if(mesh_gnss.configured) {
         return true;
@@ -5120,14 +5240,15 @@ static bool nrf9151_gnss_start_locked(const probe_options_t &opts)
         return mesh_gnss.configured;
     }
 
-    for(size_t i = 0; i < ARRAY_SIZE(setup_cmds); i++) {
-        rc = nrf9151_exchange(mesh_gnss.fd, setup_cmds[i], resp, sizeof(resp),
-                              MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
-        nrf9151_gnss_process_response(resp);
-        if(rc != 0) {
-            daemon_event("nRF9151 GNSS setup command failed: %s rc=%d",
-                         setup_cmds[i], rc);
-        }
+    if(!nrf9151_gnss_prepare_lte_mode_locked()) {
+        failures++;
+    }
+    rc = nrf9151_exchange(mesh_gnss.fd, "AT#XNMEA=1", resp, sizeof(resp),
+                          MESHTASTIC_NRF9151_CMD_TIMEOUT_US);
+    nrf9151_gnss_process_response(resp);
+    if(rc != 0) {
+        failures++;
+        daemon_event("nRF9151 GNSS NMEA enable failed rc=%d", rc);
     }
     mesh_gnss.session_start_us = monotonic_us();
     mesh_gnss.first_fix_reported = false;
@@ -5149,8 +5270,9 @@ static bool nrf9151_gnss_start_locked(const probe_options_t &opts)
     }
     mesh_gnss.configured = true;
     nrf9151_gnss_set_state("present", "searching", "GNSS running");
-    daemon_event("nRF9151 GNSS started uart=%s interval=%us",
-                 opts.gps_uart_path.c_str(), opts.position_interval_sec);
+    daemon_event("nRF9151 GNSS started uart=%s interval=%us setup_failures=%d",
+                 opts.gps_uart_path.c_str(), opts.position_interval_sec,
+                 failures);
     return true;
 }
 
@@ -12431,15 +12553,14 @@ static bool mesh_voice_handle_rx(const probe_options_t &opts,
         if(mesh_voice_decode_stream_to_file(stream, path, &duration_ms)) {
             mesh_voice_rx_complete_count++;
             if(rssi > -200.0f && rssi < 20.0f) {
-                daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=%ddBm",
+                daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=%ddBm file=%s",
                             header.from, (double)duration_ms / 1000.0,
-                            stream->total, (int)roundf(rssi));
+                            stream->total, (int)roundf(rssi), path);
             } else {
-                daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=--",
+                daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=-- file=%s",
                             header.from, (double)duration_ms / 1000.0,
-                            stream->total);
+                            stream->total, path);
             }
-            mesh_voice_play_file_async(path);
         } else {
             mesh_voice_rx_decode_fail_count++;
             daemon_chat("RX 0x%08x voice decode failed chunks=%u",
@@ -14031,6 +14152,8 @@ static std::string handle_daemon_command(const std::string &line,
         uint32_t stream_id;
         const char *path_arg = line.c_str() + 16;
         std::string path = trim_ipc_line(path_arg);
+        struct stat voice_st;
+        double voice_seconds = 0.0;
 
         if(!opts.mesh_mode) {
             return "ERR mesh-disabled\n";
@@ -14056,6 +14179,11 @@ static std::string handle_daemon_command(const std::string &line,
             snprintf(buf, sizeof(buf), "ERR voice-encode %s\n", errbuf);
             return std::string(buf);
         }
+        if(stat(path.c_str(), &voice_st) == 0 && voice_st.st_size > 0) {
+            voice_seconds = (double)std::min((off_t)MESHTASTIC_VOICE_MAX_PCM_BYTES,
+                                             voice_st.st_size) /
+                            (double)(MESHTASTIC_VOICE_SAMPLE_RATE * 2U);
+        }
         if(send_queue->size() + chunks.size() >
            MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
             daemon_event("Daemon SEND_VOICE queue full chunks=%u depth=%u",
@@ -14075,6 +14203,8 @@ static std::string handle_daemon_command(const std::string &line,
         }
         mesh_voice_tx_stream_count++;
         mesh_voice_tx_chunk_count += chunks.size();
+        daemon_chat("TX 0x%08x voice %.1fs chunks=%u queued",
+                    opts.from_node, voice_seconds, (unsigned)chunks.size());
         daemon_event("Daemon SEND_VOICE queued stream=0x%08x chunks=%u depth=%u op=%s",
                      stream_id, (unsigned)chunks.size(),
                      (unsigned)send_queue->size(), op_name(active_op));
@@ -15831,23 +15961,7 @@ int main(int argc, char **argv)
                         if(frame.want_ack) {
                             ack_tracked = mesh_ack_track_frame(frame);
                         }
-                        if(request.voice && !request.payload.empty()) {
-                            uint32_t voice_stream = 0U;
-                            uint16_t voice_seq = 0U;
-                            uint16_t voice_total = 0U;
-                            if(mesh_voice_payload_header(request.payload,
-                                                         &voice_stream,
-                                                         &voice_seq,
-                                                         &voice_total)) {
-                                daemon_chat("TX 0x%08x id=0x%08x voice chunk %u/%u ack=%s",
-                                            opts.from_node, frame.packet_id,
-                                            voice_seq + 1U, voice_total,
-                                            frame.want_ack ?
-                                            (ack_tracked ? "pending" :
-                                             "dropped") :
-                                            "air");
-                            }
-                        } else {
+                        if(!request.voice) {
                             std::string clean = mesh_clean_text(request.message);
                             if(!clean.empty()) {
                                 daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",

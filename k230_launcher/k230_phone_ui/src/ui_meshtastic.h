@@ -16,6 +16,7 @@ void ui_meshtastic_set_autostart_enabled(int enabled);
 void ui_meshtastic_pause_for_radio_owner(const char *owner);
 void ui_meshtastic_resume_after_radio_owner(void);
 void ui_meshtastic_trigger_voice_key(void);
+void ui_meshtastic_handle_voice_key(int pressed);
 
 #ifdef __cplusplus
 }

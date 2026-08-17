@@ -130,10 +130,8 @@ static const char *const cellular_lte_gnss_mode_cmds[] = {
     "AT",
     "AT+CMEE=1",
     "AT%XSIM=1",
-    "AT+CFUN=0",
-    "AT%XSYSTEMMODE=1,1,1,0",
-    "AT+CEREG=5",
     "AT+CFUN=1",
+    "AT+CEREG=5",
     "AT%XSIM?",
     "AT+CPIN?",
     "AT%XSYSTEMMODE?",
@@ -146,9 +144,8 @@ static const char *const cellular_lte_gnss_mode_cmds[] = {
 };
 
 static const char *const cellular_gnss_start_cmds[] = {
-    "AT+CFUN=0",
-    "AT%XSYSTEMMODE=0,0,1,0",
     "AT+CFUN=31",
+    "AT%XSYSTEMMODE?",
     "AT#XNMEA=1",
     "AT#XGNSS=1,0,0,0",
 };
@@ -2508,9 +2505,8 @@ static int cellular_run_command_list(int fd, cellular_action_t action,
 static int cellular_run_gnss_start(int fd, int reset_first)
 {
     static const char *const setup_cmds[] = {
-        "AT+CFUN=0",
-        "AT%XSYSTEMMODE=0,0,1,0",
-        "AT+CFUN=31",
+        "AT+CFUN=1",
+        "AT%XSYSTEMMODE?",
         "AT#XNMEA=1",
     };
     char resp[1024];
@@ -2617,6 +2613,22 @@ static int cellular_run_gnss_start_lte_mode(int fd, int reset_first)
             cellular_log_append("GNSS already running in LTE+GNSS mode");
             return rc == 0 ? 0 : 1;
         }
+    }
+
+    rc = cellular_exchange_fd(fd, "AT+CFUN=31", resp, sizeof(resp),
+                              NRF9151_CMD_TIMEOUT_US);
+    cellular_update_from_response(CELLULAR_ACTION_GNSS_START,
+                                  "AT+CFUN=31", resp, rc);
+    if(rc != 0) {
+        failures++;
+    }
+
+    rc = cellular_exchange_fd(fd, "AT%XSYSTEMMODE?", resp, sizeof(resp),
+                              NRF9151_CMD_TIMEOUT_US);
+    cellular_update_from_response(CELLULAR_ACTION_GNSS_STATUS,
+                                  "AT%XSYSTEMMODE?", resp, rc);
+    if(rc != 0) {
+        failures++;
     }
 
     rc = cellular_exchange_fd(fd, "AT#XNMEA=1", resp, sizeof(resp),
@@ -2952,7 +2964,8 @@ static void *cellular_worker_main(void *arg)
     if(action == CELLULAR_ACTION_FULL_TEST) {
         cellular_run_full_test(fd);
     } else if(action == CELLULAR_ACTION_GNSS_START) {
-        cellular_set_action_result(action, cellular_run_gnss_start(fd, 0) == 0);
+        cellular_set_action_result(action,
+                                   cellular_run_gnss_start_lte_mode(fd, 0) == 0);
     } else if(action == CELLULAR_ACTION_GNSS_NMEA) {
         unsigned int before;
         unsigned int after;

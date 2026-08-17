@@ -19,10 +19,12 @@
 #include <string.h>
 #include <strings.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <lvgl/src/misc/cache/instance/lv_image_cache.h>
@@ -51,6 +53,10 @@
 #define MESHTASTIC_CHANNEL_QR_BORDER 4
 #define MESHTASTIC_VOICE_RAW_PATH "/tmp/k230_mesh_voice_tx.raw"
 #define MESHTASTIC_VOICE_RECORD_LOG "/tmp/k230_mesh_voice_record.log"
+#define MESHTASTIC_VOICE_SAMPLE_RATE 8000U
+#define MESHTASTIC_VOICE_SAMPLE_BYTES 2U
+#define MESHTASTIC_VOICE_MIN_BYTES (MESHTASTIC_VOICE_SAMPLE_RATE * MESHTASTIC_VOICE_SAMPLE_BYTES / 4U)
+#define MESHTASTIC_VOICE_MAX_SECONDS "2"
 #define MESHTASTIC_PREF_REGION "meshtastic.region"
 #define MESHTASTIC_PREF_PRESET "meshtastic.preset"
 #define MESHTASTIC_PREF_CHANNEL "meshtastic.channel"
@@ -187,6 +193,8 @@ static lv_obj_t *mesh_channel_import_overlay;
 static lv_obj_t *mesh_channel_import_status_label;
 static lv_obj_t *mesh_canned_overlay;
 static lv_obj_t *mesh_canned_delete_overlay;
+static lv_obj_t *mesh_voice_preview_overlay;
+static lv_obj_t *mesh_voice_preview_status_label;
 static lv_obj_t *mesh_channel_url_label;
 
 typedef enum {
@@ -216,6 +224,10 @@ static char mesh_channel_scan_pending_url[1024];
 static char mesh_canned_messages[MESHTASTIC_CANNED_MAX][160];
 static int mesh_canned_manage_mode;
 static int mesh_canned_delete_index = -1;
+static pid_t mesh_voice_record_pid = -1;
+static uint64_t mesh_voice_record_start_us;
+static size_t mesh_voice_record_bytes;
+static unsigned mesh_voice_record_duration_ms;
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
 static lv_timer_t *mesh_channel_scan_timer;
@@ -1478,6 +1490,91 @@ static uint32_t mesh_chat_status_color(const char *status, int sent)
     return 0xFDE68A;
 }
 
+static int mesh_chat_parse_voice_line(const char *line, char *path,
+                                      size_t path_len, char *duration,
+                                      size_t duration_len)
+{
+    const char *voice;
+    const char *file;
+    const char *p;
+    size_t used = 0;
+
+    if(path && path_len > 0U) {
+        path[0] = '\0';
+    }
+    if(duration && duration_len > 0U) {
+        duration[0] = '\0';
+    }
+    if(!line || (strncmp(line, "RX ", 3) != 0 &&
+                 strncmp(line, "TX ", 3) != 0)) {
+        return 0;
+    }
+    if(strstr(line, ": ")) {
+        return 0;
+    }
+    voice = strstr(line, " voice ");
+    if(!voice) {
+        return 0;
+    }
+    p = voice + 7;
+    while(*p && !isspace((unsigned char)*p) && used + 1U < duration_len) {
+        duration[used++] = *p++;
+    }
+    if(duration && duration_len > 0U) {
+        duration[used] = '\0';
+    }
+    file = strstr(line, " file=");
+    if(file && path && path_len > 0U) {
+        size_t i = 0;
+
+        file += 6;
+        while(file[i] && !isspace((unsigned char)file[i]) &&
+              i + 1U < path_len) {
+            path[i] = file[i];
+            i++;
+        }
+        path[i] = '\0';
+        if(strncmp(path, "/tmp/k230_mesh_voice_", 20) != 0) {
+            path[0] = '\0';
+        }
+    }
+    return 1;
+}
+
+static void mesh_voice_play_pcm_file(const char *path)
+{
+    char command[320];
+    int rc;
+
+    if(!path || !path[0]) {
+        return;
+    }
+    snprintf(command, sizeof(command),
+             "aplay -q -f S16_LE -c 1 -r %u '%s' >/dev/null 2>&1 &",
+             MESHTASTIC_VOICE_SAMPLE_RATE, path);
+    rc = system(command);
+    if(rc != 0) {
+        mesh_append_log("voice playback failed rc=%d", rc);
+    }
+}
+
+static void mesh_voice_bubble_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    char *path = (char *)lv_event_get_user_data(event);
+
+    if(code == LV_EVENT_CLICKED) {
+        if(path && path[0]) {
+            mesh_voice_play_pcm_file(path);
+            mesh_append_log("voice playback: %s", path);
+        }
+        return;
+    }
+    if(code == LV_EVENT_DELETE) {
+        free(path);
+    }
+}
+
 static void mesh_chat_format_tx_meta(char *meta, size_t meta_len,
                                      char *status, size_t status_len,
                                      uint32_t *footer_color)
@@ -1614,6 +1711,8 @@ static void mesh_chat_add_bubble(const char *line)
     int sent = 0;
     char meta[96];
     char body[256];
+    char voice_path[160] = "";
+    char voice_duration[24] = "";
     char status[24];
     lv_obj_t *row;
     lv_obj_t *bubble;
@@ -1629,6 +1728,16 @@ static void mesh_chat_add_bubble(const char *line)
     }
     mesh_chat_parse_line(line, &sent, meta, sizeof(meta), body, sizeof(body),
                          status, sizeof(status), &footer_color);
+    if(mesh_chat_parse_voice_line(line, voice_path, sizeof(voice_path),
+                                  voice_duration, sizeof(voice_duration))) {
+        snprintf(body, sizeof(body), "%s%s%s",
+                 ui_tr("Voice message"),
+                 voice_duration[0] ? " " : "",
+                 voice_duration);
+        if(!meta[0]) {
+            snprintf(meta, sizeof(meta), "%s", sent ? "TX voice" : "RX voice");
+        }
+    }
     ui_trim_text(body);
     ui_trim_text(meta);
     if(!body[0]) {
@@ -1673,6 +1782,17 @@ static void mesh_chat_add_bubble(const char *line)
     lv_obj_set_style_pad_row(bubble, 5, 0);
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
+    if(voice_path[0]) {
+        char *play_path = strdup(voice_path);
+
+        if(play_path) {
+            lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(bubble, mesh_voice_bubble_event_cb,
+                                LV_EVENT_CLICKED, play_path);
+            lv_obj_add_event_cb(bubble, mesh_voice_bubble_event_cb,
+                                LV_EVENT_DELETE, play_path);
+        }
+    }
 
     text = ui_label(bubble, body, &lv_font_montserrat_18, 0xFFFFFF);
     lv_obj_set_width(text, bubble_w - 20);
@@ -7714,45 +7834,287 @@ static void mesh_send_text_now(const char *text, const char *source,
     app_request_fast_refresh();
 }
 
-static void mesh_send_voice_now(const char *source)
+static void mesh_voice_set_button_text(const char *text)
 {
-    char command[320];
-    char response[256];
-    int rc;
-    int ret;
+    lv_obj_t *label;
 
-    mesh_ui_trace("VOICE_%s begin", source ? source : "unknown");
-    mesh_append_log("voice: recording 1s...");
-    app_request_fast_refresh();
-
-    ui_audio_input_route_enter("meshtastic_voice");
-    snprintf(command, sizeof(command),
-             "rm -f '%s'; arecord -q -D default -f S16_LE -c 1 -r 8000 "
-             "-d 1 -t raw '%s' > '%s' 2>&1",
-             MESHTASTIC_VOICE_RAW_PATH, MESHTASTIC_VOICE_RAW_PATH,
-             MESHTASTIC_VOICE_RECORD_LOG);
-    rc = system(command);
-    ui_audio_input_route_leave("meshtastic_voice");
-    if(ui_shell_exit_code(rc) != 0) {
-        mesh_append_log("voice record failed rc=%d log=%s",
-                        ui_shell_exit_code(rc), MESHTASTIC_VOICE_RECORD_LOG);
-        mesh_ui_trace("VOICE_RECORD_FAILED rc=%d", ui_shell_exit_code(rc));
+    if(!mesh_voice_button || !lv_obj_is_valid(mesh_voice_button)) {
         return;
     }
+    label = lv_obj_get_child(mesh_voice_button, 0);
+    if(label && lv_obj_is_valid(label)) {
+        lv_label_set_text(label, ui_tr(text));
+    }
+}
 
+static void mesh_voice_preview_close(void)
+{
+    if(mesh_voice_preview_overlay && lv_obj_is_valid(mesh_voice_preview_overlay)) {
+        lv_obj_delete(mesh_voice_preview_overlay);
+    }
+    mesh_voice_preview_overlay = NULL;
+    mesh_voice_preview_status_label = NULL;
+}
+
+static int mesh_voice_send_recorded(const char *source, char *response,
+                                    size_t response_len)
+{
+    char command[320];
+    int ret;
+
+    if(response && response_len > 0U) {
+        response[0] = '\0';
+    }
     snprintf(command, sizeof(command), "SEND_VOICE_FILE %s\n",
              MESHTASTIC_VOICE_RAW_PATH);
-    ret = mesh_ipc_command(command, response, sizeof(response));
-    ui_trim_text(response);
+    ret = mesh_ipc_command(command, response, response_len);
+    if(response && response_len > 0U) {
+        ui_trim_text(response);
+    }
     mesh_ui_trace("VOICE_RESPONSE source=%s ret=%d response=%s",
-                  source ? source : "unknown", ret, response);
+                  source ? source : "unknown", ret,
+                  response ? response : "");
     if(ret == 0) {
-        mesh_append_log("voice send: %s", response);
+        mesh_append_log("voice send: %s", response ? response : "OK");
     } else {
-        mesh_append_log("voice send failed: %s", response);
+        mesh_append_log("voice send failed: %s",
+                        response && response[0] ? response : "no response");
     }
     mesh_refresh_status();
+    mesh_refresh_chat_common(1, 0);
     app_request_fast_refresh();
+    return ret;
+}
+
+static void mesh_voice_preview_play_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_voice_play_pcm_file(MESHTASTIC_VOICE_RAW_PATH);
+}
+
+static void mesh_voice_preview_cancel_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    unlink(MESHTASTIC_VOICE_RAW_PATH);
+    mesh_voice_preview_close();
+}
+
+static void mesh_voice_preview_send_event_cb(lv_event_t *event)
+{
+    char response[256];
+    int ret;
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(mesh_voice_preview_status_label && lv_obj_is_valid(mesh_voice_preview_status_label)) {
+        lv_label_set_text(mesh_voice_preview_status_label, ui_tr("Sending voice"));
+    }
+    ret = mesh_voice_send_recorded("PREVIEW", response, sizeof(response));
+    if(ret == 0) {
+        mesh_voice_preview_close();
+    } else if(mesh_voice_preview_status_label &&
+              lv_obj_is_valid(mesh_voice_preview_status_label)) {
+        lv_label_set_text(mesh_voice_preview_status_label,
+                          response[0] ? response : ui_tr("Voice send failed"));
+    }
+}
+
+static void mesh_voice_preview_open(size_t bytes, unsigned duration_ms)
+{
+    lv_obj_t *dialog;
+    lv_obj_t *title;
+    lv_obj_t *detail;
+    lv_obj_t *hint;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int dialog_w = ui_is_landscape() ? 560 : 500;
+    int dialog_h = ui_is_landscape() ? 260 : 300;
+    int pad = 22;
+    int gap = 14;
+    int button_w;
+    int button_y;
+    char text[160];
+
+    mesh_voice_preview_close();
+    if(dialog_w > screen_w - 48) {
+        dialog_w = screen_w - 48;
+    }
+    if(dialog_w < 320) {
+        dialog_w = 320;
+    }
+    if(dialog_h > screen_h - 36) {
+        dialog_h = screen_h - 36;
+    }
+    if(dialog_h < 228) {
+        dialog_h = 228;
+    }
+    button_w = (dialog_w - pad * 2 - gap * 2) / 3;
+    button_y = dialog_h - pad - 58;
+
+    mesh_voice_preview_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_voice_preview_overlay);
+    lv_obj_set_style_bg_color(mesh_voice_preview_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_voice_preview_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(mesh_voice_preview_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_voice_preview_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_voice_preview_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    dialog = ui_panel(mesh_voice_preview_overlay, 0, 0, dialog_w, dialog_h);
+    lv_obj_align(dialog, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(dialog, 16, 0);
+    lv_obj_set_style_border_color(dialog, lv_color_hex(0x253B31), 0);
+    lv_obj_set_style_pad_all(dialog, 0, 0);
+
+    title = ui_label(dialog, ui_tr("Voice preview"), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, pad, pad);
+    lv_obj_set_width(title, dialog_w - pad * 2);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    snprintf(text, sizeof(text), "%s %.1fs  %u bytes",
+             ui_tr("Voice message"), (double)duration_ms / 1000.0,
+             (unsigned)bytes);
+    detail = ui_label(dialog, text, &lv_font_montserrat_18, 0x25C281);
+    lv_obj_set_pos(detail, pad, pad + 48);
+    lv_obj_set_width(detail, dialog_w - pad * 2);
+    lv_label_set_long_mode(detail, LV_LABEL_LONG_DOT);
+
+    hint = ui_label(dialog, ui_tr("Play it before sending, or cancel."),
+                    &lv_font_montserrat_16, 0xCBD5E1);
+    lv_obj_set_pos(hint, pad, pad + 86);
+    lv_obj_set_width(hint, dialog_w - pad * 2);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+
+    mesh_voice_preview_status_label =
+        ui_label(dialog, ui_tr("Ready"), &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(mesh_voice_preview_status_label, pad, button_y - 34);
+    lv_obj_set_width(mesh_voice_preview_status_label, dialog_w - pad * 2);
+    lv_label_set_long_mode(mesh_voice_preview_status_label, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(dialog, pad, button_y, button_w,
+                            ui_tr("Play"), 0x3DA5FF);
+    lv_obj_set_height(btn, 58);
+    lv_obj_add_event_cb(btn, mesh_voice_preview_play_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    btn = ui_command_button(dialog, pad + button_w + gap, button_y, button_w,
+                            ui_tr("Cancel"), 0x9AA4AF);
+    lv_obj_set_height(btn, 58);
+    lv_obj_add_event_cb(btn, mesh_voice_preview_cancel_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    btn = ui_command_button(dialog, pad + (button_w + gap) * 2, button_y,
+                            button_w, ui_tr("Send"), 0x25C281);
+    lv_obj_set_height(btn, 58);
+    lv_obj_add_event_cb(btn, mesh_voice_preview_send_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    app_request_fast_refresh();
+}
+
+static int mesh_voice_record_start(const char *source)
+{
+    pid_t pid;
+    int logfd;
+
+    if(mesh_voice_record_pid > 0) {
+        return 0;
+    }
+    mesh_voice_preview_close();
+    unlink(MESHTASTIC_VOICE_RAW_PATH);
+    unlink(MESHTASTIC_VOICE_RECORD_LOG);
+    mesh_voice_record_bytes = 0;
+    mesh_voice_record_duration_ms = 0;
+    mesh_voice_record_start_us = ui_monotonic_us();
+    mesh_ui_trace("VOICE_%s record_start", source ? source : "unknown");
+    mesh_append_log("voice: hold to record...");
+    ui_audio_input_route_enter("meshtastic_voice");
+
+    pid = fork();
+    if(pid < 0) {
+        ui_audio_input_route_leave("meshtastic_voice");
+        mesh_append_log("voice record fork failed: %s", strerror(errno));
+        mesh_ui_trace("VOICE_RECORD_FORK_FAILED err=%s", strerror(errno));
+        return -1;
+    }
+    if(pid == 0) {
+        setpgid(0, 0);
+        logfd = open(MESHTASTIC_VOICE_RECORD_LOG,
+                     O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if(logfd >= 0) {
+            dup2(logfd, STDOUT_FILENO);
+            dup2(logfd, STDERR_FILENO);
+            close(logfd);
+        }
+        execlp("arecord", "arecord", "-q", "-D", "default", "-f", "S16_LE",
+               "-c", "1", "-r", "8000", "-d", MESHTASTIC_VOICE_MAX_SECONDS,
+               "-t", "raw", MESHTASTIC_VOICE_RAW_PATH, (char *)NULL);
+        _exit(127);
+    }
+    setpgid(pid, pid);
+    mesh_voice_record_pid = pid;
+    mesh_voice_set_button_text("Recording");
+    app_request_fast_refresh();
+    return 0;
+}
+
+static int mesh_voice_record_stop(int open_preview, const char *source)
+{
+    pid_t pid = mesh_voice_record_pid;
+    int status = 0;
+    struct stat st;
+
+    if(pid <= 0) {
+        return -1;
+    }
+    mesh_voice_record_pid = -1;
+    if(waitpid(pid, &status, WNOHANG) == 0) {
+        kill(-pid, SIGTERM);
+        for(int i = 0; i < 12; i++) {
+            usleep(25000);
+            if(waitpid(pid, &status, WNOHANG) == pid) {
+                break;
+            }
+        }
+        if(waitpid(pid, &status, WNOHANG) == 0) {
+            kill(-pid, SIGKILL);
+            waitpid(pid, &status, 0);
+        }
+    }
+    ui_audio_input_route_leave("meshtastic_voice");
+    mesh_voice_set_button_text("Mic");
+    mesh_ui_trace("VOICE_%s record_stop status=%d",
+                  source ? source : "unknown", status);
+
+    if(stat(MESHTASTIC_VOICE_RAW_PATH, &st) != 0 || st.st_size <= 0) {
+        mesh_append_log("voice record failed or empty log=%s",
+                        MESHTASTIC_VOICE_RECORD_LOG);
+        return -1;
+    }
+    mesh_voice_record_bytes = (size_t)st.st_size;
+    mesh_voice_record_duration_ms =
+        (unsigned)((mesh_voice_record_bytes * 1000ULL) /
+                   (MESHTASTIC_VOICE_SAMPLE_RATE *
+                    MESHTASTIC_VOICE_SAMPLE_BYTES));
+    if(mesh_voice_record_bytes < MESHTASTIC_VOICE_MIN_BYTES) {
+        mesh_append_log("voice too short: %.1fs",
+                        (double)mesh_voice_record_duration_ms / 1000.0);
+        unlink(MESHTASTIC_VOICE_RAW_PATH);
+        return -1;
+    }
+    mesh_append_log("voice ready: %.1fs",
+                    (double)mesh_voice_record_duration_ms / 1000.0);
+    if(open_preview) {
+        mesh_voice_preview_open(mesh_voice_record_bytes,
+                                mesh_voice_record_duration_ms);
+    }
+    return 0;
 }
 
 static void mesh_canned_close(void)
@@ -8197,18 +8559,37 @@ static void mesh_canned_event_cb(lv_event_t *event)
 
 static void mesh_voice_event_cb(lv_event_t *event)
 {
-    if(event) {
-        lv_event_stop_processing(event);
+    lv_event_code_t code = lv_event_get_code(event);
+
+    if(code == LV_EVENT_PRESSED) {
+        if(event) {
+            lv_event_stop_processing(event);
+        }
+        (void)mesh_voice_record_start("BUTTON");
+    } else if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if(event) {
+            lv_event_stop_processing(event);
+        }
+        (void)mesh_voice_record_stop(1, "BUTTON");
     }
-    mesh_send_voice_now("BUTTON");
 }
 
 void ui_meshtastic_trigger_voice_key(void)
 {
+    ui_meshtastic_handle_voice_key(1);
+    ui_meshtastic_handle_voice_key(0);
+}
+
+void ui_meshtastic_handle_voice_key(int pressed)
+{
     if(!app_current_page_is(PAGE_MESHTASTIC)) {
         return;
     }
-    mesh_send_voice_now("MIC_KEY");
+    if(pressed) {
+        (void)mesh_voice_record_start("MIC_KEY");
+    } else {
+        (void)mesh_voice_record_stop(1, "MIC_KEY");
+    }
 }
 
 static void mesh_send_submit_cb(const char *text, void *user_data)
@@ -8388,7 +8769,7 @@ void ui_meshtastic_create(lv_obj_t *scr)
     mesh_voice_button = ui_command_button(mesh_input_panel, 0, 0, 58,
                                           ui_tr("Mic"), 0xF59E0B);
     lv_obj_add_event_cb(mesh_voice_button, mesh_voice_event_cb,
-                        LV_EVENT_CLICKED, NULL);
+                        LV_EVENT_ALL, NULL);
 
     mesh_send_button = ui_command_button(mesh_input_panel,
                                          content_w - send_w, 0,
@@ -8416,6 +8797,10 @@ void ui_meshtastic_create(lv_obj_t *scr)
 
 void ui_meshtastic_cleanup(void)
 {
+    if(mesh_voice_record_pid > 0) {
+        (void)mesh_voice_record_stop(0, "CLEANUP");
+    }
+    mesh_voice_preview_close();
     if(mesh_timer) {
         lv_timer_delete(mesh_timer);
         mesh_timer = NULL;
@@ -8453,6 +8838,10 @@ void ui_meshtastic_cleanup(void)
 
 int ui_meshtastic_handle_back(void)
 {
+    if(mesh_voice_preview_overlay && lv_obj_is_valid(mesh_voice_preview_overlay)) {
+        mesh_voice_preview_close();
+        return 1;
+    }
     if(mesh_pairing_overlay && lv_obj_is_valid(mesh_pairing_overlay)) {
         mesh_pairing_notice_close_cb(NULL);
         return 1;
