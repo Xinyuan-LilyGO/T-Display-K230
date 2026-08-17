@@ -5490,6 +5490,81 @@ static void mesh_map_add_marker(lv_obj_t *map, int x, int y, uint32_t color,
     }
 }
 
+static void mesh_map_add_self_marker(lv_obj_t *map, int x, int y,
+                                     const char *text)
+{
+    lv_obj_t *halo;
+    lv_obj_t *dot;
+    lv_obj_t *ring;
+    lv_obj_t *label;
+    int map_w = lv_obj_get_width(map);
+    int map_h = lv_obj_get_height(map);
+
+    if(x < -36 || y < -36 || x > map_w + 36 || y > map_h + 36) {
+        return;
+    }
+
+    halo = lv_obj_create(map);
+    lv_obj_set_pos(halo, x - 22, y - 22);
+    lv_obj_set_size(halo, 44, 44);
+    lv_obj_set_style_radius(halo, 22, 0);
+    lv_obj_set_style_bg_color(halo, lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_opa(halo, LV_OPA_30, 0);
+    lv_obj_set_style_border_width(halo, 0, 0);
+    lv_obj_clear_flag(halo, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(halo, LV_OBJ_FLAG_CLICKABLE);
+
+    ring = lv_obj_create(map);
+    lv_obj_set_pos(ring, x - 14, y - 14);
+    lv_obj_set_size(ring, 28, 28);
+    lv_obj_set_style_radius(ring, 14, 0);
+    lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ring, 3, 0);
+    lv_obj_set_style_border_color(ring, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+
+    dot = lv_obj_create(map);
+    lv_obj_set_pos(dot, x - 8, y - 8);
+    lv_obj_set_size(dot, 16, 16);
+    lv_obj_set_style_radius(dot, 8, 0);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(dot, 2, 0);
+    lv_obj_set_style_border_color(dot, lv_color_hex(0x062A1B), 0);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+
+    if(text && text[0]) {
+        int label_w = 108;
+        int label_x = x - label_w / 2;
+        int label_y = y + 20;
+
+        if(label_x < 8) {
+            label_x = 8;
+        } else if(label_x + label_w > map_w - 8) {
+            label_x = map_w - label_w - 8;
+        }
+        if(label_y + 28 > map_h - 8) {
+            label_y = y - 50;
+        }
+
+        label = ui_label(map, text, &lv_font_montserrat_14, 0xF8FAFC);
+        lv_obj_set_style_bg_color(label, lv_color_hex(0x052E1A), 0);
+        lv_obj_set_style_bg_opa(label, LV_OPA_90, 0);
+        lv_obj_set_style_pad_left(label, 8, 0);
+        lv_obj_set_style_pad_right(label, 8, 0);
+        lv_obj_set_style_pad_top(label, 3, 0);
+        lv_obj_set_style_pad_bottom(label, 3, 0);
+        lv_obj_set_style_radius(label, 7, 0);
+        lv_obj_set_pos(label, label_x, label_y);
+        lv_obj_set_width(label, label_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
+    }
+}
+
 static void mesh_map_draw_nodes(lv_obj_t *map, const char *nodes_text,
                                 double top_left_x, double top_left_y,
                                 int zoom)
@@ -5532,7 +5607,8 @@ static void mesh_map_draw_nodes(lv_obj_t *map, const char *nodes_text,
 }
 
 static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
-                                double center_lon, int zoom,
+                                double center_lon, int has_self_position,
+                                double self_lat, double self_lon, int zoom,
                                 const char *nodes_text, int view_w,
                                 int view_h, int *missing_out)
 {
@@ -5613,8 +5689,18 @@ static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
     }
 
     mesh_map_draw_nodes(layer, nodes_text, top_left_x, top_left_y, zoom);
-    mesh_map_add_marker(layer, map_w / 2, map_h / 2, 0x25C281,
-                        mesh_map_fake_gps_enabled ? "DEBUG" : "ME");
+    if(has_self_position) {
+        double self_x;
+        double self_y;
+        int local_x;
+        int local_y;
+
+        mesh_map_lonlat_to_pixel(self_lat, self_lon, zoom, &self_x, &self_y);
+        local_x = (int)(self_x - top_left_x);
+        local_y = (int)(self_y - top_left_y);
+        mesh_map_add_self_marker(layer, local_x, local_y,
+                                 mesh_map_fake_gps_enabled ? "DEBUG" : "ME");
+    }
     if(missing_out) {
         *missing_out = missing;
     }
@@ -5858,6 +5944,62 @@ static void mesh_map_zoom_event_cb(lv_event_t *event)
     mesh_map_rebuild();
 }
 
+static lv_obj_t *mesh_map_zoom_button(lv_obj_t *parent, int x, int y,
+                                      const char *text, intptr_t delta)
+{
+    lv_obj_t *btn = lv_obj_create(parent);
+    lv_obj_t *label;
+
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_size(btn, 50, 50);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x111827), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x2DD4BF), 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_radius(btn, 10, 0);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(btn, 8);
+    lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
+                        (void *)delta);
+
+    label = ui_label(btn, text, &lv_font_montserrat_28, 0xF8FAFC);
+    lv_obj_center(label);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
+    return btn;
+}
+
+static void mesh_map_add_zoom_controls(lv_obj_t *map, int map_w, int map_h)
+{
+    lv_obj_t *panel;
+    int panel_w = 62;
+    int panel_h = 118;
+    int panel_x = map_w - panel_w - 14;
+    int panel_y = 16;
+
+    if(panel_x < 8) {
+        panel_x = 8;
+    }
+    if(panel_y + panel_h > map_h - 8) {
+        panel_y = map_h > panel_h + 16 ? map_h - panel_h - 8 : 8;
+    }
+
+    panel = lv_obj_create(map);
+    lv_obj_set_pos(panel, panel_x, panel_y);
+    lv_obj_set_size(panel, panel_w, panel_h);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x07111F), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_70, 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_radius(panel, 12, 0);
+    lv_obj_set_style_pad_all(panel, 6, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    mesh_map_zoom_button(panel, 6, 6, "+", (intptr_t)1);
+    mesh_map_zoom_button(panel, 6, 62, "-", (intptr_t)-1);
+    lv_obj_move_foreground(panel);
+}
+
 static void mesh_map_refresh_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -5958,7 +6100,10 @@ static void mesh_map_rebuild(void)
     char info[256];
     double lat = 0.0;
     double lon = 0.0;
+    double self_lat = 0.0;
+    double self_lon = 0.0;
     int has_position;
+    int has_self_position = 0;
     int missing_tiles = 0;
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
@@ -6015,6 +6160,9 @@ static void mesh_map_rebuild(void)
     has_position = mesh_map_current_position(status, &lat, &lon, reason,
                                              sizeof(reason), &position_state);
     if(has_position) {
+        self_lat = lat;
+        self_lon = lon;
+        has_self_position = 1;
         if(!mesh_map_center_valid) {
             mesh_map_center_lat = lat;
             mesh_map_center_lon = lon;
@@ -6089,27 +6237,6 @@ static void mesh_map_rebuild(void)
     lv_obj_add_event_cb(sw, mesh_map_fake_switch_event_cb, LV_EVENT_VALUE_CHANGED,
                         NULL);
 
-    if(landscape) {
-        btn = ui_command_button(controls, 0, controls_h - 74,
-                                (controls_w - 34) / 2, "-", 0xF2F5F8);
-        lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
-                            (void *)(intptr_t)-1);
-        btn = ui_command_button(controls, (controls_w - 34) / 2 + 10,
-                                controls_h - 74, (controls_w - 34) / 2,
-                                "+", 0xF2F5F8);
-        lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
-                            (void *)(intptr_t)1);
-    } else {
-        btn = ui_command_button(controls, controls_w - 198, 68, 78, "-",
-                                0xF2F5F8);
-        lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
-                            (void *)(intptr_t)-1);
-        btn = ui_command_button(controls, controls_w - 106, 68, 78, "+",
-                                0xF2F5F8);
-        lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
-                            (void *)(intptr_t)1);
-    }
-
     map = lv_obj_create(panel);
     mesh_map_view_obj = map;
     lv_obj_set_pos(map, map_x, map_y);
@@ -6129,7 +6256,8 @@ static void mesh_map_rebuild(void)
     lv_obj_update_layout(map);
 
     if(has_position) {
-        mesh_map_draw_tiles(map, lat, lon, mesh_map_zoom, nodes,
+        mesh_map_draw_tiles(map, lat, lon, has_self_position, self_lat,
+                            self_lon, mesh_map_zoom, nodes,
                             map_w, map_h, &missing_tiles);
         if(missing_tiles > 0) {
             snprintf(info, sizeof(info), "Missing %d offline tiles",
@@ -6140,6 +6268,7 @@ static void mesh_map_rebuild(void)
             lv_obj_set_style_pad_all(label, 6, 0);
             lv_obj_set_pos(label, 10, 10);
         }
+        mesh_map_add_zoom_controls(map, map_w, map_h);
     } else {
         mesh_map_draw_position_state(map, map_w, map_h, reason,
                                      position_state);
