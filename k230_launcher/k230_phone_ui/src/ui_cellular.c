@@ -105,6 +105,9 @@ static const char *const cellular_sim_cmds[] = {
 static const char *const cellular_lte_status_cmds[] = {
     "AT",
     "AT+CMEE=1",
+    "AT%XSIM=1",
+    "AT%XSIM?",
+    "AT+CPIN?",
     "AT+CFUN?",
     "AT%XSYSTEMMODE?",
     "AT+CEREG=5",
@@ -120,10 +123,15 @@ static const char *const cellular_lte_status_cmds[] = {
 };
 
 static const char *const cellular_lte_gnss_mode_cmds[] = {
+    "AT",
+    "AT+CMEE=1",
+    "AT%XSIM=1",
     "AT+CFUN=0",
     "AT%XSYSTEMMODE=1,1,1,0",
     "AT+CEREG=5",
     "AT+CFUN=1",
+    "AT%XSIM?",
+    "AT+CPIN?",
     "AT%XSYSTEMMODE?",
     "AT+CEREG?",
     "AT+CESQ",
@@ -195,6 +203,7 @@ static char cellular_log[NRF9151_LOG_MAX];
 static unsigned int cellular_urc_count;
 static unsigned int cellular_nmea_count;
 static int cellular_sim_positive_seen;
+static int cellular_lte_sim_fault_seen;
 static int cellular_led_auto_pending;
 static uint64_t cellular_last_uart_us;
 static char cellular_last_nmea[NRF9151_NMEA_LINE_MAX];
@@ -1655,6 +1664,23 @@ static int cellular_crsm_success_line(const char *line)
     return sw1 == 144 || sw1 == 145;
 }
 
+static void cellular_lte_sim_fault_set(int fault)
+{
+    pthread_mutex_lock(&cellular_lock);
+    cellular_lte_sim_fault_seen = fault ? 1 : 0;
+    pthread_mutex_unlock(&cellular_lock);
+}
+
+static int cellular_lte_sim_fault_snapshot(void)
+{
+    int fault;
+
+    pthread_mutex_lock(&cellular_lock);
+    fault = cellular_lte_sim_fault_seen;
+    pthread_mutex_unlock(&cellular_lock);
+    return fault;
+}
+
 static int cellular_cereg_stat_from_line(const char *line)
 {
     const char *p = strchr(line, ':');
@@ -1747,7 +1773,11 @@ static void cellular_lte_update_from_line(const char *line, int rc)
         int stat = cellular_cereg_stat_from_line(line);
         const char *text = cellular_cereg_stat_text(stat);
 
-        if(rc == 0 && text) {
+        if(stat == 90 && cellular_lte_sim_fault_snapshot()) {
+            cellular_set_summary(cellular_lte_status,
+                                 sizeof(cellular_lte_status),
+                                 "SIM not detected");
+        } else if(rc == 0 && text) {
             cellular_set_summary(cellular_lte_status,
                                  sizeof(cellular_lte_status), "%s", text);
         } else if(stat >= 0) {
@@ -1875,15 +1905,37 @@ static void cellular_update_from_response(cellular_action_t action,
     if(cellular_line_containing(resp, "%XSIM:", line, sizeof(line)) == 0) {
         if(rc == 0 && cellular_xsim_ready_line(line)) {
             cellular_sim_mark_positive();
+            if(action == CELLULAR_ACTION_LTE_STATUS ||
+               action == CELLULAR_ACTION_LTE_GNSS_MODE) {
+                cellular_lte_sim_fault_set(0);
+            }
         } else {
             cellular_sim_mark_fail_if_no_positive();
+            if(action == CELLULAR_ACTION_LTE_STATUS ||
+               action == CELLULAR_ACTION_LTE_GNSS_MODE) {
+                cellular_lte_sim_fault_set(1);
+                cellular_set_summary(cellular_lte_status,
+                                     sizeof(cellular_lte_status),
+                                     "SIM not detected");
+            }
         }
     }
     if(cellular_line_containing(resp, "+CPIN:", line, sizeof(line)) == 0) {
         if(rc == 0 && cellular_cpin_ready_line(line)) {
             cellular_sim_mark_positive();
+            if(action == CELLULAR_ACTION_LTE_STATUS ||
+               action == CELLULAR_ACTION_LTE_GNSS_MODE) {
+                cellular_lte_sim_fault_set(0);
+            }
         } else {
             cellular_sim_mark_fail_if_no_positive();
+            if(action == CELLULAR_ACTION_LTE_STATUS ||
+               action == CELLULAR_ACTION_LTE_GNSS_MODE) {
+                cellular_lte_sim_fault_set(1);
+                cellular_set_summary(cellular_lte_status,
+                                     sizeof(cellular_lte_status),
+                                     "SIM not ready");
+            }
         }
     }
     if(cellular_line_containing(resp, "%XICCID:", line, sizeof(line)) == 0) {
@@ -1964,6 +2016,16 @@ static void cellular_update_from_response(cellular_action_t action,
         strcmp(cmd, "AT%XICCID") == 0 || strcmp(cmd, "AT+CIMI") == 0 ||
         strstr(cmd, "AT+CRSM") == cmd)) {
         cellular_sim_mark_fail_if_no_positive();
+    }
+    if(rc != 0 &&
+       (action == CELLULAR_ACTION_LTE_STATUS ||
+        action == CELLULAR_ACTION_LTE_GNSS_MODE) &&
+       (strstr(cmd, "XSIM") || strcmp(cmd, "AT+CPIN?") == 0 ||
+        strcmp(cmd, "AT%XICCID") == 0 || strcmp(cmd, "AT+CIMI") == 0)) {
+        cellular_lte_sim_fault_set(1);
+        cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
+                             strcmp(cmd, "AT+CPIN?") == 0 ?
+                             "SIM not ready" : "SIM not detected");
     }
 }
 
@@ -2435,6 +2497,14 @@ static void *cellular_worker_main(void *arg)
         pthread_mutex_lock(&cellular_lock);
         cellular_sim_positive_seen = 0;
         snprintf(cellular_sim_status, sizeof(cellular_sim_status),
+                 "%s", "Testing");
+        pthread_mutex_unlock(&cellular_lock);
+    }
+    if(action == CELLULAR_ACTION_LTE_STATUS ||
+       action == CELLULAR_ACTION_LTE_GNSS_MODE) {
+        pthread_mutex_lock(&cellular_lock);
+        cellular_lte_sim_fault_seen = 0;
+        snprintf(cellular_lte_status, sizeof(cellular_lte_status),
                  "%s", "Testing");
         pthread_mutex_unlock(&cellular_lock);
     }
