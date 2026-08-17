@@ -99,6 +99,7 @@
 #define DISPLAY_ROTATION_ENV "K230_DISPLAY_ROTATION"
 #define DISPLAY_ORIENTATION_ENV "K230_DISPLAY_ORIENTATION"
 #define DISPLAY_ROTATION_PREF_KEY "display.rotation"
+#define DISPLAY_BRIGHTNESS_PREF_KEY "display.brightness"
 #define PAGE_TRANSITION_PREF_KEY "display.page_transition"
 #define DISPLAY_TIMEOUT_PREF_KEY "display.timeout_s"
 #define DISPLAY_TIMEOUT_DEFAULT_S 60
@@ -209,7 +210,6 @@ static lv_obj_t *ui_stage_obj;
 static lv_obj_t *page_root;
 static lv_obj_t *status_bar_obj;
 static lv_obj_t *status_ble_label;
-static lv_obj_t *status_ble_led;
 static lv_obj_t *transition_old_page;
 static int page_transition_active;
 static lv_obj_t *time_label;
@@ -2432,6 +2432,49 @@ static int write_backlight_value(int value)
     return 0;
 }
 
+static void apply_display_brightness_pref(void)
+{
+    char value[32];
+    char *end;
+    long parsed;
+
+    if(ui_prefs_get(DISPLAY_BRIGHTNESS_PREF_KEY, value, sizeof(value), "") != 0) {
+        value[0] = '\0';
+    }
+
+    if(value[0] != '\0') {
+        errno = 0;
+        parsed = strtol(value, &end, 10);
+        if(errno != 0 || end == value) {
+            touch_trace_log("DISPLAY_BRIGHTNESS_PREF invalid=%s", value);
+            return;
+        }
+
+        if(write_backlight_value((int)parsed) == 0) {
+            touch_trace_log("DISPLAY_BRIGHTNESS_PREF applied=%d max=%d",
+                            backlight_current_value, backlight_max_value);
+        } else {
+            touch_trace_log("DISPLAY_BRIGHTNESS_PREF apply failed value=%ld",
+                            parsed);
+        }
+        return;
+    }
+
+    if(find_backlight_device() == 0 && backlight_current_value <= 0) {
+        int target = backlight_max_value > 0 ? backlight_max_value : 255;
+
+        if(write_backlight_value(target) == 0) {
+            char pref_value[24];
+
+            snprintf(pref_value, sizeof(pref_value), "%d",
+                     backlight_current_value);
+            ui_prefs_set(DISPLAY_BRIGHTNESS_PREF_KEY, pref_value);
+            touch_trace_log("DISPLAY_BRIGHTNESS_PREF seeded=%d max=%d",
+                            backlight_current_value, backlight_max_value);
+        }
+    }
+}
+
 static int has_video_node(void)
 {
     DIR *dir = opendir("/dev");
@@ -3946,13 +3989,6 @@ static void create_status_bar(lv_obj_t *scr)
     lv_obj_clear_flag(ble_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_center(ble_row);
     status_ble_label = label(ble_row, "BLE", &lv_font_montserrat_16, 0x9AA4AF);
-    status_ble_led = lv_obj_create(ble_row);
-    lv_obj_set_size(status_ble_led, 9, 9);
-    lv_obj_set_style_radius(status_ble_led, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(status_ble_led, 0, 0);
-    lv_obj_set_style_bg_opa(status_ble_led, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(0x59616C), 0);
-    lv_obj_clear_flag(status_ble_led, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *wifi = chip(status_group, "WiFi", path_exists("/sys/class/net/wlan0") ? 0x25C281 : 0x9AA4AF);
     lv_obj_set_size(wifi, status_chip_w, status_chip_h);
@@ -3968,25 +4004,17 @@ static void create_status_bar(lv_obj_t *scr)
 
 void app_set_ble_status(const char *state)
 {
-    uint32_t color = 0xEF4D5A;
+    uint32_t color = 0x9AA4AF;
     const char *value = state && state[0] ? state : "offline";
 
     snprintf(status_ble_state, sizeof(status_ble_state), "%s", value);
-    if(strcmp(value, "ready") == 0 || strcmp(value, "connected") == 0) {
+    if(strcmp(value, "connected") == 0) {
         color = 0x25C281;
-    } else if(strcmp(value, "probing") == 0 ||
-              strcmp(value, "starting") == 0) {
-        color = 0xF5A524;
+    } else if(strcmp(value, "ready") == 0) {
+        color = 0x3DA5FF;
     }
     if(status_ble_label && lv_obj_is_valid(status_ble_label)) {
         lv_obj_set_style_text_color(status_ble_label, lv_color_hex(color), 0);
-    }
-    if(status_ble_led && lv_obj_is_valid(status_ble_led)) {
-        uint32_t led_color = 0xEF4D5A;
-        if(strcmp(value, "connected") == 0) {
-            led_color = 0x25C281;
-        }
-        lv_obj_set_style_bg_color(status_ble_led, lv_color_hex(led_color), 0);
     }
 }
 
@@ -4782,9 +4810,13 @@ static void display_brightness_event_cb(lv_event_t *event)
     char text[64];
 
     if(write_backlight_value(value) == 0) {
+        char pref_value[24];
+
         if(backlight_current_value != value) {
             lv_slider_set_value(slider, backlight_current_value, LV_ANIM_OFF);
         }
+        snprintf(pref_value, sizeof(pref_value), "%d", backlight_current_value);
+        ui_prefs_set(DISPLAY_BRIGHTNESS_PREF_KEY, pref_value);
         snprintf(text, sizeof(text), "%d / %d", backlight_current_value,
                  backlight_max_value);
     } else {
@@ -9471,6 +9503,7 @@ int main(void)
     ui_i18n_init();
     ui_time_settings_apply_startup();
     ui_hardware_startup();
+    apply_display_brightness_pref();
     ui_cellular_startup();
     ui_ethernet_apply_startup();
     init_styles();

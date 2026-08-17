@@ -359,6 +359,7 @@ static const ui_translation_t ui_translations[] = {
     { "Diagnostics", "诊断", "診断" },
     { "One-tap diagnostics", "诊断", "診断" },
     { "Checking modem", "正在检测模块", "モデム確認中" },
+    { "Checking LTE", "正在检查 LTE", "LTE 確認中" },
     { "Check complete", "检测完成", "チェック完了" },
     { "Check issues", "检测存在异常", "チェック異常あり" },
     { "C/N0 Monitor", "载噪比监控", "C/N0 監視" },

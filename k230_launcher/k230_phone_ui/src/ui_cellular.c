@@ -811,7 +811,7 @@ static void cellular_check_progress_refresh(int active, const char *status)
         lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(cellular_check_spinner, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(cellular_check_panel);
-        lv_label_set_text(cellular_check_label, ui_tr("Checking modem"));
+        lv_label_set_text(cellular_check_label, ui_tr("Checking LTE"));
         return;
     }
 
@@ -2598,13 +2598,10 @@ static void cellular_run_full_test(int fd)
 {
     int link_failures;
     int sim_failures;
-    int mode_failures;
     int lte_failures;
-    int gnss_failures;
     int total_failures;
 
     pthread_mutex_lock(&cellular_lock);
-    cellular_gnss_reset_locked();
     cellular_sim_positive_seen = 0;
     cellular_lte_sim_fault_seen = 0;
     snprintf(cellular_link_status, sizeof(cellular_link_status), "%s",
@@ -2613,8 +2610,6 @@ static void cellular_run_full_test(int fd)
              "Testing");
     snprintf(cellular_lte_status, sizeof(cellular_lte_status), "%s",
              "Testing");
-    snprintf(cellular_gnss_status, sizeof(cellular_gnss_status), "%s",
-             "Testing");
     snprintf(cellular_imei_status, sizeof(cellular_imei_status), "%s", "--");
     snprintf(cellular_operator_status, sizeof(cellular_operator_status),
              "%s", "--");
@@ -2622,7 +2617,7 @@ static void cellular_run_full_test(int fd)
     cellular_network_rebuild_locked();
     pthread_mutex_unlock(&cellular_lock);
 
-    cellular_log_append("Smart check: UART, SIM, LTE attach, IP, ping, GNSS");
+    cellular_log_append("LTE check: UART, SIM, registration, IP, ping");
     link_failures = cellular_run_command_list(fd, CELLULAR_ACTION_LINK,
                                               cellular_link_cmds,
                                               sizeof(cellular_link_cmds) /
@@ -2631,28 +2626,15 @@ static void cellular_run_full_test(int fd)
                                              cellular_sim_cmds,
                                              sizeof(cellular_sim_cmds) /
                                              sizeof(cellular_sim_cmds[0]));
-    mode_failures = cellular_run_command_list(fd, CELLULAR_ACTION_LTE_GNSS_MODE,
-                                              cellular_lte_gnss_mode_cmds,
-                                              sizeof(cellular_lte_gnss_mode_cmds) /
-                                              sizeof(cellular_lte_gnss_mode_cmds[0]));
     lte_failures = cellular_run_command_list(fd, CELLULAR_ACTION_LTE_STATUS,
                                              cellular_lte_status_cmds,
                                              sizeof(cellular_lte_status_cmds) /
                                              sizeof(cellular_lte_status_cmds[0]));
-    gnss_failures = cellular_run_gnss_start_lte_mode(fd, 0);
-    cellular_log_append("Full test: GNSS/NMEA started without blocking");
-    cellular_log_append("Full test leaves NMEA parsing to the GNSS panel");
-    cellular_run_command_list(fd, CELLULAR_ACTION_GNSS_STATUS,
-                              cellular_gnss_status_cmds,
-                              sizeof(cellular_gnss_status_cmds) /
-                              sizeof(cellular_gnss_status_cmds[0]));
-    total_failures = link_failures + sim_failures + mode_failures +
-                     lte_failures + gnss_failures;
+    total_failures = link_failures + sim_failures + lte_failures;
     cellular_set_status(total_failures == 0 ? "Check OK" : "Check issues");
-    cellular_log_append("Smart check done failures=%d link=%d sim=%d mode=%d "
-                        "lte=%d gnss=%d", total_failures, link_failures,
-                        sim_failures, mode_failures, lte_failures,
-                        gnss_failures);
+    cellular_log_append("LTE check done failures=%d link=%d sim=%d lte=%d",
+                        total_failures, link_failures, sim_failures,
+                        lte_failures);
 }
 
 static int cellular_cno_monitor_should_stop(void)
@@ -2787,7 +2769,7 @@ static void cellular_start_cno_monitor_after_check(void)
 
     if(pthread_create(&thread, NULL, cellular_cno_monitor_main, NULL) == 0) {
         pthread_detach(thread);
-        cellular_log_append("GNSS NMEA parser monitor started after Run");
+        cellular_log_append("GNSS NMEA parser monitor started");
     } else {
         pthread_mutex_lock(&cellular_lock);
         cellular_cno_monitor_active = 0;
@@ -2851,7 +2833,7 @@ static void cellular_action_commands(cellular_action_t action,
         *title = "Stop GNSS";
         break;
     case CELLULAR_ACTION_FULL_TEST:
-        *title = "Run";
+        *title = "LTE";
         break;
     }
 }
@@ -2942,12 +2924,7 @@ static void *cellular_worker_main(void *arg)
     }
 
     close(fd);
-    if(action == CELLULAR_ACTION_FULL_TEST) {
-        cellular_start_cno_monitor_after_check();
-    }
-    if(action != CELLULAR_ACTION_FULL_TEST) {
-        cellular_set_status("%s done", title);
-    }
+    cellular_set_status("%s done", title);
 
 out:
     pthread_mutex_lock(&cellular_lock);
@@ -2969,7 +2946,7 @@ static void cellular_start_action(cellular_action_t action)
     pthread_mutex_unlock(&cellular_lock);
 
     if(busy) {
-        cellular_log_append("Action ignored: stop C/N0 monitor or wait for worker");
+        cellular_log_append("Action ignored: stop GNSS monitor or wait for worker");
         return;
     }
 
@@ -3173,7 +3150,7 @@ void ui_cellular_create(lv_obj_t *scr)
                          &cellular_network_label);
 
     cellular_button(summary, 0, button_y, action_btn_w,
-                    "Run", 0x25C281,
+                    "LTE", 0x25C281,
                     cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_FULL_TEST);
     cellular_cno_button = cellular_button(summary, action_btn_w + 12,
@@ -3239,7 +3216,7 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_SCROLLABLE);
 
     cellular_check_dialog = lv_obj_create(cellular_check_panel);
-    lv_obj_set_size(cellular_check_dialog, landscape ? 320 : 300, 148);
+    lv_obj_set_size(cellular_check_dialog, landscape ? 360 : 320, 174);
     lv_obj_set_style_bg_color(cellular_check_dialog, lv_color_hex(0x101820), 0);
     lv_obj_set_style_bg_opa(cellular_check_dialog, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(cellular_check_dialog, 14, 0);
@@ -3251,14 +3228,14 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_center(cellular_check_dialog);
 
     cellular_check_spinner = lv_spinner_create(cellular_check_dialog);
-    lv_obj_set_size(cellular_check_spinner, 44, 44);
-    lv_obj_align(cellular_check_spinner, LV_ALIGN_TOP_MID, 0, 24);
-    cellular_check_label = ui_label(cellular_check_dialog, "Checking modem",
+    lv_obj_set_size(cellular_check_spinner, 72, 72);
+    lv_obj_align(cellular_check_spinner, LV_ALIGN_TOP_MID, 0, 22);
+    cellular_check_label = ui_label(cellular_check_dialog, "Checking LTE",
                                     &lv_font_montserrat_18, 0xDCE5EE);
     lv_obj_set_width(cellular_check_label, landscape ? 260 : 240);
     lv_label_set_long_mode(cellular_check_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(cellular_check_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(cellular_check_label, LV_ALIGN_TOP_MID, 0, 88);
+    lv_obj_align(cellular_check_label, LV_ALIGN_TOP_MID, 0, 112);
     lv_obj_add_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
 
     cellular_status_refresh();
