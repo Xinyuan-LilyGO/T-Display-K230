@@ -159,6 +159,7 @@ static lv_obj_t *mesh_map_layer_obj;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_map_overlay;
+static lv_obj_t *mesh_detector_overlay;
 static lv_obj_t *mesh_choice_overlay;
 static lv_obj_t *mesh_channel_overlay;
 static lv_obj_t *mesh_channel_profiles_overlay;
@@ -4836,6 +4837,7 @@ static void mesh_nodes_close_event_cb(lv_event_t *event)
 }
 
 static void mesh_nodes_event_cb(lv_event_t *event);
+static void mesh_detector_event_cb(lv_event_t *event);
 
 static int mesh_node_line_value(const char *line, const char *key,
                                 char *out, size_t out_len)
@@ -6395,6 +6397,486 @@ static void mesh_add_node_card(lv_obj_t *panel, const char *line,
     lv_label_set_long_mode(hint_label, LV_LABEL_LONG_DOT);
 }
 
+typedef struct {
+    char line[MESHTASTIC_UI_NODE_LINE_MAX];
+    char node_id[24];
+    char name[64];
+    char short_name[24];
+    char rx[16];
+    char age[24];
+    char rssi[24];
+    char snr[24];
+    char pos[96];
+    long rx_count;
+    long age_s;
+    long rssi_dbm;
+    double snr_db;
+    int has_rssi;
+    int has_snr;
+    int has_pos;
+    int score;
+} mesh_detector_node_t;
+
+static long mesh_detector_parse_long(const char *text, long fallback)
+{
+    char *endptr;
+    long value;
+
+    if(!text || !text[0] || strcmp(text, "-") == 0) {
+        return fallback;
+    }
+    value = strtol(text, &endptr, 10);
+    if(endptr == text) {
+        return fallback;
+    }
+    return value;
+}
+
+static double mesh_detector_parse_double(const char *text, double fallback)
+{
+    char *endptr;
+    double value;
+
+    if(!text || !text[0] || strcmp(text, "-") == 0) {
+        return fallback;
+    }
+    value = strtod(text, &endptr);
+    if(endptr == text) {
+        return fallback;
+    }
+    return value;
+}
+
+static void mesh_detector_node_prepare(mesh_detector_node_t *node,
+                                       const char *line)
+{
+    long rx_count;
+    long age_s;
+    long rssi_dbm;
+    double snr_db;
+
+    memset(node, 0, sizeof(*node));
+    snprintf(node->line, sizeof(node->line), "%s", line ? line : "");
+    if(sscanf(node->line, "%23s", node->node_id) != 1) {
+        snprintf(node->node_id, sizeof(node->node_id), "-");
+    }
+    mesh_node_line_segment(node->line, "name=", " short=", node->name,
+                           sizeof(node->name));
+    mesh_node_line_value(node->line, "short=", node->short_name,
+                         sizeof(node->short_name));
+    mesh_node_line_value(node->line, "rx=", node->rx, sizeof(node->rx));
+    mesh_node_line_value(node->line, "age=", node->age, sizeof(node->age));
+    mesh_node_line_value(node->line, "rssi=", node->rssi, sizeof(node->rssi));
+    mesh_node_line_value(node->line, "snr=", node->snr, sizeof(node->snr));
+    mesh_node_line_segment(node->line, "pos=", " tel=", node->pos,
+                           sizeof(node->pos));
+    if((!node->name[0] || strcmp(node->name, "-") == 0) &&
+       node->short_name[0] && strcmp(node->short_name, "-") != 0) {
+        snprintf(node->name, sizeof(node->name), "%s", node->short_name);
+    }
+    if(!node->name[0] || strcmp(node->name, "-") == 0) {
+        snprintf(node->name, sizeof(node->name), "%s", node->node_id);
+    }
+
+    rx_count = mesh_detector_parse_long(node->rx, 0);
+    age_s = mesh_detector_parse_long(node->age, 999999);
+    rssi_dbm = mesh_detector_parse_long(node->rssi, -999);
+    snr_db = mesh_detector_parse_double(node->snr, -999.0);
+    node->rx_count = rx_count;
+    node->age_s = age_s;
+    node->rssi_dbm = rssi_dbm;
+    node->snr_db = snr_db;
+    node->has_rssi = strcmp(node->rssi, "-") != 0;
+    node->has_snr = strcmp(node->snr, "-") != 0;
+    node->has_pos = node->pos[0] && strcmp(node->pos, "-") != 0;
+    node->score = (int)(rx_count > 80 ? 80 : rx_count);
+    if(age_s <= 300) {
+        node->score += 45;
+    } else if(age_s <= 3600) {
+        node->score += 22;
+    }
+    if(node->has_rssi) {
+        int rssi_score = (int)(rssi_dbm + 130);
+        if(rssi_score < 0) {
+            rssi_score = 0;
+        }
+        if(rssi_score > 55) {
+            rssi_score = 55;
+        }
+        node->score += rssi_score;
+    }
+    if(node->has_snr) {
+        int snr_score = (int)((snr_db + 10.0) * 2.0);
+        if(snr_score < 0) {
+            snr_score = 0;
+        }
+        if(snr_score > 40) {
+            snr_score = 40;
+        }
+        node->score += snr_score;
+    }
+    if(node->has_pos) {
+        node->score += 12;
+    }
+}
+
+static void mesh_detector_sort_nodes(mesh_detector_node_t *nodes, int count)
+{
+    int i;
+
+    for(i = 0; i < count; i++) {
+        int j;
+        for(j = i + 1; j < count; j++) {
+            if(nodes[j].score > nodes[i].score) {
+                mesh_detector_node_t tmp = nodes[i];
+                nodes[i] = nodes[j];
+                nodes[j] = tmp;
+            }
+        }
+    }
+}
+
+static void mesh_detector_close(void)
+{
+    if(mesh_detector_overlay && lv_obj_is_valid(mesh_detector_overlay)) {
+        lv_obj_delete(mesh_detector_overlay);
+    }
+    mesh_detector_overlay = NULL;
+}
+
+static void mesh_detector_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_detector_close();
+}
+
+static void mesh_detector_summary_card(lv_obj_t *panel, int x, int y, int w,
+                                       int h, const char *title,
+                                       const char *value, const char *detail,
+                                       uint32_t color)
+{
+    lv_obj_t *card;
+    lv_obj_t *label;
+
+    card = ui_panel(panel, x, y, w, h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(color), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+
+    label = ui_label(card, title, &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(label, 12, 10);
+    lv_obj_set_width(label, w - 24);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card, value, &lv_font_montserrat_24, color);
+    lv_obj_set_pos(label, 12, 34);
+    lv_obj_set_width(label, w - 24);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card, detail, &lv_font_montserrat_14, 0xCBD5E1);
+    lv_obj_set_pos(label, 12, h - 30);
+    lv_obj_set_width(label, w - 24);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+}
+
+static void mesh_detector_node_row(lv_obj_t *panel,
+                                   const mesh_detector_node_t *node,
+                                   int x, int y, int w, int h,
+                                   size_t select_index)
+{
+    lv_obj_t *card;
+    lv_obj_t *label;
+    char meta[192];
+    char score[48];
+
+    if(select_index >= MESHTASTIC_UI_NODE_SELECT_MAX || !node) {
+        return;
+    }
+    snprintf(mesh_node_select_lines[select_index],
+             sizeof(mesh_node_select_lines[select_index]), "%s", node->line);
+
+    card = ui_panel(panel, x, y, w, h);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x111827), 0);
+    lv_obj_set_style_border_color(card,
+                                  lv_color_hex(node->score > 120 ?
+                                               0x25C281 : 0x334155), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card, mesh_node_detail_event_cb, LV_EVENT_CLICKED,
+                        mesh_node_select_lines[select_index]);
+
+    label = ui_label(card, node->name, &lv_font_montserrat_18, 0xF2F5F8);
+    lv_obj_set_pos(label, 14, 10);
+    lv_obj_set_width(label, w - 88);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    snprintf(score, sizeof(score), "%d", node->score);
+    label = ui_label(card, score, &lv_font_montserrat_20, 0xF59E0B);
+    lv_obj_set_pos(label, w - 66, 10);
+    lv_obj_set_width(label, 52);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card, node->node_id, &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(label, 14, 38);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    snprintf(meta, sizeof(meta), "RSSI %s  SNR %s  RX %s  Age %s  Pos %s",
+             node->rssi, node->snr, node->rx, node->age,
+             node->has_pos ? "yes" : "no");
+    label = ui_label(card, meta, &lv_font_montserrat_14, 0x25C281);
+    lv_obj_set_pos(label, 14, 64);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+}
+
+static void mesh_detector_event_cb(lv_event_t *event)
+{
+    char status[4096];
+    char nodes_response[8192];
+    char nodes_text[8192];
+    char region[24];
+    char preset[32];
+    char channel[64];
+    char freq[24];
+    char rx[24];
+    char tx[24];
+    char dup[24];
+    char nodedb[24];
+    char hist[24];
+    char profile[192];
+    char value[64];
+    char detail[160];
+    char *saveptr = NULL;
+    char *line;
+    mesh_detector_node_t nodes[MESHTASTIC_UI_NODE_SELECT_MAX];
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *btn;
+    lv_obj_t *label;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int landscape = ui_is_landscape();
+    int summary_cols = landscape ? 4 : 2;
+    int summary_gap = 10;
+    int summary_w = (content_w - summary_gap * (summary_cols - 1)) /
+                    summary_cols;
+    int summary_h = landscape ? 96 : 102;
+    int summary_rows = landscape ? 1 : 2;
+    int node_cols = landscape ? 2 : 1;
+    int node_gap = 12;
+    int node_w = node_cols == 2 ? (content_w - node_gap) / 2 : content_w;
+    int node_h = 98;
+    int y = 0;
+    int node_count = 0;
+    int seen_count = 0;
+    int active_5m = 0;
+    int active_1h = 0;
+    int positioned = 0;
+    int weak = 0;
+    int best_rssi_valid = 0;
+    int best_snr_valid = 0;
+    long packets_total = 0;
+    long best_rssi = 0;
+    double best_snr = 0.0;
+
+    (void)event;
+    ui_input_hide_inline_active();
+    if(mesh_ipc_command("STATUS\n", status, sizeof(status)) != 0) {
+        ui_trim_text(status);
+        mesh_append_log("detector status failed: %s", status);
+        snprintf(status, sizeof(status), "%s", "ERR offline");
+    }
+    if(mesh_ipc_command("NODES\n", nodes_response,
+                        sizeof(nodes_response)) != 0) {
+        ui_trim_text(nodes_response);
+        mesh_append_log("detector nodes failed: %s", nodes_response);
+        snprintf(nodes_response, sizeof(nodes_response), "%s", "");
+    }
+    snprintf(nodes_text, sizeof(nodes_text), "%s", nodes_response);
+    if(strncmp(nodes_text, "OK nodes\n", 9) == 0) {
+        memmove(nodes_text, nodes_text + 9, strlen(nodes_text + 9) + 1U);
+    }
+
+    line = strtok_r(nodes_text, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "0x", 2) == 0) {
+            mesh_detector_node_t parsed;
+            mesh_detector_node_prepare(&parsed, line);
+            seen_count++;
+            packets_total += parsed.rx_count;
+            if(parsed.age_s <= 300) {
+                active_5m++;
+            }
+            if(parsed.age_s <= 3600) {
+                active_1h++;
+            }
+            if(parsed.has_pos) {
+                positioned++;
+            }
+            if((parsed.has_rssi && parsed.rssi_dbm <= -105) ||
+               (parsed.has_snr && parsed.snr_db < 0.0)) {
+                weak++;
+            }
+            if(parsed.has_rssi &&
+               (!best_rssi_valid || parsed.rssi_dbm > best_rssi)) {
+                best_rssi = parsed.rssi_dbm;
+                best_rssi_valid = 1;
+            }
+            if(parsed.has_snr &&
+               (!best_snr_valid || parsed.snr_db > best_snr)) {
+                best_snr = parsed.snr_db;
+                best_snr_valid = 1;
+            }
+            if(node_count < MESHTASTIC_UI_NODE_SELECT_MAX - 1) {
+                nodes[node_count++] = parsed;
+            }
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    mesh_detector_sort_nodes(nodes, node_count);
+
+    mesh_status_field(status, "region", region, sizeof(region), "-");
+    mesh_status_field(status, "preset", preset, sizeof(preset), "-");
+    mesh_status_field(status, "channel", channel, sizeof(channel), "-");
+    mesh_status_field(status, "freq", freq, sizeof(freq), "-");
+    mesh_status_field(status, "rx", rx, sizeof(rx), "0");
+    mesh_status_field(status, "tx", tx, sizeof(tx), "0");
+    mesh_status_field(status, "dup", dup, sizeof(dup), "0");
+    mesh_status_field(status, "nodedb", nodedb, sizeof(nodedb), "0");
+    mesh_status_field(status, "hist", hist, sizeof(hist), "0");
+    snprintf(profile, sizeof(profile), "%s / %s / %s MHz / %s",
+             region, preset, freq, channel);
+
+    mesh_detector_close();
+    mesh_detector_overlay = lv_obj_create(lv_screen_active());
+    ui_set_fullscreen(mesh_detector_overlay);
+    lv_obj_set_style_bg_color(mesh_detector_overlay, lv_color_hex(0x05070A),
+                              0);
+    lv_obj_set_style_bg_opa(mesh_detector_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mesh_detector_overlay, 0, 0);
+    lv_obj_set_style_border_width(mesh_detector_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_detector_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_detector_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(mesh_detector_overlay);
+
+    panel = ui_scroll_panel(mesh_detector_overlay, 0, 0, screen_w, screen_h);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    title = ui_label(panel, ui_tr("Mesh Detector"), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, margin, 22);
+    lv_obj_set_width(title, content_w - 220);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    subtitle = ui_label(panel, ui_tr("Current-channel mesh activity"),
+                        &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(subtitle, margin, 56);
+    lv_obj_set_width(subtitle, content_w - 220);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+    btn = ui_command_button(panel, screen_w - margin - 206, 18, 100,
+                            ui_tr("Refresh"), 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_detector_event_cb, LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"), 0x374151);
+    lv_obj_add_event_cb(btn, mesh_detector_close_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    y = 98;
+#define MESH_DETECTOR_SUMMARY(index, title, card_value, card_detail, color) \
+    mesh_detector_summary_card(panel, \
+                               margin + ((index) % summary_cols) * \
+                               (summary_w + summary_gap), \
+                               y + ((index) / summary_cols) * \
+                               (summary_h + summary_gap), \
+                               summary_w, summary_h, title, card_value, \
+                               card_detail, color)
+
+    snprintf(value, sizeof(value), "%d", seen_count);
+    snprintf(detail, sizeof(detail), "%s %s", ui_tr("Nodes"), nodedb);
+    MESH_DETECTOR_SUMMARY(0, ui_tr("Mesh nodes"), value, detail, 0x25C281);
+
+    snprintf(value, sizeof(value), "%d / %d", active_5m, active_1h);
+    MESH_DETECTOR_SUMMARY(1, ui_tr("Active nodes"), value, "5m / 1h",
+                          0x3DA5FF);
+
+    if(best_rssi_valid) {
+        snprintf(value, sizeof(value), "%ld dBm", best_rssi);
+    } else {
+        snprintf(value, sizeof(value), "%s", "-");
+    }
+    if(best_snr_valid) {
+        snprintf(detail, sizeof(detail), "SNR %.1f", best_snr);
+    } else {
+        snprintf(detail, sizeof(detail), "SNR -");
+    }
+    MESH_DETECTOR_SUMMARY(2, ui_tr("Best signal"), value, detail, 0xF59E0B);
+
+    snprintf(value, sizeof(value), "%ld", packets_total);
+    snprintf(detail, sizeof(detail), "rx %s / tx %s / dup %s", rx, tx, dup);
+    MESH_DETECTOR_SUMMARY(3, ui_tr("Packets"), value, detail, 0xA78BFA);
+#undef MESH_DETECTOR_SUMMARY
+
+    y += summary_rows * summary_h + (summary_rows - 1) * summary_gap;
+    if(!landscape) {
+        y += summary_gap;
+        snprintf(value, sizeof(value), "%d", positioned);
+        mesh_detector_summary_card(panel, margin, y, summary_w, summary_h,
+                                   ui_tr("Positioned"), value, profile,
+                                   0x14B8A6);
+        snprintf(value, sizeof(value), "%d", weak);
+        snprintf(detail, sizeof(detail), "history %s", hist);
+        mesh_detector_summary_card(panel, margin + summary_w + summary_gap, y,
+                                   summary_w, summary_h, ui_tr("Weak links"),
+                                   value, detail, 0xEF4D5A);
+        y += summary_h;
+    }
+
+    y += 24;
+    label = ui_label(panel, ui_tr("Current profile"),
+                     &lv_font_montserrat_18, 0xF2F5F8);
+    lv_obj_set_pos(label, margin, y);
+    lv_obj_set_width(label, content_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    y += 30;
+    label = ui_label(panel, profile, &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(label, margin, y);
+    lv_obj_set_width(label, content_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    y += 38;
+
+    label = ui_label(panel, ui_tr("Detector ranking"),
+                     &lv_font_montserrat_18, 0xF2F5F8);
+    lv_obj_set_pos(label, margin, y);
+    lv_obj_set_width(label, content_w);
+    y += 36;
+
+    if(node_count == 0) {
+        label = ui_label(panel, ui_tr("No mesh activity detected yet"),
+                         &lv_font_montserrat_18, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        return;
+    }
+
+    for(int i = 0; i < node_count; i++) {
+        int col = i % node_cols;
+        int row = i / node_cols;
+        int x = margin + col * (node_w + node_gap);
+        int row_y = y + row * (node_h + node_gap);
+        mesh_detector_node_row(panel, &nodes[i], x, row_y, node_w, node_h,
+                               (size_t)(i + 1));
+    }
+}
+
 static void mesh_profile_event_cb(lv_event_t *event)
 {
     lv_obj_t *panel;
@@ -7228,6 +7710,8 @@ void ui_meshtastic_create(lv_obj_t *scr)
     int content_w = ui_page_panel_width();
     int landscape = ui_is_landscape();
     int send_w = landscape ? 90 : 82;
+    int status_action_w = 288;
+    int status_text_w = content_w - status_action_w - 12;
 
     mesh_load_profile_prefs();
     ui_create_header(scr, "Meshtastic");
@@ -7238,6 +7722,9 @@ void ui_meshtastic_create(lv_obj_t *scr)
     mesh_status_panel_h = landscape ? 78 : 88;
     mesh_chat_gap = landscape ? 8 : 10;
     mesh_keyboard_reserved_h = 0;
+    if(status_text_w < 120) {
+        status_text_w = 120;
+    }
 
     mesh_status_panel = ui_panel(mesh_body, x, 0, content_w,
                                  mesh_status_panel_h);
@@ -7247,21 +7734,25 @@ void ui_meshtastic_create(lv_obj_t *scr)
     mesh_status_label = ui_label(mesh_status_panel, "Daemon offline",
                                  &lv_font_montserrat_20, 0xF5A524);
     lv_obj_set_pos(mesh_status_label, 0, 0);
-    lv_obj_set_width(mesh_status_label, content_w - 228);
+    lv_obj_set_width(mesh_status_label, status_text_w);
     lv_label_set_long_mode(mesh_status_label, LV_LABEL_LONG_DOT);
 
     mesh_profile_label = ui_label(mesh_status_panel, "", &lv_font_montserrat_14,
                                   0xCBD5E1);
     lv_obj_set_pos(mesh_profile_label, 0, 28);
-    lv_obj_set_width(mesh_profile_label, content_w - 228);
+    lv_obj_set_width(mesh_profile_label, status_text_w);
     lv_label_set_long_mode(mesh_profile_label, LV_LABEL_LONG_DOT);
 
     mesh_detail_label = ui_label(mesh_status_panel, "",
                                  &lv_font_montserrat_14, 0x94A3B8);
     lv_obj_set_pos(mesh_detail_label, 0, 50);
-    lv_obj_set_width(mesh_detail_label, content_w - 228);
+    lv_obj_set_width(mesh_detail_label, status_text_w);
     lv_label_set_long_mode(mesh_detail_label, LV_LABEL_LONG_DOT);
 
+    btn = ui_command_button(mesh_status_panel, content_w - 288, 0, 60,
+                            ui_tr("Detect"), 0xF59E0B);
+    lv_obj_add_event_cb(btn, mesh_detector_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_height(btn, 54);
     btn = ui_command_button(mesh_status_panel, content_w - 216, 0, 60,
                             ui_tr("Map"), 0x3DA5FF);
     lv_obj_add_event_cb(btn, mesh_map_event_cb, LV_EVENT_CLICKED, NULL);
@@ -7374,6 +7865,7 @@ void ui_meshtastic_cleanup(void)
         lv_obj_delete(mesh_nodes_overlay);
     }
     mesh_nodes_overlay = NULL;
+    mesh_detector_close();
     mesh_map_close();
     mesh_close_channel_page();
 }
@@ -7430,6 +7922,10 @@ int ui_meshtastic_handle_back(void)
     }
     if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
         mesh_close_nodes_page();
+        return 1;
+    }
+    if(mesh_detector_overlay && lv_obj_is_valid(mesh_detector_overlay)) {
+        mesh_detector_close();
         return 1;
     }
     if(mesh_inline_input && ui_input_inline_is_active(mesh_inline_input)) {
