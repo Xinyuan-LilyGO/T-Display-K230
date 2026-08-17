@@ -1395,6 +1395,25 @@ static void audio_notification_reap(void)
     }
 }
 
+static void audio_notification_stop(void)
+{
+    int status;
+
+    audio_notification_reap();
+    if(notification_pid <= 0) {
+        return;
+    }
+    kill(-notification_pid, SIGTERM);
+    usleep(80000);
+    if(waitpid(notification_pid, &status, WNOHANG) == notification_pid) {
+        notification_pid = -1;
+        return;
+    }
+    kill(-notification_pid, SIGKILL);
+    waitpid(notification_pid, &status, 0);
+    notification_pid = -1;
+}
+
 static int audio_play_notification_path(const char *path)
 {
     char quoted[AUDIO_PATH_MAX * 2];
@@ -1403,8 +1422,7 @@ static int audio_play_notification_path(const char *path)
 
     audio_notification_reap();
     if(notification_pid > 0) {
-        audio_debug_log("NOTIFICATION_SKIP reason=busy");
-        return -1;
+        audio_notification_stop();
     }
     if(!path || access(path, R_OK) != 0) {
         audio_debug_log("NOTIFICATION_SKIP reason=missing path=\"%s\"",
@@ -2325,18 +2343,20 @@ static void radio_custom_cb(lv_event_t *event)
     ui_input_dialog_open(&config);
 }
 
-static lv_obj_t *audio_create_row(lv_obj_t *parent, int y, const char *left_icon,
-                                  const char *title, const char *meta,
-                                  uint32_t accent, lv_event_cb_t cb,
-                                  void *user_data, int right_reserved,
-                                  lv_obj_t **icon_out, lv_obj_t **meta_out)
+static lv_obj_t *audio_create_row_ex(lv_obj_t *parent, int y,
+                                     const char *left_icon, const char *title,
+                                     const char *meta, uint32_t accent,
+                                     lv_event_cb_t cb, void *user_data,
+                                     int right_reserved, int text_x,
+                                     lv_obj_t **icon_out,
+                                     lv_obj_t **meta_out)
 {
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_t *icon;
     lv_obj_t *name;
     lv_obj_t *detail;
     int row_w = ui_fit_width(lv_obj_get_parent(row), 0, 488);
-    int text_w = row_w - 82 - right_reserved;
+    int text_w = row_w - text_x - 24 - right_reserved;
     if(text_w < 260) {
         text_w = 260;
     }
@@ -2361,13 +2381,13 @@ static lv_obj_t *audio_create_row(lv_obj_t *parent, int y, const char *left_icon
     name = ui_label(row, title, &lv_font_montserrat_18, 0xF2F5F8);
     lv_obj_set_width(name, text_w);
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-    lv_obj_align(name, LV_ALIGN_TOP_LEFT, 58, 13);
+    lv_obj_align(name, LV_ALIGN_TOP_LEFT, text_x, 13);
     ui_make_click_forwarder(name);
 
     detail = ui_label(row, meta, &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_width(detail, text_w);
     lv_label_set_long_mode(detail, LV_LABEL_LONG_DOT);
-    lv_obj_align(detail, LV_ALIGN_TOP_LEFT, 58, 42);
+    lv_obj_align(detail, LV_ALIGN_TOP_LEFT, text_x, 42);
     ui_make_click_forwarder(detail);
 
     if(icon_out) {
@@ -2377,6 +2397,17 @@ static lv_obj_t *audio_create_row(lv_obj_t *parent, int y, const char *left_icon
         *meta_out = detail;
     }
     return row;
+}
+
+static lv_obj_t *audio_create_row(lv_obj_t *parent, int y, const char *left_icon,
+                                  const char *title, const char *meta,
+                                  uint32_t accent, lv_event_cb_t cb,
+                                  void *user_data, int right_reserved,
+                                  lv_obj_t **icon_out, lv_obj_t **meta_out)
+{
+    return audio_create_row_ex(parent, y, left_icon, title, meta, accent, cb,
+                               user_data, right_reserved, 58, icon_out,
+                               meta_out);
 }
 
 static int notification_current_index_from_list(char *name, size_t len)
@@ -2485,43 +2516,32 @@ static void notification_refresh_ui(void)
 static void notification_select_cb(lv_event_t *event)
 {
     intptr_t raw = (intptr_t)lv_event_get_user_data(event);
+    int play_result = 0;
 
     if(raw < 0) {
         ui_prefs_set(AUDIO_NOTIFICATION_PREF, AUDIO_NOTIFICATION_NONE);
     } else if(raw < notification_sound_count) {
         ui_prefs_set(AUDIO_NOTIFICATION_PREF, notification_sounds[raw].title);
+        play_result = audio_play_notification_path(notification_sounds[raw].path);
     }
     notification_refresh_ui();
-    app_request_fast_refresh();
-}
-
-static void notification_play_cb(lv_event_t *event)
-{
-    char name[AUDIO_TITLE_MAX];
-    int idx;
-
-    (void)event;
-    idx = notification_current_index_from_list(name, sizeof(name));
-    if(idx < 0) {
-        if(notification_status_label) {
-            lv_label_set_text(notification_status_label, ui_tr("Off"));
-            lv_obj_set_style_text_color(notification_status_label,
-                                        lv_color_hex(0x9AA4AF), 0);
-        }
-        return;
-    }
-    if(audio_play_notification_path(notification_sounds[idx].path) == 0) {
-        if(notification_status_label) {
+    if(raw >= 0 && raw < notification_sound_count && notification_status_label) {
+        if(play_result == 0) {
             lv_label_set_text(notification_status_label, ui_tr("Playing"));
             lv_obj_set_style_text_color(notification_status_label,
                                         lv_color_hex(0x25C281), 0);
+        } else {
+            lv_label_set_text(notification_status_label,
+                              ui_tr("Playback failed"));
+            lv_obj_set_style_text_color(notification_status_label,
+                                        lv_color_hex(0xEF4D5A), 0);
         }
-    } else if(notification_status_label) {
-        lv_label_set_text(notification_status_label,
-                          ui_tr("Playback failed"));
+    } else if(raw < 0 && notification_status_label) {
+        lv_label_set_text(notification_status_label, ui_tr("Off"));
         lv_obj_set_style_text_color(notification_status_label,
-                                    lv_color_hex(0xEF4D5A), 0);
+                                    lv_color_hex(0x9AA4AF), 0);
     }
+    app_request_fast_refresh();
 }
 
 void ui_notification_settings_create(lv_obj_t *scr)
@@ -2529,7 +2549,6 @@ void ui_notification_settings_create(lv_obj_t *scr)
     lv_obj_t *body;
     lv_obj_t *title;
     lv_obj_t *hint;
-    lv_obj_t *play_btn;
     int x = ui_page_panel_x();
     int w = ui_page_panel_width();
     int y = 0;
@@ -2546,11 +2565,6 @@ void ui_notification_settings_create(lv_obj_t *scr)
     title = ui_label(body, "Notification sound", &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, y);
-
-    play_btn = ui_command_button(body, ui_fit_width(body, 0, w) - 132, y - 4,
-                                 112, "Play", 0x25C281);
-    lv_obj_add_event_cb(play_btn, notification_play_cb, LV_EVENT_CLICKED,
-                        NULL);
     y += 44;
 
     notification_current_label = ui_label(body, "--", &lv_font_montserrat_18,
@@ -2574,21 +2588,22 @@ void ui_notification_settings_create(lv_obj_t *scr)
     lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 0, y);
     y += 42;
 
-    notification_row[0] = audio_create_row(body, y, "OFF", "Off",
-                                           "Disable sound", 0x9AA4AF,
-                                           notification_select_cb,
-                                           (void *)(intptr_t)-1, 0,
-                                           NULL, &notification_row_meta[0]);
+    notification_row[0] = audio_create_row_ex(body, y, "OFF", "Off",
+                                              "Disable sound", 0x9AA4AF,
+                                              notification_select_cb,
+                                              (void *)(intptr_t)-1, 0, 82,
+                                              NULL,
+                                              &notification_row_meta[0]);
     y += 84;
 
     for(int i = 0; i < notification_sound_count; i++) {
         notification_row[i + 1] =
-            audio_create_row(body, y, LV_SYMBOL_AUDIO,
-                             notification_sounds[i].title,
-                             notification_sounds[i].meta, 0xA78BFA,
-                             notification_select_cb,
-                             (void *)(intptr_t)i, 0,
-                             NULL, &notification_row_meta[i + 1]);
+            audio_create_row_ex(body, y, LV_SYMBOL_AUDIO,
+                                notification_sounds[i].title,
+                                notification_sounds[i].meta, 0xA78BFA,
+                                notification_select_cb,
+                                (void *)(intptr_t)i, 0, 82,
+                                NULL, &notification_row_meta[i + 1]);
         y += 84;
     }
 

@@ -1226,6 +1226,7 @@ static void display_idle_poll(void)
         int keyboard = saved_keyboard >= 0 ? saved_keyboard :
                        ui_hardware_keyboard_backlight_get();
 
+        ui_hardware_set_screen_off(0);
         ui_hardware_shutdown_backlights_apply(screen, keyboard);
         touch_trace_log("DISPLAY_TIMEOUT_WAKE screen=%d keyboard=%d",
                         screen, keyboard);
@@ -1254,7 +1255,7 @@ static void display_idle_poll(void)
     pthread_mutex_unlock(&display_idle_lock);
 
     if(should_dim) {
-        ui_hardware_shutdown_backlights_apply(0, 0);
+        ui_hardware_set_screen_off(1);
         touch_trace_log("DISPLAY_TIMEOUT_SLEEP seconds=%d saved_screen=%d "
                         "saved_keyboard=%d",
                         timeout_s, display_idle_saved_screen,

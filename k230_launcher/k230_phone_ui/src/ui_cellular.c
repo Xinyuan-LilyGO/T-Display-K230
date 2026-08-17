@@ -173,6 +173,9 @@ static lv_obj_t *cellular_sat_chart;
 static lv_obj_t *cellular_sat_label;
 static lv_obj_t *cellular_log_label;
 static lv_obj_t *cellular_cno_button;
+static lv_obj_t *cellular_check_panel;
+static lv_obj_t *cellular_check_spinner;
+static lv_obj_t *cellular_check_label;
 static cellular_cn0_bar_t cellular_cn0_bars[NRF9151_CN0_BAR_MAX];
 static lv_timer_t *cellular_timer;
 
@@ -180,6 +183,8 @@ static pthread_mutex_t cellular_lock = PTHREAD_MUTEX_INITIALIZER;
 static int cellular_worker_active;
 static int cellular_cno_monitor_active;
 static int cellular_cno_monitor_stop;
+static int cellular_check_was_active;
+static uint64_t cellular_check_hide_us;
 static char cellular_status[160] = "Ready";
 static char cellular_link_status[160] = "Not tested";
 static char cellular_sim_status[160] = "Not tested";
@@ -788,6 +793,45 @@ static void cellular_log_refresh(void)
     }
 }
 
+static void cellular_check_progress_refresh(int active, const char *status)
+{
+    uint64_t now;
+
+    if(!cellular_check_panel || !cellular_check_label ||
+       !cellular_check_spinner) {
+        return;
+    }
+
+    now = ui_monotonic_us();
+    if(active) {
+        cellular_check_was_active = 1;
+        cellular_check_hide_us = 0;
+        lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(cellular_check_spinner, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_opa(cellular_check_panel, LV_OPA_COVER, 0);
+        lv_label_set_text(cellular_check_label, ui_tr("Checking modem"));
+        return;
+    }
+
+    if(cellular_check_was_active) {
+        const char *done = status && strstr(status, "issues") ?
+                           "Check issues" : "Check complete";
+
+        cellular_check_was_active = 0;
+        cellular_check_hide_us = now + 1200000ULL;
+        lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(cellular_check_spinner, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_opa(cellular_check_panel, LV_OPA_COVER, 0);
+        lv_label_set_text(cellular_check_label, ui_tr(done));
+        return;
+    }
+
+    if(cellular_check_hide_us != 0 && now >= cellular_check_hide_us) {
+        cellular_check_hide_us = 0;
+        lv_obj_add_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void cellular_status_refresh(void)
 {
     char status[160];
@@ -840,6 +884,7 @@ static void cellular_status_refresh(void)
                                     lv_color_hex(exists ? 0x25C281 : 0xF5A524),
                                     0);
     }
+    cellular_check_progress_refresh(active, status);
     if(cellular_link_label) {
         lv_label_set_text(cellular_link_label, link);
     }
@@ -3033,7 +3078,7 @@ void ui_cellular_create(lv_obj_t *scr)
     int summary_h = landscape ? 346 : 352;
     int actions_y = landscape ? summary_y + summary_h + 18 :
                     summary_y + summary_h + 24;
-    int actions_h = landscape ? 124 : 192;
+    int actions_h = landscape ? 152 : 212;
     int gnss_y = landscape ? 16 : actions_y + actions_h + 24;
     int gnss_h = landscape ? (body_h - 48) * 66 / 100 : 560;
     int log_y = landscape ? gnss_y + gnss_h + 18 : gnss_y + gnss_h + 24;
@@ -3107,6 +3152,27 @@ void ui_cellular_create(lv_obj_t *scr)
                     action_btn_w, "Clear log",
                     0x94A3B8,
                     cellular_clear_event_cb, NULL);
+
+    cellular_check_panel = lv_obj_create(actions);
+    lv_obj_set_pos(cellular_check_panel, 0, landscape ? 104 : 176);
+    lv_obj_set_size(cellular_check_panel, left_w - 32, 36);
+    lv_obj_set_style_bg_color(cellular_check_panel, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_bg_opa(cellular_check_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(cellular_check_panel, 8, 0);
+    lv_obj_set_style_border_width(cellular_check_panel, 1, 0);
+    lv_obj_set_style_border_color(cellular_check_panel, lv_color_hex(0x25303A),
+                                  0);
+    lv_obj_set_style_pad_all(cellular_check_panel, 0, 0);
+    lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_SCROLLABLE);
+    cellular_check_spinner = lv_spinner_create(cellular_check_panel);
+    lv_obj_set_size(cellular_check_spinner, 24, 24);
+    lv_obj_align(cellular_check_spinner, LV_ALIGN_LEFT_MID, 12, 0);
+    cellular_check_label = ui_label(cellular_check_panel, "Checking modem",
+                                    &lv_font_montserrat_16, 0xDCE5EE);
+    lv_obj_set_width(cellular_check_label, left_w - 84);
+    lv_label_set_long_mode(cellular_check_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_check_label, LV_ALIGN_LEFT_MID, 48, 0);
+    lv_obj_add_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
 
     gnss_panel = ui_panel(body, right_x, gnss_y, right_w, gnss_h);
     lv_obj_set_style_bg_color(gnss_panel, lv_color_hex(0x101820), 0);
@@ -3184,5 +3250,10 @@ void ui_cellular_cleanup(void)
     cellular_sat_label = NULL;
     cellular_log_label = NULL;
     cellular_cno_button = NULL;
+    cellular_check_panel = NULL;
+    cellular_check_spinner = NULL;
+    cellular_check_label = NULL;
+    cellular_check_was_active = 0;
+    cellular_check_hide_us = 0;
     memset(cellular_cn0_bars, 0, sizeof(cellular_cn0_bars));
 }

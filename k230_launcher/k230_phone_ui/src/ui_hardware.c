@@ -1145,6 +1145,16 @@ int ui_hardware_boot0_screen_off(void)
     return boot0_screen_off;
 }
 
+void ui_hardware_set_screen_off(int off)
+{
+    int current = ui_hardware_boot0_screen_off();
+
+    if((off ? 1 : 0) == current) {
+        return;
+    }
+    boot0_apply_screen_toggle(off ? 1 : 0);
+}
+
 void ui_hardware_shutdown_backlights_apply(int screen_value,
                                            int keyboard_percent)
 {
