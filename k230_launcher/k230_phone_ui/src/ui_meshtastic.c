@@ -2041,6 +2041,7 @@ static void mesh_refresh_status(void)
     }
     if(mesh_detail_label && lv_obj_is_valid(mesh_detail_label)) {
         char detail[360];
+        char target[96];
         char ack_pending[16];
         char ack_rx[16];
         char nak_rx[16];
@@ -2076,11 +2077,20 @@ static void mesh_refresh_status(void)
                           sizeof(position_tx), "0");
         mesh_status_field(mesh_status_text, "telemetry_tx", telemetry_tx,
                           sizeof(telemetry_tx), "0");
+        if(mesh_to_text_is_broadcast(mesh_to_node)) {
+            snprintf(target, sizeof(target), "%s: %s",
+                     ui_tr("To"), ui_tr("Channel broadcast"));
+            lv_obj_set_style_text_color(mesh_detail_label,
+                                        lv_color_hex(0x25C281), 0);
+        } else {
+            snprintf(target, sizeof(target), "%s: %s %s",
+                     ui_tr("To"), ui_tr("Direct message"), mesh_to_node);
+            lv_obj_set_style_text_color(mesh_detail_label,
+                                        lv_color_hex(0xF5A524), 0);
+        }
         snprintf(detail, sizeof(detail),
-                 "%s -> %s  GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
-                 mesh_node_name,
-                 mesh_to_text_is_broadcast(mesh_to_node) ? "broadcast" :
-                 mesh_to_node,
+                 "%s  |  GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
+                 target,
                  nrf9151, gps, sats, position_tx,
                  telemetry_tx, queued_count, mesh_ack_enabled ? "on" : "off",
                  ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
