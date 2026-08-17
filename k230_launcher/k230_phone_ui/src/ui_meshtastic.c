@@ -6135,9 +6135,74 @@ static void mesh_map_draw_nodes(lv_obj_t *map, const char *nodes_text,
     }
 }
 
+static void mesh_map_draw_waypoints(lv_obj_t *map, const char *waypoints_text,
+                                    double top_left_x, double top_left_y,
+                                    int zoom)
+{
+    char waypoints_copy[4096];
+    char *saveptr = NULL;
+    char *line;
+
+    if(!waypoints_text || !waypoints_text[0]) {
+        return;
+    }
+    snprintf(waypoints_copy, sizeof(waypoints_copy), "%s", waypoints_text);
+    line = strtok_r(waypoints_copy, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "wp ", 3) == 0) {
+            char lat_text[32];
+            char lon_text[32];
+            char name[48];
+            char id_text[24];
+            char *endptr;
+            double lat;
+            double lon;
+
+            if(mesh_node_line_value(line, "lat=", lat_text,
+                                    sizeof(lat_text)) &&
+               mesh_node_line_value(line, "lon=", lon_text,
+                                    sizeof(lon_text))) {
+                double px;
+                double py;
+                int local_x;
+                int local_y;
+
+                lat = strtod(lat_text, &endptr);
+                if(endptr == lat_text || !isfinite(lat)) {
+                    line = strtok_r(NULL, "\n", &saveptr);
+                    continue;
+                }
+                lon = strtod(lon_text, &endptr);
+                if(endptr == lon_text || !isfinite(lon)) {
+                    line = strtok_r(NULL, "\n", &saveptr);
+                    continue;
+                }
+                if(!mesh_node_line_value(line, "name=", name,
+                                         sizeof(name)) ||
+                   mesh_node_text_missing(name)) {
+                    if(mesh_node_line_value(line, "id=", id_text,
+                                            sizeof(id_text))) {
+                        snprintf(name, sizeof(name), "%s", id_text);
+                    } else {
+                        snprintf(name, sizeof(name), "%s",
+                                 ui_tr("Waypoint"));
+                    }
+                }
+                mesh_map_lonlat_to_pixel(lat, lon, zoom, &px, &py);
+                local_x = (int)(px - top_left_x);
+                local_y = (int)(py - top_left_y);
+                mesh_map_add_marker(map, local_x, local_y, 0x38BDF8,
+                                    name);
+            }
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+}
+
 static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
                                 double center_lon, int zoom,
-                                const char *nodes_text, int view_w,
+                                const char *nodes_text,
+                                const char *waypoints_text, int view_w,
                                 int view_h, int *missing_out)
 {
     lv_obj_t *layer;
@@ -6217,6 +6282,8 @@ static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
     }
 
     mesh_map_draw_nodes(layer, nodes_text, top_left_x, top_left_y, zoom);
+    mesh_map_draw_waypoints(layer, waypoints_text, top_left_x, top_left_y,
+                            zoom);
     if(missing_out) {
         *missing_out = missing;
     }
@@ -6739,6 +6806,7 @@ static void mesh_map_rebuild(void)
 {
     char status[4096];
     char nodes[8192];
+    char waypoints[4096];
     char reason[128];
     char info[256];
     double lat = 0.0;
@@ -6801,6 +6869,12 @@ static void mesh_map_rebuild(void)
         nodes[0] = '\0';
     } else if(strncmp(nodes, "OK nodes\n", 9) == 0) {
         memmove(nodes, nodes + 9, strlen(nodes + 9) + 1U);
+    }
+    waypoints[0] = '\0';
+    if(mesh_ipc_command("WAYPOINTS\n", waypoints, sizeof(waypoints)) != 0) {
+        waypoints[0] = '\0';
+    } else if(strncmp(waypoints, "OK waypoints\n", 13) == 0) {
+        memmove(waypoints, waypoints + 13, strlen(waypoints + 13) + 1U);
     }
     has_position = mesh_map_current_position(status, &lat, &lon, reason,
                                              sizeof(reason), &position_state);
@@ -6881,8 +6955,8 @@ static void mesh_map_rebuild(void)
     lv_obj_update_layout(map);
 
     if(has_position) {
-        mesh_map_draw_tiles(map, lat, lon, mesh_map_zoom, nodes, map_w,
-                            map_h, &missing_tiles);
+        mesh_map_draw_tiles(map, lat, lon, mesh_map_zoom, nodes, waypoints,
+                            map_w, map_h, &missing_tiles);
         if(missing_tiles > 0) {
             snprintf(info, sizeof(info), "Missing %d offline tiles",
                      missing_tiles);

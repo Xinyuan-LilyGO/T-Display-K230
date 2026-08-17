@@ -62,6 +62,7 @@
 #define MESHTASTIC_ROUTING_APP 5U
 #define MESHTASTIC_ADMIN_APP 6U
 #define MESHTASTIC_TEXT_MESSAGE_COMPRESSED_APP 7U
+#define MESHTASTIC_WAYPOINT_APP 8U
 #define MESHTASTIC_AUDIO_APP 9U
 #define MESHTASTIC_TELEMETRY_APP 67U
 #define MESHTASTIC_TRACEROUTE_APP 70U
@@ -92,6 +93,7 @@
 #define MESHTASTIC_CHAT_LOG_LINES 24U
 #define MESHTASTIC_CHAT_LOG_LINE_LEN 256U
 #define MESHTASTIC_NODE_CACHE_SIZE 24U
+#define MESHTASTIC_WAYPOINT_CACHE_SIZE 16U
 #define MESHTASTIC_PACKET_HISTORY_SIZE 64U
 #define MESHTASTIC_PACKET_HISTORY_TTL_US (30ULL * 60ULL * 1000000ULL)
 #define MESHTASTIC_CHAT_DEDUP_SIZE 16U
@@ -841,6 +843,7 @@ typedef struct {
     bool client_log = false;
     bool client_chat = false;
     bool client_nodes = false;
+    bool client_waypoints = false;
     bool client_channel_url = false;
     bool client_quit = false;
     bool client_publish_nodeinfo = false;
@@ -850,6 +853,8 @@ typedef struct {
     std::string client_send_to_message;
     bool client_send_voice_requested = false;
     std::string client_send_voice_path;
+    bool client_send_waypoint_requested = false;
+    std::string client_send_waypoint_text;
     bool client_publish_position = false;
     bool client_publish_telemetry = false;
     bool client_request_nodeinfo = false;
@@ -1106,6 +1111,24 @@ typedef struct {
 } mesh_position_info_t;
 
 typedef struct {
+    bool valid = false;
+    bool has_id = false;
+    bool has_latitude = false;
+    bool has_longitude = false;
+    uint32_t id = 0;
+    uint32_t from_node = 0;
+    uint32_t expire = 0;
+    uint32_t locked_to = 0;
+    uint32_t icon = 0;
+    uint32_t last_seen_epoch = 0;
+    uint64_t last_seen_us = 0;
+    int32_t latitude_i = 0;
+    int32_t longitude_i = 0;
+    char name[32] = {0};
+    char description[104] = {0};
+} mesh_waypoint_info_t;
+
+typedef struct {
     bool enabled = false;
     bool probed = false;
     bool present = false;
@@ -1359,6 +1382,8 @@ static char daemon_chat_log[MESHTASTIC_CHAT_LOG_LINES][MESHTASTIC_CHAT_LOG_LINE_
 static size_t daemon_chat_log_count;
 static mesh_node_entry_t mesh_nodes[MESHTASTIC_NODE_CACHE_SIZE];
 static size_t mesh_node_count;
+static mesh_waypoint_info_t mesh_waypoints[MESHTASTIC_WAYPOINT_CACHE_SIZE];
+static size_t mesh_waypoint_count;
 static bool mesh_nodedb_dirty;
 static bool mesh_nodedb_loaded;
 static uint64_t mesh_nodedb_next_save_us;
@@ -2203,6 +2228,106 @@ static void mesh_node_update_route_info(uint32_t node,
     snprintf(entry->route_summary, sizeof(entry->route_summary), "%s",
              clean.c_str());
     mesh_nodedb_mark_dirty();
+}
+
+static uint32_t mesh_waypoint_age_seconds(const mesh_waypoint_info_t &wp)
+{
+    uint32_t now_epoch = mesh_now_epoch();
+    uint64_t now_us = monotonic_us();
+
+    if(wp.last_seen_epoch != 0U && now_epoch >= wp.last_seen_epoch) {
+        return now_epoch - wp.last_seen_epoch;
+    }
+    if(wp.last_seen_us != 0ULL && wp.last_seen_us <= now_us) {
+        uint64_t age_s = (now_us - wp.last_seen_us) / 1000000ULL;
+        return age_s > UINT32_MAX ? UINT32_MAX : (uint32_t)age_s;
+    }
+    return 0U;
+}
+
+static bool mesh_waypoint_is_expired(const mesh_waypoint_info_t &wp,
+                                     uint32_t now_epoch)
+{
+    return wp.valid && wp.expire != 0U && now_epoch != 0U &&
+           wp.expire <= now_epoch;
+}
+
+static std::string mesh_ipc_token(const char *text, size_t max_len)
+{
+    std::string out;
+
+    if(!text || !text[0] || max_len == 0U) {
+        return "-";
+    }
+    for(size_t i = 0; text[i] && out.size() < max_len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if(c == '\r' || c == '\n' || c == '\t' ||
+           isspace((unsigned char)c)) {
+            if(!out.empty() && out.back() != '_') {
+                out.push_back('_');
+            }
+        } else if(c >= 32U) {
+            out.push_back((char)c);
+        }
+    }
+    while(!out.empty() && out.back() == '_') {
+        out.pop_back();
+    }
+    return out.empty() ? "-" : out;
+}
+
+static void mesh_waypoint_update(uint32_t from_node,
+                                 const mesh_waypoint_info_t &waypoint)
+{
+    size_t slot = MESHTASTIC_WAYPOINT_CACHE_SIZE;
+    size_t oldest = 0U;
+    uint32_t now_epoch = mesh_now_epoch();
+    uint64_t now_us = monotonic_us();
+
+    if(!waypoint.has_latitude || !waypoint.has_longitude) {
+        return;
+    }
+    for(size_t i = 0; i < mesh_waypoint_count; i++) {
+        if(!mesh_waypoints[i].valid) {
+            slot = i;
+            break;
+        }
+        if(waypoint.has_id && mesh_waypoints[i].has_id &&
+           mesh_waypoints[i].id == waypoint.id) {
+            slot = i;
+            break;
+        }
+        if(!waypoint.has_id && !mesh_waypoints[i].has_id &&
+           mesh_waypoints[i].from_node == from_node) {
+            slot = i;
+            break;
+        }
+        if(mesh_waypoints[i].last_seen_us <
+           mesh_waypoints[oldest].last_seen_us) {
+            oldest = i;
+        }
+    }
+    if(slot == MESHTASTIC_WAYPOINT_CACHE_SIZE) {
+        for(size_t i = 0; i < mesh_waypoint_count; i++) {
+            if(mesh_waypoint_is_expired(mesh_waypoints[i], now_epoch)) {
+                slot = i;
+                break;
+            }
+        }
+    }
+    if(slot == MESHTASTIC_WAYPOINT_CACHE_SIZE) {
+        if(mesh_waypoint_count < MESHTASTIC_WAYPOINT_CACHE_SIZE) {
+            slot = mesh_waypoint_count++;
+        } else {
+            slot = oldest;
+        }
+    }
+
+    mesh_waypoints[slot] = waypoint;
+    mesh_waypoints[slot].valid = true;
+    mesh_waypoints[slot].from_node = from_node;
+    mesh_waypoints[slot].last_seen_us = now_us;
+    mesh_waypoints[slot].last_seen_epoch = now_epoch;
 }
 
 static char mesh_hex_digit(unsigned int value)
@@ -5641,6 +5766,32 @@ static bool encode_position_proto(const mesh_position_info_t &position,
         append_uint32_field(out, 23U, position.precision_bits);
     }
     return !out->empty();
+}
+
+static bool encode_waypoint_proto(const mesh_waypoint_info_t &waypoint,
+                                  std::vector<uint8_t> *out)
+{
+    if(!out || !waypoint.has_latitude || !waypoint.has_longitude) {
+        return false;
+    }
+    out->clear();
+    if(waypoint.has_id) {
+        append_uint32_field(out, 1U, waypoint.id);
+    }
+    append_sfixed32_field(out, 2U, waypoint.latitude_i);
+    append_sfixed32_field(out, 3U, waypoint.longitude_i);
+    if(waypoint.expire != 0U) {
+        append_uint32_field(out, 4U, waypoint.expire);
+    }
+    if(waypoint.locked_to != 0U) {
+        append_uint32_field(out, 5U, waypoint.locked_to);
+    }
+    append_string_field(out, 6U, waypoint.name, 31U);
+    append_string_field(out, 7U, waypoint.description, 95U);
+    if(waypoint.icon != 0U) {
+        append_fixed32_field(out, 8U, waypoint.icon);
+    }
+    return !out->empty() && out->size() <= MESHTASTIC_DATA_PAYLOAD_LEN;
 }
 
 static bool encode_device_metrics_proto(const mesh_telemetry_info_t &telemetry,
@@ -10164,6 +10315,97 @@ static bool decode_position_proto(const std::vector<uint8_t> &payload,
     return found.has_latitude && found.has_longitude;
 }
 
+static bool decode_waypoint_proto(const std::vector<uint8_t> &payload,
+                                  mesh_waypoint_info_t *waypoint)
+{
+    size_t pos = 0;
+    mesh_waypoint_info_t found;
+
+    while(pos < payload.size()) {
+        uint32_t tag;
+        uint32_t field;
+        uint32_t wire;
+
+        if(!read_varint(payload.data(), payload.size(), &pos, &tag)) {
+            return false;
+        }
+        field = tag >> 3U;
+        wire = tag & 0x07U;
+        if((field == 2U || field == 3U || field == 8U) &&
+           wire == 5U && pos + 4U <= payload.size()) {
+            uint32_t value = get_le32(payload.data() + pos);
+            pos += 4U;
+            if(field == 2U) {
+                found.latitude_i = (int32_t)value;
+                found.has_latitude = true;
+            } else if(field == 3U) {
+                found.longitude_i = (int32_t)value;
+                found.has_longitude = true;
+            } else {
+                found.icon = value;
+            }
+        } else if((field == 1U || field == 4U || field == 5U) &&
+                  wire == 0U) {
+            uint32_t value = 0U;
+
+            if(!read_varint(payload.data(), payload.size(), &pos, &value)) {
+                return false;
+            }
+            if(field == 1U) {
+                found.id = value;
+                found.has_id = true;
+            } else if(field == 4U) {
+                found.expire = value;
+            } else {
+                found.locked_to = value;
+            }
+        } else if((field == 6U || field == 7U) && wire == 2U) {
+            uint32_t l;
+            std::string text;
+            std::string clean;
+
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            text.assign((const char *)payload.data() + pos, l);
+            pos += l;
+            clean = mesh_clean_text(text);
+            if(field == 6U) {
+                snprintf(found.name, sizeof(found.name), "%s",
+                         clean.c_str());
+            } else {
+                snprintf(found.description, sizeof(found.description), "%s",
+                         clean.c_str());
+            }
+        } else if(wire == 0U) {
+            uint64_t ignored;
+            if(!read_varint64(payload.data(), payload.size(), &pos,
+                              &ignored)) {
+                return false;
+            }
+        } else if(wire == 2U) {
+            uint32_t l;
+            if(!read_varint(payload.data(), payload.size(), &pos, &l) ||
+               pos + l > payload.size()) {
+                return false;
+            }
+            pos += l;
+        } else if(wire == 5U && pos + 4U <= payload.size()) {
+            pos += 4U;
+        } else if(wire == 1U && pos + 8U <= payload.size()) {
+            pos += 8U;
+        } else {
+            return false;
+        }
+    }
+
+    if(waypoint) {
+        *waypoint = found;
+    }
+    return found.has_latitude && found.has_longitude;
+}
+
 static bool decode_device_metrics_proto(const uint8_t *data, size_t len,
                                         mesh_telemetry_info_t *telemetry)
 {
@@ -13449,6 +13691,27 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                          alt_text, speed_text, track_text,
                          position.sats_in_view, position.precision_bits,
                          duplicate ? " duplicate" : "");
+        } else if(decoded.portnum == MESHTASTIC_WAYPOINT_APP) {
+            mesh_waypoint_info_t waypoint;
+            bool waypoint_ok = decode_waypoint_proto(decoded.payload,
+                                                     &waypoint);
+            std::string clean_name = mesh_clean_text(waypoint.name);
+            std::string clean_desc = mesh_clean_text(waypoint.description);
+
+            if(waypoint_ok && secure_match && !duplicate) {
+                mesh_waypoint_update(header.from, waypoint);
+            }
+            daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u waypoint=%s wp_id=0x%08x lat=%.7f lon=%.7f expire=%u locked=0x%08x icon=0x%08x name=%s desc=%s%s",
+                         (unsigned long)rx_count, header.from, header.to,
+                         header.id, header.channel, hop_limit, hop_start,
+                         rssi, snr, decoded.portnum,
+                         waypoint_ok ? "ok" : "decode-failed",
+                         waypoint.id, waypoint.latitude_i * 1e-7,
+                         waypoint.longitude_i * 1e-7, waypoint.expire,
+                         waypoint.locked_to, waypoint.icon,
+                         clean_name.empty() ? "-" : clean_name.c_str(),
+                         clean_desc.empty() ? "-" : clean_desc.c_str(),
+                         duplicate ? " duplicate" : "");
         } else if(decoded.portnum == MESHTASTIC_NODEINFO_APP) {
             mesh_user_info_t user;
             bool user_ok = decode_user_proto(decoded.payload, &user);
@@ -14281,6 +14544,150 @@ static std::string daemon_nodes_response(void)
     return response;
 }
 
+static std::string daemon_waypoints_response(void)
+{
+    char line[512];
+    std::string response = "OK waypoints\n";
+    uint32_t now_epoch = mesh_now_epoch();
+    size_t visible_count = 0U;
+
+    for(size_t i = 0; i < mesh_waypoint_count; i++) {
+        if(mesh_waypoints[i].valid &&
+           !mesh_waypoint_is_expired(mesh_waypoints[i], now_epoch)) {
+            visible_count++;
+        }
+    }
+    if(visible_count == 0U) {
+        response += "No waypoints seen yet\n";
+        return response;
+    }
+    snprintf(line, sizeof(line), "Waypoint count: %u\n",
+             (unsigned)visible_count);
+    response += line;
+    for(size_t i = 0; i < mesh_waypoint_count; i++) {
+        const mesh_waypoint_info_t &wp = mesh_waypoints[i];
+        std::string name;
+        std::string desc;
+
+        if(!wp.valid || mesh_waypoint_is_expired(wp, now_epoch)) {
+            continue;
+        }
+        name = mesh_ipc_token(wp.name, 40U);
+        desc = mesh_ipc_token(wp.description, 96U);
+        snprintf(line, sizeof(line),
+                 "wp id=0x%08x from=0x%08x age=%us lat=%.7f lon=%.7f expire=%u locked=0x%08x icon=0x%08x name=%s desc=%s\n",
+                 wp.id, wp.from_node, mesh_waypoint_age_seconds(wp),
+                 wp.latitude_i * 1e-7, wp.longitude_i * 1e-7, wp.expire,
+                 wp.locked_to, wp.icon, name.c_str(), desc.c_str());
+        response += line;
+    }
+    return response;
+}
+
+static bool parse_waypoint_degrees(const std::string &text, double min_value,
+                                   double max_value, double *value)
+{
+    char *endp = nullptr;
+    double parsed;
+
+    if(!value || text.empty()) {
+        return false;
+    }
+    errno = 0;
+    parsed = strtod(text.c_str(), &endp);
+    if(errno != 0 || endp == text.c_str()) {
+        return false;
+    }
+    while(endp && *endp && isspace((unsigned char)*endp)) {
+        endp++;
+    }
+    if(endp && *endp) {
+        return false;
+    }
+    if(parsed < min_value || parsed > max_value || parsed == 0.0) {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+static bool parse_waypoint_command(const std::string &arg,
+                                   mesh_waypoint_info_t *waypoint,
+                                   char *errbuf, size_t errlen)
+{
+    std::string trimmed = trim_ipc_line(arg.c_str());
+    size_t first_comma;
+    size_t second_comma;
+    std::string lat_text;
+    std::string lon_text;
+    std::string name_text;
+    double lat_deg = 0.0;
+    double lon_deg = 0.0;
+    int64_t lat_i;
+    int64_t lon_i;
+
+    if(!waypoint) {
+        return false;
+    }
+    if(trimmed.empty()) {
+        snprintf(errbuf, errlen, "empty-waypoint");
+        return false;
+    }
+    first_comma = trimmed.find(',');
+    if(first_comma == std::string::npos) {
+        snprintf(errbuf, errlen, "expected-lat-lon-name");
+        return false;
+    }
+    second_comma = trimmed.find(',', first_comma + 1U);
+    lat_text = trim_ipc_line(trimmed.substr(0, first_comma).c_str());
+    if(second_comma == std::string::npos) {
+        lon_text = trim_ipc_line(trimmed.substr(first_comma + 1U).c_str());
+        name_text = "K230 waypoint";
+    } else {
+        lon_text = trim_ipc_line(
+            trimmed.substr(first_comma + 1U,
+                           second_comma - first_comma - 1U).c_str());
+        name_text = mesh_clean_text(trimmed.substr(second_comma + 1U));
+        if(name_text.empty()) {
+            name_text = "K230 waypoint";
+        }
+    }
+    if(!parse_waypoint_degrees(lat_text, -90.0, 90.0, &lat_deg)) {
+        snprintf(errbuf, errlen, "invalid-latitude");
+        return false;
+    }
+    if(!parse_waypoint_degrees(lon_text, -180.0, 180.0, &lon_deg)) {
+        snprintf(errbuf, errlen, "invalid-longitude");
+        return false;
+    }
+    lat_i = (int64_t)llround(lat_deg * 10000000.0);
+    lon_i = (int64_t)llround(lon_deg * 10000000.0);
+    if(lat_i < -900000000LL || lat_i > 900000000LL ||
+       lon_i < -1800000000LL || lon_i > 1800000000LL) {
+        snprintf(errbuf, errlen, "coordinate-out-of-range");
+        return false;
+    }
+
+    *waypoint = mesh_waypoint_info_t();
+    waypoint->valid = true;
+    waypoint->has_id = true;
+    waypoint->id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+    if(waypoint->id == 0U) {
+        waypoint->id = 1U;
+    }
+    waypoint->has_latitude = true;
+    waypoint->has_longitude = true;
+    waypoint->latitude_i = (int32_t)lat_i;
+    waypoint->longitude_i = (int32_t)lon_i;
+    waypoint->expire = mesh_now_epoch() + 86400U;
+    waypoint->icon = 0x0001f4cdU;
+    snprintf(waypoint->name, sizeof(waypoint->name), "%s",
+             name_text.c_str());
+    snprintf(waypoint->description, sizeof(waypoint->description),
+             "K230 shared waypoint");
+    return true;
+}
+
 static bool daemon_parse_target_command(const std::string &line,
                                         const char *prefix,
                                         uint32_t *target)
@@ -14469,6 +14876,60 @@ static std::string handle_daemon_command(const std::string &line,
     }
     if(line == "NODES" || line == "nodes") {
         return daemon_nodes_response();
+    }
+    if(line == "WAYPOINTS" || line == "waypoints") {
+        return daemon_waypoints_response();
+    }
+    if(line.compare(0, 14, "SEND_WAYPOINT ") == 0 ||
+       line.compare(0, 14, "send_waypoint ") == 0) {
+        mesh_waypoint_info_t waypoint;
+        std::vector<uint8_t> waypoint_proto;
+        mesh_send_request_t request;
+        char errbuf[96];
+        char buf[192];
+
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        if(!send_queue) {
+            return "ERR internal\n";
+        }
+        if(mesh_channel_slot_role(opts, mesh_tx_channel_slot_index(opts, 0U)) ==
+           MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+            return "ERR channel-disabled\n";
+        }
+        if(!parse_waypoint_command(line.c_str() + 14, &waypoint,
+                                   errbuf, sizeof(errbuf))) {
+            snprintf(buf, sizeof(buf), "ERR waypoint %s\n", errbuf);
+            return std::string(buf);
+        }
+        if(!encode_waypoint_proto(waypoint, &waypoint_proto)) {
+            return "ERR waypoint-encode\n";
+        }
+        if(send_queue->size() >= MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+            daemon_event("Daemon SEND_WAYPOINT queue full depth=%u",
+                         (unsigned)send_queue->size());
+            return "ERR queue-full\n";
+        }
+        request.raw_payload = true;
+        request.portnum = MESHTASTIC_WAYPOINT_APP;
+        request.payload = waypoint_proto;
+        request.channel_index = 0U;
+        request.summary = "waypoint";
+        send_queue->push_back(request);
+        mesh_waypoint_update(opts.from_node, waypoint);
+        daemon_event("Daemon SEND_WAYPOINT queued id=0x%08x lat=%.7f lon=%.7f name=%s bytes=%u depth=%u op=%s",
+                     waypoint.id, waypoint.latitude_i * 1e-7,
+                     waypoint.longitude_i * 1e-7,
+                     waypoint.name, (unsigned)waypoint_proto.size(),
+                     (unsigned)send_queue->size(), op_name(active_op));
+        snprintf(buf, sizeof(buf),
+                 "OK waypoint queued id=0x%08x lat=%.7f lon=%.7f bytes=%u depth=%u\n",
+                 waypoint.id, waypoint.latitude_i * 1e-7,
+                 waypoint.longitude_i * 1e-7,
+                 (unsigned)waypoint_proto.size(),
+                 (unsigned)send_queue->size());
+        return std::string(buf);
     }
     if(line == "CHANNEL_URL" || line == "channel_url" ||
        line == "CHANNELURL" || line == "channelurl") {
@@ -14953,6 +15414,14 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "CHAT\n";
     } else if(opts.client_nodes) {
         command = "NODES\n";
+    } else if(opts.client_waypoints) {
+        command = "WAYPOINTS\n";
+    } else if(opts.client_send_waypoint_requested) {
+        if(opts.client_send_waypoint_text.empty()) {
+            fprintf(stderr, "--cmd-send-waypoint value is empty\n");
+            return 2;
+        }
+        command = "SEND_WAYPOINT " + opts.client_send_waypoint_text + "\n";
     } else if(opts.client_channel_url) {
         command = "CHANNEL_URL\n";
     } else if(opts.client_publish_nodeinfo) {
@@ -15060,7 +15529,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-waypoints|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -15068,6 +15537,7 @@ static void print_usage(const char *argv0)
             "  --cmd-log       Query recent daemon TX/RX event log and exit\n"
             "  --cmd-chat      Query recent decoded text messages and exit\n"
             "  --cmd-nodes     Query recently seen mesh nodes and exit\n"
+            "  --cmd-waypoints Query recently received mesh waypoints and exit\n"
             "  --cmd-channel-url Query Meshtastic channel sharing URL and exit\n"
             "  --cmd-publish-nodeinfo  Ask daemon to publish this node info now\n"
             "  --cmd-publish-position  Ask daemon to publish current GNSS position now\n"
@@ -15082,6 +15552,7 @@ static void print_usage(const char *argv0)
             "  --cmd-send-to NODE MSG  Ask daemon to transmit MSG to NODE without ACK\n"
             "  --cmd-send-to-ack NODE MSG  Ask daemon to transmit MSG to NODE with ACK\n"
             "  --cmd-send-voice FILE  Ask daemon to encode and transmit 8 kHz S16_LE mono PCM\n"
+            "  --cmd-send-waypoint LAT,LON,NAME  Ask daemon to broadcast a waypoint\n"
             "  --cmd-quit      Ask running daemon to exit\n\n"
             "Profile options:\n"
             "  --region NAME    Meshtastic region, default US when --mesh is used\n"
@@ -15381,6 +15852,8 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_chat = true;
         } else if(strcmp(arg, "--cmd-nodes") == 0) {
             opts->client_nodes = true;
+        } else if(strcmp(arg, "--cmd-waypoints") == 0) {
+            opts->client_waypoints = true;
         } else if(strcmp(arg, "--cmd-channel-url") == 0) {
             opts->client_channel_url = true;
         } else if(strcmp(arg, "--cmd-publish-nodeinfo") == 0) {
@@ -15427,6 +15900,9 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
         } else if(strcmp(arg, "--cmd-send-voice") == 0 && i + 1 < argc) {
             opts->client_send_voice_requested = true;
             opts->client_send_voice_path = argv[++i];
+        } else if(strcmp(arg, "--cmd-send-waypoint") == 0 && i + 1 < argc) {
+            opts->client_send_waypoint_requested = true;
+            opts->client_send_waypoint_text = argv[++i];
         } else if(strcmp(arg, "--cmd-quit") == 0) {
             opts->client_quit = true;
         } else if(strcmp(arg, "--cmd-send") == 0 && i + 1 < argc) {
@@ -16049,6 +16525,7 @@ int main(int argc, char **argv)
                               (opts.client_log ? 1 : 0) +
                               (opts.client_chat ? 1 : 0) +
                               (opts.client_nodes ? 1 : 0) +
+                              (opts.client_waypoints ? 1 : 0) +
                               (opts.client_channel_url ? 1 : 0) +
                               (opts.client_publish_nodeinfo ? 1 : 0) +
                               (opts.client_publish_position ? 1 : 0) +
@@ -16061,6 +16538,7 @@ int main(int argc, char **argv)
                               (opts.client_import_node_key ? 1 : 0) +
                               (opts.client_send_to_requested ? 1 : 0) +
                               (opts.client_send_voice_requested ? 1 : 0) +
+                              (opts.client_send_waypoint_requested ? 1 : 0) +
                               (opts.client_quit ? 1 : 0) +
                               (opts.client_send_requested ? 1 : 0);
         if(client_commands > 1) {
@@ -16574,7 +17052,12 @@ int main(int argc, char **argv)
                 if(built) {
                     char errbuf[128];
                     uint32_t airtime_ms = 0U;
-                    bool polite = request.voice;
+                    bool polite = request.voice ||
+                                  (request.raw_payload &&
+                                   (request.portnum == MESHTASTIC_WAYPOINT_APP ||
+                                    request.portnum == MESHTASTIC_POSITION_APP ||
+                                    request.portnum == MESHTASTIC_NODEINFO_APP ||
+                                    request.portnum == MESHTASTIC_TELEMETRY_APP));
 
                     if(!mesh_frame_airtime_allowed(radio, tx_opts, frame,
                                                    polite,
