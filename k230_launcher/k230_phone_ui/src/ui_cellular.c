@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <gpiod.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -15,6 +16,7 @@
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define NRF9151_UART_DEV "/dev/ttyS3"
@@ -41,6 +43,8 @@
 #define NRF9151_LOG_MAX 4096
 #define NRF9151_LOG_VIEW_MAX 4096
 #define NRF9151_TEST_LOG "/tmp/k230_nrf9151_test.log"
+#define NRF9151_GNSS_FIX_CACHE "/tmp/k230_nrf9151_gnss_fix.cache"
+#define NRF9151_GNSS_FIX_CACHE_TMP "/tmp/k230_nrf9151_gnss_fix.cache.tmp"
 #define NRF9151_CMD_TIMEOUT_US 1800000ULL
 #define NRF9151_NMEA_READ_SECONDS 15U
 #define NRF9151_FULL_TEST_NMEA_SECONDS 20U
@@ -606,6 +610,42 @@ static int cellular_gnss_note_fix_locked(double *ttff_s)
                   1000000.0;
     }
     return 1;
+}
+
+static void cellular_gnss_write_fix_cache(double lat, double lon, int has_alt,
+                                          double alt_m, int sats,
+                                          const char *source)
+{
+    FILE *fp;
+
+    if(!isfinite(lat) || !isfinite(lon) || lat < -90.0 || lat > 90.0 ||
+       lon < -180.0 || lon > 180.0 ||
+       (lat > -0.000001 && lat < 0.000001 &&
+        lon > -0.000001 && lon < 0.000001)) {
+        return;
+    }
+    fp = fopen(NRF9151_GNSS_FIX_CACHE_TMP, "w");
+    if(!fp) {
+        cellular_log_append("GNSS fix cache open failed: %s", strerror(errno));
+        return;
+    }
+    fprintf(fp, "version=1\n");
+    fprintf(fp, "epoch=%ld\n", (long)time(NULL));
+    fprintf(fp, "lat=%.7f\n", lat);
+    fprintf(fp, "lon=%.7f\n", lon);
+    fprintf(fp, "has_alt=%d\n", has_alt ? 1 : 0);
+    fprintf(fp, "alt=%.2f\n", has_alt ? alt_m : 0.0);
+    fprintf(fp, "sats=%d\n", sats > 0 ? sats : 0);
+    fprintf(fp, "source=%s\n", source && source[0] ? source : "lte");
+    if(fclose(fp) != 0) {
+        cellular_log_append("GNSS fix cache close failed: %s", strerror(errno));
+        unlink(NRF9151_GNSS_FIX_CACHE_TMP);
+        return;
+    }
+    if(rename(NRF9151_GNSS_FIX_CACHE_TMP, NRF9151_GNSS_FIX_CACHE) != 0) {
+        cellular_log_append("GNSS fix cache rename failed: %s", strerror(errno));
+        unlink(NRF9151_GNSS_FIX_CACHE_TMP);
+    }
 }
 
 static void cellular_ttff_text(char *out, size_t out_len, uint64_t start_us,
@@ -1299,10 +1339,22 @@ static void cellular_nmea_parse_gga(char **fields, int count)
     int sats = count > 7 ? cellular_parse_int_field(fields[7]) : -1;
     int first_fix = 0;
     double ttff_s = 0.0;
+    double lat_value = 0.0;
+    double lon_value = 0.0;
+    double alt_value = 0.0;
+    int has_alt = 0;
 
     if(count > 5) {
         cellular_nmea_coord_to_decimal(fields[2], fields[3], lat, sizeof(lat));
         cellular_nmea_coord_to_decimal(fields[4], fields[5], lon, sizeof(lon));
+    }
+    if(lat[0] && lon[0]) {
+        lat_value = strtod(lat, NULL);
+        lon_value = strtod(lon, NULL);
+    }
+    if(count > 9 && fields[9] && fields[9][0]) {
+        alt_value = strtod(fields[9], NULL);
+        has_alt = isfinite(alt_value) ? 1 : 0;
     }
 
     pthread_mutex_lock(&cellular_lock);
@@ -1321,6 +1373,10 @@ static void cellular_nmea_parse_gga(char **fields, int count)
                  "%s", "OK");
     }
     pthread_mutex_unlock(&cellular_lock);
+    if(fix > 0 && lat[0] && lon[0]) {
+        cellular_gnss_write_fix_cache(lat_value, lon_value, has_alt, alt_value,
+                                      sats, "lte-gga");
+    }
     if(first_fix) {
         cellular_log_append("GNSS first fix TTFF %.1fs", ttff_s);
     }
@@ -1334,6 +1390,8 @@ static void cellular_nmea_parse_rmc(char **fields, int count)
     const char *speed = count > 7 ? fields[7] : "";
     int first_fix;
     double ttff_s = 0.0;
+    double lat_value = 0.0;
+    double lon_value = 0.0;
 
     if(count > 6) {
         cellular_nmea_coord_to_decimal(fields[3], fields[4], lat, sizeof(lat));
@@ -1342,6 +1400,8 @@ static void cellular_nmea_parse_rmc(char **fields, int count)
     if(valid[0] != 'A' || !lat[0] || !lon[0]) {
         return;
     }
+    lat_value = strtod(lat, NULL);
+    lon_value = strtod(lon, NULL);
 
     pthread_mutex_lock(&cellular_lock);
     first_fix = cellular_gnss_note_fix_locked(&ttff_s);
@@ -1351,6 +1411,8 @@ static void cellular_nmea_parse_rmc(char **fields, int count)
     snprintf(cellular_gnss_status, sizeof(cellular_gnss_status),
              "%s", "OK");
     pthread_mutex_unlock(&cellular_lock);
+    cellular_gnss_write_fix_cache(lat_value, lon_value, 0, 0.0, -1,
+                                  "lte-rmc");
     if(first_fix) {
         cellular_log_append("GNSS first fix TTFF %.1fs", ttff_s);
     }
@@ -1393,6 +1455,8 @@ static void cellular_parse_gnsspos(const char *line)
     snprintf(cellular_gnss_status, sizeof(cellular_gnss_status),
              "%s", "OK");
     pthread_mutex_unlock(&cellular_lock);
+    cellular_gnss_write_fix_cache(lat, lon, parsed >= 3, alt, -1,
+                                  "lte-xgnsspos");
 
     if(first_fix) {
         cellular_log_append("GNSS first fix TTFF %.1fs from XGNSSPOS", ttff_s);

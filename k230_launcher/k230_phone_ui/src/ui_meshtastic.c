@@ -119,6 +119,7 @@ static lv_obj_t *mesh_textarea;
 static ui_input_inline_t *mesh_inline_input;
 static lv_timer_t *mesh_timer;
 static lv_timer_t *mesh_background_timer;
+static lv_timer_t *mesh_map_timer;
 static char mesh_status_text[4096] = "Not running";
 static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
 static char mesh_last_chat_text[3072];
@@ -166,6 +167,7 @@ static int mesh_map_drag_total_dy = 0;
 static int mesh_map_pinch_active = 0;
 static double mesh_map_pinch_start_distance = 0.0;
 static int mesh_map_pinch_start_zoom = MESHTASTIC_MAP_DEFAULT_ZOOM;
+static int mesh_map_has_position = 0;
 static lv_obj_t *mesh_map_view_obj;
 static lv_obj_t *mesh_map_layer_obj;
 static lv_obj_t *mesh_settings_overlay;
@@ -5171,10 +5173,15 @@ static void mesh_node_remote_request_event_cb(lv_event_t *event)
 
 static void mesh_map_close(void)
 {
+    if(mesh_map_timer) {
+        lv_timer_delete(mesh_map_timer);
+        mesh_map_timer = NULL;
+    }
     if(mesh_map_overlay && lv_obj_is_valid(mesh_map_overlay)) {
         lv_obj_delete(mesh_map_overlay);
     }
     mesh_map_overlay = NULL;
+    mesh_map_has_position = 0;
 }
 
 static void mesh_map_close_event_cb(lv_event_t *event)
@@ -6024,6 +6031,9 @@ static void mesh_map_rebuild(void)
         position_state = MESH_MAP_POS_READY;
         snprintf(reason, sizeof(reason), "Map %.5f, %.5f", lat, lon);
     }
+    mesh_map_has_position = has_position;
+    mesh_ui_trace("map rebuild has_position=%d state=%d reason=%s",
+                  has_position, (int)position_state, reason);
 
     panel = lv_obj_create(mesh_map_overlay);
     ui_set_fullscreen(panel);
@@ -6138,6 +6148,28 @@ static void mesh_map_rebuild(void)
     app_request_fast_refresh();
 }
 
+static void mesh_map_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if(!mesh_map_overlay || !lv_obj_is_valid(mesh_map_overlay)) {
+        if(mesh_map_timer) {
+            lv_timer_delete(mesh_map_timer);
+            mesh_map_timer = NULL;
+        }
+        return;
+    }
+    if(mesh_map_has_position) {
+        lv_timer_delete(mesh_map_timer);
+        mesh_map_timer = NULL;
+        return;
+    }
+    mesh_map_rebuild();
+    if(mesh_map_has_position && mesh_map_timer) {
+        lv_timer_delete(mesh_map_timer);
+        mesh_map_timer = NULL;
+    }
+}
+
 static void mesh_map_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -6154,6 +6186,9 @@ static void mesh_map_event_cb(lv_event_t *event)
         lv_obj_move_foreground(mesh_map_overlay);
     }
     mesh_map_rebuild();
+    if(!mesh_map_has_position && !mesh_map_timer) {
+        mesh_map_timer = lv_timer_create(mesh_map_timer_cb, 2000, NULL);
+    }
 }
 
 static void mesh_node_detail_event_cb(lv_event_t *event)

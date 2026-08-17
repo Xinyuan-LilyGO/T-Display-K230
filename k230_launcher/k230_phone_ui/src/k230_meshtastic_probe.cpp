@@ -109,6 +109,8 @@
 #define MESHTASTIC_PHONEAPI_FROM_SEND_GAP_US 120000U
 #define MESHTASTIC_NRF9151_UART_DEV "/dev/ttyS3"
 #define MESHTASTIC_NRF9151_UART_BAUD B115200
+#define MESHTASTIC_NRF9151_FIX_CACHE "/tmp/k230_nrf9151_gnss_fix.cache"
+#define MESHTASTIC_NRF9151_FIX_CACHE_MAX_AGE_SEC (60 * 60)
 #define MESHTASTIC_NRF9151_PROBE_TIMEOUT_US 500000ULL
 #define MESHTASTIC_NRF9151_CMD_TIMEOUT_US 1800000ULL
 #define MESHTASTIC_NRF9151_LINE_MAX 256U
@@ -1081,6 +1083,7 @@ typedef struct {
     uint64_t last_rx_us = 0;
     uint64_t last_fix_us = 0;
     uint64_t session_start_us = 0;
+    time_t cache_epoch = 0;
     char line[MESHTASTIC_NRF9151_LINE_MAX];
     char modem_state[32] = "off";
     char gps_state[32] = "off";
@@ -4366,6 +4369,93 @@ static void nrf9151_gnss_apply_fix(double lat, double lon, bool has_alt,
     }
 }
 
+static bool nrf9151_gnss_apply_cache_fix(bool quiet)
+{
+    struct stat st;
+    FILE *fp;
+    char line[192];
+    double lat = 0.0;
+    double lon = 0.0;
+    double alt = 0.0;
+    int has_alt = 0;
+    int sats = 0;
+    time_t epoch = 0;
+    time_t now = time(nullptr);
+    char source[48] = "cache";
+
+    if(stat(MESHTASTIC_NRF9151_FIX_CACHE, &st) != 0) {
+        return false;
+    }
+    if(now > 0 && st.st_mtime > 0 &&
+       now >= st.st_mtime &&
+       now - st.st_mtime > MESHTASTIC_NRF9151_FIX_CACHE_MAX_AGE_SEC) {
+        return false;
+    }
+
+    fp = fopen(MESHTASTIC_NRF9151_FIX_CACHE, "r");
+    if(!fp) {
+        return false;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        char *eq;
+
+        nrf9151_trim_in_place(line);
+        eq = strchr(line, '=');
+        if(!eq) {
+            continue;
+        }
+        *eq++ = '\0';
+        if(strcmp(line, "epoch") == 0) {
+            epoch = (time_t)strtol(eq, nullptr, 10);
+        } else if(strcmp(line, "lat") == 0) {
+            lat = strtod(eq, nullptr);
+        } else if(strcmp(line, "lon") == 0) {
+            lon = strtod(eq, nullptr);
+        } else if(strcmp(line, "has_alt") == 0) {
+            has_alt = atoi(eq) != 0;
+        } else if(strcmp(line, "alt") == 0) {
+            alt = strtod(eq, nullptr);
+        } else if(strcmp(line, "sats") == 0) {
+            sats = atoi(eq);
+        } else if(strcmp(line, "source") == 0) {
+            snprintf(source, sizeof(source), "%s", eq);
+        }
+    }
+    fclose(fp);
+
+    if(epoch <= 0) {
+        epoch = st.st_mtime;
+    }
+    if(now > 0 && epoch > 0 && now >= epoch &&
+       now - epoch > MESHTASTIC_NRF9151_FIX_CACHE_MAX_AGE_SEC) {
+        return false;
+    }
+    if(!isfinite(lat) || !isfinite(lon) || lat < -90.0 || lat > 90.0 ||
+       lon < -180.0 || lon > 180.0 ||
+       (fabs(lat) < 0.000001 && fabs(lon) < 0.000001)) {
+        return false;
+    }
+    if(mesh_gnss.cache_epoch == epoch && mesh_gnss.has_fix &&
+       strcmp(mesh_gnss.gps_state, "fix") == 0) {
+        return true;
+    }
+
+    nrf9151_gnss_apply_fix(lat, lon, has_alt != 0, alt, false, 0.0, false,
+                           0.0, sats > 0 ? (uint32_t)sats : 0U);
+    if(epoch > 0) {
+        mesh_gnss.position.timestamp = (uint32_t)epoch;
+    }
+    mesh_gnss.cache_epoch = epoch;
+    nrf9151_gnss_set_state("present", "fix", "GNSS fix from LTE cache");
+    if(!quiet) {
+        long age = (now > 0 && epoch > 0 && now >= epoch) ?
+                   (long)(now - epoch) : 0L;
+        daemon_event("nRF9151 GNSS cache applied source=%s lat=%.7f lon=%.7f age=%lds",
+                     source, lat, lon, age);
+    }
+    return true;
+}
+
 static void nrf9151_gnss_parse_gga(char **fields, int count)
 {
     double lat = 0.0;
@@ -4377,6 +4467,9 @@ static void nrf9151_gnss_parse_gga(char **fields, int count)
     if(fix <= 0 || count <= 9 ||
        !nrf9151_nmea_coord_to_double(fields[2], fields[3], &lat) ||
        !nrf9151_nmea_coord_to_double(fields[4], fields[5], &lon)) {
+        if(nrf9151_gnss_apply_cache_fix(true)) {
+            return;
+        }
         nrf9151_gnss_set_state("present", "searching", "No GNSS fix");
         return;
     }
@@ -12394,6 +12487,10 @@ static std::string daemon_status_response(const probe_options_t &opts,
     std::string pki_key = "-";
     size_t node_public_key_count = 0;
 
+    if(opts.position_enabled &&
+       (!mesh_gnss.has_fix || strcmp(mesh_gnss.gps_state, "fix") != 0)) {
+        (void)nrf9151_gnss_apply_cache_fix(true);
+    }
     ble_state = phoneapi_bridge_get_state(ble_detail, sizeof(ble_detail));
     if(mesh_pki_public_key_available()) {
         pki_key = mesh_hex_encode_bytes(mesh_pki_identity.public_key, 4U);
@@ -14786,6 +14883,9 @@ int main(int argc, char **argv)
                 (uint64_t)opts.position_interval_sec * 1000000ULL;
 
             mesh_manual_position_requested = false;
+            if(!using_fixed) {
+                (void)nrf9151_gnss_apply_cache_fix(false);
+            }
             if(!using_fixed && (!mesh_gnss.present || !mesh_gnss.has_fix)) {
                 mesh_position_drop_count++;
                 mesh_next_position_us = opts.position_enabled ?
