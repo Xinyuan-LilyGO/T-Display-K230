@@ -6630,8 +6630,9 @@ static void mesh_detector_node_row(lv_obj_t *panel,
              node->has_pos ? "yes" : "no");
     label = ui_label(card, meta, &lv_font_montserrat_14, 0x25C281);
     lv_obj_set_pos(label, 14, 64);
+    lv_obj_set_height(label, h - 78);
     lv_obj_set_width(label, w - 28);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 }
 
 static void mesh_detector_event_cb(lv_event_t *event)
@@ -6673,7 +6674,7 @@ static void mesh_detector_event_cb(lv_event_t *event)
     int node_cols = landscape ? 2 : 1;
     int node_gap = 12;
     int node_w = node_cols == 2 ? (content_w - node_gap) / 2 : content_w;
-    int node_h = 98;
+    int node_h = 122;
     int y = 0;
     int node_count = 0;
     int db_count = 0;
