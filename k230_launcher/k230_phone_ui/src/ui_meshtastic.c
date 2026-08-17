@@ -116,6 +116,8 @@ static void mesh_overlay_auto_refresh_tick(void);
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
 static lv_obj_t *mesh_profile_label;
+static lv_obj_t *mesh_airtime_label;
+static lv_obj_t *mesh_chutil_bar;
 static lv_obj_t *mesh_chat_scroll;
 static lv_obj_t *mesh_log_label;
 static lv_obj_t *mesh_send_button;
@@ -683,6 +685,24 @@ static void mesh_status_field(const char *status, const char *key,
         }
         p += key_len;
     }
+}
+
+static float mesh_status_float_field(const char *status, const char *key,
+                                     float fallback)
+{
+    char value[24];
+    char *end = NULL;
+    float parsed;
+
+    mesh_status_field(status, key, value, sizeof(value), "");
+    if(!value[0]) {
+        return fallback;
+    }
+    parsed = strtof(value, &end);
+    if(end == value) {
+        return fallback;
+    }
+    return parsed;
 }
 
 static void mesh_apply_ble_status(const char *status, int online)
@@ -2433,8 +2453,11 @@ static void mesh_refresh_status(void)
         char sats[16];
         char position_tx[16];
         char telemetry_tx[16];
-        char ch_util[16];
-        char air_tx[16];
+        float ch_value;
+        float air_value;
+        float duty_value;
+        uint32_t airtime_color = 0x25C281;
+        const char *airtime_state = "Voice OK";
 
         mesh_status_field(mesh_status_text, "queued_count", queued_count,
                           sizeof(queued_count), "0");
@@ -2458,10 +2481,16 @@ static void mesh_refresh_status(void)
                           sizeof(position_tx), "0");
         mesh_status_field(mesh_status_text, "telemetry_tx", telemetry_tx,
                           sizeof(telemetry_tx), "0");
-        mesh_status_field(mesh_status_text, "ch_util", ch_util,
-                          sizeof(ch_util), "0.0");
-        mesh_status_field(mesh_status_text, "air_tx", air_tx,
-                          sizeof(air_tx), "0.00");
+        ch_value = mesh_status_float_field(mesh_status_text, "ch_util", 0.0f);
+        air_value = mesh_status_float_field(mesh_status_text, "air_tx", 0.0f);
+        duty_value = mesh_status_float_field(mesh_status_text, "duty", 100.0f);
+        if(ch_value >= 40.0f) {
+            airtime_color = 0xEF4D5A;
+            airtime_state = "Channel busy";
+        } else if(ch_value >= 25.0f) {
+            airtime_color = 0xF5A524;
+            airtime_state = "Voice limited";
+        }
         if(mesh_to_text_is_broadcast(mesh_to_node)) {
             snprintf(target, sizeof(target), "%s: %s",
                      ui_tr("To"), ui_tr("Channel broadcast"));
@@ -2474,14 +2503,36 @@ static void mesh_refresh_status(void)
                                         lv_color_hex(0xF5A524), 0);
         }
         snprintf(detail, sizeof(detail),
-                 "%s  |  Ch%s%% Air%s%% GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
+                 "%s  |  GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
                  target,
-                 ch_util, air_tx,
                  nrf9151, gps, sats, position_tx,
                  telemetry_tx, queued_count, mesh_ack_enabled ? "on" : "off",
                  ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
                  ack_drop);
         lv_label_set_text(mesh_detail_label, detail);
+        if(mesh_airtime_label && lv_obj_is_valid(mesh_airtime_label)) {
+            char airtime[128];
+
+            snprintf(airtime, sizeof(airtime),
+                     "ChUtil %.1f%%  TX %.2f/%.1f%%  %s",
+                     ch_value, air_value, duty_value, airtime_state);
+            lv_label_set_text(mesh_airtime_label, airtime);
+            lv_obj_set_style_text_color(mesh_airtime_label,
+                                        lv_color_hex(airtime_color), 0);
+        }
+        if(mesh_chutil_bar && lv_obj_is_valid(mesh_chutil_bar)) {
+            int bar_value = (int)(ch_value + 0.5f);
+
+            if(bar_value < 0) {
+                bar_value = 0;
+            } else if(bar_value > 40) {
+                bar_value = 40;
+            }
+            lv_bar_set_value(mesh_chutil_bar, bar_value, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(mesh_chutil_bar,
+                                      lv_color_hex(airtime_color),
+                                      LV_PART_INDICATOR);
+        }
     }
     if(mesh_send_button && lv_obj_is_valid(mesh_send_button)) {
         if(online) {
@@ -8870,7 +8921,7 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_set_scrollbar_mode(mesh_body, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(mesh_body, LV_OBJ_FLAG_SCROLLABLE);
 
-    mesh_status_panel_h = landscape ? 78 : 88;
+    mesh_status_panel_h = landscape ? 90 : 98;
     mesh_chat_gap = landscape ? 8 : 10;
     mesh_keyboard_reserved_h = 0;
     if(status_text_w < 120) {
@@ -8899,6 +8950,24 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_set_pos(mesh_detail_label, 0, 50);
     lv_obj_set_width(mesh_detail_label, status_text_w);
     lv_label_set_long_mode(mesh_detail_label, LV_LABEL_LONG_DOT);
+
+    mesh_airtime_label = ui_label(mesh_status_panel, "ChUtil 0.0%",
+                                  &lv_font_montserrat_12, 0x25C281);
+    lv_obj_set_pos(mesh_airtime_label, 0, 66);
+    lv_obj_set_width(mesh_airtime_label, status_text_w);
+    lv_label_set_long_mode(mesh_airtime_label, LV_LABEL_LONG_DOT);
+
+    mesh_chutil_bar = lv_bar_create(mesh_status_panel);
+    lv_obj_set_pos(mesh_chutil_bar, 0, 82);
+    lv_obj_set_size(mesh_chutil_bar, status_text_w, 5);
+    lv_bar_set_range(mesh_chutil_bar, 0, 40);
+    lv_bar_set_value(mesh_chutil_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(mesh_chutil_bar, lv_color_hex(0x263241),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_color(mesh_chutil_bar, lv_color_hex(0x25C281),
+                              LV_PART_INDICATOR);
+    lv_obj_set_style_radius(mesh_chutil_bar, 3, LV_PART_MAIN);
+    lv_obj_set_style_radius(mesh_chutil_bar, 3, LV_PART_INDICATOR);
 
     btn = ui_command_button(mesh_status_panel, content_w - 288, 0, 60,
                             ui_tr("Detect"), 0xF59E0B);
@@ -9008,6 +9077,8 @@ void ui_meshtastic_cleanup(void)
     mesh_status_label = NULL;
     mesh_detail_label = NULL;
     mesh_profile_label = NULL;
+    mesh_airtime_label = NULL;
+    mesh_chutil_bar = NULL;
     mesh_chat_scroll = NULL;
     mesh_log_label = NULL;
     mesh_send_button = NULL;
