@@ -30,7 +30,9 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
+#include <opus/opus.h>
 
+#include <algorithm>
 #include <deque>
 #include <string>
 #include <vector>
@@ -59,9 +61,11 @@
 #define MESHTASTIC_ROUTING_APP 5U
 #define MESHTASTIC_ADMIN_APP 6U
 #define MESHTASTIC_TEXT_MESSAGE_COMPRESSED_APP 7U
+#define MESHTASTIC_AUDIO_APP 9U
 #define MESHTASTIC_TELEMETRY_APP 67U
 #define MESHTASTIC_TRACEROUTE_APP 70U
 #define MESHTASTIC_NEIGHBORINFO_APP 71U
+#define MESHTASTIC_PRIVATE_APP 256U
 #define MESHTASTIC_ERRNO_SHOULD_RELEASE 35U
 #define MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK 0x07U
 #define MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK 0x08U
@@ -91,6 +95,17 @@
 #define MESHTASTIC_PACKET_HISTORY_TTL_US (30ULL * 60ULL * 1000000ULL)
 #define MESHTASTIC_CHAT_DEDUP_SIZE 16U
 #define MESHTASTIC_CHAT_DEDUP_TTL_US (45ULL * 1000000ULL)
+#define MESHTASTIC_VOICE_MAGIC "KPV1"
+#define MESHTASTIC_VOICE_CODEC_OPUS 1U
+#define MESHTASTIC_VOICE_SAMPLE_RATE 8000U
+#define MESHTASTIC_VOICE_FRAME_MS 20U
+#define MESHTASTIC_VOICE_FRAME_SAMPLES \
+    ((MESHTASTIC_VOICE_SAMPLE_RATE * MESHTASTIC_VOICE_FRAME_MS) / 1000U)
+#define MESHTASTIC_VOICE_BITRATE_BPS 6000
+#define MESHTASTIC_VOICE_MAX_PCM_BYTES \
+    (MESHTASTIC_VOICE_SAMPLE_RATE * 2U)
+#define MESHTASTIC_VOICE_CHUNK_TARGET_BYTES 190U
+#define MESHTASTIC_VOICE_RX_STREAMS 4U
 #define MESHTASTIC_DELAYED_TX_QUEUE_SIZE 4U
 #define MESHTASTIC_REBROADCAST_MIN_DELAY_US 150000ULL
 #define MESHTASTIC_REBROADCAST_JITTER_US 700000ULL
@@ -1022,11 +1037,16 @@ typedef struct {
 
 typedef struct {
     std::string message;
+    std::vector<uint8_t> payload;
+    uint32_t portnum = MESHTASTIC_TEXT_MESSAGE_APP;
     uint32_t channel_index = 0;
     bool has_to_node = false;
     uint32_t to_node = 0;
     bool has_want_ack = false;
     bool want_ack = false;
+    bool raw_payload = false;
+    bool voice = false;
+    std::string summary;
 } mesh_send_request_t;
 
 typedef struct {
@@ -1087,6 +1107,13 @@ typedef struct {
     uint64_t last_fix_us = 0;
     uint64_t session_start_us = 0;
     uint64_t last_search_restart_us = 0;
+    uint64_t nmea_rx_count = 0;
+    uint64_t nmea_valid_count = 0;
+    uint64_t nmea_nofix_count = 0;
+    uint64_t last_nmea_us = 0;
+    uint64_t ttff_ms = 0;
+    bool ttff_valid = false;
+    bool used_cache_fix = false;
     time_t cache_epoch = 0;
     char line[MESHTASTIC_NRF9151_LINE_MAX];
     char modem_state[32] = "off";
@@ -2878,10 +2905,21 @@ static void put_le32(uint8_t *dst, uint32_t value)
     dst[3] = (uint8_t)((value >> 24) & 0xffU);
 }
 
+static void put_le16(uint8_t *dst, uint16_t value)
+{
+    dst[0] = (uint8_t)(value & 0xffU);
+    dst[1] = (uint8_t)((value >> 8) & 0xffU);
+}
+
 static uint32_t get_le32(const uint8_t *src)
 {
     return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
            ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
+}
+
+static uint16_t get_le16(const uint8_t *src)
+{
+    return (uint16_t)((uint16_t)src[0] | ((uint16_t)src[1] << 8));
 }
 
 static uint32_t djb2_hash(const char *text)
@@ -4226,6 +4264,31 @@ static void nrf9151_gnss_set_state(const char *modem, const char *gps,
              detail && detail[0] ? detail : "-");
 }
 
+static const char *nrf9151_gnss_phase(void)
+{
+    if(!mesh_gnss.enabled) {
+        return "off";
+    }
+    if(strcmp(mesh_gnss.modem_state, "missing") == 0 ||
+       strcmp(mesh_gnss.modem_state, "off") == 0) {
+        return "missing";
+    }
+    if(strcmp(mesh_gnss.gps_state, "error") == 0 ||
+       strcmp(mesh_gnss.gps_state, "failed") == 0) {
+        return "error";
+    }
+    if(mesh_gnss.has_fix) {
+        return mesh_gnss.used_cache_fix ? "cache" : "fix";
+    }
+    if(mesh_gnss.configured && mesh_gnss.nmea_rx_count == 0ULL) {
+        return "first";
+    }
+    if(mesh_gnss.position.sats_in_view == 0U) {
+        return "no_sat";
+    }
+    return "sat_no_fix";
+}
+
 static void nrf9151_trim_in_place(char *line)
 {
     char *start = line;
@@ -4405,6 +4468,7 @@ static void nrf9151_gnss_apply_fix(double lat, double lon, bool has_alt,
     }
     mesh_gnss.has_fix = true;
     mesh_gnss.last_fix_us = monotonic_us();
+    mesh_gnss.used_cache_fix = !update_cache;
     if(update_cache) {
         nrf9151_gnss_write_cache(lat, lon, has_alt, alt_m, sats,
                                  cache_source);
@@ -4417,6 +4481,8 @@ static void nrf9151_gnss_apply_fix(double lat, double lon, bool has_alt,
             ttff_ms = (mesh_gnss.last_fix_us - mesh_gnss.session_start_us) /
                       1000ULL;
         }
+        mesh_gnss.ttff_ms = ttff_ms;
+        mesh_gnss.ttff_valid = true;
         mesh_gnss.first_fix_reported = true;
         daemon_event("nRF9151 GNSS first fix lat=%.7f lon=%.7f sats=%u ttff=%lums",
                      lat, lon, sats, (unsigned long)ttff_ms);
@@ -4501,6 +4567,8 @@ static bool nrf9151_gnss_apply_cache_fix(bool quiet)
         mesh_gnss.position.timestamp = (uint32_t)epoch;
     }
     mesh_gnss.cache_epoch = epoch;
+    mesh_gnss.used_cache_fix = true;
+    mesh_gnss.ttff_valid = false;
     nrf9151_gnss_set_state("present", "fix", "GNSS fix from LTE cache");
     if(!quiet) {
         long age = (now > 0 && epoch > 0 && now >= epoch) ?
@@ -4519,13 +4587,19 @@ static void nrf9151_gnss_parse_gga(char **fields, int count)
     int fix = count > 6 ? atoi(fields[6]) : 0;
     int sats = count > 7 ? atoi(fields[7]) : 0;
 
+    if(sats > 0) {
+        mesh_gnss.position.sats_in_view = (uint32_t)sats;
+    }
     if(fix <= 0 || count <= 9 ||
        !nrf9151_nmea_coord_to_double(fields[2], fields[3], &lat) ||
        !nrf9151_nmea_coord_to_double(fields[4], fields[5], &lon)) {
+        mesh_gnss.nmea_nofix_count++;
         if(nrf9151_gnss_apply_cache_fix(true)) {
             return;
         }
-        nrf9151_gnss_set_state("present", "searching", "No GNSS fix");
+        nrf9151_gnss_set_state("present", "searching",
+                               sats > 0 ? "GNSS satellites visible no fix" :
+                               "GNSS running no satellites");
         return;
     }
     alt = fields[9] && fields[9][0] ? strtod(fields[9], nullptr) : 0.0;
@@ -4557,6 +4631,24 @@ static void nrf9151_gnss_parse_rmc(char **fields, int count)
                            mesh_gnss.position.sats_in_view);
 }
 
+static void nrf9151_gnss_parse_gsv(char **fields, int count)
+{
+    int sats;
+
+    if(count <= 3) {
+        return;
+    }
+    sats = atoi(fields[3]);
+    if(sats >= 0) {
+        mesh_gnss.position.sats_in_view = (uint32_t)sats;
+        if(!mesh_gnss.has_fix) {
+            nrf9151_gnss_set_state("present", "searching",
+                                   sats > 0 ? "GNSS satellites visible no fix" :
+                                   "GNSS running no satellites");
+        }
+    }
+}
+
 static void nrf9151_gnss_parse_sentence(const char *line)
 {
     char body[MESHTASTIC_NRF9151_LINE_MAX];
@@ -4569,6 +4661,7 @@ static void nrf9151_gnss_parse_sentence(const char *line)
     if(!line || line[0] != '$' || !nrf9151_nmea_checksum_ok(line)) {
         return;
     }
+    mesh_gnss.nmea_valid_count++;
     star = strchr(line, '*');
     len = star ? (size_t)(star - line - 1) : strlen(line + 1);
     if(len >= sizeof(body)) {
@@ -4586,6 +4679,8 @@ static void nrf9151_gnss_parse_sentence(const char *line)
         nrf9151_gnss_parse_gga(fields, count);
     } else if(strcmp(type, "RMC") == 0) {
         nrf9151_gnss_parse_rmc(fields, count);
+    } else if(strcmp(type, "GSV") == 0) {
+        nrf9151_gnss_parse_gsv(fields, count);
     }
 }
 
@@ -4645,6 +4740,8 @@ static void nrf9151_gnss_process_line(char *line)
         nmea = line;
     }
     if(nmea && nrf9151_line_has_nmea_prefix(nmea)) {
+        mesh_gnss.nmea_rx_count++;
+        mesh_gnss.last_nmea_us = mesh_gnss.last_rx_us;
         nrf9151_gnss_parse_sentence(nmea);
         return;
     }
@@ -11178,10 +11275,12 @@ static bool build_mesh_rebroadcast_frame(const probe_options_t &opts,
     return true;
 }
 
-static bool build_mesh_frame(const probe_options_t &opts,
-                             const std::string &message,
-                             uint32_t channel_index,
-                             tx_frame_t *frame)
+static bool build_mesh_data_frame(const probe_options_t &opts,
+                                  uint32_t portnum,
+                                  const std::vector<uint8_t> &payload,
+                                  uint32_t channel_index,
+                                  const char *summary_kind,
+                                  tx_frame_t *frame)
 {
     std::vector<uint8_t> key;
     std::vector<uint8_t> data_proto;
@@ -11192,27 +11291,24 @@ static bool build_mesh_frame(const probe_options_t &opts,
     uint32_t packet_id = opts.packet_id;
     char summary[220];
 
-    if(!frame ||
+    if(!frame || payload.size() > MESHTASTIC_DATA_PAYLOAD_LEN ||
        !mesh_resolve_tx_channel(opts, channel_index, &channel_name, &psk,
-                                &key, &channel_hash)) {
+                                 &key, &channel_hash)) {
         return false;
     }
     if(!meshtastic_node_is_broadcast(opts.to_node)) {
-        std::vector<uint8_t> text_payload;
         uint8_t remote_public[MESHTASTIC_CURVE25519_KEY_LEN];
 
         if(!mesh_node_copy_public_key(opts.to_node, remote_public)) {
-            daemon_event("Mesh direct text skipped target=0x%08x reason=no-public-key",
+            daemon_event("Mesh direct %s skipped target=0x%08x reason=no-public-key",
+                         summary_kind && summary_kind[0] ? summary_kind : "data",
                          opts.to_node);
             return false;
         }
-        text_payload.assign(message.begin(), message.end());
-        if(text_payload.size() > MESHTASTIC_DATA_PAYLOAD_LEN) {
-            text_payload.resize(MESHTASTIC_DATA_PAYLOAD_LEN);
-        }
         return build_mesh_pki_direct_data_frame(
-            opts, opts.to_node, MESHTASTIC_TEXT_MESSAGE_APP, text_payload,
-            0U, 0U, false, 0U, opts.want_ack, false, "text", frame);
+            opts, opts.to_node, portnum, payload, 0U, 0U, false, 0U,
+            opts.want_ack, false,
+            summary_kind && summary_kind[0] ? summary_kind : "data", frame);
     }
     if(packet_id == 0U) {
         packet_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
@@ -11220,7 +11316,7 @@ static bool build_mesh_frame(const probe_options_t &opts,
             packet_id = 1U;
         }
     }
-    if(!encode_text_data_proto(message, &data_proto)) {
+    if(!encode_data_proto(portnum, payload, 0U, 0U, &data_proto)) {
         return false;
     }
     if(!aes_ctr_crypt(key, opts.from_node, packet_id, &data_proto)) {
@@ -11259,13 +11355,29 @@ static bool build_mesh_frame(const probe_options_t &opts,
     frame->ack_request_id = 0;
     frame->channel = header.channel;
     snprintf(summary, sizeof(summary),
-             "mesh id=0x%08x from=0x%08x to=0x%08x ch=0x%02x name=%s hop=%u ack=%s psk=%s text=%s",
+             "mesh %s id=0x%08x from=0x%08x to=0x%08x ch=0x%02x name=%s hop=%u ack=%s psk=%s port=%u payload=%u",
+             summary_kind && summary_kind[0] ? summary_kind : "data",
              header.id, header.from, header.to, header.channel,
              channel_name.c_str(), opts.hop_limit,
              frame->want_ack ? "on" : "off",
-             key.empty() ? "none" : psk.c_str(), message.c_str());
+             key.empty() ? "none" : psk.c_str(), portnum,
+             (unsigned)payload.size());
     frame->summary = summary;
     return true;
+}
+
+static bool build_mesh_frame(const probe_options_t &opts,
+                             const std::string &message,
+                             uint32_t channel_index,
+                             tx_frame_t *frame)
+{
+    std::vector<uint8_t> text_payload(message.begin(), message.end());
+
+    if(text_payload.size() > MESHTASTIC_DATA_PAYLOAD_LEN) {
+        text_payload.resize(MESHTASTIC_DATA_PAYLOAD_LEN);
+    }
+    return build_mesh_data_frame(opts, MESHTASTIC_TEXT_MESSAGE_APP,
+                                 text_payload, channel_index, "text", frame);
 }
 
 static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
@@ -12051,6 +12163,379 @@ static bool build_tx_frame(const probe_options_t &opts,
     return true;
 }
 
+static bool build_tx_data_frame(const probe_options_t &opts, uint32_t portnum,
+                                const std::vector<uint8_t> &payload,
+                                uint32_t channel_index,
+                                const char *summary_kind, tx_frame_t *frame)
+{
+    if(!opts.mesh_mode || !frame) {
+        return false;
+    }
+    return build_mesh_data_frame(opts, portnum, payload, channel_index,
+                                 summary_kind, frame);
+}
+
+typedef struct {
+    bool active = false;
+    uint32_t from_node = 0;
+    uint32_t stream_id = 0;
+    uint16_t total = 0;
+    uint64_t first_us = 0;
+    uint64_t last_us = 0;
+    std::vector<std::vector<uint8_t>> chunks;
+    std::vector<uint8_t> received;
+} mesh_voice_rx_stream_t;
+
+static mesh_voice_rx_stream_t mesh_voice_rx_streams[MESHTASTIC_VOICE_RX_STREAMS];
+
+static void mesh_voice_rx_stream_reset(mesh_voice_rx_stream_t *stream)
+{
+    if(!stream) {
+        return;
+    }
+    stream->active = false;
+    stream->from_node = 0;
+    stream->stream_id = 0;
+    stream->total = 0;
+    stream->first_us = 0;
+    stream->last_us = 0;
+    stream->chunks.clear();
+    stream->received.clear();
+}
+
+static bool mesh_voice_payload_is_k230(const std::vector<uint8_t> &payload)
+{
+    return payload.size() >= 16U &&
+           memcmp(payload.data(), MESHTASTIC_VOICE_MAGIC, 4U) == 0;
+}
+
+static bool mesh_voice_payload_header(const std::vector<uint8_t> &payload,
+                                      uint32_t *stream_id, uint16_t *seq,
+                                      uint16_t *total)
+{
+    if(!mesh_voice_payload_is_k230(payload) || !stream_id || !seq || !total ||
+       payload[12] != (MESHTASTIC_VOICE_SAMPLE_RATE / 1000U) ||
+       payload[13] != MESHTASTIC_VOICE_FRAME_MS ||
+       payload[14] != MESHTASTIC_VOICE_CODEC_OPUS) {
+        return false;
+    }
+    *stream_id = get_le32(payload.data() + 4U);
+    *seq = get_le16(payload.data() + 8U);
+    *total = get_le16(payload.data() + 10U);
+    if(*total == 0U || *total > MESHTASTIC_DAEMON_SEND_QUEUE_MAX ||
+       *seq >= *total) {
+        return false;
+    }
+    return true;
+}
+
+static bool mesh_voice_chunk_payload_valid(const std::vector<uint8_t> &payload)
+{
+    size_t pos = 16U;
+    uint8_t frame_count;
+
+    if(!mesh_voice_payload_is_k230(payload)) {
+        return false;
+    }
+    frame_count = payload[15];
+    for(uint8_t i = 0U; i < frame_count; i++) {
+        uint8_t frame_len;
+        if(pos >= payload.size()) {
+            return false;
+        }
+        frame_len = payload[pos++];
+        if(frame_len == 0U || pos + frame_len > payload.size()) {
+            return false;
+        }
+        pos += frame_len;
+    }
+    return pos == payload.size();
+}
+
+static mesh_voice_rx_stream_t *mesh_voice_rx_find_stream(uint32_t from_node,
+                                                         uint32_t stream_id,
+                                                         uint16_t total)
+{
+    uint64_t now = monotonic_us();
+    mesh_voice_rx_stream_t *oldest = &mesh_voice_rx_streams[0];
+
+    for(size_t i = 0; i < MESHTASTIC_VOICE_RX_STREAMS; i++) {
+        mesh_voice_rx_stream_t *stream = &mesh_voice_rx_streams[i];
+        if(stream->active && now - stream->last_us > 120000000ULL) {
+            mesh_voice_rx_stream_reset(stream);
+        }
+        if(stream->active && stream->from_node == from_node &&
+           stream->stream_id == stream_id) {
+            return stream;
+        }
+        if(!stream->active) {
+            stream->active = true;
+            stream->from_node = from_node;
+            stream->stream_id = stream_id;
+            stream->total = total;
+            stream->first_us = now;
+            stream->last_us = now;
+            stream->chunks.assign(total, std::vector<uint8_t>());
+            stream->received.assign(total, 0U);
+            return stream;
+        }
+        if(stream->last_us < oldest->last_us) {
+            oldest = stream;
+        }
+    }
+
+    mesh_voice_rx_stream_reset(oldest);
+    oldest->active = true;
+    oldest->from_node = from_node;
+    oldest->stream_id = stream_id;
+    oldest->total = total;
+    oldest->first_us = now;
+    oldest->last_us = now;
+    oldest->chunks.assign(total, std::vector<uint8_t>());
+    oldest->received.assign(total, 0U);
+    return oldest;
+}
+
+static bool mesh_voice_rx_complete(const mesh_voice_rx_stream_t *stream)
+{
+    if(!stream || !stream->active || stream->total == 0U ||
+       stream->received.size() < stream->total) {
+        return false;
+    }
+    for(uint16_t i = 0U; i < stream->total; i++) {
+        if(!stream->received[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool mesh_voice_decode_stream_to_file(const mesh_voice_rx_stream_t *stream,
+                                             const char *path,
+                                             unsigned *duration_ms)
+{
+    int err = OPUS_OK;
+    OpusDecoder *decoder;
+    std::vector<int16_t> pcm;
+    int16_t out[MESHTASTIC_VOICE_FRAME_SAMPLES];
+    FILE *fp;
+
+    if(duration_ms) {
+        *duration_ms = 0U;
+    }
+    if(!stream || !path || !stream->active || !mesh_voice_rx_complete(stream)) {
+        return false;
+    }
+    decoder = opus_decoder_create(MESHTASTIC_VOICE_SAMPLE_RATE, 1, &err);
+    if(!decoder || err != OPUS_OK) {
+        daemon_event("Voice decode failed: opus decoder create rc=%d", err);
+        if(decoder) {
+            opus_decoder_destroy(decoder);
+        }
+        return false;
+    }
+    for(uint16_t seq = 0U; seq < stream->total; seq++) {
+        const std::vector<uint8_t> &payload = stream->chunks[seq];
+        size_t pos = 16U;
+        uint8_t frame_count = payload[15];
+
+        for(uint8_t i = 0U; i < frame_count; i++) {
+            uint8_t frame_len = payload[pos++];
+            int samples = opus_decode(decoder, payload.data() + pos, frame_len,
+                                      out, MESHTASTIC_VOICE_FRAME_SAMPLES, 0);
+            pos += frame_len;
+            if(samples <= 0) {
+                daemon_event("Voice decode chunk failed stream=0x%08x seq=%u frame=%u rc=%d",
+                             stream->stream_id, seq, i, samples);
+                continue;
+            }
+            pcm.insert(pcm.end(), out, out + samples);
+        }
+    }
+    opus_decoder_destroy(decoder);
+    if(pcm.empty()) {
+        return false;
+    }
+    fp = fopen(path, "wb");
+    if(!fp) {
+        daemon_event("Voice decode fopen failed path=%s err=%s", path,
+                     strerror(errno));
+        return false;
+    }
+    fwrite(pcm.data(), sizeof(int16_t), pcm.size(), fp);
+    fclose(fp);
+    if(duration_ms) {
+        *duration_ms = (unsigned)((uint64_t)pcm.size() * 1000ULL /
+                                  MESHTASTIC_VOICE_SAMPLE_RATE);
+    }
+    return true;
+}
+
+static void mesh_voice_play_file_async(const char *path)
+{
+    char command[320];
+
+    if(!path || !path[0]) {
+        return;
+    }
+    snprintf(command, sizeof(command),
+             "aplay -q -f S16_LE -c 1 -r %u '%s' >/dev/null 2>&1 &",
+             MESHTASTIC_VOICE_SAMPLE_RATE, path);
+    (void)system(command);
+}
+
+static bool mesh_voice_handle_rx(const probe_options_t &opts,
+                                 const mesh_header_t &header,
+                                 const std::vector<uint8_t> &payload,
+                                 float rssi, float snr, bool duplicate,
+                                 bool secure_match)
+{
+    uint32_t stream_id;
+    uint16_t seq;
+    uint16_t total;
+    mesh_voice_rx_stream_t *stream;
+
+    if(!mesh_voice_payload_header(payload, &stream_id, &seq, &total) ||
+       !mesh_voice_chunk_payload_valid(payload)) {
+        return false;
+    }
+    daemon_event("RX voice chunk from=0x%08x id=0x%08x stream=0x%08x seq=%u/%u len=%u rssi=%.1f snr=%.1f%s",
+                 header.from, header.id, stream_id, seq + 1U, total,
+                 (unsigned)payload.size(), rssi, snr,
+                 duplicate ? " duplicate" : "");
+    if(duplicate || !secure_match || header.from == opts.from_node) {
+        return true;
+    }
+    stream = mesh_voice_rx_find_stream(header.from, stream_id, total);
+    if(!stream || stream->total != total || seq >= stream->total) {
+        return true;
+    }
+    stream->last_us = monotonic_us();
+    if(!stream->received[seq]) {
+        stream->chunks[seq] = payload;
+        stream->received[seq] = 1U;
+    }
+    if(mesh_voice_rx_complete(stream)) {
+        char path[128];
+        unsigned duration_ms = 0U;
+        snprintf(path, sizeof(path), "/tmp/k230_mesh_voice_rx_%08x_%08x.raw",
+                 header.from, stream_id);
+        if(mesh_voice_decode_stream_to_file(stream, path, &duration_ms)) {
+            daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=%ddBm",
+                        header.from, (double)duration_ms / 1000.0,
+                        stream->total, (int)roundf(rssi));
+            mesh_voice_play_file_async(path);
+        } else {
+            daemon_chat("RX 0x%08x voice decode failed chunks=%u",
+                        header.from, stream->total);
+        }
+        mesh_voice_rx_stream_reset(stream);
+    }
+    return true;
+}
+
+static bool mesh_voice_encode_pcm_file(const char *path, uint32_t stream_id,
+                                       std::vector<std::vector<uint8_t>> *chunks,
+                                       char *errbuf, size_t errbuf_len)
+{
+    FILE *fp;
+    std::vector<int16_t> pcm;
+    uint8_t encoded[96];
+    int err = OPUS_OK;
+    OpusEncoder *encoder;
+    std::vector<uint8_t> chunk;
+    size_t read_samples;
+
+    if(errbuf && errbuf_len > 0U) {
+        errbuf[0] = '\0';
+    }
+    if(!path || !chunks) {
+        snprintf(errbuf, errbuf_len, "invalid voice argument");
+        return false;
+    }
+    fp = fopen(path, "rb");
+    if(!fp) {
+        snprintf(errbuf, errbuf_len, "open failed: %s", strerror(errno));
+        return false;
+    }
+    pcm.resize(MESHTASTIC_VOICE_MAX_PCM_BYTES / sizeof(int16_t));
+    read_samples = fread(pcm.data(), sizeof(int16_t), pcm.size(), fp);
+    fclose(fp);
+    pcm.resize(read_samples);
+    if(pcm.size() < MESHTASTIC_VOICE_FRAME_SAMPLES) {
+        snprintf(errbuf, errbuf_len, "voice sample too short");
+        return false;
+    }
+    while(pcm.size() % MESHTASTIC_VOICE_FRAME_SAMPLES) {
+        pcm.push_back(0);
+    }
+
+    encoder = opus_encoder_create(MESHTASTIC_VOICE_SAMPLE_RATE, 1,
+                                  OPUS_APPLICATION_VOIP, &err);
+    if(!encoder || err != OPUS_OK) {
+        snprintf(errbuf, errbuf_len, "opus encoder create rc=%d", err);
+        if(encoder) {
+            opus_encoder_destroy(encoder);
+        }
+        return false;
+    }
+    opus_encoder_ctl(encoder, OPUS_SET_BITRATE(MESHTASTIC_VOICE_BITRATE_BPS));
+    opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(3));
+    opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+
+    chunks->clear();
+    for(size_t pos = 0; pos < pcm.size();
+        pos += MESHTASTIC_VOICE_FRAME_SAMPLES) {
+        int n = opus_encode(encoder, pcm.data() + pos,
+                            MESHTASTIC_VOICE_FRAME_SAMPLES, encoded,
+                            sizeof(encoded));
+        if(n <= 0 || n > 255) {
+            snprintf(errbuf, errbuf_len, "opus encode rc=%d", n);
+            opus_encoder_destroy(encoder);
+            return false;
+        }
+        if(chunk.empty()) {
+            chunk.assign(16U, 0U);
+            memcpy(chunk.data(), MESHTASTIC_VOICE_MAGIC, 4U);
+            put_le32(chunk.data() + 4U, stream_id);
+            chunk[12] = (uint8_t)(MESHTASTIC_VOICE_SAMPLE_RATE / 1000U);
+            chunk[13] = (uint8_t)MESHTASTIC_VOICE_FRAME_MS;
+            chunk[14] = MESHTASTIC_VOICE_CODEC_OPUS;
+            chunk[15] = 0U;
+        }
+        if(chunk[15] > 0U &&
+           chunk.size() + 1U + (size_t)n > MESHTASTIC_VOICE_CHUNK_TARGET_BYTES) {
+            chunks->push_back(chunk);
+            chunk.clear();
+            chunk.assign(16U, 0U);
+            memcpy(chunk.data(), MESHTASTIC_VOICE_MAGIC, 4U);
+            put_le32(chunk.data() + 4U, stream_id);
+            chunk[12] = (uint8_t)(MESHTASTIC_VOICE_SAMPLE_RATE / 1000U);
+            chunk[13] = (uint8_t)MESHTASTIC_VOICE_FRAME_MS;
+            chunk[14] = MESHTASTIC_VOICE_CODEC_OPUS;
+            chunk[15] = 0U;
+        }
+        chunk.push_back((uint8_t)n);
+        chunk.insert(chunk.end(), encoded, encoded + n);
+        chunk[15]++;
+    }
+    opus_encoder_destroy(encoder);
+    if(!chunk.empty()) {
+        chunks->push_back(chunk);
+    }
+    if(chunks->empty() || chunks->size() > MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+        snprintf(errbuf, errbuf_len, "voice chunk count %u exceeds queue",
+                 (unsigned)chunks->size());
+        chunks->clear();
+        return false;
+    }
+    for(size_t i = 0; i < chunks->size(); i++) {
+        put_le16((*chunks)[i].data() + 8U, (uint16_t)i);
+        put_le16((*chunks)[i].data() + 10U, (uint16_t)chunks->size());
+    }
+    return true;
+}
+
 static bool mesh_decode_payload_for_known_channel(
     const probe_options_t &opts, const mesh_header_t &header,
     const std::vector<uint8_t> &encrypted_payload,
@@ -12274,6 +12759,28 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                 daemon_chat("RX 0x%08x compressed text len=%u unsupported: unishox2 decoder required",
                             header.from, (unsigned)decoded.payload.size());
             }
+        } else if(decoded.portnum == MESHTASTIC_AUDIO_APP) {
+            bool codec2_header = decoded.payload.size() >= 4U &&
+                                 decoded.payload[0] == 0xc0U &&
+                                 decoded.payload[1] == 0xdeU &&
+                                 decoded.payload[2] == 0xc2U;
+            daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u ack=%s rssi=%.1f snr=%.1f port=%u codec2=%s len=%u%s",
+                         (unsigned long)rx_count, header.from, header.to,
+                         header.id, header.channel, hop_limit, hop_start,
+                         mesh_header_want_ack(header) ? "yes" : "no",
+                         rssi, snr, decoded.portnum,
+                         codec2_header ? "yes" : "no",
+                         (unsigned)decoded.payload.size(),
+                         duplicate ? " duplicate" : "");
+            if(!duplicate && secure_match && header.from != opts.from_node) {
+                daemon_chat("RX 0x%08x codec2 voice len=%u%s",
+                            header.from, (unsigned)decoded.payload.size(),
+                            codec2_header ? "" : " invalid-header");
+            }
+        } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
+                  mesh_voice_payload_is_k230(decoded.payload)) {
+            (void)mesh_voice_handle_rx(opts, header, decoded.payload, rssi, snr,
+                                       duplicate, secure_match);
         } else if(decoded.portnum == MESHTASTIC_POSITION_APP) {
             mesh_position_info_t position;
             bool position_request = decoded.want_response &&
@@ -12604,14 +13111,16 @@ static std::string daemon_status_response(const probe_options_t &opts,
                                           chip_type_t chip,
                                           size_t pending_send_count)
 {
-    char buf[2600];
+    char buf[3200];
     char ble_detail[160];
     char ble_pair[16];
     char slot_text[16];
     char gps_detail[160];
+    char gnss_phase[24];
     phoneapi_bridge_state_t ble_state;
     const char *queued = pending_send_count > 0U ? "1" : "0";
     uint64_t now = monotonic_us();
+    uint64_t last_nmea_ms = 0ULL;
     std::string channel_url = meshtastic_channel_url(opts);
     std::string pki_key = "-";
     size_t node_public_key_count = 0;
@@ -12643,6 +13152,10 @@ static std::string daemon_status_response(const probe_options_t &opts,
             gps_detail[i] = '_';
         }
     }
+    snprintf(gnss_phase, sizeof(gnss_phase), "%s", nrf9151_gnss_phase());
+    if(mesh_gnss.last_nmea_us > 0ULL && now >= mesh_gnss.last_nmea_us) {
+        last_nmea_ms = (now - mesh_gnss.last_nmea_us) / 1000ULL;
+    }
     snprintf(buf, sizeof(buf),
              "OK version=%s chip=%s op=%s tx=%lu rx=%lu queued=%s queued_count=%u "
              "ble=%s ble_detail=%s ble_pair=%s "
@@ -12652,7 +13165,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
-             "position=%s fixed=%s nrf9151=%s gps=%s gps_detail=%s "
+             "position=%s fixed=%s nrf9151=%s gps=%s gnss_phase=%s gps_detail=%s "
+             "nmea_rx=%lu nmea_valid=%lu nmea_nofix=%lu last_nmea_ms=%lu "
+             "gnss_sats_seen=%u ttff_ms=%lu ttff_valid=%s "
              "position_tx=%lu position_drop=%lu next_position_ms=%u "
              "lat=%.7f lon=%.7f sats=%u fixed_lat=%.7f fixed_lon=%.7f "
              "telemetry=%s telemetry_env=%s telemetry_tx=%lu telemetry_drop=%lu next_telemetry_ms=%u "
@@ -12684,7 +13199,15 @@ static std::string daemon_status_response(const probe_options_t &opts,
              mesh_nodeinfo_next_ms(now),
              opts.position_enabled ? "on" : "off",
              opts.fixed_position_enabled ? "on" : "off",
-             mesh_gnss.modem_state, mesh_gnss.gps_state, gps_detail,
+             mesh_gnss.modem_state, mesh_gnss.gps_state, gnss_phase,
+             gps_detail,
+             (unsigned long)mesh_gnss.nmea_rx_count,
+             (unsigned long)mesh_gnss.nmea_valid_count,
+             (unsigned long)mesh_gnss.nmea_nofix_count,
+             (unsigned long)last_nmea_ms,
+             mesh_gnss.position.sats_in_view,
+             (unsigned long)mesh_gnss.ttff_ms,
+             mesh_gnss.ttff_valid ? "1" : "0",
              (unsigned long)mesh_position_tx_count,
              (unsigned long)mesh_position_drop_count,
              mesh_position_next_ms(now),
@@ -13476,6 +13999,65 @@ static std::string handle_daemon_command(const std::string &line,
     if(line == "QUIT" || line == "quit") {
         running = 0;
         return "OK quitting\n";
+    }
+    if(line.compare(0, 16, "SEND_VOICE_FILE ") == 0 ||
+       line.compare(0, 16, "send_voice_file ") == 0) {
+        std::vector<std::vector<uint8_t>> chunks;
+        char errbuf[128];
+        char buf[160];
+        uint32_t stream_id;
+        const char *path_arg = line.c_str() + 16;
+        std::string path = trim_ipc_line(path_arg);
+
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        if(!send_queue) {
+            return "ERR internal\n";
+        }
+        if(path.empty()) {
+            return "ERR empty-voice-file\n";
+        }
+        if(mesh_channel_slot_role(opts, mesh_tx_channel_slot_index(opts, 0U)) ==
+           MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+            return "ERR channel-disabled\n";
+        }
+        stream_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+        if(stream_id == 0U) {
+            stream_id = 1U;
+        }
+        if(!mesh_voice_encode_pcm_file(path.c_str(), stream_id, &chunks,
+                                       errbuf, sizeof(errbuf))) {
+            daemon_event("Daemon SEND_VOICE encode failed path=%s reason=%s",
+                         path.c_str(), errbuf);
+            snprintf(buf, sizeof(buf), "ERR voice-encode %s\n", errbuf);
+            return std::string(buf);
+        }
+        if(send_queue->size() + chunks.size() >
+           MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+            daemon_event("Daemon SEND_VOICE queue full chunks=%u depth=%u",
+                         (unsigned)chunks.size(),
+                         (unsigned)send_queue->size());
+            return "ERR queue-full\n";
+        }
+        for(size_t i = 0; i < chunks.size(); i++) {
+            mesh_send_request_t request;
+            request.raw_payload = true;
+            request.voice = true;
+            request.portnum = MESHTASTIC_PRIVATE_APP;
+            request.payload = chunks[i];
+            request.channel_index = 0U;
+            request.summary = "voice";
+            send_queue->push_back(request);
+        }
+        daemon_event("Daemon SEND_VOICE queued stream=0x%08x chunks=%u depth=%u op=%s",
+                     stream_id, (unsigned)chunks.size(),
+                     (unsigned)send_queue->size(), op_name(active_op));
+        snprintf(buf, sizeof(buf),
+                 "OK voice queued stream=0x%08x chunks=%u depth=%u\n",
+                 stream_id, (unsigned)chunks.size(),
+                 (unsigned)send_queue->size());
+        return std::string(buf);
     }
     if(line.compare(0, 13, "SEND_CHANNEL ") == 0 ||
        line.compare(0, 13, "send_channel ") == 0) {
@@ -15190,37 +15772,73 @@ int main(int argc, char **argv)
                 }
             } else {
                 pending_daemon_sends.pop_front();
-                daemon_event("Daemon SEND dequeue depth=%u slot=%u target=0x%08x ack=%s len=%u",
+                daemon_event("Daemon SEND dequeue depth=%u slot=%u target=0x%08x ack=%s port=%u len=%u",
                              (unsigned)pending_daemon_sends.size(),
                              request.channel_index,
                              tx_opts.to_node,
                              tx_opts.want_ack ? "yes" : "no",
+                             request.raw_payload ? request.portnum :
+                             MESHTASTIC_TEXT_MESSAGE_APP,
+                             request.raw_payload ?
+                             (unsigned)request.payload.size() :
                              (unsigned)request.message.size());
-                if(build_tx_frame(tx_opts, request.message,
-                                  request.channel_index, &frame)) {
+                bool built = request.raw_payload ?
+                    build_tx_data_frame(tx_opts, request.portnum,
+                                        request.payload,
+                                        request.channel_index,
+                                        request.summary.c_str(), &frame) :
+                    build_tx_frame(tx_opts, request.message,
+                                   request.channel_index, &frame);
+                if(built) {
                     if(start_tx(radio, frame) == 0 && tx_opts.mesh_mode) {
                         bool ack_tracked = true;
                         if(frame.want_ack) {
                             ack_tracked = mesh_ack_track_frame(frame);
                         }
-                        std::string clean = mesh_clean_text(request.message);
-                        if(!clean.empty()) {
-                            daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",
-                                        opts.from_node, frame.packet_id,
-                                        request.channel_index,
-                                        frame.want_ack ?
-                                        (ack_tracked ? "pending" : "dropped") :
-                                        "air",
-                                        clean.c_str());
+                        if(request.voice && !request.payload.empty()) {
+                            uint32_t voice_stream = 0U;
+                            uint16_t voice_seq = 0U;
+                            uint16_t voice_total = 0U;
+                            if(mesh_voice_payload_header(request.payload,
+                                                         &voice_stream,
+                                                         &voice_seq,
+                                                         &voice_total)) {
+                                daemon_chat("TX 0x%08x id=0x%08x voice chunk %u/%u ack=%s",
+                                            opts.from_node, frame.packet_id,
+                                            voice_seq + 1U, voice_total,
+                                            frame.want_ack ?
+                                            (ack_tracked ? "pending" :
+                                             "dropped") :
+                                            "air");
+                            }
+                        } else {
+                            std::string clean = mesh_clean_text(request.message);
+                            if(!clean.empty()) {
+                                daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",
+                                            opts.from_node, frame.packet_id,
+                                            request.channel_index,
+                                            frame.want_ack ?
+                                            (ack_tracked ? "pending" : "dropped") :
+                                            "air",
+                                            clean.c_str());
+                            }
                         }
                     } else {
-                        daemon_event("Daemon SEND start failed slot=%u len=%u",
+                        daemon_event("Daemon SEND start failed slot=%u port=%u len=%u",
                                      request.channel_index,
+                                     request.raw_payload ? request.portnum :
+                                     MESHTASTIC_TEXT_MESSAGE_APP,
+                                     request.raw_payload ?
+                                     (unsigned)request.payload.size() :
                                      (unsigned)request.message.size());
                     }
                 } else {
-                    daemon_event("Daemon SEND build failed slot=%u len=%u",
+                    daemon_event("Daemon SEND build failed slot=%u port=%u len=%u",
                                  request.channel_index,
+                                 request.raw_payload ? request.portnum :
+                                 MESHTASTIC_TEXT_MESSAGE_APP,
+                                 request.raw_payload ?
+                                 (unsigned)request.payload.size() :
                                  (unsigned)request.message.size());
                 }
             }

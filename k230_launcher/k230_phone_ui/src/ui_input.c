@@ -2,6 +2,7 @@
 
 #include "ui_hardware.h"
 #include "ui_i18n.h"
+#include "ui_meshtastic.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -433,6 +434,11 @@ static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
     comp_len = strlen(state->pinyin_comp);
     ui_input_log("hardware-key title-textarea code=%d key=0x%08X mode=%d comp=%s",
                  code, key, state->keyboard_mode, state->pinyin_comp);
+
+    if(code == 11 && key == 0U && app_current_page_is(PAGE_MESHTASTIC)) {
+        ui_meshtastic_trigger_voice_key();
+        return;
+    }
 
     switch(key) {
     case LV_KEY_ENTER:

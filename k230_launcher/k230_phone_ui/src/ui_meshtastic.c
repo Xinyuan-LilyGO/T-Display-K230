@@ -49,6 +49,8 @@
 #define MESHTASTIC_CANNED_MAX 16
 #define MESHTASTIC_CHANNEL_QR_MAX 280
 #define MESHTASTIC_CHANNEL_QR_BORDER 4
+#define MESHTASTIC_VOICE_RAW_PATH "/tmp/k230_mesh_voice_tx.raw"
+#define MESHTASTIC_VOICE_RECORD_LOG "/tmp/k230_mesh_voice_record.log"
 #define MESHTASTIC_PREF_REGION "meshtastic.region"
 #define MESHTASTIC_PREF_PRESET "meshtastic.preset"
 #define MESHTASTIC_PREF_CHANNEL "meshtastic.channel"
@@ -112,6 +114,7 @@ static lv_obj_t *mesh_chat_scroll;
 static lv_obj_t *mesh_log_label;
 static lv_obj_t *mesh_send_button;
 static lv_obj_t *mesh_canned_button;
+static lv_obj_t *mesh_voice_button;
 static lv_obj_t *mesh_body;
 static lv_obj_t *mesh_status_panel;
 static lv_obj_t *mesh_input_panel;
@@ -190,6 +193,10 @@ typedef enum {
     MESH_MAP_POS_READY = 0,
     MESH_MAP_POS_DAEMON_OFFLINE,
     MESH_MAP_POS_NRF9151_MISSING,
+    MESH_MAP_POS_USING_CACHE,
+    MESH_MAP_POS_FIRST_FIX,
+    MESH_MAP_POS_NO_SATELLITES,
+    MESH_MAP_POS_SATELLITES_NO_FIX,
     MESH_MAP_POS_GNSS_SEARCHING,
     MESH_MAP_POS_GNSS_ERROR,
     MESH_MAP_POS_COORD_UNAVAILABLE,
@@ -2022,6 +2029,7 @@ static void mesh_layout_main(void)
     int chat_h;
     int send_w = ui_is_landscape() ? 90 : 82;
     int canned_w = ui_is_landscape() ? 52 : 56;
+    int voice_w = ui_is_landscape() ? 56 : 58;
     int input_gap = 8;
     int textarea_w;
 
@@ -2062,12 +2070,16 @@ static void mesh_layout_main(void)
         lv_obj_set_pos(mesh_canned_button, 0, 0);
         lv_obj_set_size(mesh_canned_button, canned_w, input_h - 2);
     }
+    if(mesh_voice_button && lv_obj_is_valid(mesh_voice_button)) {
+        lv_obj_set_pos(mesh_voice_button, canned_w + input_gap, 0);
+        lv_obj_set_size(mesh_voice_button, voice_w, input_h - 2);
+    }
     if(mesh_textarea && lv_obj_is_valid(mesh_textarea)) {
-        textarea_w = content_w - canned_w - send_w - input_gap * 2;
+        textarea_w = content_w - canned_w - voice_w - send_w - input_gap * 3;
         if(textarea_w < 180) {
             textarea_w = 180;
         }
-        lv_obj_set_pos(mesh_textarea, canned_w + input_gap, 0);
+        lv_obj_set_pos(mesh_textarea, canned_w + voice_w + input_gap * 2, 0);
         lv_obj_set_size(mesh_textarea, textarea_w, input_h - 2);
     }
     if(mesh_send_button && lv_obj_is_valid(mesh_send_button)) {
@@ -5285,6 +5297,45 @@ static void mesh_map_pixel_to_lonlat(double px, double py, int zoom,
     }
 }
 
+static void mesh_map_status_stats_line(const char *status, char *out,
+                                       size_t out_len)
+{
+    char rx[24];
+    char sats[16];
+    char ttff[24];
+    char ttff_valid[8];
+    char last_nmea[24];
+    unsigned long ttff_ms;
+    unsigned long last_ms;
+    char ttff_text[24];
+    char last_text[24];
+
+    if(!out || out_len == 0U) {
+        return;
+    }
+    mesh_status_field(status, "nmea_rx", rx, sizeof(rx), "0");
+    mesh_status_field(status, "gnss_sats_seen", sats, sizeof(sats), "0");
+    mesh_status_field(status, "ttff_ms", ttff, sizeof(ttff), "0");
+    mesh_status_field(status, "ttff_valid", ttff_valid, sizeof(ttff_valid),
+                      "0");
+    mesh_status_field(status, "last_nmea_ms", last_nmea, sizeof(last_nmea),
+                      "0");
+    ttff_ms = strtoul(ttff, NULL, 10);
+    last_ms = strtoul(last_nmea, NULL, 10);
+    if(strcmp(ttff_valid, "1") == 0 && ttff_ms > 0UL) {
+        snprintf(ttff_text, sizeof(ttff_text), "%.1fs", ttff_ms / 1000.0);
+    } else {
+        snprintf(ttff_text, sizeof(ttff_text), "-");
+    }
+    if(last_ms > 0UL) {
+        snprintf(last_text, sizeof(last_text), "%.1fs", last_ms / 1000.0);
+    } else {
+        snprintf(last_text, sizeof(last_text), "-");
+    }
+    snprintf(out, out_len, "RX %s  Sats %s  TTFT %s  Last %s",
+             rx, sats, ttff_text, last_text);
+}
+
 static int mesh_map_status_position(const char *status, double *lat,
                                     double *lon, char *reason,
                                     size_t reason_len,
@@ -5292,8 +5343,10 @@ static int mesh_map_status_position(const char *status, double *lat,
 {
     char nrf9151[24];
     char gps[24];
+    char phase[24];
     char lat_text[32];
     char lon_text[32];
+    char stats[128];
     char *endptr;
     double parsed_lat;
     double parsed_lon;
@@ -5316,6 +5369,8 @@ static int mesh_map_status_position(const char *status, double *lat,
     }
 
     mesh_status_field(status, "nrf9151", nrf9151, sizeof(nrf9151), "missing");
+    mesh_status_field(status, "gnss_phase", phase, sizeof(phase), "-");
+    mesh_map_status_stats_line(status, stats, sizeof(stats));
     if(strcmp(nrf9151, "present") != 0) {
         if(reason && reason_len > 0U) {
             snprintf(reason, reason_len, "%s",
@@ -5334,16 +5389,31 @@ static int mesh_map_status_position(const char *status, double *lat,
        strcmp(gps, "debug") != 0) {
         if(reason && reason_len > 0U) {
             if(strcmp(gps, "error") == 0 || strcmp(gps, "failed") == 0) {
-                snprintf(reason, reason_len, "%s",
-                         ui_tr("GNSS needs attention"));
+                snprintf(reason, reason_len, "%s\n%s",
+                         ui_tr("GNSS needs attention"), stats);
+            } else if(strcmp(phase, "first") == 0) {
+                snprintf(reason, reason_len, "%s\n%s",
+                         ui_tr("Waiting first GNSS fix"), stats);
+            } else if(strcmp(phase, "no_sat") == 0) {
+                snprintf(reason, reason_len, "%s\n%s",
+                         ui_tr("GNSS running, no satellites"), stats);
+            } else if(strcmp(phase, "sat_no_fix") == 0) {
+                snprintf(reason, reason_len, "%s\n%s",
+                         ui_tr("GNSS satellites visible, no fix"), stats);
             } else {
-                snprintf(reason, reason_len, "%s",
-                         ui_tr("nRF9151 GNSS locating..."));
+                snprintf(reason, reason_len, "%s\n%s",
+                         ui_tr("nRF9151 GNSS locating..."), stats);
             }
         }
         if(state) {
             if(strcmp(gps, "error") == 0 || strcmp(gps, "failed") == 0) {
                 *state = MESH_MAP_POS_GNSS_ERROR;
+            } else if(strcmp(phase, "first") == 0) {
+                *state = MESH_MAP_POS_FIRST_FIX;
+            } else if(strcmp(phase, "no_sat") == 0) {
+                *state = MESH_MAP_POS_NO_SATELLITES;
+            } else if(strcmp(phase, "sat_no_fix") == 0) {
+                *state = MESH_MAP_POS_SATELLITES_NO_FIX;
             } else {
                 *state = MESH_MAP_POS_GNSS_SEARCHING;
             }
@@ -5391,11 +5461,17 @@ static int mesh_map_status_position(const char *status, double *lat,
         *lon = parsed_lon;
     }
     if(reason && reason_len > 0U) {
-        snprintf(reason, reason_len, "GNSS %.5f, %.5f", parsed_lat,
-                 parsed_lon);
+        if(strcmp(phase, "cache") == 0) {
+            snprintf(reason, reason_len, "%s\n%s",
+                     ui_tr("Using last GNSS fix"), stats);
+        } else {
+            snprintf(reason, reason_len, "%s\n%s",
+                     ui_tr("GNSS fixed"), stats);
+        }
     }
     if(state) {
-        *state = MESH_MAP_POS_READY;
+        *state = strcmp(phase, "cache") == 0 ? MESH_MAP_POS_USING_CACHE :
+                 MESH_MAP_POS_READY;
     }
     return 1;
 }
@@ -6086,6 +6162,57 @@ static void mesh_map_add_zoom_badge(lv_obj_t *map, int map_w)
     lv_obj_move_foreground(badge);
 }
 
+static void mesh_map_add_position_badge(lv_obj_t *map, int map_w, int map_h,
+                                        const char *reason,
+                                        mesh_map_position_state_t state)
+{
+    lv_obj_t *badge;
+    char text[160];
+    const char *newline;
+    int badge_w = map_w - 24;
+    uint32_t color = 0x25C281;
+
+    if(!reason || !reason[0]) {
+        return;
+    }
+    if(badge_w > 430) {
+        badge_w = 430;
+    } else if(badge_w < 220) {
+        badge_w = map_w - 16;
+    }
+    newline = strchr(reason, '\n');
+    if(newline) {
+        size_t len = (size_t)(newline - reason);
+        if(len >= sizeof(text)) {
+            len = sizeof(text) - 1U;
+        }
+        memcpy(text, reason, len);
+        text[len] = '\0';
+    } else {
+        snprintf(text, sizeof(text), "%s", reason);
+    }
+    if(state == MESH_MAP_POS_USING_CACHE) {
+        color = 0xF5A524;
+    } else if(state != MESH_MAP_POS_READY) {
+        color = 0xD7DEE8;
+    }
+    badge = ui_label(map, text, &lv_font_montserrat_16, color);
+    lv_obj_set_pos(badge, 12, map_h > 54 ? map_h - 44 : 10);
+    lv_obj_set_width(badge, badge_w);
+    lv_obj_set_style_bg_color(badge, lv_color_hex(0x07111F), 0);
+    lv_obj_set_style_bg_opa(badge, LV_OPA_80, 0);
+    lv_obj_set_style_border_color(badge, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_border_width(badge, 1, 0);
+    lv_obj_set_style_radius(badge, 8, 0);
+    lv_obj_set_style_pad_left(badge, 10, 0);
+    lv_obj_set_style_pad_right(badge, 10, 0);
+    lv_obj_set_style_pad_top(badge, 5, 0);
+    lv_obj_set_style_pad_bottom(badge, 5, 0);
+    lv_label_set_long_mode(badge, LV_LABEL_LONG_DOT);
+    lv_obj_clear_flag(badge, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_move_foreground(badge);
+}
+
 static void mesh_map_refresh_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -6100,6 +6227,14 @@ static const char *mesh_map_position_hint(mesh_map_position_state_t state)
         return ui_tr("Waiting for Meshtastic service.");
     case MESH_MAP_POS_NRF9151_MISSING:
         return ui_tr("Install nRF9151 or enable Debug GPS.");
+    case MESH_MAP_POS_USING_CACHE:
+        return ui_tr("Move outdoors to refresh GNSS fix.");
+    case MESH_MAP_POS_FIRST_FIX:
+        return ui_tr("Waiting for the first valid NMEA fix.");
+    case MESH_MAP_POS_NO_SATELLITES:
+        return ui_tr("Check GNSS antenna and sky view.");
+    case MESH_MAP_POS_SATELLITES_NO_FIX:
+        return ui_tr("Satellites are visible; keep antenna still.");
     case MESH_MAP_POS_GNSS_ERROR:
         return ui_tr("Open Cellular app to check GNSS.");
     case MESH_MAP_POS_COORD_UNAVAILABLE:
@@ -6121,10 +6256,13 @@ static void mesh_map_draw_position_state(lv_obj_t *map, int map_w, int map_h,
     lv_obj_t *hint;
     const char *hint_text = mesh_map_position_hint(state);
     int show_spinner = state == MESH_MAP_POS_GNSS_SEARCHING ||
+                       state == MESH_MAP_POS_FIRST_FIX ||
+                       state == MESH_MAP_POS_NO_SATELLITES ||
+                       state == MESH_MAP_POS_SATELLITES_NO_FIX ||
                        state == MESH_MAP_POS_COORD_UNAVAILABLE ||
                        state == MESH_MAP_POS_DAEMON_OFFLINE;
     int card_w = map_w - 48;
-    int card_h = show_spinner ? 172 : 132;
+    int card_h = show_spinner ? 192 : 148;
     int text_y = show_spinner ? 74 : 24;
 
     if(card_w > 420) {
@@ -6162,6 +6300,7 @@ static void mesh_map_draw_position_state(lv_obj_t *map, int map_w, int map_h,
                      ui_tr("nRF9151 GNSS locating..."),
                      &lv_font_montserrat_20,
                      state == MESH_MAP_POS_NRF9151_MISSING ? 0xF5A524 :
+                     state == MESH_MAP_POS_USING_CACHE ? 0xF5A524 :
                      state == MESH_MAP_POS_GNSS_ERROR ? 0xEF4D5A :
                      0xD7DEE8);
     lv_obj_set_pos(label, 16, text_y);
@@ -6258,14 +6397,11 @@ static void mesh_map_rebuild(void)
         } else {
             lat = mesh_map_center_lat;
             lon = mesh_map_center_lon;
-            snprintf(reason, sizeof(reason), "Map %.5f, %.5f", lat, lon);
         }
     } else if(mesh_map_center_valid) {
         lat = mesh_map_center_lat;
         lon = mesh_map_center_lon;
         has_position = 1;
-        position_state = MESH_MAP_POS_READY;
-        snprintf(reason, sizeof(reason), "Map %.5f, %.5f", lat, lon);
     }
     mesh_map_has_position = has_position;
     mesh_ui_trace("map rebuild has_position=%d state=%d reason=%s",
@@ -6345,6 +6481,8 @@ static void mesh_map_rebuild(void)
         }
         mesh_map_add_zoom_controls(map, map_w, map_h);
         mesh_map_add_zoom_badge(map, map_w);
+        mesh_map_add_position_badge(map, map_w, map_h, reason,
+                                    position_state);
     } else {
         mesh_map_draw_position_state(map, map_w, map_h, reason,
                                      position_state);
@@ -7576,6 +7714,47 @@ static void mesh_send_text_now(const char *text, const char *source,
     app_request_fast_refresh();
 }
 
+static void mesh_send_voice_now(const char *source)
+{
+    char command[320];
+    char response[256];
+    int rc;
+    int ret;
+
+    mesh_ui_trace("VOICE_%s begin", source ? source : "unknown");
+    mesh_append_log("voice: recording 1s...");
+    app_request_fast_refresh();
+
+    ui_audio_input_route_enter("meshtastic_voice");
+    snprintf(command, sizeof(command),
+             "rm -f '%s'; arecord -q -D default -f S16_LE -c 1 -r 8000 "
+             "-d 1 -t raw '%s' > '%s' 2>&1",
+             MESHTASTIC_VOICE_RAW_PATH, MESHTASTIC_VOICE_RAW_PATH,
+             MESHTASTIC_VOICE_RECORD_LOG);
+    rc = system(command);
+    ui_audio_input_route_leave("meshtastic_voice");
+    if(ui_shell_exit_code(rc) != 0) {
+        mesh_append_log("voice record failed rc=%d log=%s",
+                        ui_shell_exit_code(rc), MESHTASTIC_VOICE_RECORD_LOG);
+        mesh_ui_trace("VOICE_RECORD_FAILED rc=%d", ui_shell_exit_code(rc));
+        return;
+    }
+
+    snprintf(command, sizeof(command), "SEND_VOICE_FILE %s\n",
+             MESHTASTIC_VOICE_RAW_PATH);
+    ret = mesh_ipc_command(command, response, sizeof(response));
+    ui_trim_text(response);
+    mesh_ui_trace("VOICE_RESPONSE source=%s ret=%d response=%s",
+                  source ? source : "unknown", ret, response);
+    if(ret == 0) {
+        mesh_append_log("voice send: %s", response);
+    } else {
+        mesh_append_log("voice send failed: %s", response);
+    }
+    mesh_refresh_status();
+    app_request_fast_refresh();
+}
+
 static void mesh_canned_close(void)
 {
     if(mesh_canned_overlay && lv_obj_is_valid(mesh_canned_overlay)) {
@@ -8016,6 +8195,22 @@ static void mesh_canned_event_cb(lv_event_t *event)
     mesh_canned_open(0);
 }
 
+static void mesh_voice_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_send_voice_now("BUTTON");
+}
+
+void ui_meshtastic_trigger_voice_key(void)
+{
+    if(!app_current_page_is(PAGE_MESHTASTIC)) {
+        return;
+    }
+    mesh_send_voice_now("MIC_KEY");
+}
+
 static void mesh_send_submit_cb(const char *text, void *user_data)
 {
     (void)user_data;
@@ -8190,6 +8385,11 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_add_event_cb(mesh_canned_button, mesh_canned_event_cb,
                         LV_EVENT_CLICKED, NULL);
 
+    mesh_voice_button = ui_command_button(mesh_input_panel, 0, 0, 58,
+                                          ui_tr("Mic"), 0xF59E0B);
+    lv_obj_add_event_cb(mesh_voice_button, mesh_voice_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
     mesh_send_button = ui_command_button(mesh_input_panel,
                                          content_w - send_w, 0,
                                          send_w, "Send", 0x25C281);
@@ -8235,6 +8435,7 @@ void ui_meshtastic_cleanup(void)
     mesh_log_label = NULL;
     mesh_send_button = NULL;
     mesh_canned_button = NULL;
+    mesh_voice_button = NULL;
     mesh_choice_close();
     mesh_canned_delete_confirm_close();
     mesh_canned_close();
