@@ -90,7 +90,7 @@
 #define MESHTASTIC_EVENT_LOG_LINES 32U
 #define MESHTASTIC_EVENT_LOG_LINE_LEN 192U
 #define MESHTASTIC_CHAT_LOG_LINES 24U
-#define MESHTASTIC_CHAT_LOG_LINE_LEN 192U
+#define MESHTASTIC_CHAT_LOG_LINE_LEN 256U
 #define MESHTASTIC_NODE_CACHE_SIZE 24U
 #define MESHTASTIC_PACKET_HISTORY_SIZE 64U
 #define MESHTASTIC_PACKET_HISTORY_TTL_US (30ULL * 60ULL * 1000000ULL)
@@ -13323,9 +13323,12 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                     daemon_event("Mesh chat duplicate text suppressed from=0x%08x to=0x%08x text=%s",
                                  header.from, header.to, clean.c_str());
                 } else {
-                    daemon_chat("RX 0x%08x rssi=%ddBm snr=%.1f: %s",
-                                header.from, (int)roundf(rssi), snr,
-                                clean.c_str());
+                    daemon_chat("RX 0x%08x mode=%s to=0x%08x ch=%u rssi=%ddBm snr=%.1f: %s",
+                                header.from,
+                                meshtastic_node_is_broadcast(header.to) ?
+                                "channel" : "direct",
+                                header.to, channel_info.index,
+                                (int)roundf(rssi), snr, clean.c_str());
                 }
             }
         } else if(decoded.portnum == MESHTASTIC_TEXT_MESSAGE_COMPRESSED_APP) {
@@ -16613,8 +16616,11 @@ int main(int argc, char **argv)
                                 std::string clean =
                                     mesh_clean_text(request.message);
                                 if(!clean.empty()) {
-                                    daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",
+                                    daemon_chat("TX 0x%08x id=0x%08x mode=%s to=0x%08x ch=%u ack=%s: %s",
                                                 opts.from_node, frame.packet_id,
+                                                request.has_to_node ?
+                                                "direct" : "channel",
+                                                frame.to_node,
                                                 request.channel_index,
                                                 frame.want_ack ?
                                                 (ack_tracked ? "pending" :
@@ -16687,8 +16693,13 @@ int main(int argc, char **argv)
                                 phoneapi_tx.data.payload.size());
                             std::string clean = mesh_clean_text(text);
                             if(!clean.empty()) {
-                                daemon_chat("TX 0x%08x id=0x%08x ack=%s: %s",
+                                daemon_chat("TX 0x%08x id=0x%08x mode=%s to=0x%08x ch=%u ack=%s: %s",
                                             opts.from_node, frame.packet_id,
+                                            meshtastic_node_is_broadcast(
+                                                frame.to_node) ?
+                                            "channel" : "direct",
+                                            frame.to_node,
+                                            phoneapi_tx.channel_index,
                                             frame.want_ack ?
                                             (ack_tracked ? "pending" :
                                              "dropped") :

@@ -45,6 +45,7 @@
 #define MESHTASTIC_CANNED_FILE MESHTASTIC_CHANNEL_DIR "/canned_messages.txt"
 #define MESHTASTIC_QR_SCAN_PATH "/root/app/k230_phone_ui/k230_qr_scan"
 #define MESHTASTIC_UI_LOG_MAX 4096
+#define MESHTASTIC_UI_CHAT_MAX 8192
 #define MESHTASTIC_UI_NODE_SELECT_MAX 24
 #define MESHTASTIC_UI_NODE_LINE_MAX 768
 #define MESHTASTIC_CHANNEL_PROFILE_MAX 24
@@ -133,7 +134,7 @@ static lv_timer_t *mesh_background_timer;
 static lv_timer_t *mesh_map_timer;
 static char mesh_status_text[4096] = "Not running";
 static char mesh_log_text[MESHTASTIC_UI_LOG_MAX];
-static char mesh_last_chat_text[3072];
+static char mesh_last_chat_text[MESHTASTIC_UI_CHAT_MAX];
 static char mesh_last_ble_state[32] = "offline";
 static char mesh_node_select_ids[MESHTASTIC_UI_NODE_SELECT_MAX][24];
 static char mesh_node_select_lines[MESHTASTIC_UI_NODE_SELECT_MAX][MESHTASTIC_UI_NODE_LINE_MAX];
@@ -1510,6 +1511,20 @@ static uint32_t mesh_chat_status_color(const char *status, int sent)
     return 0xFDE68A;
 }
 
+static const char *mesh_chat_mode_label(const char *mode)
+{
+    if(mode && strcmp(mode, "direct") == 0) {
+        return ui_tr("Direct");
+    }
+    if(mode && strcmp(mode, "channel") == 0) {
+        return ui_tr("Channel");
+    }
+    if(mode && strcmp(mode, "broadcast") == 0) {
+        return ui_tr("Broadcast");
+    }
+    return "";
+}
+
 static int mesh_chat_parse_voice_line(const char *line, char *path,
                                       size_t path_len, char *duration,
                                       size_t duration_len)
@@ -1693,10 +1708,12 @@ static void mesh_chat_format_tx_meta(char *meta, size_t meta_len,
                                      char *status, size_t status_len,
                                      uint32_t *footer_color)
 {
-    char raw[128];
-    char id[24];
-    char ack[24];
+    char raw[192];
+    char id[32];
+    char ack[32];
+    char mode[24];
     const char *status_text;
+    const char *mode_text;
 
     if(status && status_len > 0U) {
         status[0] = '\0';
@@ -1710,13 +1727,57 @@ static void mesh_chat_format_tx_meta(char *meta, size_t meta_len,
        !mesh_chat_extract_meta_field(raw, "ack=", ack, sizeof(ack))) {
         return;
     }
+    mode[0] = '\0';
+    mesh_chat_extract_meta_field(raw, "mode=", mode, sizeof(mode));
+    mode_text = mesh_chat_mode_label(mode);
     status_text = mesh_chat_status_text(ack);
-    snprintf(meta, meta_len, "%s - %s", id, status_text);
+    if(mode_text[0]) {
+        snprintf(meta, meta_len, "%s - %s - %s", mode_text, id,
+                 status_text);
+    } else {
+        snprintf(meta, meta_len, "%s - %s", id, status_text);
+    }
     if(status && status_len > 0U) {
         snprintf(status, status_len, "%s", ack);
     }
     if(footer_color) {
         *footer_color = mesh_chat_status_color(ack, 1);
+    }
+}
+
+static void mesh_chat_format_rx_meta(char *meta, size_t meta_len)
+{
+    char raw[192];
+    char from[32] = "";
+    char mode[24];
+    char rssi[24];
+    const char *mode_text;
+    const char *p;
+    size_t n = 0;
+
+    if(!meta || meta_len == 0U || !meta[0]) {
+        return;
+    }
+    snprintf(raw, sizeof(raw), "%s", meta);
+    if(strncmp(raw, "RX ", 3) != 0) {
+        return;
+    }
+    p = raw + 3;
+    while(p[n] && !isspace((unsigned char)p[n]) &&
+          n + 1U < sizeof(from)) {
+        from[n] = p[n];
+        n++;
+    }
+    from[n] = '\0';
+    mode[0] = '\0';
+    rssi[0] = '\0';
+    mesh_chat_extract_meta_field(raw, "mode=", mode, sizeof(mode));
+    mesh_chat_extract_meta_field(raw, "rssi=", rssi, sizeof(rssi));
+    mode_text = mesh_chat_mode_label(mode);
+    if(mode_text[0] && rssi[0]) {
+        snprintf(meta, meta_len, "%s - %s - %s", from, mode_text, rssi);
+    } else if(mode_text[0]) {
+        snprintf(meta, meta_len, "%s - %s", from, mode_text);
     }
 }
 
@@ -1769,6 +1830,7 @@ static void mesh_chat_parse_line(const char *line, int *sent,
             prefix_len = (size_t)(colon - line);
             if(meta && meta_len > 0U) {
                 snprintf(meta, meta_len, "%.*s", (int)prefix_len, line);
+                mesh_chat_format_rx_meta(meta, meta_len);
             }
             snprintf(body, body_len, "%s", colon + 2);
             return;
@@ -2289,7 +2351,7 @@ static void mesh_show_incoming_notification(const char *line)
 
 static void mesh_refresh_chat_common(int update_ui, int notify_background)
 {
-    char response[3072];
+    char response[MESHTASTIC_UI_CHAT_MAX];
     const char *shown;
     const char *append_lines = NULL;
     char latest_rx[256];
