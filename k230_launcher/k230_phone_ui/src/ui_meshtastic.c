@@ -5443,18 +5443,19 @@ static void mesh_map_rebuild(void)
     int missing_tiles = 0;
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
-    int margin = ui_page_side_margin();
-    int content_w = screen_w - margin * 2;
     int landscape = ui_is_landscape();
-    int title_y = 22;
+    int margin = landscape ? 24 : ui_page_side_margin();
+    int bottom_margin = landscape ? 18 : margin;
+    int content_w = screen_w - margin * 2;
+    int title_y = landscape ? 16 : 22;
     int controls_x = margin;
-    int controls_y = landscape ? 78 : 72;
-    int controls_w = landscape ? 260 : content_w;
-    int controls_h = landscape ? screen_h - controls_y - margin : 118;
-    int map_x = landscape ? controls_x + controls_w + 12 : margin;
+    int controls_y = landscape ? 88 : 72;
+    int controls_w = landscape ? 184 : content_w;
+    int controls_h = landscape ? screen_h - controls_y - bottom_margin : 118;
+    int map_x = landscape ? controls_x + controls_w + 10 : margin;
     int map_y = landscape ? controls_y : controls_y + controls_h + 12;
     int map_w = landscape ? screen_w - map_x - margin : content_w;
-    int map_h = screen_h - map_y - margin;
+    int map_h = screen_h - map_y - bottom_margin;
     lv_obj_t *panel;
     lv_obj_t *title;
     lv_obj_t *btn;
@@ -5465,6 +5466,12 @@ static void mesh_map_rebuild(void)
 
     if(!mesh_map_overlay || !lv_obj_is_valid(mesh_map_overlay)) {
         return;
+    }
+    if(map_w < 240) {
+        map_w = 240;
+    }
+    if(map_h < 180) {
+        map_h = 180;
     }
     mesh_map_load_prefs();
     lv_obj_clean(mesh_map_overlay);
