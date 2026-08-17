@@ -168,6 +168,15 @@ static lv_obj_t *mesh_channel_import_status_label;
 static lv_obj_t *mesh_canned_overlay;
 static lv_obj_t *mesh_canned_delete_overlay;
 static lv_obj_t *mesh_channel_url_label;
+
+typedef enum {
+    MESH_MAP_POS_READY = 0,
+    MESH_MAP_POS_DAEMON_OFFLINE,
+    MESH_MAP_POS_NRF9151_MISSING,
+    MESH_MAP_POS_GNSS_SEARCHING,
+    MESH_MAP_POS_GNSS_ERROR,
+    MESH_MAP_POS_COORD_UNAVAILABLE,
+} mesh_map_position_state_t;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
 static lv_obj_t *mesh_publish_status_label;
@@ -5187,7 +5196,8 @@ static void mesh_map_pixel_to_lonlat(double px, double py, int zoom,
 
 static int mesh_map_status_position(const char *status, double *lat,
                                     double *lon, char *reason,
-                                    size_t reason_len)
+                                    size_t reason_len,
+                                    mesh_map_position_state_t *state)
 {
     char nrf9151[24];
     char gps[24];
@@ -5198,11 +5208,18 @@ static int mesh_map_status_position(const char *status, double *lat,
     double parsed_lon;
 
     if(reason && reason_len > 0U) {
-        snprintf(reason, reason_len, "%s", "Waiting for position");
+        snprintf(reason, reason_len, "%s", ui_tr("Waiting for position"));
+    }
+    if(state) {
+        *state = MESH_MAP_POS_GNSS_SEARCHING;
     }
     if(!status || !mesh_status_is_online(status)) {
         if(reason && reason_len > 0U) {
-            snprintf(reason, reason_len, "%s", "Meshtastic daemon offline");
+            snprintf(reason, reason_len, "%s",
+                     ui_tr("Meshtastic service is starting"));
+        }
+        if(state) {
+            *state = MESH_MAP_POS_DAEMON_OFFLINE;
         }
         return 0;
     }
@@ -5210,7 +5227,11 @@ static int mesh_map_status_position(const char *status, double *lat,
     mesh_status_field(status, "nrf9151", nrf9151, sizeof(nrf9151), "missing");
     if(strcmp(nrf9151, "present") != 0) {
         if(reason && reason_len > 0U) {
-            snprintf(reason, reason_len, "%s", "nRF9151 GNSS not detected");
+            snprintf(reason, reason_len, "%s",
+                     ui_tr("nRF9151 GNSS not detected"));
+        }
+        if(state) {
+            *state = MESH_MAP_POS_NRF9151_MISSING;
         }
         return 0;
     }
@@ -5221,7 +5242,20 @@ static int mesh_map_status_position(const char *status, double *lat,
     if(strcmp(gps, "fix") != 0 && strcmp(gps, "fixed") != 0 &&
        strcmp(gps, "debug") != 0) {
         if(reason && reason_len > 0U) {
-            snprintf(reason, reason_len, "GNSS state: %s", gps);
+            if(strcmp(gps, "error") == 0 || strcmp(gps, "failed") == 0) {
+                snprintf(reason, reason_len, "%s",
+                         ui_tr("GNSS needs attention"));
+            } else {
+                snprintf(reason, reason_len, "%s",
+                         ui_tr("nRF9151 GNSS locating..."));
+            }
+        }
+        if(state) {
+            if(strcmp(gps, "error") == 0 || strcmp(gps, "failed") == 0) {
+                *state = MESH_MAP_POS_GNSS_ERROR;
+            } else {
+                *state = MESH_MAP_POS_GNSS_SEARCHING;
+            }
         }
         return 0;
     }
@@ -5229,20 +5263,32 @@ static int mesh_map_status_position(const char *status, double *lat,
     parsed_lat = strtod(lat_text, &endptr);
     if(endptr == lat_text || !isfinite(parsed_lat)) {
         if(reason && reason_len > 0U) {
-            snprintf(reason, reason_len, "%s", "GNSS latitude unavailable");
+            snprintf(reason, reason_len, "%s",
+                     ui_tr("Waiting for GNSS coordinates"));
+        }
+        if(state) {
+            *state = MESH_MAP_POS_COORD_UNAVAILABLE;
         }
         return 0;
     }
     parsed_lon = strtod(lon_text, &endptr);
     if(endptr == lon_text || !isfinite(parsed_lon)) {
         if(reason && reason_len > 0U) {
-            snprintf(reason, reason_len, "%s", "GNSS longitude unavailable");
+            snprintf(reason, reason_len, "%s",
+                     ui_tr("Waiting for GNSS coordinates"));
+        }
+        if(state) {
+            *state = MESH_MAP_POS_COORD_UNAVAILABLE;
         }
         return 0;
     }
     if(fabs(parsed_lat) < 0.000001 && fabs(parsed_lon) < 0.000001) {
         if(reason && reason_len > 0U) {
-            snprintf(reason, reason_len, "%s", "GNSS fix has no coordinates");
+            snprintf(reason, reason_len, "%s",
+                     ui_tr("Waiting for GNSS coordinates"));
+        }
+        if(state) {
+            *state = MESH_MAP_POS_COORD_UNAVAILABLE;
         }
         return 0;
     }
@@ -5257,12 +5303,16 @@ static int mesh_map_status_position(const char *status, double *lat,
         snprintf(reason, reason_len, "GNSS %.5f, %.5f", parsed_lat,
                  parsed_lon);
     }
+    if(state) {
+        *state = MESH_MAP_POS_READY;
+    }
     return 1;
 }
 
 static int mesh_map_current_position(const char *status, double *lat,
                                      double *lon, char *reason,
-                                     size_t reason_len)
+                                     size_t reason_len,
+                                     mesh_map_position_state_t *state)
 {
     if(mesh_map_fake_gps_enabled) {
         if(lat) {
@@ -5276,9 +5326,13 @@ static int mesh_map_current_position(const char *status, double *lat,
                      "Debug GPS %.5f, %.5f", MESHTASTIC_MAP_FAKE_LAT,
                      MESHTASTIC_MAP_FAKE_LON);
         }
+        if(state) {
+            *state = MESH_MAP_POS_READY;
+        }
         return 1;
     }
-    return mesh_map_status_position(status, lat, lon, reason, reason_len);
+    return mesh_map_status_position(status, lat, lon, reason, reason_len,
+                                    state);
 }
 
 static void mesh_map_tile_path(int z, int x, int y, char *out,
@@ -5720,6 +5774,91 @@ static void mesh_map_refresh_event_cb(lv_event_t *event)
     mesh_map_rebuild();
 }
 
+static const char *mesh_map_position_hint(mesh_map_position_state_t state)
+{
+    switch(state) {
+    case MESH_MAP_POS_DAEMON_OFFLINE:
+        return ui_tr("Waiting for Meshtastic service.");
+    case MESH_MAP_POS_NRF9151_MISSING:
+        return ui_tr("Install nRF9151 or enable Debug GPS.");
+    case MESH_MAP_POS_GNSS_ERROR:
+        return ui_tr("Open Cellular app to check GNSS.");
+    case MESH_MAP_POS_COORD_UNAVAILABLE:
+    case MESH_MAP_POS_GNSS_SEARCHING:
+        return ui_tr("Open sky improves GNSS fix.");
+    case MESH_MAP_POS_READY:
+    default:
+        return "";
+    }
+}
+
+static void mesh_map_draw_position_state(lv_obj_t *map, int map_w, int map_h,
+                                         const char *reason,
+                                         mesh_map_position_state_t state)
+{
+    lv_obj_t *card;
+    lv_obj_t *spinner = NULL;
+    lv_obj_t *label;
+    lv_obj_t *hint;
+    const char *hint_text = mesh_map_position_hint(state);
+    int show_spinner = state == MESH_MAP_POS_GNSS_SEARCHING ||
+                       state == MESH_MAP_POS_COORD_UNAVAILABLE ||
+                       state == MESH_MAP_POS_DAEMON_OFFLINE;
+    int card_w = map_w - 48;
+    int card_h = show_spinner ? 172 : 132;
+    int text_y = show_spinner ? 74 : 24;
+
+    if(card_w > 420) {
+        card_w = 420;
+    }
+    if(card_w < 220) {
+        card_w = map_w - 24;
+    }
+    if(card_h > map_h - 24) {
+        card_h = map_h - 24;
+    }
+
+    card = lv_obj_create(map);
+    lv_obj_set_size(card, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x233044), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 10, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    if(show_spinner) {
+        spinner = lv_spinner_create(card);
+        lv_obj_set_size(spinner, 42, 42);
+        lv_obj_set_pos(spinner, (card_w - 42) / 2, 20);
+        lv_obj_set_style_arc_color(spinner, lv_color_hex(0x25C281),
+                                   LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(spinner, lv_color_hex(0x233044),
+                                   LV_PART_MAIN);
+    }
+
+    label = ui_label(card, reason && reason[0] ? reason :
+                     ui_tr("nRF9151 GNSS locating..."),
+                     &lv_font_montserrat_20,
+                     state == MESH_MAP_POS_NRF9151_MISSING ? 0xF5A524 :
+                     state == MESH_MAP_POS_GNSS_ERROR ? 0xEF4D5A :
+                     0xD7DEE8);
+    lv_obj_set_pos(label, 16, text_y);
+    lv_obj_set_width(label, card_w - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+
+    if(hint_text && hint_text[0]) {
+        hint = ui_label(card, hint_text, &lv_font_montserrat_16, 0x94A3B8);
+        lv_obj_set_pos(hint, 18, text_y + 46);
+        lv_obj_set_width(hint, card_w - 36);
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    }
+}
+
 static void mesh_map_rebuild(void)
 {
     char status[4096];
@@ -5733,6 +5872,7 @@ static void mesh_map_rebuild(void)
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
     int landscape = ui_is_landscape();
+    mesh_map_position_state_t position_state = MESH_MAP_POS_GNSS_SEARCHING;
     int margin = landscape ? 24 : ui_page_side_margin();
     int bottom_margin = landscape ? 18 : margin;
     int content_w = screen_w - margin * 2;
@@ -5782,7 +5922,7 @@ static void mesh_map_rebuild(void)
         memmove(nodes, nodes + 9, strlen(nodes + 9) + 1U);
     }
     has_position = mesh_map_current_position(status, &lat, &lon, reason,
-                                             sizeof(reason));
+                                             sizeof(reason), &position_state);
     if(has_position) {
         if(!mesh_map_center_valid) {
             mesh_map_center_lat = lat;
@@ -5797,6 +5937,7 @@ static void mesh_map_rebuild(void)
         lat = mesh_map_center_lat;
         lon = mesh_map_center_lon;
         has_position = 1;
+        position_state = MESH_MAP_POS_READY;
         snprintf(reason, sizeof(reason), "Map %.5f, %.5f", lat, lon);
     }
 
@@ -5906,12 +6047,8 @@ static void mesh_map_rebuild(void)
             lv_obj_set_pos(label, 10, 10);
         }
     } else {
-        label = ui_label(map,
-                         ui_tr("Map needs nRF9151 GNSS fix, or enable Debug GPS."),
-                         &lv_font_montserrat_18, 0xF5A524);
-        lv_obj_set_width(label, map_w - 40);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-        lv_obj_center(label);
+        mesh_map_draw_position_state(map, map_w, map_h, reason,
+                                     position_state);
     }
 
     app_request_fast_refresh();
