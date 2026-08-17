@@ -494,6 +494,8 @@ static const ui_translation_t ui_translations[] = {
     { "No mesh activity detected yet", "暂未探测到 Mesh 活动", "Mesh アクティビティ未検出" },
     { "Nearby nodes", "附近节点", "近くのノード" },
     { "Recently heard mesh nodes; tap one for direct messages", "最近收到过的 Mesh 节点；点击节点可作为私信目标", "最近受信した Mesh ノード。タップで DM 宛先" },
+    { "Recently active mesh nodes; tap one for direct messages", "最近 15 分钟活跃的 Mesh 节点；点击节点可作为私信目标", "直近 15 分でアクティブな Mesh ノード。タップで DM 宛先" },
+    { "No recently active mesh nodes", "最近 15 分钟没有活跃 Mesh 节点", "直近 15 分のアクティブな Mesh ノードなし" },
     { "To", "发送到", "宛先" },
     { "Channel broadcast", "频道广播", "チャンネル一斉送信" },
     { "Direct message", "定向消息", "ダイレクトメッセージ" },

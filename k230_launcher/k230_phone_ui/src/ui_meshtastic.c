@@ -92,7 +92,7 @@
 #define MESHTASTIC_MAP_FAKE_LON 113.2644
 #define MESHTASTIC_PREF_MAP_FAKE_GPS "meshtastic.map.fake_gps"
 #define MESHTASTIC_PREF_MAP_ZOOM "meshtastic.map.zoom"
-#define MESHTASTIC_DETECTOR_RECENT_WINDOW_S 900
+#define MESHTASTIC_NODE_RECENT_WINDOW_S 900
 
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
@@ -6726,7 +6726,7 @@ static void mesh_detector_event_cb(lv_event_t *event)
             int recent;
             mesh_detector_node_prepare(&parsed, line);
             db_count++;
-            recent = parsed.age_s <= MESHTASTIC_DETECTOR_RECENT_WINDOW_S;
+            recent = parsed.age_s <= MESHTASTIC_NODE_RECENT_WINDOW_S;
             if(recent) {
                 detected_count++;
                 packets_total += parsed.rx_count;
@@ -7065,8 +7065,9 @@ static void mesh_profile_event_cb(lv_event_t *event)
 
 static void mesh_nodes_event_cb(lv_event_t *event)
 {
-    char response[2048];
-    char nodes_text[2048];
+    char response[8192];
+    char nodes_text[8192];
+    mesh_detector_node_t nodes[MESHTASTIC_UI_NODE_SELECT_MAX];
     char *saveptr = NULL;
     char *line;
     lv_obj_t *panel;
@@ -7086,6 +7087,11 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     int y = 98;
     int node_index = 1;
     int shown_count = 0;
+    int db_count = 0;
+    int recent_count = 0;
+    int stale_count = 0;
+    char subtitle_text[192];
+    char empty_text[192];
 
     (void)event;
     ui_input_hide_inline_active();
@@ -7098,6 +7104,29 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     if(strncmp(response, "OK nodes\n", 9) == 0) {
         snprintf(nodes_text, sizeof(nodes_text), "%s", response + 9);
     }
+
+    line = strtok_r(nodes_text, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "0x", 2) == 0) {
+            mesh_detector_node_t parsed;
+            mesh_detector_node_prepare(&parsed, line);
+            db_count++;
+            if(parsed.age_s <= MESHTASTIC_NODE_RECENT_WINDOW_S) {
+                recent_count++;
+                if(shown_count < MESHTASTIC_UI_NODE_SELECT_MAX - 1) {
+                    nodes[shown_count++] = parsed;
+                }
+            } else {
+                stale_count++;
+            }
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    mesh_detector_sort_nodes(nodes, shown_count);
+    snprintf(subtitle_text, sizeof(subtitle_text), "%s  15m %d / db %d",
+             ui_tr("Recently active mesh nodes; tap one for direct messages"),
+             recent_count, db_count);
+
     if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
         lv_obj_delete(mesh_nodes_overlay);
     }
@@ -7121,8 +7150,7 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     lv_obj_set_pos(title, margin, 22);
     lv_obj_set_width(title, content_w - 230);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    subtitle = ui_label(panel,
-                        ui_tr("Recently heard mesh nodes; tap one for direct messages"),
+    subtitle = ui_label(panel, subtitle_text,
                         &lv_font_montserrat_14, 0x94A3B8);
     lv_obj_set_pos(subtitle, margin, 56);
     lv_obj_set_width(subtitle, content_w);
@@ -7139,25 +7167,23 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     lv_obj_add_event_cb(btn, mesh_nodes_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
 
-    line = strtok_r(nodes_text, "\n", &saveptr);
-    while(line && node_index < MESHTASTIC_UI_NODE_SELECT_MAX) {
-        if(strncmp(line, "0x", 2) == 0) {
-            int col = shown_count % columns;
-            int row = shown_count / columns;
-            int x = margin + col * (card_w + gap);
-            int card_y = y + row * (card_h + gap);
-            mesh_add_node_card(panel, line, x, card_y, card_w, card_h,
-                               (size_t)node_index);
-            node_index++;
-            shown_count++;
-        }
-        line = strtok_r(NULL, "\n", &saveptr);
+    for(int i = 0; i < shown_count && node_index < MESHTASTIC_UI_NODE_SELECT_MAX;
+        i++) {
+        int col = i % columns;
+        int row = i / columns;
+        int x = margin + col * (card_w + gap);
+        int card_y = y + row * (card_h + gap);
+        mesh_add_node_card(panel, nodes[i].line, x, card_y, card_w, card_h,
+                           (size_t)node_index);
+        node_index++;
     }
 
     if(shown_count == 0) {
-        label = ui_label(panel,
-                         nodes_text[0] ? nodes_text : "No nodes seen yet",
-                         &lv_font_montserrat_18, 0xCBD5E1);
+        snprintf(empty_text, sizeof(empty_text), "%s\n15m 0 / db %d / stale %d",
+                 ui_tr("No recently active mesh nodes"), db_count,
+                 stale_count);
+        label = ui_label(panel, empty_text, &lv_font_montserrat_18,
+                         0xCBD5E1);
         lv_obj_set_pos(label, margin, y + 12);
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
