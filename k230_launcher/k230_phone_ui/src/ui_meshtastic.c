@@ -5331,14 +5331,15 @@ static void mesh_map_draw_nodes(lv_obj_t *map, const char *nodes_text,
 
 static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
                                 double center_lon, int zoom,
-                                const char *nodes_text, int *missing_out)
+                                const char *nodes_text, int view_w,
+                                int view_h, int *missing_out)
 {
     double center_x;
     double center_y;
     double top_left_x;
     double top_left_y;
-    int map_w = lv_obj_get_width(map);
-    int map_h = lv_obj_get_height(map);
+    int map_w = view_w > 0 ? view_w : lv_obj_get_width(map);
+    int map_h = view_h > 0 ? view_h : lv_obj_get_height(map);
     int n = 1 << zoom;
     int tx0;
     int tx1;
@@ -5573,10 +5574,11 @@ static void mesh_map_rebuild(void)
     lv_obj_set_style_clip_corner(map, 1, 0);
     lv_obj_set_style_pad_all(map, 0, 0);
     lv_obj_clear_flag(map, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_update_layout(map);
 
     if(has_position) {
         mesh_map_draw_tiles(map, lat, lon, mesh_map_zoom, nodes,
-                            &missing_tiles);
+                            map_w, map_h, &missing_tiles);
         if(missing_tiles > 0) {
             snprintf(info, sizeof(info), "Missing %d offline tiles",
                      missing_tiles);
