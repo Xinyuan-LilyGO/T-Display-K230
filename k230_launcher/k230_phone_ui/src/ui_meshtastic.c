@@ -92,6 +92,7 @@
 #define MESHTASTIC_MAP_FAKE_LON 113.2644
 #define MESHTASTIC_PREF_MAP_FAKE_GPS "meshtastic.map.fake_gps"
 #define MESHTASTIC_PREF_MAP_ZOOM "meshtastic.map.zoom"
+#define MESHTASTIC_DETECTOR_RECENT_WINDOW_S 900
 
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
@@ -6575,7 +6576,8 @@ static void mesh_detector_summary_card(lv_obj_t *panel, int x, int y, int w,
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 
     label = ui_label(card, detail, &lv_font_montserrat_14, 0xCBD5E1);
-    lv_obj_set_pos(label, 12, h - 30);
+    lv_obj_set_pos(label, 12, h - 42);
+    lv_obj_set_height(label, 30);
     lv_obj_set_width(label, w - 24);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 }
@@ -6666,7 +6668,7 @@ static void mesh_detector_event_cb(lv_event_t *event)
     int summary_gap = 10;
     int summary_w = (content_w - summary_gap * (summary_cols - 1)) /
                     summary_cols;
-    int summary_h = landscape ? 96 : 102;
+    int summary_h = landscape ? 116 : 118;
     int summary_rows = landscape ? 1 : 2;
     int node_cols = landscape ? 2 : 1;
     int node_gap = 12;
@@ -6674,9 +6676,10 @@ static void mesh_detector_event_cb(lv_event_t *event)
     int node_h = 98;
     int y = 0;
     int node_count = 0;
-    int seen_count = 0;
+    int db_count = 0;
+    int detected_count = 0;
     int active_5m = 0;
-    int active_1h = 0;
+    int active_15m = 0;
     int positioned = 0;
     int weak = 0;
     int best_rssi_valid = 0;
@@ -6703,44 +6706,6 @@ static void mesh_detector_event_cb(lv_event_t *event)
         memmove(nodes_text, nodes_text + 9, strlen(nodes_text + 9) + 1U);
     }
 
-    line = strtok_r(nodes_text, "\n", &saveptr);
-    while(line) {
-        if(strncmp(line, "0x", 2) == 0) {
-            mesh_detector_node_t parsed;
-            mesh_detector_node_prepare(&parsed, line);
-            seen_count++;
-            packets_total += parsed.rx_count;
-            if(parsed.age_s <= 300) {
-                active_5m++;
-            }
-            if(parsed.age_s <= 3600) {
-                active_1h++;
-            }
-            if(parsed.has_pos) {
-                positioned++;
-            }
-            if((parsed.has_rssi && parsed.rssi_dbm <= -105) ||
-               (parsed.has_snr && parsed.snr_db < 0.0)) {
-                weak++;
-            }
-            if(parsed.has_rssi &&
-               (!best_rssi_valid || parsed.rssi_dbm > best_rssi)) {
-                best_rssi = parsed.rssi_dbm;
-                best_rssi_valid = 1;
-            }
-            if(parsed.has_snr &&
-               (!best_snr_valid || parsed.snr_db > best_snr)) {
-                best_snr = parsed.snr_db;
-                best_snr_valid = 1;
-            }
-            if(node_count < MESHTASTIC_UI_NODE_SELECT_MAX - 1) {
-                nodes[node_count++] = parsed;
-            }
-        }
-        line = strtok_r(NULL, "\n", &saveptr);
-    }
-    mesh_detector_sort_nodes(nodes, node_count);
-
     mesh_status_field(status, "region", region, sizeof(region), "-");
     mesh_status_field(status, "preset", preset, sizeof(preset), "-");
     mesh_status_field(status, "channel", channel, sizeof(channel), "-");
@@ -6752,6 +6717,50 @@ static void mesh_detector_event_cb(lv_event_t *event)
     mesh_status_field(status, "hist", hist, sizeof(hist), "0");
     snprintf(profile, sizeof(profile), "%s / %s / %s MHz / %s",
              region, preset, freq, channel);
+
+    line = strtok_r(nodes_text, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "0x", 2) == 0) {
+            mesh_detector_node_t parsed;
+            int recent;
+            mesh_detector_node_prepare(&parsed, line);
+            db_count++;
+            recent = parsed.age_s <= MESHTASTIC_DETECTOR_RECENT_WINDOW_S;
+            if(recent) {
+                detected_count++;
+                packets_total += parsed.rx_count;
+                if(parsed.age_s <= 300) {
+                    active_5m++;
+                }
+                active_15m++;
+                if(parsed.has_pos) {
+                    positioned++;
+                }
+                if((parsed.has_rssi && parsed.rssi_dbm <= -105) ||
+                   (parsed.has_snr && parsed.snr_db < 0.0)) {
+                    weak++;
+                }
+                if(parsed.has_rssi &&
+                   (!best_rssi_valid || parsed.rssi_dbm > best_rssi)) {
+                    best_rssi = parsed.rssi_dbm;
+                    best_rssi_valid = 1;
+                }
+                if(parsed.has_snr &&
+                   (!best_snr_valid || parsed.snr_db > best_snr)) {
+                    best_snr = parsed.snr_db;
+                    best_snr_valid = 1;
+                }
+                if(node_count < MESHTASTIC_UI_NODE_SELECT_MAX - 1) {
+                    nodes[node_count++] = parsed;
+                }
+            }
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    mesh_detector_sort_nodes(nodes, node_count);
+    if(strcmp(nodedb, "0") == 0 && db_count > 0) {
+        snprintf(nodedb, sizeof(nodedb), "%d", db_count);
+    }
 
     mesh_detector_close();
     mesh_detector_overlay = lv_obj_create(lv_screen_active());
@@ -6799,12 +6808,12 @@ static void mesh_detector_event_cb(lv_event_t *event)
                                summary_w, summary_h, title, card_value, \
                                card_detail, color)
 
-    snprintf(value, sizeof(value), "%d", seen_count);
-    snprintf(detail, sizeof(detail), "%s %s", ui_tr("Nodes"), nodedb);
+    snprintf(value, sizeof(value), "%d", detected_count);
+    snprintf(detail, sizeof(detail), "15m / db %s", nodedb);
     MESH_DETECTOR_SUMMARY(0, ui_tr("Mesh nodes"), value, detail, 0x25C281);
 
-    snprintf(value, sizeof(value), "%d / %d", active_5m, active_1h);
-    MESH_DETECTOR_SUMMARY(1, ui_tr("Active nodes"), value, "5m / 1h",
+    snprintf(value, sizeof(value), "%d / %d", active_5m, active_15m);
+    MESH_DETECTOR_SUMMARY(1, ui_tr("Active nodes"), value, "5m / 15m",
                           0x3DA5FF);
 
     if(best_rssi_valid) {
