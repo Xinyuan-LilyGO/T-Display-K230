@@ -12189,6 +12189,11 @@ typedef struct {
 } mesh_voice_rx_stream_t;
 
 static mesh_voice_rx_stream_t mesh_voice_rx_streams[MESHTASTIC_VOICE_RX_STREAMS];
+static uint64_t mesh_voice_tx_stream_count;
+static uint64_t mesh_voice_tx_chunk_count;
+static uint64_t mesh_voice_rx_chunk_count;
+static uint64_t mesh_voice_rx_complete_count;
+static uint64_t mesh_voice_rx_decode_fail_count;
 
 static void mesh_voice_rx_stream_reset(mesh_voice_rx_stream_t *stream)
 {
@@ -12408,6 +12413,7 @@ static bool mesh_voice_handle_rx(const probe_options_t &opts,
     if(duplicate || !secure_match || header.from == opts.from_node) {
         return true;
     }
+    mesh_voice_rx_chunk_count++;
     stream = mesh_voice_rx_find_stream(header.from, stream_id, total);
     if(!stream || stream->total != total || seq >= stream->total) {
         return true;
@@ -12423,6 +12429,7 @@ static bool mesh_voice_handle_rx(const probe_options_t &opts,
         snprintf(path, sizeof(path), "/tmp/k230_mesh_voice_rx_%08x_%08x.raw",
                  header.from, stream_id);
         if(mesh_voice_decode_stream_to_file(stream, path, &duration_ms)) {
+            mesh_voice_rx_complete_count++;
             if(rssi > -200.0f && rssi < 20.0f) {
                 daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=%ddBm",
                             header.from, (double)duration_ms / 1000.0,
@@ -12434,6 +12441,7 @@ static bool mesh_voice_handle_rx(const probe_options_t &opts,
             }
             mesh_voice_play_file_async(path);
         } else {
+            mesh_voice_rx_decode_fail_count++;
             daemon_chat("RX 0x%08x voice decode failed chunks=%u",
                         header.from, stream->total);
         }
@@ -13172,6 +13180,8 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "delayed=%u next_rebroadcast_ms=%u "
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
+             "voice_tx_streams=%lu voice_tx_chunks=%lu voice_rx_chunks=%lu "
+             "voice_rx_complete=%lu voice_rx_decode_fail=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
              "position=%s fixed=%s nrf9151=%s gps=%s gnss_phase=%s gps_detail=%s "
              "nmea_rx=%lu nmea_valid=%lu nmea_nofix=%lu last_nmea_ms=%lu "
@@ -13202,6 +13212,11 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_ack_retry_count,
              (unsigned long)mesh_ack_timeout_count,
              (unsigned long)mesh_ack_drop_count,
+             (unsigned long)mesh_voice_tx_stream_count,
+             (unsigned long)mesh_voice_tx_chunk_count,
+             (unsigned long)mesh_voice_rx_chunk_count,
+             (unsigned long)mesh_voice_rx_complete_count,
+             (unsigned long)mesh_voice_rx_decode_fail_count,
              (unsigned long)mesh_nodeinfo_tx_count,
              (unsigned long)mesh_nodeinfo_drop_count,
              mesh_nodeinfo_next_ms(now),
@@ -14058,6 +14073,8 @@ static std::string handle_daemon_command(const std::string &line,
             request.summary = "voice";
             send_queue->push_back(request);
         }
+        mesh_voice_tx_stream_count++;
+        mesh_voice_tx_chunk_count += chunks.size();
         daemon_event("Daemon SEND_VOICE queued stream=0x%08x chunks=%u depth=%u op=%s",
                      stream_id, (unsigned)chunks.size(),
                      (unsigned)send_queue->size(), op_name(active_op));
