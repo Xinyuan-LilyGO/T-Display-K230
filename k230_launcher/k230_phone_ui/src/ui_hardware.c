@@ -1138,6 +1138,10 @@ int ui_hardware_keyboard_backlight_get(void)
 
 int ui_hardware_boot0_screen_off(void)
 {
+    if(boot0_screen_off && hardware_read_backlight_raw() > 0) {
+        boot0_screen_off = 0;
+        button_test_log("BOOT0 screen-off state cleared because screen backlight is on");
+    }
     return boot0_screen_off;
 }
 
@@ -1243,6 +1247,10 @@ static void boot0_toggle_poll(void)
     if(!boot0_toggle_initialized) {
         boot0_last_raw = value;
         boot0_toggle_initialized = 1;
+        if(hardware_read_backlight_raw() <= 0) {
+            boot0_screen_off = 1;
+            button_test_log("BOOT0 initial screen-off state from backlight=0");
+        }
         return;
     }
 

@@ -1155,7 +1155,26 @@ static int display_idle_is_dimmed(void)
 
 static int touch_input_blocked(void)
 {
-    return display_idle_is_dimmed() || ui_hardware_boot0_screen_off();
+    int idle_dimmed = display_idle_is_dimmed();
+    int boot0_off = ui_hardware_boot0_screen_off();
+
+    if((idle_dimmed || boot0_off) && ui_hardware_screen_backlight_get() > 0) {
+        uint64_t now = monotonic_us();
+
+        if(idle_dimmed) {
+            pthread_mutex_lock(&display_idle_lock);
+            display_idle_dimmed = 0;
+            display_idle_wake_pending = 0;
+            display_last_activity_us = now;
+            pthread_mutex_unlock(&display_idle_lock);
+            touch_trace_log("DISPLAY_TIMEOUT_TOUCH_STATE_RECOVER screen=%d",
+                            ui_hardware_screen_backlight_get());
+        }
+        boot0_off = ui_hardware_boot0_screen_off();
+        idle_dimmed = display_idle_is_dimmed();
+    }
+
+    return idle_dimmed || boot0_off;
 }
 
 static void display_idle_poll(void)
