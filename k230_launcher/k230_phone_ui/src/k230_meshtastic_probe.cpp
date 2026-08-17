@@ -30,6 +30,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
+#include <codec2.h>
 #include <opus/opus.h>
 
 #include <algorithm>
@@ -40,7 +41,7 @@
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
 
-#define PROBE_VERSION "0.30"
+#define PROBE_VERSION "0.31"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 16U
@@ -97,6 +98,8 @@
 #define MESHTASTIC_CHAT_DEDUP_TTL_US (45ULL * 1000000ULL)
 #define MESHTASTIC_VOICE_MAGIC "KPV1"
 #define MESHTASTIC_VOICE_CODEC_OPUS 1U
+#define MESHTASTIC_VOICE_CODEC2_HEADER_LEN 4U
+#define MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE CODEC2_MODE_1200
 #define MESHTASTIC_VOICE_SAMPLE_RATE 8000U
 #define MESHTASTIC_VOICE_FRAME_MS 20U
 #define MESHTASTIC_VOICE_FRAME_SAMPLES \
@@ -111,6 +114,7 @@
 #define MESHTASTIC_AIRTIME_TX_PERIODS 60U
 #define MESHTASTIC_AIRTIME_TX_PERIOD_US (60ULL * 1000000ULL)
 #define MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT 25.0f
+#define MESHTASTIC_AIRTIME_MAX_CHANNEL_UTIL_PERCENT 40.0f
 #define MESHTASTIC_AIRTIME_POLITE_DUTY_CYCLE_RATIO 0.5f
 #define MESHTASTIC_DELAYED_TX_QUEUE_SIZE 4U
 #define MESHTASTIC_REBROADCAST_MIN_DELAY_US 150000ULL
@@ -3134,15 +3138,19 @@ static float meshtastic_region_duty_cycle_percent(
     return meshtastic_region_duty_cycle_percent(region);
 }
 
-static bool mesh_voice_airtime_allowed(const probe_options_t &opts,
-                                       uint32_t estimated_airtime_ms,
-                                       char *errbuf, size_t errbuf_len)
+static bool mesh_airtime_allowed(const probe_options_t &opts,
+                                 uint32_t estimated_airtime_ms,
+                                 bool polite, char *errbuf,
+                                 size_t errbuf_len)
 {
     float channel_util = mesh_airtime_channel_util_percent();
     float tx_util = mesh_airtime_tx_util_percent();
     float duty_cycle = meshtastic_region_duty_cycle_percent(opts);
+    float channel_limit = polite ? MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT :
+                                  MESHTASTIC_AIRTIME_MAX_CHANNEL_UTIL_PERCENT;
     float tx_limit = duty_cycle < 100.0f ?
-        duty_cycle * MESHTASTIC_AIRTIME_POLITE_DUTY_CYCLE_RATIO : 100.0f;
+        duty_cycle * (polite ? MESHTASTIC_AIRTIME_POLITE_DUTY_CYCLE_RATIO :
+                               1.0f) : 100.0f;
     float channel_projected = channel_util;
     float tx_projected = tx_util;
 
@@ -3157,18 +3165,16 @@ static bool mesh_voice_airtime_allowed(const probe_options_t &opts,
             100.0f;
     }
 
-    if(channel_util >= MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT) {
+    if(channel_util >= channel_limit) {
         snprintf(errbuf, errbuf_len,
                  "channel-busy ch_util=%.1f limit=%.1f",
-                 channel_util,
-                 MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT);
+                 channel_util, channel_limit);
         return false;
     }
-    if(channel_projected >= MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT) {
+    if(channel_projected >= channel_limit) {
         snprintf(errbuf, errbuf_len,
                  "channel-budget ch_util=%.1f projected=%.1f limit=%.1f airtime_ms=%u",
-                 channel_util, channel_projected,
-                 MESHTASTIC_AIRTIME_POLITE_CHANNEL_UTIL_PERCENT,
+                 channel_util, channel_projected, channel_limit,
                  estimated_airtime_ms);
         return false;
     }
@@ -3189,6 +3195,22 @@ static bool mesh_voice_airtime_allowed(const probe_options_t &opts,
         errbuf[0] = '\0';
     }
     return true;
+}
+
+static bool mesh_frame_airtime_allowed(PhysicalLayer *radio,
+                                       const probe_options_t &opts,
+                                       const tx_frame_t &frame,
+                                       bool polite,
+                                       char *errbuf,
+                                       size_t errbuf_len,
+                                       uint32_t *airtime_ms)
+{
+    uint32_t estimate = mesh_radio_airtime_ms(radio, frame.bytes.size());
+
+    if(airtime_ms) {
+        *airtime_ms = estimate;
+    }
+    return mesh_airtime_allowed(opts, estimate, polite, errbuf, errbuf_len);
 }
 
 static bool profile_supports_preset(region_profile_type_t profile,
@@ -12595,6 +12617,26 @@ static bool mesh_voice_chunk_payload_valid(const std::vector<uint8_t> &payload)
     return pos == payload.size();
 }
 
+static bool mesh_voice_payload_is_codec2(const std::vector<uint8_t> &payload)
+{
+    return payload.size() >= MESHTASTIC_VOICE_CODEC2_HEADER_LEN &&
+           payload[0] == 0xc0U && payload[1] == 0xdeU &&
+           payload[2] == 0xc2U;
+}
+
+static void mesh_voice_set_error(char *errbuf, size_t errbuf_len,
+                                 const char *fmt, ...)
+{
+    va_list ap;
+
+    if(!errbuf || errbuf_len == 0U || !fmt) {
+        return;
+    }
+    va_start(ap, fmt);
+    vsnprintf(errbuf, errbuf_len, fmt, ap);
+    va_end(ap);
+}
+
 static mesh_voice_rx_stream_t *mesh_voice_rx_find_stream(uint32_t from_node,
                                                          uint32_t stream_id,
                                                          uint16_t total)
@@ -12703,6 +12745,81 @@ static bool mesh_voice_decode_stream_to_file(const mesh_voice_rx_stream_t *strea
     if(!fp) {
         daemon_event("Voice decode fopen failed path=%s err=%s", path,
                      strerror(errno));
+        return false;
+    }
+    fwrite(pcm.data(), sizeof(int16_t), pcm.size(), fp);
+    fclose(fp);
+    if(duration_ms) {
+        *duration_ms = (unsigned)((uint64_t)pcm.size() * 1000ULL /
+                                  MESHTASTIC_VOICE_SAMPLE_RATE);
+    }
+    return true;
+}
+
+static bool mesh_voice_decode_codec2_payload_to_file(
+    const std::vector<uint8_t> &payload, const char *path,
+    unsigned *duration_ms, char *errbuf, size_t errbuf_len)
+{
+    CODEC2 *codec;
+    uint8_t mode;
+    int frame_bytes;
+    int frame_samples;
+    size_t payload_pos = MESHTASTIC_VOICE_CODEC2_HEADER_LEN;
+    std::vector<int16_t> pcm;
+    FILE *fp;
+
+    if(duration_ms) {
+        *duration_ms = 0U;
+    }
+    if(!path || !path[0]) {
+        mesh_voice_set_error(errbuf, errbuf_len, "invalid codec2 output path");
+        return false;
+    }
+    if(!mesh_voice_payload_is_codec2(payload)) {
+        mesh_voice_set_error(errbuf, errbuf_len, "invalid codec2 header");
+        return false;
+    }
+
+    mode = payload[3];
+    codec = codec2_create((int)mode);
+    if(!codec) {
+        mesh_voice_set_error(errbuf, errbuf_len, "codec2 create mode=%u failed",
+                             mode);
+        return false;
+    }
+    codec2_set_lpc_post_filter(codec, 1, 0, 0.8f, 0.2f);
+    frame_bytes = (codec2_bits_per_frame(codec) + 7) / 8;
+    frame_samples = codec2_samples_per_frame(codec);
+    if(frame_bytes <= 0 || frame_samples <= 0) {
+        codec2_destroy(codec);
+        mesh_voice_set_error(errbuf, errbuf_len,
+                             "codec2 bad frame mode=%u bytes=%d samples=%d",
+                             mode, frame_bytes, frame_samples);
+        return false;
+    }
+
+    while(payload_pos + (size_t)frame_bytes <= payload.size()) {
+        size_t old_size = pcm.size();
+        pcm.resize(old_size + (size_t)frame_samples);
+        codec2_decode(codec, pcm.data() + old_size, payload.data() + payload_pos);
+        payload_pos += (size_t)frame_bytes;
+    }
+    codec2_destroy(codec);
+    if(pcm.empty()) {
+        mesh_voice_set_error(errbuf, errbuf_len,
+                             "codec2 payload has no complete frame mode=%u len=%u",
+                             mode, (unsigned)payload.size());
+        return false;
+    }
+    if(payload_pos != payload.size()) {
+        daemon_event("Codec2 voice ignored trailing bytes mode=%u trailing=%u",
+                     mode, (unsigned)(payload.size() - payload_pos));
+    }
+
+    fp = fopen(path, "wb");
+    if(!fp) {
+        mesh_voice_set_error(errbuf, errbuf_len, "codec2 fopen failed: %s",
+                             strerror(errno));
         return false;
     }
     fwrite(pcm.data(), sizeof(int16_t), pcm.size(), fp);
@@ -12887,8 +13004,106 @@ static bool mesh_voice_encode_pcm_file(const char *path, uint32_t stream_id,
     return true;
 }
 
+static bool mesh_voice_encode_codec2_pcm_file(
+    const char *path, std::vector<std::vector<uint8_t>> *chunks,
+    unsigned *duration_ms, char *errbuf, size_t errbuf_len)
+{
+    FILE *fp;
+    std::vector<int16_t> pcm;
+    std::vector<uint8_t> encoded;
+    std::vector<uint8_t> chunk;
+    CODEC2 *codec;
+    int frame_bytes;
+    int frame_samples;
+    size_t read_samples;
+
+    if(duration_ms) {
+        *duration_ms = 0U;
+    }
+    if(errbuf && errbuf_len > 0U) {
+        errbuf[0] = '\0';
+    }
+    if(!path || !chunks) {
+        mesh_voice_set_error(errbuf, errbuf_len, "invalid codec2 voice argument");
+        return false;
+    }
+    fp = fopen(path, "rb");
+    if(!fp) {
+        mesh_voice_set_error(errbuf, errbuf_len, "codec2 open failed: %s",
+                             strerror(errno));
+        return false;
+    }
+    pcm.resize(MESHTASTIC_VOICE_MAX_PCM_BYTES / sizeof(int16_t));
+    read_samples = fread(pcm.data(), sizeof(int16_t), pcm.size(), fp);
+    fclose(fp);
+    pcm.resize(read_samples);
+    if(duration_ms) {
+        *duration_ms = (unsigned)((uint64_t)read_samples * 1000ULL /
+                                  MESHTASTIC_VOICE_SAMPLE_RATE);
+    }
+    if(pcm.empty()) {
+        mesh_voice_set_error(errbuf, errbuf_len, "codec2 voice sample empty");
+        return false;
+    }
+
+    codec = codec2_create(MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE);
+    if(!codec) {
+        mesh_voice_set_error(errbuf, errbuf_len, "codec2 encoder create failed");
+        return false;
+    }
+    codec2_set_lpc_post_filter(codec, 1, 0, 0.8f, 0.2f);
+    frame_bytes = (codec2_bits_per_frame(codec) + 7) / 8;
+    frame_samples = codec2_samples_per_frame(codec);
+    if(frame_bytes <= 0 || frame_samples <= 0 ||
+       (size_t)frame_bytes >
+       (MESHTASTIC_DATA_PAYLOAD_LEN - MESHTASTIC_VOICE_CODEC2_HEADER_LEN)) {
+        codec2_destroy(codec);
+        mesh_voice_set_error(errbuf, errbuf_len,
+                             "codec2 bad frame mode=%u bytes=%d samples=%d",
+                             MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE,
+                             frame_bytes, frame_samples);
+        return false;
+    }
+    while(pcm.size() % (size_t)frame_samples) {
+        pcm.push_back(0);
+    }
+
+    chunks->clear();
+    encoded.resize((size_t)frame_bytes);
+    for(size_t pos = 0; pos < pcm.size(); pos += (size_t)frame_samples) {
+        if(chunk.empty()) {
+            chunk.push_back(0xc0U);
+            chunk.push_back(0xdeU);
+            chunk.push_back(0xc2U);
+            chunk.push_back(MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE);
+        }
+        if(chunk.size() + (size_t)frame_bytes > MESHTASTIC_DATA_PAYLOAD_LEN) {
+            chunks->push_back(chunk);
+            chunk.clear();
+            chunk.push_back(0xc0U);
+            chunk.push_back(0xdeU);
+            chunk.push_back(0xc2U);
+            chunk.push_back(MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE);
+        }
+        codec2_encode(codec, encoded.data(), pcm.data() + pos);
+        chunk.insert(chunk.end(), encoded.begin(), encoded.end());
+    }
+    codec2_destroy(codec);
+    if(!chunk.empty()) {
+        chunks->push_back(chunk);
+    }
+    if(chunks->empty() || chunks->size() > MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+        mesh_voice_set_error(errbuf, errbuf_len,
+                             "codec2 voice packet count %u exceeds queue",
+                             (unsigned)chunks->size());
+        chunks->clear();
+        return false;
+    }
+    return true;
+}
+
 static uint32_t mesh_voice_estimate_chunks_airtime_ms(
-    PhysicalLayer *radio, const probe_options_t &opts,
+    PhysicalLayer *radio, const probe_options_t &opts, uint32_t portnum,
     const std::vector<std::vector<uint8_t>> &chunks)
 {
     uint64_t total_ms = 0ULL;
@@ -12901,8 +13116,8 @@ static uint32_t mesh_voice_estimate_chunks_airtime_ms(
     for(size_t i = 0; i < chunks.size(); i++) {
         tx_frame_t frame;
 
-        if(!build_tx_data_frame(estimate_opts, MESHTASTIC_PRIVATE_APP,
-                                chunks[i], 0U, "voice-estimate", &frame)) {
+        if(!build_tx_data_frame(estimate_opts, portnum, chunks[i], 0U,
+                                "voice-estimate", &frame)) {
             continue;
         }
         total_ms += mesh_radio_airtime_ms(radio, frame.bytes.size());
@@ -13137,10 +13352,7 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                             header.from, (unsigned)decoded.payload.size());
             }
         } else if(decoded.portnum == MESHTASTIC_AUDIO_APP) {
-            bool codec2_header = decoded.payload.size() >= 4U &&
-                                 decoded.payload[0] == 0xc0U &&
-                                 decoded.payload[1] == 0xdeU &&
-                                 decoded.payload[2] == 0xc2U;
+            bool codec2_header = mesh_voice_payload_is_codec2(decoded.payload);
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u ack=%s rssi=%.1f snr=%.1f port=%u codec2=%s len=%u%s",
                          (unsigned long)rx_count, header.from, header.to,
                          header.id, header.channel, hop_limit, hop_start,
@@ -13150,9 +13362,41 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                          (unsigned)decoded.payload.size(),
                          duplicate ? " duplicate" : "");
             if(!duplicate && secure_match && header.from != opts.from_node) {
-                daemon_chat("RX 0x%08x codec2 voice len=%u%s",
-                            header.from, (unsigned)decoded.payload.size(),
-                            codec2_header ? "" : " invalid-header");
+                if(codec2_header) {
+                    char path[128];
+                    char errbuf[128];
+                    unsigned duration_ms = 0U;
+
+                    mesh_voice_rx_chunk_count++;
+                    snprintf(path, sizeof(path),
+                             "/tmp/k230_mesh_voice_rx_%08x_%08x.raw",
+                             header.from, header.id);
+                    if(mesh_voice_decode_codec2_payload_to_file(
+                           decoded.payload, path, &duration_ms, errbuf,
+                           sizeof(errbuf))) {
+                        mesh_voice_rx_complete_count++;
+                        if(rssi > -200.0f && rssi < 20.0f) {
+                            daemon_chat("RX 0x%08x voice %.1fs codec=codec2 rssi=%ddBm file=%s",
+                                        header.from,
+                                        (double)duration_ms / 1000.0,
+                                        (int)roundf(rssi), path);
+                        } else {
+                            daemon_chat("RX 0x%08x voice %.1fs codec=codec2 rssi=-- file=%s",
+                                        header.from,
+                                        (double)duration_ms / 1000.0,
+                                        path);
+                        }
+                    } else {
+                        mesh_voice_rx_decode_fail_count++;
+                        daemon_chat("RX 0x%08x codec2 voice decode failed: %s",
+                                    header.from, errbuf);
+                    }
+                } else {
+                    mesh_voice_rx_decode_fail_count++;
+                    daemon_chat("RX 0x%08x codec2 voice invalid-header len=%u",
+                                header.from,
+                                (unsigned)decoded.payload.size());
+                }
             }
         } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
                   mesh_voice_payload_is_k230(decoded.payload)) {
@@ -14396,13 +14640,17 @@ static std::string handle_daemon_command(const std::string &line,
        line.compare(0, 16, "send_voice_file ") == 0) {
         std::vector<std::vector<uint8_t>> chunks;
         char errbuf[128];
+        char codec2_errbuf[128];
         char buf[160];
         uint32_t stream_id;
         uint32_t estimated_airtime_ms = 0U;
+        uint32_t voice_portnum = MESHTASTIC_AUDIO_APP;
         const char *path_arg = line.c_str() + 16;
         std::string path = trim_ipc_line(path_arg);
         struct stat voice_st;
         double voice_seconds = 0.0;
+        const char *voice_codec = "codec2";
+        unsigned codec2_duration_ms = 0U;
 
         if(!opts.mesh_mode) {
             return "ERR mesh-disabled\n";
@@ -14421,24 +14669,37 @@ static std::string handle_daemon_command(const std::string &line,
         if(stream_id == 0U) {
             stream_id = 1U;
         }
-        if(!mesh_voice_encode_pcm_file(path.c_str(), stream_id, &chunks,
-                                       errbuf, sizeof(errbuf))) {
-            daemon_event("Daemon SEND_VOICE encode failed path=%s reason=%s",
-                         path.c_str(), errbuf);
-            snprintf(buf, sizeof(buf), "ERR voice-encode %s\n", errbuf);
-            return std::string(buf);
+        if(mesh_voice_encode_codec2_pcm_file(path.c_str(), &chunks,
+                                             &codec2_duration_ms,
+                                             codec2_errbuf,
+                                             sizeof(codec2_errbuf))) {
+            voice_seconds = (double)codec2_duration_ms / 1000.0;
+        } else {
+            daemon_event("Daemon SEND_VOICE codec2 encode failed path=%s reason=%s; falling back to opus-private",
+                         path.c_str(), codec2_errbuf);
+            voice_portnum = MESHTASTIC_PRIVATE_APP;
+            voice_codec = "opus";
+            if(!mesh_voice_encode_pcm_file(path.c_str(), stream_id, &chunks,
+                                           errbuf, sizeof(errbuf))) {
+                daemon_event("Daemon SEND_VOICE encode failed path=%s reason=%s",
+                             path.c_str(), errbuf);
+                snprintf(buf, sizeof(buf), "ERR voice-encode %s\n", errbuf);
+                return std::string(buf);
+            }
         }
         estimated_airtime_ms =
-            mesh_voice_estimate_chunks_airtime_ms(radio, opts, chunks);
-        if(!mesh_voice_airtime_allowed(opts, estimated_airtime_ms,
-                                       errbuf, sizeof(errbuf))) {
+            mesh_voice_estimate_chunks_airtime_ms(radio, opts, voice_portnum,
+                                                  chunks);
+        if(!mesh_airtime_allowed(opts, estimated_airtime_ms, true,
+                                 errbuf, sizeof(errbuf))) {
             daemon_event("Daemon SEND_VOICE airtime rejected path=%s chunks=%u airtime_ms=%u reason=%s",
                          path.c_str(), (unsigned)chunks.size(),
                          estimated_airtime_ms, errbuf);
             snprintf(buf, sizeof(buf), "ERR voice-airtime %s\n", errbuf);
             return std::string(buf);
         }
-        if(stat(path.c_str(), &voice_st) == 0 && voice_st.st_size > 0) {
+        if(voice_seconds <= 0.0 &&
+           stat(path.c_str(), &voice_st) == 0 && voice_st.st_size > 0) {
             voice_seconds = (double)std::min((off_t)MESHTASTIC_VOICE_MAX_PCM_BYTES,
                                              voice_st.st_size) /
                             (double)(MESHTASTIC_VOICE_SAMPLE_RATE * 2U);
@@ -14454,25 +14715,29 @@ static std::string handle_daemon_command(const std::string &line,
             mesh_send_request_t request;
             request.raw_payload = true;
             request.voice = true;
-            request.portnum = MESHTASTIC_PRIVATE_APP;
+            request.portnum = voice_portnum;
             request.payload = chunks[i];
             request.channel_index = 0U;
-            request.summary = "voice";
+            request.summary = voice_codec;
+            request.summary += "-voice";
             send_queue->push_back(request);
         }
         mesh_voice_tx_stream_count++;
         mesh_voice_tx_chunk_count += chunks.size();
-        daemon_chat("TX 0x%08x voice %.1fs chunks=%u airtime=%.1fs queued",
-                    opts.from_node, voice_seconds, (unsigned)chunks.size(),
+        daemon_chat("TX 0x%08x voice %.1fs codec=%s packets=%u airtime=%.1fs queued",
+                    opts.from_node, voice_seconds, voice_codec,
+                    (unsigned)chunks.size(),
                     (double)estimated_airtime_ms / 1000.0);
-        daemon_event("Daemon SEND_VOICE queued stream=0x%08x chunks=%u airtime_ms=%u depth=%u op=%s",
-                     stream_id, (unsigned)chunks.size(),
+        daemon_event("Daemon SEND_VOICE queued stream=0x%08x codec=%s port=%u chunks=%u airtime_ms=%u depth=%u op=%s",
+                     stream_id, voice_codec, voice_portnum,
+                     (unsigned)chunks.size(),
                      estimated_airtime_ms, (unsigned)send_queue->size(),
                      op_name(active_op));
         snprintf(buf, sizeof(buf),
-                 "OK voice queued stream=0x%08x chunks=%u airtime_ms=%u depth=%u\n",
-                 stream_id, (unsigned)chunks.size(),
-                 estimated_airtime_ms, (unsigned)send_queue->size());
+                 "OK voice queued codec=%s stream=0x%08x packets=%u airtime_ms=%u depth=%u\n",
+                 voice_codec, stream_id, (unsigned)chunks.size(),
+                 estimated_airtime_ms,
+                 (unsigned)send_queue->size());
         return std::string(buf);
     }
     if(line.compare(0, 13, "SEND_CHANNEL ") == 0 ||
@@ -15646,7 +15911,8 @@ static void handle_radio_event(PhysicalLayer *radio, const probe_options_t &opts
     }
 }
 
-static void handle_delayed_tx(PhysicalLayer *radio, uint64_t now_us)
+static void handle_delayed_tx(PhysicalLayer *radio, const probe_options_t &opts,
+                              uint64_t now_us)
 {
     tx_frame_t frame;
 
@@ -15659,6 +15925,20 @@ static void handle_delayed_tx(PhysicalLayer *radio, uint64_t now_us)
     daemon_event("Mesh %s due id=0x%08x queued=%u",
                  frame.routing_ack ? "ACK" : "rebroadcast",
                  frame.packet_id, mesh_delayed_tx_count());
+    if(!frame.routing_ack) {
+        char errbuf[128];
+        uint32_t airtime_ms = 0U;
+
+        if(!mesh_frame_airtime_allowed(radio, opts, frame, true,
+                                       errbuf, sizeof(errbuf),
+                                       &airtime_ms)) {
+            mesh_rebroadcast_drop_count++;
+            daemon_event("Mesh rebroadcast ChUtil drop id=0x%08x airtime_ms=%u reason=%s drop=%lu",
+                         frame.packet_id, airtime_ms, errbuf,
+                         (unsigned long)mesh_rebroadcast_drop_count);
+            return;
+        }
+    }
     if(start_tx(radio, frame) != 0) {
         if(frame.routing_ack) {
             mesh_ack_drop_count++;
@@ -15970,7 +16250,7 @@ int main(int argc, char **argv)
         }
 
         mesh_history_expire(now);
-        handle_delayed_tx(radio, now);
+        handle_delayed_tx(radio, opts, now);
         handle_ack_retry(radio, now);
         mesh_nodedb_maybe_save(now);
 
@@ -15992,7 +16272,21 @@ int main(int argc, char **argv)
 
             mesh_manual_nodeinfo_requested = false;
             if(build_mesh_nodeinfo_frame(opts, &frame)) {
-                if(start_tx(radio, frame) == 0) {
+                char errbuf[128];
+                uint32_t airtime_ms = 0U;
+
+                if(!mesh_frame_airtime_allowed(radio, opts, frame, true,
+                                               errbuf, sizeof(errbuf),
+                                               &airtime_ms)) {
+                    mesh_nodeinfo_drop_count++;
+                    mesh_next_nodeinfo_us = opts.advertise_nodeinfo ?
+                                           now + MESHTASTIC_NODEINFO_RETRY_US :
+                                           0ULL;
+                    daemon_event("NodeInfo ChUtil deferred node=%s manual=%s airtime_ms=%u reason=%s",
+                                 opts.node_name.c_str(),
+                                 manual_publish ? "yes" : "no",
+                                 airtime_ms, errbuf);
+                } else if(start_tx(radio, frame) == 0) {
                     mesh_nodeinfo_tx_count++;
                     mesh_next_nodeinfo_us = opts.advertise_nodeinfo ?
                                            now + interval_us : 0ULL;
@@ -16049,7 +16343,21 @@ int main(int argc, char **argv)
 
             if(position_ready &&
                build_mesh_position_frame(opts, position, &frame)) {
-                if(start_tx(radio, frame) == 0) {
+                char errbuf[128];
+                uint32_t airtime_ms = 0U;
+
+                if(!mesh_frame_airtime_allowed(radio, opts, frame, true,
+                                               errbuf, sizeof(errbuf),
+                                               &airtime_ms)) {
+                    mesh_position_drop_count++;
+                    mesh_next_position_us = opts.position_enabled ?
+                                           now + MESHTASTIC_POSITION_RETRY_US :
+                                           0ULL;
+                    daemon_event("Position ChUtil deferred from=0x%08x manual=%s airtime_ms=%u reason=%s",
+                                 opts.from_node,
+                                 manual_publish ? "yes" : "no",
+                                 airtime_ms, errbuf);
+                } else if(start_tx(radio, frame) == 0) {
                     mesh_position_tx_count++;
                     mesh_next_position_us = opts.position_enabled ?
                                            now + interval_us : 0ULL;
@@ -16094,7 +16402,20 @@ int main(int argc, char **argv)
             mesh_manual_device_telemetry_requested = false;
             if(mesh_collect_device_telemetry(&telemetry) &&
                build_mesh_telemetry_frame(opts, telemetry, false, &frame)) {
-                if(start_tx(radio, frame) == 0) {
+                char errbuf[128];
+                uint32_t airtime_ms = 0U;
+
+                if(!mesh_frame_airtime_allowed(radio, opts, frame, true,
+                                               errbuf, sizeof(errbuf),
+                                               &airtime_ms)) {
+                    mesh_telemetry_drop_count++;
+                    mesh_next_device_telemetry_us = opts.telemetry_enabled ?
+                        now + MESHTASTIC_TELEMETRY_RETRY_US : 0ULL;
+                    daemon_event("Telemetry ChUtil deferred type=device from=0x%08x manual=%s airtime_ms=%u reason=%s",
+                                 opts.from_node,
+                                 manual_publish ? "yes" : "no",
+                                 airtime_ms, errbuf);
+                } else if(start_tx(radio, frame) == 0) {
                     mesh_telemetry_tx_count++;
                     mesh_next_device_telemetry_us = opts.telemetry_enabled ?
                                                    now + interval_us : 0ULL;
@@ -16135,7 +16456,21 @@ int main(int argc, char **argv)
             mesh_manual_environment_telemetry_requested = false;
             if(mesh_collect_environment_telemetry(&telemetry) &&
                build_mesh_telemetry_frame(opts, telemetry, true, &frame)) {
-                if(start_tx(radio, frame) == 0) {
+                char errbuf[128];
+                uint32_t airtime_ms = 0U;
+
+                if(!mesh_frame_airtime_allowed(radio, opts, frame, true,
+                                               errbuf, sizeof(errbuf),
+                                               &airtime_ms)) {
+                    mesh_telemetry_drop_count++;
+                    mesh_next_environment_telemetry_us =
+                        opts.environment_telemetry_enabled ?
+                        now + MESHTASTIC_TELEMETRY_RETRY_US : 0ULL;
+                    daemon_event("Telemetry ChUtil deferred type=environment from=0x%08x manual=%s airtime_ms=%u reason=%s",
+                                 opts.from_node,
+                                 manual_publish ? "yes" : "no",
+                                 airtime_ms, errbuf);
+                } else if(start_tx(radio, frame) == 0) {
                     mesh_telemetry_tx_count++;
                     mesh_next_environment_telemetry_us =
                         opts.environment_telemetry_enabled ? now + interval_us :
@@ -16168,22 +16503,40 @@ int main(int argc, char **argv)
         if(!pending_remote_requests.empty() && active_op != OP_TX) {
             tx_frame_t frame;
             mesh_remote_request_t request = pending_remote_requests.front();
-            pending_remote_requests.pop_front();
-            daemon_event("Remote request dequeue target=0x%08x type=%s depth=%u",
-                         request.to_node,
-                         mesh_remote_request_name(request.type),
-                         (unsigned)pending_remote_requests.size());
             if(build_mesh_remote_request_frame(opts, request, &frame)) {
-                if(start_tx(radio, frame) == 0) {
+                char errbuf[128];
+                uint32_t airtime_ms = 0U;
+
+                if(!mesh_frame_airtime_allowed(radio, opts, frame, false,
+                                               errbuf, sizeof(errbuf),
+                                               &airtime_ms)) {
+                    if(now - last_reliable_hold_log_us > 2000000ULL) {
+                        daemon_event("Remote request ChUtil held target=0x%08x type=%s airtime_ms=%u reason=%s depth=%u",
+                                     request.to_node,
+                                     mesh_remote_request_name(request.type),
+                                     airtime_ms, errbuf,
+                                     (unsigned)pending_remote_requests.size());
+                        last_reliable_hold_log_us = now;
+                    }
+                } else {
+                    pending_remote_requests.pop_front();
+                    daemon_event("Remote request dequeue target=0x%08x type=%s depth=%u airtime_ms=%u",
+                                 request.to_node,
+                                 mesh_remote_request_name(request.type),
+                                 (unsigned)pending_remote_requests.size(),
+                                 airtime_ms);
+                    if(start_tx(radio, frame) == 0) {
                     if(frame.want_ack) {
                         (void)mesh_ack_track_frame(frame);
                     }
-                } else {
-                    daemon_event("Remote request TX start failed target=0x%08x type=%s",
-                                 request.to_node,
-                                 mesh_remote_request_name(request.type));
+                    } else {
+                        daemon_event("Remote request TX start failed target=0x%08x type=%s",
+                                     request.to_node,
+                                     mesh_remote_request_name(request.type));
+                    }
                 }
             } else {
+                pending_remote_requests.pop_front();
                 daemon_event("Remote request build failed target=0x%08x type=%s",
                              request.to_node,
                              mesh_remote_request_name(request.type));
@@ -16208,17 +16561,6 @@ int main(int argc, char **argv)
                     last_reliable_hold_log_us = now;
                 }
             } else {
-                pending_daemon_sends.pop_front();
-                daemon_event("Daemon SEND dequeue depth=%u slot=%u target=0x%08x ack=%s port=%u len=%u",
-                             (unsigned)pending_daemon_sends.size(),
-                             request.channel_index,
-                             tx_opts.to_node,
-                             tx_opts.want_ack ? "yes" : "no",
-                             request.raw_payload ? request.portnum :
-                             MESHTASTIC_TEXT_MESSAGE_APP,
-                             request.raw_payload ?
-                             (unsigned)request.payload.size() :
-                             (unsigned)request.message.size());
                 bool built = request.raw_payload ?
                     build_tx_data_frame(tx_opts, request.portnum,
                                         request.payload,
@@ -16227,33 +16569,72 @@ int main(int argc, char **argv)
                     build_tx_frame(tx_opts, request.message,
                                    request.channel_index, &frame);
                 if(built) {
-                    if(start_tx(radio, frame) == 0 && tx_opts.mesh_mode) {
-                        bool ack_tracked = true;
-                        if(frame.want_ack) {
-                            ack_tracked = mesh_ack_track_frame(frame);
-                        }
-                        if(!request.voice) {
-                            std::string clean = mesh_clean_text(request.message);
-                            if(!clean.empty()) {
-                                daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",
-                                            opts.from_node, frame.packet_id,
-                                            request.channel_index,
-                                            frame.want_ack ?
-                                            (ack_tracked ? "pending" : "dropped") :
-                                            "air",
-                                            clean.c_str());
-                            }
+                    char errbuf[128];
+                    uint32_t airtime_ms = 0U;
+                    bool polite = request.voice;
+
+                    if(!mesh_frame_airtime_allowed(radio, tx_opts, frame,
+                                                   polite,
+                                                   errbuf, sizeof(errbuf),
+                                                   &airtime_ms)) {
+                        if(now - last_reliable_hold_log_us > 2000000ULL) {
+                            daemon_event("Daemon SEND ChUtil held slot=%u target=0x%08x port=%u len=%u airtime_ms=%u reason=%s depth=%u",
+                                         request.channel_index,
+                                         tx_opts.to_node,
+                                         request.raw_payload ? request.portnum :
+                                         MESHTASTIC_TEXT_MESSAGE_APP,
+                                         request.raw_payload ?
+                                         (unsigned)request.payload.size() :
+                                         (unsigned)request.message.size(),
+                                         airtime_ms, errbuf,
+                                         (unsigned)pending_daemon_sends.size());
+                            last_reliable_hold_log_us = now;
                         }
                     } else {
-                        daemon_event("Daemon SEND start failed slot=%u port=%u len=%u",
+                        pending_daemon_sends.pop_front();
+                        daemon_event("Daemon SEND dequeue depth=%u slot=%u target=0x%08x ack=%s port=%u len=%u airtime_ms=%u",
+                                     (unsigned)pending_daemon_sends.size(),
                                      request.channel_index,
+                                     tx_opts.to_node,
+                                     tx_opts.want_ack ? "yes" : "no",
                                      request.raw_payload ? request.portnum :
                                      MESHTASTIC_TEXT_MESSAGE_APP,
                                      request.raw_payload ?
                                      (unsigned)request.payload.size() :
-                                     (unsigned)request.message.size());
+                                     (unsigned)request.message.size(),
+                                     airtime_ms);
+                        if(start_tx(radio, frame) == 0 && tx_opts.mesh_mode) {
+                            bool ack_tracked = true;
+
+                            if(frame.want_ack) {
+                                ack_tracked = mesh_ack_track_frame(frame);
+                            }
+                            if(!request.voice) {
+                                std::string clean =
+                                    mesh_clean_text(request.message);
+                                if(!clean.empty()) {
+                                    daemon_chat("TX 0x%08x id=0x%08x ch=%u ack=%s: %s",
+                                                opts.from_node, frame.packet_id,
+                                                request.channel_index,
+                                                frame.want_ack ?
+                                                (ack_tracked ? "pending" :
+                                                 "dropped") :
+                                                "air",
+                                                clean.c_str());
+                                }
+                            }
+                        } else {
+                            daemon_event("Daemon SEND start failed slot=%u port=%u len=%u",
+                                         request.channel_index,
+                                         request.raw_payload ? request.portnum :
+                                         MESHTASTIC_TEXT_MESSAGE_APP,
+                                         request.raw_payload ?
+                                         (unsigned)request.payload.size() :
+                                         (unsigned)request.message.size());
+                        }
                     }
                 } else {
+                    pending_daemon_sends.pop_front();
                     daemon_event("Daemon SEND build failed slot=%u port=%u len=%u",
                                  request.channel_index,
                                  request.raw_payload ? request.portnum :
@@ -16277,7 +16658,23 @@ int main(int argc, char **argv)
             } else if(phoneapi_take_mesh_tx(&phoneapi_tx)) {
                 tx_frame_t frame;
                 if(build_phoneapi_mesh_data_frame(opts, phoneapi_tx, &frame)) {
-                    if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
+                    char errbuf[128];
+                    uint32_t airtime_ms = 0U;
+
+                    if(!mesh_frame_airtime_allowed(radio, opts, frame, false,
+                                                   errbuf, sizeof(errbuf),
+                                                   &airtime_ms)) {
+                        daemon_event("PhoneAPI TX ChUtil rejected port=%u payload=%u airtime_ms=%u reason=%s",
+                                     phoneapi_tx.data.portnum,
+                                     (unsigned)phoneapi_tx.data.payload.size(),
+                                     airtime_ms, errbuf);
+                        if(phoneapi_tx.packet_id != 0U) {
+                            (void)phoneapi_notify_routing_result(
+                                frame.to_node, phoneapi_tx.packet_id,
+                                MESHTASTIC_ROUTING_ERROR_DUTY_CYCLE_LIMIT,
+                                errbuf);
+                        }
+                    } else if(start_tx(radio, frame) == 0 && opts.mesh_mode) {
                         bool ack_tracked = true;
                         if(frame.want_ack) {
                             ack_tracked = mesh_ack_track_frame(frame);
@@ -16322,12 +16719,24 @@ int main(int argc, char **argv)
         if(!opts.send_once.empty() && !send_once_started &&
            active_op != OP_TX) {
             tx_frame_t frame;
-            if(build_tx_frame(opts, opts.send_once, 0U, &frame) &&
-               start_tx(radio, frame) == 0) {
-                send_once_started = true;
-                send_once_awaiting_ack = frame.want_ack;
-                if(frame.want_ack) {
-                    (void)mesh_ack_track_frame(frame);
+            if(build_tx_frame(opts, opts.send_once, 0U, &frame)) {
+                char errbuf[128];
+                uint32_t airtime_ms = 0U;
+
+                if(!mesh_frame_airtime_allowed(radio, opts, frame, false,
+                                               errbuf, sizeof(errbuf),
+                                               &airtime_ms)) {
+                    daemon_event("Send-once ChUtil rejected airtime_ms=%u reason=%s",
+                                 airtime_ms, errbuf);
+                    send_once_finished = true;
+                } else if(start_tx(radio, frame) == 0) {
+                    send_once_started = true;
+                    send_once_awaiting_ack = frame.want_ack;
+                    if(frame.want_ack) {
+                        (void)mesh_ack_track_frame(frame);
+                    }
+                } else {
+                    send_once_finished = true;
                 }
             } else {
                 send_once_finished = true;
@@ -16339,7 +16748,15 @@ int main(int argc, char **argv)
             tx_frame_t frame;
             last_tx_us = now;
             if(build_tx_frame(opts, opts.message, 0U, &frame)) {
-                if(start_tx(radio, frame) == 0 && frame.want_ack) {
+                char errbuf[128];
+                uint32_t airtime_ms = 0U;
+
+                if(!mesh_frame_airtime_allowed(radio, opts, frame, true,
+                                               errbuf, sizeof(errbuf),
+                                               &airtime_ms)) {
+                    daemon_event("Auto TX ChUtil skipped airtime_ms=%u reason=%s",
+                                 airtime_ms, errbuf);
+                } else if(start_tx(radio, frame) == 0 && frame.want_ack) {
                     (void)mesh_ack_track_frame(frame);
                 }
             }

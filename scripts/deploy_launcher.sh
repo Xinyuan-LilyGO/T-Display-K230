@@ -243,6 +243,7 @@ VIDEO_SRC="${LAUNCHER_DIR}/resources/videos"
 NOTIFICATION_SRC="${LAUNCHER_DIR}/resources/notification"
 MAP_SRC="${LAUNCHER_DIR}/resources/maps"
 INSTALL_SCRIPT="${LAUNCHER_DIR}/scripts/install_to_sdk.sh"
+RUNTIME_LIB_DIR="${OUT_DIR}/target/usr/lib"
 
 [[ -x "${INSTALL_SCRIPT}" ]] || die "missing launcher install script: ${INSTALL_SCRIPT}"
 git -C "${SDK_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "SDK is not a git checkout: ${SDK_DIR}"
@@ -310,7 +311,9 @@ set -e
 mkdir -p "${REMOTE_TMP}/app" "${REMOTE_TMP}/face_detect" \
          "${REMOTE_TMP}/boot" "${REMOTE_TMP}/music" "${REMOTE_TMP}/videos" \
          "${REMOTE_TMP}/notification" "${REMOTE_TMP}/maps" \
-         "${REMOTE_BACKUP}/app" "${REMOTE_BACKUP}/boot" "${REMOTE_BACKUP}/media"
+         "${REMOTE_TMP}/lib" "${REMOTE_BACKUP}/app" \
+         "${REMOTE_BACKUP}/boot" "${REMOTE_BACKUP}/media" \
+         "${REMOTE_BACKUP}/lib"
 
 if [ "${DEPLOY_APP}" = "1" ]; then
     if [ -d "${REMOTE_APP_DIR}" ]; then
@@ -319,6 +322,7 @@ if [ "${DEPLOY_APP}" = "1" ]; then
     if [ -d "${REMOTE_FACE_DIR}" ]; then
         cp -a "${REMOTE_FACE_DIR}" "${REMOTE_BACKUP}/app/face_detect" 2>/dev/null || true
     fi
+    cp -a /usr/lib/libcodec2.so* "${REMOTE_BACKUP}/lib/" 2>/dev/null || true
 fi
 
 if [ "${DEPLOY_FIRMWARE}" = "1" ] && [ -d "${REMOTE_BOOT}" ]; then
@@ -346,6 +350,10 @@ if [[ "${DEPLOY_APP}" -eq 1 ]]; then
     if [[ -d "${FACE_DIR}" ]]; then
         tar -C "${FACE_DIR}" -cf - . | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
             "tar -C '${REMOTE_TMP}/face_detect' -xf -"
+    fi
+    if compgen -G "${RUNTIME_LIB_DIR}/libcodec2.so*" >/dev/null; then
+        (cd "${RUNTIME_LIB_DIR}" && tar -cf - libcodec2.so*) | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
+            "tar -C '${REMOTE_TMP}/lib' -xf -"
     fi
 fi
 
@@ -415,6 +423,10 @@ if [ "${DEPLOY_APP}" = "1" ]; then
         rm -rf "${REMOTE_FACE_DIR}"
         mkdir -p "${REMOTE_FACE_DIR}"
         cp -a "${REMOTE_TMP}/face_detect/." "${REMOTE_FACE_DIR}/"
+    fi
+    if [ "$(find "${REMOTE_TMP}/lib" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+        mkdir -p /usr/lib
+        cp -a "${REMOTE_TMP}/lib/." /usr/lib/
     fi
     chmod 755 "${REMOTE_APP_DIR}/k230_phone_ui" \
               "${REMOTE_APP_DIR}/k230_phone_ui_fullswitch_test" \

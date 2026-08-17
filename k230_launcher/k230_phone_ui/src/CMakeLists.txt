@@ -189,6 +189,7 @@ target_include_directories(k230_lora_flrc_tile_stream PRIVATE
 
 target_include_directories(k230_meshtastic_probe PRIVATE
     ${CMAKE_SYSROOT}/usr/include
+    ${CMAKE_SYSROOT}/usr/include/codec2
     ${RADIOLIB_DIR}
 )
 
@@ -329,6 +330,7 @@ target_link_libraries(k230_meshtastic_probe PRIVATE
     gpiod
     crypto
     opus
+    codec2
     m
     pthread
 )

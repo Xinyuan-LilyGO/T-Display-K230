@@ -1541,12 +1541,86 @@ static int mesh_chat_parse_voice_line(const char *line, char *path,
     return 1;
 }
 
-static void mesh_voice_play_pcm_file(const char *path)
+static int mesh_chat_parse_voice_group_item(const char *line, int *sent,
+                                            char *node, size_t node_len,
+                                            char *path, size_t path_len,
+                                            double *duration_s)
+{
+    const char *node_start;
+    const char *node_end;
+    const char *voice;
+    const char *file;
+
+    if(sent) {
+        *sent = 0;
+    }
+    if(node && node_len > 0U) {
+        node[0] = '\0';
+    }
+    if(path && path_len > 0U) {
+        path[0] = '\0';
+    }
+    if(duration_s) {
+        *duration_s = 0.0;
+    }
+    if(!line || (strncmp(line, "RX ", 3) != 0 &&
+                 strncmp(line, "TX ", 3) != 0)) {
+        return 0;
+    }
+    if(strstr(line, ": ")) {
+        return 0;
+    }
+    if(sent) {
+        *sent = strncmp(line, "TX ", 3) == 0;
+    }
+    node_start = line + 3;
+    node_end = node_start;
+    while(*node_end && !isspace((unsigned char)*node_end)) {
+        node_end++;
+    }
+    if(node && node_len > 0U) {
+        size_t n = (size_t)(node_end - node_start);
+        if(n >= node_len) {
+            n = node_len - 1U;
+        }
+        snprintf(node, node_len, "%.*s", (int)n, node_start);
+    }
+    voice = strstr(line, " voice ");
+    if(!voice) {
+        return 0;
+    }
+    if(duration_s) {
+        *duration_s = atof(voice + 7);
+    }
+    file = strstr(line, " file=");
+    if(file && path && path_len > 0U) {
+        size_t i = 0;
+
+        file += 6;
+        while(file[i] && !isspace((unsigned char)file[i]) &&
+              i + 1U < path_len) {
+            path[i] = file[i];
+            i++;
+        }
+        path[i] = '\0';
+        if(strncmp(path, "/tmp/k230_mesh_voice_", 20) != 0) {
+            path[0] = '\0';
+        }
+    }
+    return 1;
+}
+
+static void mesh_voice_play_one_pcm_file(const char *path)
 {
     char command[320];
     int rc;
 
     if(!path || !path[0]) {
+        return;
+    }
+    if(strncmp(path, "/tmp/k230_mesh_voice_", 20) != 0 ||
+       strchr(path, '\'') || strchr(path, ';')) {
+        mesh_append_log("voice playback rejected path=%s", path);
         return;
     }
     snprintf(command, sizeof(command),
@@ -1555,6 +1629,26 @@ static void mesh_voice_play_pcm_file(const char *path)
     rc = system(command);
     if(rc != 0) {
         mesh_append_log("voice playback failed rc=%d", rc);
+    }
+}
+
+static void mesh_voice_play_pcm_file(const char *path)
+{
+    char copy[512];
+    char *item;
+    char *save = NULL;
+
+    if(!path || !path[0]) {
+        return;
+    }
+    snprintf(copy, sizeof(copy), "%s", path);
+    item = strtok_r(copy, ";", &save);
+    while(item) {
+        ui_trim_text(item);
+        if(item[0]) {
+            mesh_voice_play_one_pcm_file(item);
+        }
+        item = strtok_r(NULL, ";", &save);
     }
 }
 
@@ -1730,11 +1824,21 @@ static void mesh_chat_add_bubble(const char *line)
                          status, sizeof(status), &footer_color);
     if(mesh_chat_parse_voice_line(line, voice_path, sizeof(voice_path),
                                   voice_duration, sizeof(voice_duration))) {
+        char voice_node[32] = "";
+        int voice_sent = 0;
+
         snprintf(body, sizeof(body), "%s%s%s",
                  ui_tr("Voice message"),
                  voice_duration[0] ? " " : "",
                  voice_duration);
-        if(!meta[0]) {
+        if(mesh_chat_parse_voice_group_item(line, &voice_sent,
+                                            voice_node, sizeof(voice_node),
+                                            NULL, 0, NULL) &&
+           voice_node[0]) {
+            snprintf(meta, sizeof(meta), "%s %s",
+                     voice_sent ? "TX" : "RX", voice_node);
+            sent = voice_sent;
+        } else {
             snprintf(meta, sizeof(meta), "%s", sent ? "TX voice" : "RX voice");
         }
     }
@@ -1805,12 +1909,30 @@ static void mesh_chat_add_bubble(const char *line)
     lv_label_set_long_mode(footer, LV_LABEL_LONG_DOT);
 }
 
+static void mesh_chat_add_voice_group(const char *node, double duration_s,
+                                      const char *paths)
+{
+    char line[768];
+
+    if(!node || !node[0] || !paths || !paths[0]) {
+        return;
+    }
+    snprintf(line, sizeof(line),
+             "RX %s voice %.1fs codec=codec2 file=%s",
+             node, duration_s, paths);
+    mesh_chat_add_bubble(line);
+}
+
 static void mesh_chat_rebuild(const char *shown)
 {
     char copy[3072];
     char *line;
     char *save = NULL;
     int count = 0;
+    int voice_group_active = 0;
+    char voice_group_node[32] = "";
+    char voice_group_paths[512] = "";
+    double voice_group_duration = 0.0;
 
     if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll)) {
         return;
@@ -1826,10 +1948,66 @@ static void mesh_chat_rebuild(const char *shown)
     while(line) {
         ui_trim_text(line);
         if(line[0] && strcmp(line, "No mesh messages yet") != 0) {
+            int voice_sent = 0;
+            char voice_node[32] = "";
+            char voice_path[160] = "";
+            double voice_duration = 0.0;
+
+            if(mesh_chat_parse_voice_group_item(line, &voice_sent,
+                                                voice_node,
+                                                sizeof(voice_node),
+                                                voice_path,
+                                                sizeof(voice_path),
+                                                &voice_duration) &&
+               !voice_sent && voice_path[0]) {
+                if(voice_group_active &&
+                   strcmp(voice_group_node, voice_node) == 0 &&
+                   strlen(voice_group_paths) + strlen(voice_path) + 2U <
+                       sizeof(voice_group_paths)) {
+                    strncat(voice_group_paths, ";",
+                            sizeof(voice_group_paths) -
+                            strlen(voice_group_paths) - 1U);
+                    strncat(voice_group_paths, voice_path,
+                            sizeof(voice_group_paths) -
+                            strlen(voice_group_paths) - 1U);
+                    voice_group_duration += voice_duration;
+                } else {
+                    if(voice_group_active) {
+                        mesh_chat_add_voice_group(voice_group_node,
+                                                  voice_group_duration,
+                                                  voice_group_paths);
+                        count++;
+                    }
+                    voice_group_active = 1;
+                    snprintf(voice_group_node, sizeof(voice_group_node),
+                             "%s", voice_node);
+                    snprintf(voice_group_paths, sizeof(voice_group_paths),
+                             "%s", voice_path);
+                    voice_group_duration = voice_duration;
+                }
+                line = strtok_r(NULL, "\n", &save);
+                continue;
+            }
+            if(voice_group_active) {
+                mesh_chat_add_voice_group(voice_group_node,
+                                          voice_group_duration,
+                                          voice_group_paths);
+                voice_group_active = 0;
+                voice_group_node[0] = '\0';
+                voice_group_paths[0] = '\0';
+                voice_group_duration = 0.0;
+                count++;
+            }
             mesh_chat_add_bubble(line);
             count++;
         }
         line = strtok_r(NULL, "\n", &save);
+    }
+    if(voice_group_active) {
+        mesh_chat_add_voice_group(voice_group_node,
+                                  voice_group_duration,
+                                  voice_group_paths);
+        count++;
     }
     if(count == 0) {
         mesh_chat_add_empty();
