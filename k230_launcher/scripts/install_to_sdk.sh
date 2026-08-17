@@ -65,6 +65,7 @@ mkdir -p "$ROOTFS_DIR/root/music" "$ROOTFS_DIR/root/nes" "$ROOTFS_DIR/root/video
     "$ROOTFS_DIR/root/photos" "$ROOTFS_DIR/root/screenshots" \
     "$ROOTFS_DIR/root/recordings" "$ROOTFS_DIR/root/lorawan" \
     "$ROOTFS_DIR/root/meshtastic" "$ROOTFS_DIR/root/notification" \
+    "$ROOTFS_DIR/root/maps" \
     "$ROOTFS_DIR/root/nrf52840/firmware"
 
 sync_media_dir() {
@@ -83,6 +84,7 @@ sync_media_dir() {
 sync_media_dir "$RESOURCE_DIR/videos" "$ROOTFS_DIR/root/videos" "video"
 sync_media_dir "$RESOURCE_DIR/music" "$ROOTFS_DIR/root/music" "music"
 sync_media_dir "$RESOURCE_DIR/notification" "$ROOTFS_DIR/root/notification" "notification"
+sync_media_dir "$RESOURCE_DIR/maps" "$ROOTFS_DIR/root/maps" "map"
 
 if [ -e "$STAMP" ]; then
     mv "$STAMP" "$STAMP.stale.$(date +%Y%m%d_%H%M%S)"

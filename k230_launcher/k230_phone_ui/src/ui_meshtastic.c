@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,6 +27,10 @@
 #include <lvgl/src/misc/cache/instance/lv_image_cache.h>
 
 #include "qrcodegen.h"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define MESHTASTIC_PROBE_PATH "/root/app/k230_phone_ui/k230_meshtastic_probe"
 #define MESHTASTIC_SOCKET_PATH "/tmp/k230_meshtastic.sock"
@@ -73,6 +78,16 @@
 #define MESHTASTIC_QR_PREVIEW_W 384
 #define MESHTASTIC_QR_PREVIEW_H 216
 #define MESHTASTIC_QR_PREVIEW_BYTES (MESHTASTIC_QR_PREVIEW_W * MESHTASTIC_QR_PREVIEW_H * 2)
+#define MESHTASTIC_MAP_ROOT "/root/maps"
+#define MESHTASTIC_MAP_STYLE "openstreetmap"
+#define MESHTASTIC_MAP_TILE_SIZE 256
+#define MESHTASTIC_MAP_MIN_ZOOM 5
+#define MESHTASTIC_MAP_MAX_ZOOM 9
+#define MESHTASTIC_MAP_DEFAULT_ZOOM 8
+#define MESHTASTIC_MAP_FAKE_LAT 23.1291
+#define MESHTASTIC_MAP_FAKE_LON 113.2644
+#define MESHTASTIC_PREF_MAP_FAKE_GPS "meshtastic.map.fake_gps"
+#define MESHTASTIC_PREF_MAP_ZOOM "meshtastic.map.zoom"
 
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
@@ -122,8 +137,11 @@ static int mesh_position_enabled = 1;
 static int mesh_fixed_position_enabled = 0;
 static int mesh_telemetry_enabled = 1;
 static int mesh_environment_telemetry_enabled = 1;
+static int mesh_map_fake_gps_enabled = 1;
+static int mesh_map_zoom = MESHTASTIC_MAP_DEFAULT_ZOOM;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
+static lv_obj_t *mesh_map_overlay;
 static lv_obj_t *mesh_choice_overlay;
 static lv_obj_t *mesh_channel_overlay;
 static lv_obj_t *mesh_channel_profiles_overlay;
@@ -5041,6 +5059,556 @@ static void mesh_node_remote_request_event_cb(lv_event_t *event)
     mesh_refresh_status();
 }
 
+static void mesh_map_close(void)
+{
+    if(mesh_map_overlay && lv_obj_is_valid(mesh_map_overlay)) {
+        lv_obj_delete(mesh_map_overlay);
+    }
+    mesh_map_overlay = NULL;
+}
+
+static void mesh_map_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_map_close();
+}
+
+static void mesh_map_load_prefs(void)
+{
+    char value[16];
+    int zoom;
+
+    ui_prefs_get(MESHTASTIC_PREF_MAP_FAKE_GPS, value, sizeof(value), "1");
+    mesh_map_fake_gps_enabled = atoi(value) != 0;
+    ui_prefs_get(MESHTASTIC_PREF_MAP_ZOOM, value, sizeof(value), "8");
+    zoom = atoi(value);
+    if(zoom < MESHTASTIC_MAP_MIN_ZOOM) {
+        zoom = MESHTASTIC_MAP_MIN_ZOOM;
+    } else if(zoom > MESHTASTIC_MAP_MAX_ZOOM) {
+        zoom = MESHTASTIC_MAP_MAX_ZOOM;
+    }
+    mesh_map_zoom = zoom;
+}
+
+static void mesh_map_save_prefs(void)
+{
+    char value[16];
+
+    snprintf(value, sizeof(value), "%d", mesh_map_fake_gps_enabled ? 1 : 0);
+    ui_prefs_set(MESHTASTIC_PREF_MAP_FAKE_GPS, value);
+    snprintf(value, sizeof(value), "%d", mesh_map_zoom);
+    ui_prefs_set(MESHTASTIC_PREF_MAP_ZOOM, value);
+}
+
+static double mesh_map_clip_latitude(double lat)
+{
+    if(lat > 85.05112878) {
+        return 85.05112878;
+    }
+    if(lat < -85.05112878) {
+        return -85.05112878;
+    }
+    return lat;
+}
+
+static void mesh_map_lonlat_to_pixel(double lat, double lon, int zoom,
+                                     double *px, double *py)
+{
+    double n = (double)(1U << (unsigned)zoom);
+    double lat_rad = mesh_map_clip_latitude(lat) * M_PI / 180.0;
+    double x = (lon + 180.0) / 360.0 * n;
+    double y = (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / M_PI) /
+               2.0 * n;
+
+    if(px) {
+        *px = x * MESHTASTIC_MAP_TILE_SIZE;
+    }
+    if(py) {
+        *py = y * MESHTASTIC_MAP_TILE_SIZE;
+    }
+}
+
+static int mesh_map_status_position(const char *status, double *lat,
+                                    double *lon, char *reason,
+                                    size_t reason_len)
+{
+    char nrf9151[24];
+    char gps[24];
+    char lat_text[32];
+    char lon_text[32];
+    char *endptr;
+    double parsed_lat;
+    double parsed_lon;
+
+    if(reason && reason_len > 0U) {
+        snprintf(reason, reason_len, "%s", "Waiting for position");
+    }
+    if(!status || !mesh_status_is_online(status)) {
+        if(reason && reason_len > 0U) {
+            snprintf(reason, reason_len, "%s", "Meshtastic daemon offline");
+        }
+        return 0;
+    }
+
+    mesh_status_field(status, "nrf9151", nrf9151, sizeof(nrf9151), "missing");
+    if(strcmp(nrf9151, "present") != 0) {
+        if(reason && reason_len > 0U) {
+            snprintf(reason, reason_len, "%s", "nRF9151 GNSS not detected");
+        }
+        return 0;
+    }
+
+    mesh_status_field(status, "gps", gps, sizeof(gps), "-");
+    mesh_status_field(status, "lat", lat_text, sizeof(lat_text), "-");
+    mesh_status_field(status, "lon", lon_text, sizeof(lon_text), "-");
+    if(strcmp(gps, "fix") != 0 && strcmp(gps, "fixed") != 0 &&
+       strcmp(gps, "debug") != 0) {
+        if(reason && reason_len > 0U) {
+            snprintf(reason, reason_len, "GNSS state: %s", gps);
+        }
+        return 0;
+    }
+
+    parsed_lat = strtod(lat_text, &endptr);
+    if(endptr == lat_text || !isfinite(parsed_lat)) {
+        if(reason && reason_len > 0U) {
+            snprintf(reason, reason_len, "%s", "GNSS latitude unavailable");
+        }
+        return 0;
+    }
+    parsed_lon = strtod(lon_text, &endptr);
+    if(endptr == lon_text || !isfinite(parsed_lon)) {
+        if(reason && reason_len > 0U) {
+            snprintf(reason, reason_len, "%s", "GNSS longitude unavailable");
+        }
+        return 0;
+    }
+    if(fabs(parsed_lat) < 0.000001 && fabs(parsed_lon) < 0.000001) {
+        if(reason && reason_len > 0U) {
+            snprintf(reason, reason_len, "%s", "GNSS fix has no coordinates");
+        }
+        return 0;
+    }
+
+    if(lat) {
+        *lat = parsed_lat;
+    }
+    if(lon) {
+        *lon = parsed_lon;
+    }
+    if(reason && reason_len > 0U) {
+        snprintf(reason, reason_len, "GNSS %.5f, %.5f", parsed_lat,
+                 parsed_lon);
+    }
+    return 1;
+}
+
+static int mesh_map_current_position(const char *status, double *lat,
+                                     double *lon, char *reason,
+                                     size_t reason_len)
+{
+    if(mesh_map_fake_gps_enabled) {
+        if(lat) {
+            *lat = MESHTASTIC_MAP_FAKE_LAT;
+        }
+        if(lon) {
+            *lon = MESHTASTIC_MAP_FAKE_LON;
+        }
+        if(reason && reason_len > 0U) {
+            snprintf(reason, reason_len,
+                     "Debug GPS %.5f, %.5f", MESHTASTIC_MAP_FAKE_LAT,
+                     MESHTASTIC_MAP_FAKE_LON);
+        }
+        return 1;
+    }
+    return mesh_map_status_position(status, lat, lon, reason, reason_len);
+}
+
+static void mesh_map_tile_path(int z, int x, int y, char *out,
+                               size_t out_len)
+{
+    snprintf(out, out_len, "%s/%s/%d/%d/%d.png", MESHTASTIC_MAP_ROOT,
+             MESHTASTIC_MAP_STYLE, z, x, y);
+}
+
+static void mesh_map_add_placeholder_tile(lv_obj_t *map, int x, int y,
+                                          const char *text)
+{
+    lv_obj_t *tile = lv_obj_create(map);
+    lv_obj_t *label;
+
+    lv_obj_set_pos(tile, x, y);
+    lv_obj_set_size(tile, MESHTASTIC_MAP_TILE_SIZE,
+                    MESHTASTIC_MAP_TILE_SIZE);
+    lv_obj_set_style_bg_color(tile, lv_color_hex(0x0B1220), 0);
+    lv_obj_set_style_border_color(tile, lv_color_hex(0x233044), 0);
+    lv_obj_set_style_border_width(tile, 1, 0);
+    lv_obj_set_style_radius(tile, 0, 0);
+    lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+
+    label = ui_label(tile, text, &lv_font_montserrat_14, 0x64748B);
+    lv_obj_set_width(label, MESHTASTIC_MAP_TILE_SIZE - 24);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_center(label);
+}
+
+static void mesh_map_add_marker(lv_obj_t *map, int x, int y, uint32_t color,
+                                const char *text)
+{
+    lv_obj_t *dot;
+    lv_obj_t *label;
+
+    if(x < -24 || y < -24 || x > lv_obj_get_width(map) + 24 ||
+       y > lv_obj_get_height(map) + 24) {
+        return;
+    }
+
+    dot = lv_obj_create(map);
+    lv_obj_set_pos(dot, x - 7, y - 7);
+    lv_obj_set_size(dot, 14, 14);
+    lv_obj_set_style_radius(dot, 7, 0);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(dot, 2, 0);
+    lv_obj_set_style_border_color(dot, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+
+    if(text && text[0]) {
+        label = ui_label(map, text, &lv_font_montserrat_14, 0xF8FAFC);
+        lv_obj_set_style_bg_color(label, lv_color_hex(0x0B1220), 0);
+        lv_obj_set_style_bg_opa(label, LV_OPA_80, 0);
+        lv_obj_set_style_pad_left(label, 6, 0);
+        lv_obj_set_style_pad_right(label, 6, 0);
+        lv_obj_set_style_pad_top(label, 2, 0);
+        lv_obj_set_style_pad_bottom(label, 2, 0);
+        lv_obj_set_style_radius(label, 5, 0);
+        lv_obj_set_pos(label, x + 10, y - 12);
+        lv_obj_set_width(label, 96);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    }
+}
+
+static void mesh_map_draw_nodes(lv_obj_t *map, const char *nodes_text,
+                                double top_left_x, double top_left_y,
+                                int zoom)
+{
+    char nodes_copy[8192];
+    char *saveptr = NULL;
+    char *line;
+
+    if(!nodes_text || !nodes_text[0]) {
+        return;
+    }
+    snprintf(nodes_copy, sizeof(nodes_copy), "%s", nodes_text);
+    line = strtok_r(nodes_copy, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "0x", 2) == 0) {
+            char pos[96];
+            double lat;
+            double lon;
+            if(mesh_node_line_value(line, "pos=", pos, sizeof(pos)) &&
+               sscanf(pos, "%lf,%lf", &lat, &lon) == 2) {
+                double px;
+                double py;
+                char short_name[24];
+                int local_x;
+                int local_y;
+                mesh_map_lonlat_to_pixel(lat, lon, zoom, &px, &py);
+                local_x = (int)(px - top_left_x);
+                local_y = (int)(py - top_left_y);
+                if(!mesh_node_line_value(line, "short=", short_name,
+                                         sizeof(short_name)) ||
+                   mesh_node_text_missing(short_name)) {
+                    snprintf(short_name, sizeof(short_name), "%.10s", line);
+                }
+                mesh_map_add_marker(map, local_x, local_y, 0xF59E0B,
+                                    short_name);
+            }
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+}
+
+static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
+                                double center_lon, int zoom,
+                                const char *nodes_text, int *missing_out)
+{
+    double center_x;
+    double center_y;
+    double top_left_x;
+    double top_left_y;
+    int map_w = lv_obj_get_width(map);
+    int map_h = lv_obj_get_height(map);
+    int n = 1 << zoom;
+    int tx0;
+    int tx1;
+    int ty0;
+    int ty1;
+    int missing = 0;
+
+    mesh_map_lonlat_to_pixel(center_lat, center_lon, zoom, &center_x,
+                             &center_y);
+    top_left_x = center_x - (double)map_w / 2.0;
+    top_left_y = center_y - (double)map_h / 2.0;
+    tx0 = (int)floor(top_left_x / MESHTASTIC_MAP_TILE_SIZE);
+    tx1 = (int)floor((top_left_x + map_w) / MESHTASTIC_MAP_TILE_SIZE);
+    ty0 = (int)floor(top_left_y / MESHTASTIC_MAP_TILE_SIZE);
+    ty1 = (int)floor((top_left_y + map_h) / MESHTASTIC_MAP_TILE_SIZE);
+
+    for(int ty = ty0; ty <= ty1; ty++) {
+        if(ty < 0 || ty >= n) {
+            continue;
+        }
+        for(int tx = tx0; tx <= tx1; tx++) {
+            char path[256];
+            char fallback[64];
+            int tile_x = tx;
+            int local_x;
+            int local_y;
+
+            while(tile_x < 0) {
+                tile_x += n;
+            }
+            while(tile_x >= n) {
+                tile_x -= n;
+            }
+            local_x = (int)((double)tx * MESHTASTIC_MAP_TILE_SIZE -
+                            top_left_x);
+            local_y = (int)((double)ty * MESHTASTIC_MAP_TILE_SIZE -
+                            top_left_y);
+            mesh_map_tile_path(zoom, tile_x, ty, path, sizeof(path));
+            if(ui_path_exists(path)) {
+                lv_obj_t *img = lv_image_create(map);
+                lv_image_set_src(img, path);
+                lv_obj_set_pos(img, local_x, local_y);
+                lv_obj_clear_flag(img, LV_OBJ_FLAG_SCROLLABLE);
+            } else {
+                snprintf(fallback, sizeof(fallback), "z%d/%d/%d", zoom,
+                         tile_x, ty);
+                mesh_map_add_placeholder_tile(map, local_x, local_y,
+                                              fallback);
+                missing++;
+            }
+        }
+    }
+
+    mesh_map_draw_nodes(map, nodes_text, top_left_x, top_left_y, zoom);
+    mesh_map_add_marker(map, map_w / 2, map_h / 2, 0x25C281,
+                        mesh_map_fake_gps_enabled ? "DEBUG" : "ME");
+    if(missing_out) {
+        *missing_out = missing;
+    }
+}
+
+static void mesh_map_rebuild(void);
+
+static void mesh_map_fake_switch_event_cb(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target(event);
+
+    mesh_map_fake_gps_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED) ? 1 : 0;
+    mesh_map_save_prefs();
+    mesh_map_rebuild();
+}
+
+static void mesh_map_zoom_event_cb(lv_event_t *event)
+{
+    int delta = (int)(intptr_t)lv_event_get_user_data(event);
+
+    mesh_map_zoom += delta;
+    if(mesh_map_zoom < MESHTASTIC_MAP_MIN_ZOOM) {
+        mesh_map_zoom = MESHTASTIC_MAP_MIN_ZOOM;
+    } else if(mesh_map_zoom > MESHTASTIC_MAP_MAX_ZOOM) {
+        mesh_map_zoom = MESHTASTIC_MAP_MAX_ZOOM;
+    }
+    mesh_map_save_prefs();
+    mesh_map_rebuild();
+}
+
+static void mesh_map_refresh_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_map_rebuild();
+}
+
+static void mesh_map_rebuild(void)
+{
+    char status[4096];
+    char nodes[8192];
+    char reason[128];
+    char info[256];
+    double lat = 0.0;
+    double lon = 0.0;
+    int has_position;
+    int missing_tiles = 0;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int landscape = ui_is_landscape();
+    int title_y = 22;
+    int controls_x = margin;
+    int controls_y = landscape ? 78 : 72;
+    int controls_w = landscape ? 260 : content_w;
+    int controls_h = landscape ? screen_h - controls_y - margin : 118;
+    int map_x = landscape ? controls_x + controls_w + 12 : margin;
+    int map_y = landscape ? controls_y : controls_y + controls_h + 12;
+    int map_w = landscape ? screen_w - map_x - margin : content_w;
+    int map_h = screen_h - map_y - margin;
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *btn;
+    lv_obj_t *controls;
+    lv_obj_t *label;
+    lv_obj_t *sw;
+    lv_obj_t *map;
+
+    if(!mesh_map_overlay || !lv_obj_is_valid(mesh_map_overlay)) {
+        return;
+    }
+    mesh_map_load_prefs();
+    lv_obj_clean(mesh_map_overlay);
+
+    if(mesh_ipc_command("STATUS\n", status, sizeof(status)) != 0) {
+        snprintf(status, sizeof(status), "%s", mesh_status_text);
+    }
+    nodes[0] = '\0';
+    if(mesh_ipc_command("NODES\n", nodes, sizeof(nodes)) != 0) {
+        nodes[0] = '\0';
+    } else if(strncmp(nodes, "OK nodes\n", 9) == 0) {
+        memmove(nodes, nodes + 9, strlen(nodes + 9) + 1U);
+    }
+    has_position = mesh_map_current_position(status, &lat, &lon, reason,
+                                             sizeof(reason));
+
+    panel = lv_obj_create(mesh_map_overlay);
+    ui_set_fullscreen(panel);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    title = ui_label(panel, ui_tr("Mesh Map"), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, margin, title_y);
+    lv_obj_set_width(title, content_w - 230);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 206, 18, 100,
+                            ui_tr("Refresh"), 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_map_refresh_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"), 0x374151);
+    lv_obj_add_event_cb(btn, mesh_map_close_event_cb, LV_EVENT_CLICKED, NULL);
+
+    controls = lv_obj_create(panel);
+    lv_obj_set_pos(controls, controls_x, controls_y);
+    lv_obj_set_size(controls, controls_w, controls_h);
+    lv_obj_set_style_bg_color(controls, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_color(controls, lv_color_hex(0x233044), 0);
+    lv_obj_set_style_border_width(controls, 1, 0);
+    lv_obj_set_style_radius(controls, 8, 0);
+    lv_obj_set_style_pad_all(controls, 14, 0);
+    lv_obj_clear_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
+
+    label = ui_label(controls, ui_tr("Position"), &lv_font_montserrat_16,
+                     0x94A3B8);
+    lv_obj_set_pos(label, 0, 0);
+    snprintf(info, sizeof(info), "%s\nZoom %d", reason, mesh_map_zoom);
+    label = ui_label(controls, info, &lv_font_montserrat_16,
+                     has_position ? 0xD7DEE8 : 0xF5A524);
+    lv_obj_set_pos(label, 0, 28);
+    lv_obj_set_width(label, controls_w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+    label = ui_label(controls, ui_tr("Debug GPS"), &lv_font_montserrat_16,
+                     0xCBD5E1);
+    lv_obj_set_pos(label, 0, landscape ? 96 : 76);
+    sw = lv_switch_create(controls);
+    lv_obj_set_pos(sw, controls_w - 86, landscape ? 88 : 68);
+    lv_obj_set_size(sw, 64, 34);
+    if(mesh_map_fake_gps_enabled) {
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(sw, mesh_map_fake_switch_event_cb, LV_EVENT_VALUE_CHANGED,
+                        NULL);
+
+    if(landscape) {
+        btn = ui_command_button(controls, 0, controls_h - 74,
+                                (controls_w - 34) / 2, "-", 0xF2F5F8);
+        lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)-1);
+        btn = ui_command_button(controls, (controls_w - 34) / 2 + 10,
+                                controls_h - 74, (controls_w - 34) / 2,
+                                "+", 0xF2F5F8);
+        lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)1);
+    } else {
+        btn = ui_command_button(controls, controls_w - 198, 68, 78, "-",
+                                0xF2F5F8);
+        lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)-1);
+        btn = ui_command_button(controls, controls_w - 106, 68, 78, "+",
+                                0xF2F5F8);
+        lv_obj_add_event_cb(btn, mesh_map_zoom_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)1);
+    }
+
+    map = lv_obj_create(panel);
+    lv_obj_set_pos(map, map_x, map_y);
+    lv_obj_set_size(map, map_w, map_h);
+    lv_obj_set_style_bg_color(map, lv_color_hex(0x08111C), 0);
+    lv_obj_set_style_border_color(map, lv_color_hex(0x233044), 0);
+    lv_obj_set_style_border_width(map, 1, 0);
+    lv_obj_set_style_radius(map, 8, 0);
+    lv_obj_set_style_clip_corner(map, 1, 0);
+    lv_obj_set_style_pad_all(map, 0, 0);
+    lv_obj_clear_flag(map, LV_OBJ_FLAG_SCROLLABLE);
+
+    if(has_position) {
+        mesh_map_draw_tiles(map, lat, lon, mesh_map_zoom, nodes,
+                            &missing_tiles);
+        if(missing_tiles > 0) {
+            snprintf(info, sizeof(info), "Missing %d offline tiles",
+                     missing_tiles);
+            label = ui_label(map, info, &lv_font_montserrat_14, 0xF5A524);
+            lv_obj_set_style_bg_color(label, lv_color_hex(0x0B1220), 0);
+            lv_obj_set_style_bg_opa(label, LV_OPA_80, 0);
+            lv_obj_set_style_pad_all(label, 6, 0);
+            lv_obj_set_pos(label, 10, 10);
+        }
+    } else {
+        label = ui_label(map,
+                         ui_tr("Map needs nRF9151 GNSS fix, or enable Debug GPS."),
+                         &lv_font_montserrat_18, 0xF5A524);
+        lv_obj_set_width(label, map_w - 40);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        lv_obj_center(label);
+    }
+
+    app_request_fast_refresh();
+}
+
+static void mesh_map_event_cb(lv_event_t *event)
+{
+    (void)event;
+    ui_input_hide_inline_active();
+    if(!mesh_map_overlay || !lv_obj_is_valid(mesh_map_overlay)) {
+        mesh_map_overlay = lv_obj_create(lv_screen_active());
+        ui_set_fullscreen(mesh_map_overlay);
+        lv_obj_set_style_bg_color(mesh_map_overlay, lv_color_hex(0x05070A), 0);
+        lv_obj_set_style_bg_opa(mesh_map_overlay, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(mesh_map_overlay, 0, 0);
+        lv_obj_set_style_border_width(mesh_map_overlay, 0, 0);
+        lv_obj_set_style_pad_all(mesh_map_overlay, 0, 0);
+        lv_obj_clear_flag(mesh_map_overlay, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_move_foreground(mesh_map_overlay);
+    }
+    mesh_map_rebuild();
+}
+
 static void mesh_node_detail_event_cb(lv_event_t *event)
 {
     const char *line = (const char *)lv_event_get_user_data(event);
@@ -6216,21 +6784,25 @@ void ui_meshtastic_create(lv_obj_t *scr)
     mesh_status_label = ui_label(mesh_status_panel, "Daemon offline",
                                  &lv_font_montserrat_20, 0xF5A524);
     lv_obj_set_pos(mesh_status_label, 0, 0);
-    lv_obj_set_width(mesh_status_label, content_w - 156);
+    lv_obj_set_width(mesh_status_label, content_w - 228);
     lv_label_set_long_mode(mesh_status_label, LV_LABEL_LONG_DOT);
 
     mesh_profile_label = ui_label(mesh_status_panel, "", &lv_font_montserrat_14,
                                   0xCBD5E1);
     lv_obj_set_pos(mesh_profile_label, 0, 28);
-    lv_obj_set_width(mesh_profile_label, content_w - 156);
+    lv_obj_set_width(mesh_profile_label, content_w - 228);
     lv_label_set_long_mode(mesh_profile_label, LV_LABEL_LONG_DOT);
 
     mesh_detail_label = ui_label(mesh_status_panel, "",
                                  &lv_font_montserrat_14, 0x94A3B8);
     lv_obj_set_pos(mesh_detail_label, 0, 50);
-    lv_obj_set_width(mesh_detail_label, content_w - 156);
+    lv_obj_set_width(mesh_detail_label, content_w - 228);
     lv_label_set_long_mode(mesh_detail_label, LV_LABEL_LONG_DOT);
 
+    btn = ui_command_button(mesh_status_panel, content_w - 216, 0, 60,
+                            ui_tr("Map"), 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_map_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_height(btn, 54);
     btn = ui_command_button(mesh_status_panel, content_w - 144, 0, 60,
                             LV_SYMBOL_LIST, 0x25C281);
     lv_obj_add_event_cb(btn, mesh_nodes_event_cb, LV_EVENT_CLICKED, NULL);
@@ -6339,6 +6911,7 @@ void ui_meshtastic_cleanup(void)
         lv_obj_delete(mesh_nodes_overlay);
     }
     mesh_nodes_overlay = NULL;
+    mesh_map_close();
     mesh_close_channel_page();
 }
 
@@ -6382,6 +6955,10 @@ int ui_meshtastic_handle_back(void)
     }
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
         mesh_close_channel_page();
+        return 1;
+    }
+    if(mesh_map_overlay && lv_obj_is_valid(mesh_map_overlay)) {
+        mesh_map_close();
         return 1;
     }
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
