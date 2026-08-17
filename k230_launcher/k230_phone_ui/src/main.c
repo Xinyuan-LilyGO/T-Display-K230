@@ -682,7 +682,8 @@ static int page_uses_lora_radio(page_id_t page)
 {
     return page == PAGE_LORA ||
            page == PAGE_LORA_FLRC ||
-           page == PAGE_LORAWAN;
+           page == PAGE_LORAWAN ||
+           page == PAGE_CELLULAR;
 }
 
 static void touch_trace_log(const char *fmt, ...)
@@ -1161,7 +1162,11 @@ static int touch_input_blocked(void)
     if((idle_dimmed || boot0_off) && ui_hardware_screen_backlight_get() > 0) {
         uint64_t now = monotonic_us();
 
-        if(idle_dimmed) {
+        if(boot0_off) {
+            ui_hardware_shutdown_backlights_apply(0, 0);
+            touch_trace_log("DISPLAY_TIMEOUT_TOUCH_FORCE_OFF screen=%d",
+                            ui_hardware_screen_backlight_get());
+        } else if(idle_dimmed) {
             pthread_mutex_lock(&display_idle_lock);
             display_idle_dimmed = 0;
             display_idle_wake_pending = 0;
@@ -1210,6 +1215,12 @@ static void display_idle_poll(void)
 
     if(!restore_pending && display_idle_is_dimmed() &&
        ui_hardware_screen_backlight_get() > 0) {
+        if(ui_hardware_boot0_screen_off()) {
+            ui_hardware_shutdown_backlights_apply(0, 0);
+            touch_trace_log("DISPLAY_TIMEOUT_POLL_FORCE_OFF screen=%d",
+                            ui_hardware_screen_backlight_get());
+            return;
+        }
         pthread_mutex_lock(&display_idle_lock);
         display_idle_dimmed = 0;
         display_idle_wake_pending = 0;

@@ -1078,6 +1078,14 @@ static void boot0_fade_backlights(int screen_from, int screen_to,
         }
         usleep(BOOT0_FADE_STEP_US);
     }
+    hardware_write_backlight_raw(screen_to);
+    if(screen_to == 0) {
+        usleep(20000);
+        hardware_write_backlight_raw(0);
+    }
+    if(keyboard_should_drive) {
+        keyboard_backlight_apply(keyboard_to, frequency_hz, 0);
+    }
     if(!keyboard_should_drive) {
         pthread_mutex_lock(&hardware_lock);
         keyboard_backlight_last = 0;
@@ -1138,9 +1146,12 @@ int ui_hardware_keyboard_backlight_get(void)
 
 int ui_hardware_boot0_screen_off(void)
 {
-    if(boot0_screen_off && hardware_read_backlight_raw() > 0) {
+    int raw = hardware_read_backlight_raw();
+
+    if(boot0_screen_off && raw > 16) {
         boot0_screen_off = 0;
-        button_test_log("BOOT0 screen-off state cleared because screen backlight is on");
+        button_test_log("BOOT0 screen-off state cleared because screen backlight is on raw=%d",
+                        raw);
     }
     return boot0_screen_off;
 }

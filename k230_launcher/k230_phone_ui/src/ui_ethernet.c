@@ -49,6 +49,7 @@ static lv_obj_t *eth_status_label;
 static lv_obj_t *eth_mode_label;
 static lv_obj_t *eth_mode_dhcp_btn;
 static lv_obj_t *eth_mode_static_btn;
+static lv_obj_t *eth_field_row_obj[ETH_FIELD_COUNT];
 static lv_obj_t *eth_field_value[ETH_FIELD_COUNT];
 static lv_obj_t *eth_apply_btn;
 static lv_timer_t *eth_timer;
@@ -385,9 +386,8 @@ static void ethernet_update_config_ui(void)
     pthread_mutex_unlock(&eth_lock);
 
     if(eth_mode_label) {
-        lv_label_set_text(eth_mode_label, ui_tr(
-                          strcmp(config.mode, ETH_MODE_STATIC) == 0 ?
-                          "Static IP" : "DHCP"));
+        lv_label_set_text(eth_mode_label, "");
+        lv_obj_add_flag(eth_mode_label, LV_OBJ_FLAG_HIDDEN);
     }
     ethernet_style_choice_button(eth_mode_dhcp_btn,
                                  strcmp(config.mode, ETH_MODE_DHCP) == 0,
@@ -409,6 +409,16 @@ static void ethernet_update_config_ui(void)
         lv_label_set_text(eth_field_value[ETH_FIELD_DNS],
                           config.dns[0] ? config.dns : "--");
     }
+    for(size_t i = 0; i < ETH_FIELD_COUNT; i++) {
+        if(!eth_field_row_obj[i]) {
+            continue;
+        }
+        if(strcmp(config.mode, ETH_MODE_STATIC) == 0) {
+            lv_obj_clear_flag(eth_field_row_obj[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(eth_field_row_obj[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     if(eth_status_label) {
         lv_label_set_text(eth_status_label, ui_tr(busy ? "Applying..." : status));
         lv_obj_set_style_text_color(eth_status_label,
@@ -416,10 +426,16 @@ static void ethernet_update_config_ui(void)
                                     0);
     }
     if(eth_apply_btn) {
+        lv_obj_set_pos(eth_apply_btn, 0,
+                       strcmp(config.mode, ETH_MODE_STATIC) == 0 ? 796 : 520);
         lv_obj_clear_state(eth_apply_btn, LV_STATE_DISABLED);
         if(busy) {
             lv_obj_add_state(eth_apply_btn, LV_STATE_DISABLED);
         }
+    }
+    if(eth_status_label) {
+        lv_obj_align(eth_status_label, LV_ALIGN_TOP_LEFT, 0,
+                     strcmp(config.mode, ETH_MODE_STATIC) == 0 ? 868 : 592);
     }
 }
 
@@ -498,6 +514,7 @@ void ui_ethernet_cleanup(void)
     eth_mode_dhcp_btn = NULL;
     eth_mode_static_btn = NULL;
     eth_apply_btn = NULL;
+    memset(eth_field_row_obj, 0, sizeof(eth_field_row_obj));
     memset(eth_field_value, 0, sizeof(eth_field_value));
 }
 
@@ -527,8 +544,7 @@ static void ethernet_mode_event_cb(lv_event_t *event)
     snprintf(config.mode, sizeof(config.mode), "%s",
              mode ? mode : ETH_MODE_DHCP);
     ethernet_save_config(&config);
-    ethernet_set_status(strcmp(config.mode, ETH_MODE_STATIC) == 0 ?
-                        "Static IP selected" : "DHCP selected");
+    ethernet_set_status("Ready");
     ethernet_update_config_ui();
     app_request_fast_refresh();
 }
@@ -708,6 +724,7 @@ static lv_obj_t *ethernet_field_row(lv_obj_t *parent, int y,
     lv_obj_add_event_cb(edit, ethernet_edit_field_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)field);
 
+    eth_field_row_obj[field] = row;
     return row;
 }
 
@@ -816,5 +833,6 @@ void ui_ethernet_create(lv_obj_t *scr)
     lv_obj_align(eth_status_label, LV_ALIGN_TOP_LEFT, 0, 868);
 
     eth_timer = lv_timer_create(ethernet_timer_cb, 1000, NULL);
+    ethernet_update_config_ui();
     ethernet_update_page();
 }

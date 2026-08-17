@@ -174,6 +174,7 @@ static lv_obj_t *cellular_sat_label;
 static lv_obj_t *cellular_log_label;
 static lv_obj_t *cellular_cno_button;
 static lv_obj_t *cellular_check_panel;
+static lv_obj_t *cellular_check_dialog;
 static lv_obj_t *cellular_check_spinner;
 static lv_obj_t *cellular_check_label;
 static cellular_cn0_bar_t cellular_cn0_bars[NRF9151_CN0_BAR_MAX];
@@ -183,6 +184,7 @@ static pthread_mutex_t cellular_lock = PTHREAD_MUTEX_INITIALIZER;
 static int cellular_worker_active;
 static int cellular_cno_monitor_active;
 static int cellular_cno_monitor_stop;
+static int cellular_page_active;
 static int cellular_check_was_active;
 static uint64_t cellular_check_hide_us;
 static char cellular_status[160] = "Ready";
@@ -808,7 +810,7 @@ static void cellular_check_progress_refresh(int active, const char *status)
         cellular_check_hide_us = 0;
         lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(cellular_check_spinner, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_opa(cellular_check_panel, LV_OPA_COVER, 0);
+        lv_obj_move_foreground(cellular_check_panel);
         lv_label_set_text(cellular_check_label, ui_tr("Checking modem"));
         return;
     }
@@ -821,7 +823,7 @@ static void cellular_check_progress_refresh(int active, const char *status)
         cellular_check_hide_us = now + 1200000ULL;
         lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(cellular_check_spinner, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_opa(cellular_check_panel, LV_OPA_COVER, 0);
+        lv_obj_move_foreground(cellular_check_panel);
         lv_label_set_text(cellular_check_label, ui_tr(done));
         return;
     }
@@ -921,8 +923,8 @@ static void cellular_status_refresh(void)
         lv_obj_t *label = lv_obj_get_child(cellular_cno_button, 0);
 
         if(label) {
-            lv_label_set_text(label, ui_tr(monitor_active ? "Stop C/N0" :
-                                           "C/N0 Monitor"));
+            lv_label_set_text(label, ui_tr(monitor_active ? "Stop GNSS" :
+                                           "GNSS"));
             lv_obj_set_style_text_color(label,
                                         lv_color_hex(monitor_active ?
                                                      0xEF4D5A : 0xF97316),
@@ -2638,10 +2640,8 @@ static void cellular_run_full_test(int fd)
                                              sizeof(cellular_lte_status_cmds) /
                                              sizeof(cellular_lte_status_cmds[0]));
     gnss_failures = cellular_run_gnss_start_lte_mode(fd, 0);
-    cellular_log_append("Full test: wait for GNSS URC/NMEA");
-    usleep(1500000);
-    cellular_log_append("Full test leaves GNSS running");
-    cellular_read_unsolicited(fd, NRF9151_FULL_TEST_NMEA_SECONDS);
+    cellular_log_append("Full test: GNSS/NMEA started without blocking");
+    cellular_log_append("Full test leaves NMEA parsing to the GNSS panel");
     cellular_run_command_list(fd, CELLULAR_ACTION_GNSS_STATUS,
                               cellular_gnss_status_cmds,
                               sizeof(cellular_gnss_status_cmds) /
@@ -2675,8 +2675,8 @@ static void *cellular_cno_monitor_main(void *arg)
     unsigned int last_nmea_count = 0;
     int restart_attempted = 0;
 
-    cellular_set_status("C/N0 monitor");
-    cellular_log_append("=== C/N0 monitor start ===");
+    cellular_set_status("GNSS");
+    cellular_log_append("=== GNSS monitor start ===");
 #if NRF9151_EN_CONTROL_ENABLED
     if(cellular_gpio_set(NRF9151_EN_GPIO, 1) == 0) {
         cellular_log_append("GPIO%u EN=1", NRF9151_EN_GPIO);
@@ -2698,7 +2698,7 @@ static void *cellular_cno_monitor_main(void *arg)
     pthread_mutex_lock(&cellular_lock);
     last_nmea_count = cellular_nmea_count;
     pthread_mutex_unlock(&cellular_lock);
-    cellular_log_append("C/N0 monitor running; press button again to stop");
+    cellular_log_append("GNSS monitor running; press GNSS again to stop");
     while(!cellular_cno_monitor_should_stop()) {
         fd_set rfds;
         struct timeval tv;
@@ -2719,14 +2719,14 @@ static void *cellular_cno_monitor_main(void *arg)
                 pthread_mutex_unlock(&cellular_lock);
                 if(current_nmea_count == last_nmea_count) {
                     if(!restart_attempted) {
-                        cellular_log_append("C/N0 monitor no NMEA; restart GNSS");
+                        cellular_log_append("GNSS monitor no NMEA; restart GNSS");
                         cellular_run_gnss_start(fd, 1);
                         pthread_mutex_lock(&cellular_lock);
                         last_nmea_count = cellular_nmea_count;
                         pthread_mutex_unlock(&cellular_lock);
                         restart_attempted = 1;
                     } else {
-                        cellular_log_append("C/N0 monitor waiting for NMEA");
+                        cellular_log_append("GNSS monitor waiting for NMEA");
                     }
                 } else {
                     last_nmea_count = current_nmea_count;
@@ -2752,8 +2752,8 @@ static void *cellular_cno_monitor_main(void *arg)
         cellular_process_uart_line(uart_line);
         cellular_apply_led_auto_if_pending(fd);
     }
-    cellular_log_append("=== C/N0 monitor stop ===");
-    cellular_set_status("C/N0 monitor stopped");
+    cellular_log_append("=== GNSS monitor stop ===");
+    cellular_set_status("GNSS stopped");
     close(fd);
 
 out:
@@ -2762,6 +2762,40 @@ out:
     cellular_cno_monitor_stop = 0;
     pthread_mutex_unlock(&cellular_lock);
     return NULL;
+}
+
+static void cellular_start_cno_monitor_after_check(void)
+{
+    pthread_t thread;
+    int start = 0;
+
+    pthread_mutex_lock(&cellular_lock);
+    if(!cellular_cno_monitor_active) {
+        if(!cellular_page_active) {
+            pthread_mutex_unlock(&cellular_lock);
+            return;
+        }
+        cellular_cno_monitor_active = 1;
+        cellular_cno_monitor_stop = 0;
+        start = 1;
+    }
+    pthread_mutex_unlock(&cellular_lock);
+
+    if(!start) {
+        return;
+    }
+
+    if(pthread_create(&thread, NULL, cellular_cno_monitor_main, NULL) == 0) {
+        pthread_detach(thread);
+        cellular_log_append("GNSS NMEA parser monitor started after Run");
+    } else {
+        pthread_mutex_lock(&cellular_lock);
+        cellular_cno_monitor_active = 0;
+        cellular_cno_monitor_stop = 0;
+        pthread_mutex_unlock(&cellular_lock);
+        cellular_log_append("pthread_create GNSS monitor failed");
+    }
+    app_request_fast_refresh();
 }
 
 static void cellular_action_commands(cellular_action_t action,
@@ -2817,7 +2851,7 @@ static void cellular_action_commands(cellular_action_t action,
         *title = "Stop GNSS";
         break;
     case CELLULAR_ACTION_FULL_TEST:
-        *title = "Run Check";
+        *title = "Run";
         break;
     }
 }
@@ -2908,6 +2942,9 @@ static void *cellular_worker_main(void *arg)
     }
 
     close(fd);
+    if(action == CELLULAR_ACTION_FULL_TEST) {
+        cellular_start_cno_monitor_after_check();
+    }
     if(action != CELLULAR_ACTION_FULL_TEST) {
         cellular_set_status("%s done", title);
     }
@@ -2983,13 +3020,13 @@ static void cellular_cno_monitor_event_cb(lv_event_t *event)
     pthread_mutex_unlock(&cellular_lock);
 
     if(active) {
-        cellular_log_append("C/N0 monitor stop requested");
-        cellular_set_status("Stopping C/N0 monitor");
+        cellular_log_append("GNSS monitor stop requested");
+        cellular_set_status("Stopping GNSS");
         app_request_fast_refresh();
         return;
     }
     if(busy) {
-        cellular_log_append("C/N0 monitor ignored: worker busy");
+        cellular_log_append("GNSS monitor ignored: worker busy");
         app_request_fast_refresh();
         return;
     }
@@ -3001,8 +3038,8 @@ static void cellular_cno_monitor_event_cb(lv_event_t *event)
         cellular_cno_monitor_active = 0;
         cellular_cno_monitor_stop = 0;
         pthread_mutex_unlock(&cellular_lock);
-        cellular_log_append("pthread_create C/N0 monitor failed");
-        cellular_set_status("C/N0 monitor failed");
+        cellular_log_append("pthread_create GNSS monitor failed");
+        cellular_set_status("GNSS failed");
     }
     app_request_fast_refresh();
 }
@@ -3088,6 +3125,10 @@ void ui_cellular_create(lv_obj_t *scr)
     int gnss_inner_w = right_w - 48;
     int log_inner_w = right_w - 48;
 
+    pthread_mutex_lock(&cellular_lock);
+    cellular_page_active = 1;
+    pthread_mutex_unlock(&cellular_lock);
+
     if(log_h < 118) {
         log_h = 118;
     }
@@ -3127,14 +3168,14 @@ void ui_cellular_create(lv_obj_t *scr)
 
     actions = ui_panel(body, left_x, actions_y, left_w, actions_h);
     lv_obj_set_style_bg_color(actions, lv_color_hex(0x151B22), 0);
-    ui_label(actions, "One-tap diagnostics", &lv_font_montserrat_20,
+    ui_label(actions, "Diagnostics", &lv_font_montserrat_20,
              0xF2F5F8);
     lv_obj_align(lv_obj_get_child(actions, lv_obj_get_child_count(actions) - 1),
                  LV_ALIGN_TOP_LEFT, 0, 0);
 
     cellular_button(actions, 0, 46,
                     landscape ? action_btn_w : left_w - 32,
-                    "Run Check", 0x25C281,
+                    "Run", 0x25C281,
                     cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_FULL_TEST);
     cellular_cno_button = cellular_button(actions,
@@ -3143,7 +3184,7 @@ void ui_cellular_create(lv_obj_t *scr)
                                           landscape ? 46 : 116,
                                           landscape ? action_btn_w :
                                           action_btn_w,
-                                          "C/N0 Monitor", 0xF97316,
+                                          "GNSS", 0xF97316,
                                           cellular_cno_monitor_event_cb, NULL);
     cellular_button(actions,
                     landscape ? (action_btn_w + 12) * 2 :
@@ -3152,27 +3193,6 @@ void ui_cellular_create(lv_obj_t *scr)
                     action_btn_w, "Clear log",
                     0x94A3B8,
                     cellular_clear_event_cb, NULL);
-
-    cellular_check_panel = lv_obj_create(actions);
-    lv_obj_set_pos(cellular_check_panel, 0, landscape ? 104 : 176);
-    lv_obj_set_size(cellular_check_panel, left_w - 32, 36);
-    lv_obj_set_style_bg_color(cellular_check_panel, lv_color_hex(0x0F172A), 0);
-    lv_obj_set_style_bg_opa(cellular_check_panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(cellular_check_panel, 8, 0);
-    lv_obj_set_style_border_width(cellular_check_panel, 1, 0);
-    lv_obj_set_style_border_color(cellular_check_panel, lv_color_hex(0x25303A),
-                                  0);
-    lv_obj_set_style_pad_all(cellular_check_panel, 0, 0);
-    lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_SCROLLABLE);
-    cellular_check_spinner = lv_spinner_create(cellular_check_panel);
-    lv_obj_set_size(cellular_check_spinner, 24, 24);
-    lv_obj_align(cellular_check_spinner, LV_ALIGN_LEFT_MID, 12, 0);
-    cellular_check_label = ui_label(cellular_check_panel, "Checking modem",
-                                    &lv_font_montserrat_16, 0xDCE5EE);
-    lv_obj_set_width(cellular_check_label, left_w - 84);
-    lv_label_set_long_mode(cellular_check_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(cellular_check_label, LV_ALIGN_LEFT_MID, 48, 0);
-    lv_obj_add_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
 
     gnss_panel = ui_panel(body, right_x, gnss_y, right_w, gnss_h);
     lv_obj_set_style_bg_color(gnss_panel, lv_color_hex(0x101820), 0);
@@ -3226,6 +3246,38 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_label_set_long_mode(cellular_log_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(cellular_log_label, LV_ALIGN_TOP_LEFT, 0, 42);
 
+    cellular_check_panel = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(cellular_check_panel);
+    lv_obj_set_style_bg_color(cellular_check_panel, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(cellular_check_panel, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(cellular_check_panel, 0, 0);
+    lv_obj_set_style_pad_all(cellular_check_panel, 0, 0);
+    lv_obj_add_flag(cellular_check_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    cellular_check_dialog = lv_obj_create(cellular_check_panel);
+    lv_obj_set_size(cellular_check_dialog, landscape ? 320 : 300, 148);
+    lv_obj_set_style_bg_color(cellular_check_dialog, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(cellular_check_dialog, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(cellular_check_dialog, 14, 0);
+    lv_obj_set_style_border_width(cellular_check_dialog, 1, 0);
+    lv_obj_set_style_border_color(cellular_check_dialog, lv_color_hex(0x25303A),
+                                  0);
+    lv_obj_set_style_pad_all(cellular_check_dialog, 0, 0);
+    lv_obj_clear_flag(cellular_check_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(cellular_check_dialog);
+
+    cellular_check_spinner = lv_spinner_create(cellular_check_dialog);
+    lv_obj_set_size(cellular_check_spinner, 44, 44);
+    lv_obj_align(cellular_check_spinner, LV_ALIGN_TOP_MID, 0, 24);
+    cellular_check_label = ui_label(cellular_check_dialog, "Checking modem",
+                                    &lv_font_montserrat_18, 0xDCE5EE);
+    lv_obj_set_width(cellular_check_label, landscape ? 260 : 240);
+    lv_label_set_long_mode(cellular_check_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(cellular_check_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(cellular_check_label, LV_ALIGN_TOP_MID, 0, 88);
+    lv_obj_add_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
+
     cellular_status_refresh();
     cellular_log_refresh();
     cellular_timer = lv_timer_create(cellular_timer_cb, 500, NULL);
@@ -3233,6 +3285,14 @@ void ui_cellular_create(lv_obj_t *scr)
 
 void ui_cellular_cleanup(void)
 {
+    pthread_mutex_lock(&cellular_lock);
+    cellular_page_active = 0;
+    if(cellular_cno_monitor_active) {
+        cellular_cno_monitor_stop = 1;
+    }
+    pthread_mutex_unlock(&cellular_lock);
+    cellular_log_append("Cellular page cleanup: GNSS monitor stop requested");
+
     if(cellular_timer) {
         lv_timer_delete(cellular_timer);
         cellular_timer = NULL;
@@ -3250,7 +3310,11 @@ void ui_cellular_cleanup(void)
     cellular_sat_label = NULL;
     cellular_log_label = NULL;
     cellular_cno_button = NULL;
+    if(cellular_check_panel) {
+        lv_obj_delete(cellular_check_panel);
+    }
     cellular_check_panel = NULL;
+    cellular_check_dialog = NULL;
     cellular_check_spinner = NULL;
     cellular_check_label = NULL;
     cellular_check_was_active = 0;
