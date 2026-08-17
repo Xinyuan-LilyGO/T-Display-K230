@@ -180,6 +180,8 @@ static int mesh_map_pinch_active = 0;
 static double mesh_map_pinch_start_distance = 0.0;
 static int mesh_map_pinch_start_zoom = MESHTASTIC_MAP_DEFAULT_ZOOM;
 static int mesh_map_has_position = 0;
+static char mesh_map_notice_text[128];
+static uint32_t mesh_map_notice_color = 0x25C281;
 static lv_obj_t *mesh_map_view_obj;
 static lv_obj_t *mesh_map_layer_obj;
 static lv_obj_t *mesh_settings_overlay;
@@ -6698,6 +6700,126 @@ static void mesh_map_add_position_badge(lv_obj_t *map, int map_w, int map_h,
     lv_obj_move_foreground(badge);
 }
 
+static void mesh_map_set_notice(const char *text, uint32_t color)
+{
+    snprintf(mesh_map_notice_text, sizeof(mesh_map_notice_text), "%s",
+             text && text[0] ? text : "");
+    mesh_map_notice_color = color;
+}
+
+static void mesh_map_add_notice(lv_obj_t *map, int map_w)
+{
+    lv_obj_t *badge;
+    int badge_w;
+
+    if(!mesh_map_notice_text[0]) {
+        return;
+    }
+    badge_w = map_w - 24;
+    if(badge_w > 360) {
+        badge_w = 360;
+    }
+    if(badge_w < 180) {
+        badge_w = map_w > 24 ? map_w - 24 : map_w;
+    }
+    badge = ui_label(map, mesh_map_notice_text, &lv_font_montserrat_16,
+                     mesh_map_notice_color);
+    lv_obj_set_pos(badge, (map_w - badge_w) / 2, 52);
+    lv_obj_set_width(badge, badge_w);
+    lv_obj_set_style_bg_color(badge, lv_color_hex(0x07111F), 0);
+    lv_obj_set_style_bg_opa(badge, LV_OPA_80, 0);
+    lv_obj_set_style_border_color(badge, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_border_width(badge, 1, 0);
+    lv_obj_set_style_radius(badge, 8, 0);
+    lv_obj_set_style_pad_left(badge, 10, 0);
+    lv_obj_set_style_pad_right(badge, 10, 0);
+    lv_obj_set_style_pad_top(badge, 5, 0);
+    lv_obj_set_style_pad_bottom(badge, 5, 0);
+    lv_label_set_long_mode(badge, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(badge, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_clear_flag(badge, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_move_foreground(badge);
+}
+
+static void mesh_map_sanitize_waypoint_name(char *name, size_t name_len)
+{
+    if(!name || name_len == 0U) {
+        return;
+    }
+    for(size_t i = 0; name[i]; i++) {
+        if(name[i] == ',' || name[i] == '\r' || name[i] == '\n' ||
+           name[i] == '\t') {
+            name[i] = ' ';
+        }
+    }
+    ui_trim_text(name);
+    if(!name[0]) {
+        snprintf(name, name_len, "K230 waypoint");
+    }
+}
+
+static void mesh_map_share_event_cb(lv_event_t *event)
+{
+    char status[4096];
+    char reason[128];
+    char response[512];
+    char command[256];
+    char name[48];
+    double lat = 0.0;
+    double lon = 0.0;
+    mesh_map_position_state_t state = MESH_MAP_POS_GNSS_SEARCHING;
+
+    (void)event;
+    if(mesh_ipc_command("STATUS\n", status, sizeof(status)) != 0) {
+        snprintf(status, sizeof(status), "%s", mesh_status_text);
+    }
+    if(!mesh_map_current_position(status, &lat, &lon, reason,
+                                  sizeof(reason), &state)) {
+        mesh_map_set_notice(ui_tr("No position to share"), 0xF5A524);
+        mesh_append_log("waypoint share skipped: no position state=%d reason=%s",
+                        (int)state, reason);
+        mesh_map_rebuild();
+        return;
+    }
+    snprintf(name, sizeof(name), "%s", mesh_node_name[0] ? mesh_node_name :
+             "K230 waypoint");
+    mesh_map_sanitize_waypoint_name(name, sizeof(name));
+    snprintf(command, sizeof(command), "SEND_WAYPOINT %.7f,%.7f,%s\n",
+             lat, lon, name);
+    if(mesh_ipc_command(command, response, sizeof(response)) == 0 &&
+       strncmp(response, "OK waypoint", 11) == 0) {
+        mesh_map_set_notice(ui_tr("Waypoint shared"), 0x25C281);
+        mesh_append_log("waypoint shared %.7f,%.7f %s", lat, lon, name);
+    } else {
+        ui_trim_text(response);
+        mesh_map_set_notice(ui_tr("Share failed"), 0xEF4D5A);
+        mesh_append_log("waypoint share failed: %s", response);
+    }
+    mesh_map_rebuild();
+}
+
+static void mesh_map_add_share_button(lv_obj_t *map, int map_w, int map_h)
+{
+    lv_obj_t *btn;
+    int btn_w = 96;
+    int btn_h = 44;
+    int x = map_w - btn_w - 14;
+    int y = map_h - btn_h - 14;
+
+    if(x < 12) {
+        x = 12;
+    }
+    if(y < 76) {
+        y = 76;
+    }
+    btn = ui_command_button(map, x, y, btn_w, ui_tr("Share"), 0x25C281);
+    lv_obj_set_height(btn, btn_h);
+    lv_obj_set_ext_click_area(btn, 8);
+    lv_obj_add_event_cb(btn, mesh_map_share_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    lv_obj_move_foreground(btn);
+}
+
 static void mesh_map_refresh_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -6970,15 +7092,18 @@ static void mesh_map_rebuild(void)
             mesh_map_add_current_position_overlay(map, lat, lon, self_lat,
                                                   self_lon, mesh_map_zoom,
                                                   map_w, map_h);
+            mesh_map_add_share_button(map, map_w, map_h);
         }
         mesh_map_add_zoom_controls(map, map_w, map_h);
         mesh_map_add_zoom_badge(map, map_w);
         mesh_map_add_position_badge(map, map_w, map_h, reason,
                                     position_state);
+        mesh_map_add_notice(map, map_w);
     } else {
         mesh_map_draw_position_state(map, map_w, map_h, reason,
                                      position_state);
         mesh_map_add_zoom_badge(map, map_w);
+        mesh_map_add_notice(map, map_w);
     }
 
     app_request_fast_refresh();
