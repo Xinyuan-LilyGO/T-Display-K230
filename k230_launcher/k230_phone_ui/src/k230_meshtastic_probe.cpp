@@ -838,6 +838,8 @@ typedef struct {
     bool client_send_to_ack = false;
     std::string client_send_to_target;
     std::string client_send_to_message;
+    bool client_send_voice_requested = false;
+    std::string client_send_voice_path;
     bool client_publish_position = false;
     bool client_publish_telemetry = false;
     bool client_request_nodeinfo = false;
@@ -12421,9 +12423,15 @@ static bool mesh_voice_handle_rx(const probe_options_t &opts,
         snprintf(path, sizeof(path), "/tmp/k230_mesh_voice_rx_%08x_%08x.raw",
                  header.from, stream_id);
         if(mesh_voice_decode_stream_to_file(stream, path, &duration_ms)) {
-            daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=%ddBm",
-                        header.from, (double)duration_ms / 1000.0,
-                        stream->total, (int)roundf(rssi));
+            if(rssi > -200.0f && rssi < 20.0f) {
+                daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=%ddBm",
+                            header.from, (double)duration_ms / 1000.0,
+                            stream->total, (int)roundf(rssi));
+            } else {
+                daemon_chat("RX 0x%08x voice %.1fs chunks=%u rssi=--",
+                            header.from, (double)duration_ms / 1000.0,
+                            stream->total);
+            }
             mesh_voice_play_file_async(path);
         } else {
             daemon_chat("RX 0x%08x voice decode failed chunks=%u",
@@ -14298,6 +14306,12 @@ static int run_daemon_client(const probe_options_t &opts)
         command = (opts.client_send_to_ack ? "SEND_TO_ACK " : "SEND_TO ") +
                   opts.client_send_to_target + " " +
                   opts.client_send_to_message + "\n";
+    } else if(opts.client_send_voice_requested) {
+        if(opts.client_send_voice_path.empty()) {
+            fprintf(stderr, "--cmd-send-voice file is empty\n");
+            return 2;
+        }
+        command = "SEND_VOICE_FILE " + opts.client_send_voice_path + "\n";
     } else if(opts.client_quit) {
         command = "QUIT\n";
     } else if(opts.client_send_requested) {
@@ -14369,7 +14383,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -14390,6 +14404,7 @@ static void print_usage(const char *argv0)
             "  --cmd-send MSG  Ask running daemon to transmit MSG and exit\n"
             "  --cmd-send-to NODE MSG  Ask daemon to transmit MSG to NODE without ACK\n"
             "  --cmd-send-to-ack NODE MSG  Ask daemon to transmit MSG to NODE with ACK\n"
+            "  --cmd-send-voice FILE  Ask daemon to encode and transmit 8 kHz S16_LE mono PCM\n"
             "  --cmd-quit      Ask running daemon to exit\n\n"
             "Profile options:\n"
             "  --region NAME    Meshtastic region, default US when --mesh is used\n"
@@ -14732,6 +14747,9 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_send_to_ack = true;
             opts->client_send_to_target = argv[++i];
             opts->client_send_to_message = argv[++i];
+        } else if(strcmp(arg, "--cmd-send-voice") == 0 && i + 1 < argc) {
+            opts->client_send_voice_requested = true;
+            opts->client_send_voice_path = argv[++i];
         } else if(strcmp(arg, "--cmd-quit") == 0) {
             opts->client_quit = true;
         } else if(strcmp(arg, "--cmd-send") == 0 && i + 1 < argc) {
@@ -15341,6 +15359,7 @@ int main(int argc, char **argv)
                               (opts.client_request_neighborinfo ? 1 : 0) +
                               (opts.client_import_node_key ? 1 : 0) +
                               (opts.client_send_to_requested ? 1 : 0) +
+                              (opts.client_send_voice_requested ? 1 : 0) +
                               (opts.client_quit ? 1 : 0) +
                               (opts.client_send_requested ? 1 : 0);
         if(client_commands > 1) {
