@@ -44,6 +44,7 @@
 #define NRF9151_CMD_TIMEOUT_US 1800000ULL
 #define NRF9151_NMEA_READ_SECONDS 15U
 #define NRF9151_FULL_TEST_NMEA_SECONDS 20U
+#define NRF9151_LTE_PING_READ_SECONDS 12U
 #define NRF9151_NMEA_LINE_MAX 192
 #define NRF9151_UART_LINE_MAX 512
 #define NRF9151_MAX_SATS 48
@@ -103,21 +104,33 @@ static const char *const cellular_sim_cmds[] = {
 
 static const char *const cellular_lte_status_cmds[] = {
     "AT",
+    "AT+CMEE=1",
     "AT+CFUN?",
     "AT%XSYSTEMMODE?",
+    "AT+CEREG=5",
     "AT+CEREG?",
     "AT+CESQ",
     "AT%XMONITOR",
+    "AT+COPS?",
+    "AT+CGATT?",
+    "AT+CGACT?",
+    "AT+CGPADDR",
+    "AT+CGDCONT?",
+    "AT#XPING=\"223.5.5.5\",32,5000,3,1000",
 };
 
 static const char *const cellular_lte_gnss_mode_cmds[] = {
     "AT+CFUN=0",
-    "AT%XSYSTEMMODE=1,0,1,0",
+    "AT%XSYSTEMMODE=1,1,1,0",
     "AT+CEREG=5",
     "AT+CFUN=1",
     "AT%XSYSTEMMODE?",
     "AT+CEREG?",
     "AT+CESQ",
+    "AT%XMONITOR",
+    "AT+CGATT?",
+    "AT+CGACT?",
+    "AT+CGPADDR",
 };
 
 static const char *const cellular_gnss_start_cmds[] = {
@@ -197,6 +210,7 @@ static unsigned int cellular_en_gpio_offset;
 
 static int cellular_response_gnss_active(const char *resp);
 static const char *cellular_skip_spaces(const char *s);
+static void cellular_lte_update_from_line(const char *line, int rc);
 static void cellular_process_response_lines(const char *resp);
 static int cellular_try_led_mode(int fd, int mode, const char *reason);
 static void cellular_apply_led_auto_if_pending(int fd);
@@ -1412,6 +1426,8 @@ static void cellular_process_uart_line(const char *line)
     snprintf(cellular_last_urc, sizeof(cellular_last_urc), "%s", clean);
     pthread_mutex_unlock(&cellular_lock);
 
+    cellular_lte_update_from_line(clean, 0);
+
     if(strncmp(clean, "#XGNSSNMEA:", 11) == 0) {
         nmea = cellular_skip_spaces(clean + 11);
     } else if(cellular_line_has_nmea_prefix(clean)) {
@@ -1639,6 +1655,145 @@ static int cellular_crsm_success_line(const char *line)
     return sw1 == 144 || sw1 == 145;
 }
 
+static int cellular_cereg_stat_from_line(const char *line)
+{
+    const char *p = strchr(line, ':');
+    char *end = NULL;
+    long first;
+    long second = -1;
+
+    if(!p) {
+        return -1;
+    }
+    p = cellular_skip_spaces(p + 1);
+    errno = 0;
+    first = strtol(p, &end, 10);
+    if(errno != 0 || end == p) {
+        return -1;
+    }
+    p = cellular_skip_spaces(end);
+    if(*p == ',') {
+        p = cellular_skip_spaces(p + 1);
+        errno = 0;
+        second = strtol(p, &end, 10);
+        if(errno == 0 && end != p) {
+            return (int)second;
+        }
+    }
+    return (int)first;
+}
+
+static const char *cellular_cereg_stat_text(int stat)
+{
+    switch(stat) {
+    case 0:
+        return "Not registered";
+    case 1:
+        return "Registered home";
+    case 2:
+        return "Searching";
+    case 3:
+        return "Registration denied";
+    case 4:
+        return "Unknown";
+    case 5:
+        return "Registered roaming";
+    case 90:
+        return "SIM/network error";
+    default:
+        return NULL;
+    }
+}
+
+static int cellular_line_first_quoted(const char *line, char *out,
+                                      size_t out_len)
+{
+    const char *start;
+    const char *end;
+    size_t len;
+
+    if(!line || !out || out_len == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    start = strchr(line, '"');
+    if(!start) {
+        return -1;
+    }
+    start++;
+    end = strchr(start, '"');
+    if(!end || end <= start) {
+        return -1;
+    }
+    len = (size_t)(end - start);
+    if(len >= out_len) {
+        len = out_len - 1U;
+    }
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return out[0] ? 0 : -1;
+}
+
+static void cellular_lte_update_from_line(const char *line, int rc)
+{
+    char ip[64];
+    const char *p;
+    int value;
+
+    if(!line) {
+        return;
+    }
+    if(strncmp(line, "+CEREG:", 7) == 0) {
+        int stat = cellular_cereg_stat_from_line(line);
+        const char *text = cellular_cereg_stat_text(stat);
+
+        if(rc == 0 && text) {
+            cellular_set_summary(cellular_lte_status,
+                                 sizeof(cellular_lte_status), "%s", text);
+        } else if(stat >= 0) {
+            cellular_set_summary(cellular_lte_status,
+                                 sizeof(cellular_lte_status),
+                                 "CEREG %d", stat);
+        } else {
+            cellular_set_summary(cellular_lte_status,
+                                 sizeof(cellular_lte_status),
+                                 rc == 0 ? "CEREG OK" : "CEREG fail");
+        }
+        return;
+    }
+    if(strncmp(line, "+CGATT:", 8) == 0) {
+        p = strchr(line, ':');
+        value = p ? atoi(cellular_skip_spaces(p + 1)) : 0;
+        cellular_set_summary(cellular_lte_status,
+                             sizeof(cellular_lte_status),
+                             value ? "Packet attached" : "Not attached");
+        return;
+    }
+    if(strncmp(line, "+CGACT:", 8) == 0) {
+        p = strrchr(line, ',');
+        value = p ? atoi(cellular_skip_spaces(p + 1)) : 0;
+        if(value) {
+            cellular_set_summary(cellular_lte_status,
+                                 sizeof(cellular_lte_status), "PDP active");
+        }
+        return;
+    }
+    if(strncmp(line, "+CGPADDR:", 9) == 0) {
+        if(cellular_line_first_quoted(line, ip, sizeof(ip)) == 0 &&
+           strcmp(ip, "0.0.0.0") != 0) {
+            cellular_set_summary(cellular_lte_status,
+                                 sizeof(cellular_lte_status), "IP %s", ip);
+        }
+        return;
+    }
+    if(strncmp(line, "#XPING:", 7) == 0) {
+        cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
+                             strstr(line, "average") ? "Ping OK" :
+                             "Ping reply");
+        return;
+    }
+}
+
 static void cellular_sim_mark_positive(void)
 {
     pthread_mutex_lock(&cellular_lock);
@@ -1752,17 +1907,20 @@ static void cellular_update_from_response(cellular_action_t action,
         }
     }
 
-    if(cellular_line_containing(resp, "+CESQ:", line, sizeof(line)) == 0) {
-        cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
-                             rc == 0 ? "OK" : "FAIL");
-    }
     if(cellular_line_containing(resp, "+CEREG:", line, sizeof(line)) == 0) {
-        cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
-                             rc == 0 ? "OK" : "FAIL");
+        cellular_lte_update_from_line(line, rc);
     }
-    if(cellular_line_containing(resp, "%XMONITOR:", line, sizeof(line)) == 0) {
-        cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
-                             rc == 0 ? "OK" : "FAIL");
+    if(cellular_line_containing(resp, "+CGATT:", line, sizeof(line)) == 0) {
+        cellular_lte_update_from_line(line, rc);
+    }
+    if(cellular_line_containing(resp, "+CGACT:", line, sizeof(line)) == 0) {
+        cellular_lte_update_from_line(line, rc);
+    }
+    if(cellular_line_containing(resp, "+CGPADDR:", line, sizeof(line)) == 0) {
+        cellular_lte_update_from_line(line, rc);
+    }
+    if(cellular_line_containing(resp, "#XPING:", line, sizeof(line)) == 0) {
+        cellular_lte_update_from_line(line, rc);
     }
 
     if(cellular_line_containing(resp, "#XGNSS:", line, sizeof(line)) == 0 ||
@@ -1870,6 +2028,102 @@ static void cellular_read_unsolicited(int fd, unsigned int seconds)
     }
 }
 
+static void cellular_ping_line_process(char *line, int *ping_seen,
+                                       int *average_seen, int *error_seen)
+{
+    char clean[NRF9151_UART_LINE_MAX];
+
+    if(!line) {
+        return;
+    }
+    snprintf(clean, sizeof(clean), "%s", line);
+    ui_trim_text(clean);
+    if(!clean[0]) {
+        return;
+    }
+    if(strncmp(clean, "#XPING:", 7) == 0) {
+        if(ping_seen) {
+            *ping_seen = 1;
+        }
+        if(strstr(clean, "average") && average_seen) {
+            *average_seen = 1;
+        }
+    } else if(strstr(clean, "ERROR") && error_seen) {
+        *error_seen = 1;
+    }
+    cellular_process_uart_line(clean);
+}
+
+static int cellular_read_ping_result(int fd, unsigned int seconds)
+{
+    uint64_t deadline = ui_monotonic_us() + (uint64_t)seconds * 1000000ULL;
+    char uart_line[NRF9151_UART_LINE_MAX];
+    size_t uart_used = 0;
+    int ping_seen = 0;
+    int average_seen = 0;
+    int error_seen = 0;
+
+    cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
+                         "Pinging");
+    cellular_log_append("Reading XPING result for %us", seconds);
+    while(ui_monotonic_us() < deadline && !average_seen && !error_seen) {
+        fd_set rfds;
+        struct timeval tv;
+        char buf[256];
+        ssize_t rd;
+
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 250000;
+        if(select(fd + 1, &rfds, NULL, NULL, &tv) <= 0) {
+            continue;
+        }
+        rd = read(fd, buf, sizeof(buf));
+        if(rd <= 0) {
+            continue;
+        }
+        for(ssize_t i = 0; i < rd; i++) {
+            char c = buf[i];
+
+            if(c == '\r') {
+                continue;
+            }
+            if(c == '\n') {
+                uart_line[uart_used] = '\0';
+                cellular_ping_line_process(uart_line, &ping_seen,
+                                           &average_seen, &error_seen);
+                uart_used = 0;
+                if(average_seen || error_seen) {
+                    break;
+                }
+                continue;
+            }
+            if(uart_used + 1U >= sizeof(uart_line)) {
+                uart_line[uart_used] = '\0';
+                cellular_ping_line_process(uart_line, &ping_seen,
+                                           &average_seen, &error_seen);
+                uart_used = 0;
+            }
+            uart_line[uart_used++] = c;
+        }
+    }
+    if(uart_used > 0U) {
+        uart_line[uart_used] = '\0';
+        cellular_ping_line_process(uart_line, &ping_seen, &average_seen,
+                                   &error_seen);
+    }
+
+    if(average_seen) {
+        cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
+                             "Ping OK");
+        return 0;
+    }
+    cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
+                         ping_seen ? "Ping incomplete" : "Ping timeout");
+    return 1;
+}
+
 static int cellular_run_command_list(int fd, cellular_action_t action,
                                      const char *const *cmds, size_t count)
 {
@@ -1877,12 +2131,17 @@ static int cellular_run_command_list(int fd, cellular_action_t action,
 
     for(size_t i = 0; i < count; i++) {
         char resp[1024];
+        int is_ping = strncmp(cmds[i], "AT#XPING", 8) == 0;
         int rc = cellular_exchange_fd(fd, cmds[i], resp, sizeof(resp),
                                       NRF9151_CMD_TIMEOUT_US);
 
         cellular_update_from_response(action, cmds[i], resp, rc);
         cellular_apply_led_auto_if_pending(fd);
         if(rc != 0) {
+            failures++;
+        } else if(is_ping &&
+                  cellular_read_ping_result(fd,
+                                            NRF9151_LTE_PING_READ_SECONDS) != 0) {
             failures++;
         }
         usleep(120000);
@@ -2222,6 +2481,17 @@ static void *cellular_worker_main(void *arg)
         if(action == CELLULAR_ACTION_SIM) {
             cellular_set_action_result(action, failures == 0 ||
                                       cellular_sim_positive_snapshot());
+        } else if(action == CELLULAR_ACTION_LTE_STATUS ||
+                  action == CELLULAR_ACTION_LTE_GNSS_MODE) {
+            if(failures != 0) {
+                pthread_mutex_lock(&cellular_lock);
+                if(strcmp(cellular_lte_status, "Not tested") == 0 ||
+                   strcmp(cellular_lte_status, "Pinging") == 0) {
+                    snprintf(cellular_lte_status, sizeof(cellular_lte_status),
+                             "%s", "FAIL");
+                }
+                pthread_mutex_unlock(&cellular_lock);
+            }
         } else {
             cellular_set_action_result(action, failures == 0);
         }
@@ -2489,9 +2759,9 @@ void ui_cellular_create(lv_obj_t *scr)
     cellular_button(actions, (third_btn + 12) * 2, 46, third_btn,
                     "Reset modem", 0xF5A524, cellular_reset_event_cb, NULL);
 
-    cellular_button(actions, 0, 116, wide_btn, "Full test", 0x8B5CF6,
+    cellular_button(actions, 0, 116, wide_btn, "LTE attach", 0x25C281,
                     cellular_action_event_cb,
-                    (void *)(intptr_t)CELLULAR_ACTION_FULL_TEST);
+                    (void *)(intptr_t)CELLULAR_ACTION_LTE_GNSS_MODE);
     cellular_cno_button = cellular_button(actions, wide_btn + 12, 116, wide_btn,
                                           "C/N0 Monitor", 0xF97316,
                                           cellular_cno_monitor_event_cb, NULL);
