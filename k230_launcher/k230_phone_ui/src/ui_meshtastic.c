@@ -8157,9 +8157,13 @@ static void mesh_voice_preview_send_event_cb(lv_event_t *event)
     } else if(mesh_voice_preview_status_label &&
               lv_obj_is_valid(mesh_voice_preview_status_label)) {
         message = response[0] ? response : ui_tr("Voice send failed");
-        if(strstr(message, "chunk count") || strstr(message, "queue") ||
-           strstr(message, "voice-airtime") || strstr(message, "channel-busy") ||
-           strstr(message, "duty-cycle") || strstr(message, "duty-budget")) {
+        if(strstr(message, "voice-airtime") || strstr(message, "channel-busy") ||
+           strstr(message, "channel-budget")) {
+            message = ui_tr("Channel is busy, try later");
+        } else if(strstr(message, "duty-cycle") ||
+                  strstr(message, "duty-budget")) {
+            message = ui_tr("Radio duty limit, try later");
+        } else if(strstr(message, "chunk count") || strstr(message, "queue")) {
             message = ui_tr("Voice is too long or radio is busy");
         }
         lv_label_set_text(mesh_voice_preview_status_label,
