@@ -65,8 +65,14 @@ mkdir -p "$ROOTFS_DIR/root/music" "$ROOTFS_DIR/root/nes" "$ROOTFS_DIR/root/video
     "$ROOTFS_DIR/root/photos" "$ROOTFS_DIR/root/screenshots" \
     "$ROOTFS_DIR/root/recordings" "$ROOTFS_DIR/root/lorawan" \
     "$ROOTFS_DIR/root/meshtastic" "$ROOTFS_DIR/root/notification" \
-    "$ROOTFS_DIR/root/maps" \
     "$ROOTFS_DIR/root/nrf52840/firmware"
+
+# Map tiles are runtime data. Keep them out of generated images so users can
+# later choose an area/zoom level and download only the cache they need.
+rm -rf "$ROOTFS_DIR/root/maps"
+if [ -d "$OUTPUT_CONF_DIR/target/root" ]; then
+    rm -rf "$OUTPUT_CONF_DIR/target/root/maps"
+fi
 
 sync_media_dir() {
     local src="$1"
@@ -84,7 +90,7 @@ sync_media_dir() {
 sync_media_dir "$RESOURCE_DIR/videos" "$ROOTFS_DIR/root/videos" "video"
 sync_media_dir "$RESOURCE_DIR/music" "$ROOTFS_DIR/root/music" "music"
 sync_media_dir "$RESOURCE_DIR/notification" "$ROOTFS_DIR/root/notification" "notification"
-sync_media_dir "$RESOURCE_DIR/maps" "$ROOTFS_DIR/root/maps" "map"
+echo "Skipped map tiles; runtime cache is /root/maps on the device"
 
 if [ -e "$STAMP" ]; then
     mv "$STAMP" "$STAMP.stale.$(date +%Y%m%d_%H%M%S)"

@@ -4,6 +4,7 @@
 #include "ui_hardware.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
+#include "ui_multitouch.h"
 #include "ui_prefs.h"
 
 #include <ctype.h>
@@ -84,6 +85,9 @@
 #define MESHTASTIC_MAP_MIN_ZOOM 5
 #define MESHTASTIC_MAP_MAX_ZOOM 14
 #define MESHTASTIC_MAP_DEFAULT_ZOOM 12
+#define MESHTASTIC_MAP_PREFETCH_TILES 1
+#define MESHTASTIC_MAP_PINCH_IN_RATIO 1.32
+#define MESHTASTIC_MAP_PINCH_OUT_RATIO 0.76
 #define MESHTASTIC_MAP_FAKE_LAT 23.1291
 #define MESHTASTIC_MAP_FAKE_LON 113.2644
 #define MESHTASTIC_PREF_MAP_FAKE_GPS "meshtastic.map.fake_gps"
@@ -145,6 +149,13 @@ static double mesh_map_center_lon;
 static int mesh_map_drag_active = 0;
 static int mesh_map_drag_dirty = 0;
 static lv_point_t mesh_map_drag_last_point;
+static int mesh_map_drag_total_dx = 0;
+static int mesh_map_drag_total_dy = 0;
+static int mesh_map_pinch_active = 0;
+static double mesh_map_pinch_start_distance = 0.0;
+static int mesh_map_pinch_start_zoom = MESHTASTIC_MAP_DEFAULT_ZOOM;
+static lv_obj_t *mesh_map_view_obj;
+static lv_obj_t *mesh_map_layer_obj;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_map_overlay;
@@ -5380,6 +5391,7 @@ static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
                                 const char *nodes_text, int view_w,
                                 int view_h, int *missing_out)
 {
+    lv_obj_t *layer;
     double center_x;
     double center_y;
     double top_left_x;
@@ -5401,6 +5413,22 @@ static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
     tx1 = (int)floor((top_left_x + map_w) / MESHTASTIC_MAP_TILE_SIZE);
     ty0 = (int)floor(top_left_y / MESHTASTIC_MAP_TILE_SIZE);
     ty1 = (int)floor((top_left_y + map_h) / MESHTASTIC_MAP_TILE_SIZE);
+    tx0 -= MESHTASTIC_MAP_PREFETCH_TILES;
+    tx1 += MESHTASTIC_MAP_PREFETCH_TILES;
+    ty0 -= MESHTASTIC_MAP_PREFETCH_TILES;
+    ty1 += MESHTASTIC_MAP_PREFETCH_TILES;
+
+    layer = lv_obj_create(map);
+    mesh_map_layer_obj = layer;
+    lv_obj_set_pos(layer, 0, 0);
+    lv_obj_set_size(layer, map_w, map_h);
+    lv_obj_set_style_bg_opa(layer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(layer, 0, 0);
+    lv_obj_set_style_radius(layer, 0, 0);
+    lv_obj_set_style_pad_all(layer, 0, 0);
+    lv_obj_clear_flag(layer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(layer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(layer, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
     for(int ty = ty0; ty <= ty1; ty++) {
         if(ty < 0 || ty >= n) {
@@ -5425,22 +5453,22 @@ static void mesh_map_draw_tiles(lv_obj_t *map, double center_lat,
                             top_left_y);
             mesh_map_tile_path(zoom, tile_x, ty, path, sizeof(path));
             if(ui_path_exists(path)) {
-                lv_obj_t *img = lv_image_create(map);
+                lv_obj_t *img = lv_image_create(layer);
                 lv_image_set_src(img, path);
                 lv_obj_set_pos(img, local_x, local_y);
                 lv_obj_clear_flag(img, LV_OBJ_FLAG_SCROLLABLE);
             } else {
                 snprintf(fallback, sizeof(fallback), "z%d/%d/%d", zoom,
                          tile_x, ty);
-                mesh_map_add_placeholder_tile(map, local_x, local_y,
+                mesh_map_add_placeholder_tile(layer, local_x, local_y,
                                               fallback);
                 missing++;
             }
         }
     }
 
-    mesh_map_draw_nodes(map, nodes_text, top_left_x, top_left_y, zoom);
-    mesh_map_add_marker(map, map_w / 2, map_h / 2, 0x25C281,
+    mesh_map_draw_nodes(layer, nodes_text, top_left_x, top_left_y, zoom);
+    mesh_map_add_marker(layer, map_w / 2, map_h / 2, 0x25C281,
                         mesh_map_fake_gps_enabled ? "DEBUG" : "ME");
     if(missing_out) {
         *missing_out = missing;
@@ -5460,6 +5488,9 @@ static void mesh_map_recenter(void)
     mesh_map_center_valid = 0;
     mesh_map_drag_active = 0;
     mesh_map_drag_dirty = 0;
+    mesh_map_drag_total_dx = 0;
+    mesh_map_drag_total_dy = 0;
+    mesh_map_pinch_active = 0;
 }
 
 static void mesh_map_pan_by_pixels(int dx, int dy)
@@ -5478,21 +5509,119 @@ static void mesh_map_pan_by_pixels(int dx, int dy)
                              &mesh_map_center_lon);
 }
 
-static void mesh_map_shift_children(lv_obj_t *map, int dx, int dy)
+static void mesh_map_shift_layer(int dx, int dy)
 {
-    uint32_t count;
-
-    if(!map || !lv_obj_is_valid(map)) {
+    if(!mesh_map_layer_obj || !lv_obj_is_valid(mesh_map_layer_obj)) {
         return;
     }
-    count = lv_obj_get_child_count(map);
+    lv_obj_set_pos(mesh_map_layer_obj, lv_obj_get_x(mesh_map_layer_obj) + dx,
+                   lv_obj_get_y(mesh_map_layer_obj) + dy);
+}
+
+static int mesh_map_touch_point_in_obj(lv_obj_t *obj, int x, int y)
+{
+    lv_area_t coords;
+
+    if(!obj || !lv_obj_is_valid(obj)) {
+        return 0;
+    }
+    lv_obj_get_coords(obj, &coords);
+    return x >= coords.x1 && x <= coords.x2 && y >= coords.y1 &&
+           y <= coords.y2;
+}
+
+static int mesh_map_get_touch_pair(lv_obj_t *map, ui_touch_point_t *a,
+                                   ui_touch_point_t *b)
+{
+    ui_touch_point_t points[UI_MULTITOUCH_MAX_POINTS];
+    uint32_t count = ui_multitouch_get_points(points, UI_MULTITOUCH_MAX_POINTS);
+    int found = 0;
+
     for(uint32_t i = 0; i < count; i++) {
-        lv_obj_t *child = lv_obj_get_child(map, i);
-        if(child && lv_obj_is_valid(child)) {
-            lv_obj_set_pos(child, lv_obj_get_x(child) + dx,
-                           lv_obj_get_y(child) + dy);
+        if(!points[i].active ||
+           !mesh_map_touch_point_in_obj(map, points[i].x, points[i].y)) {
+            continue;
+        }
+        if(found == 0 && a) {
+            *a = points[i];
+        } else if(found == 1 && b) {
+            *b = points[i];
+        }
+        found++;
+        if(found >= 2) {
+            return 1;
         }
     }
+    return 0;
+}
+
+static double mesh_map_touch_distance(const ui_touch_point_t *a,
+                                      const ui_touch_point_t *b)
+{
+    double dx = (double)a->x - (double)b->x;
+    double dy = (double)a->y - (double)b->y;
+
+    return sqrt(dx * dx + dy * dy);
+}
+
+static int mesh_map_pinch_target_zoom(double distance)
+{
+    int target = mesh_map_pinch_start_zoom;
+    double ratio;
+
+    if(mesh_map_pinch_start_distance < 24.0 || distance < 24.0) {
+        return mesh_map_zoom;
+    }
+    ratio = distance / mesh_map_pinch_start_distance;
+    while(ratio >= MESHTASTIC_MAP_PINCH_IN_RATIO &&
+          target < MESHTASTIC_MAP_MAX_ZOOM) {
+        target++;
+        ratio /= MESHTASTIC_MAP_PINCH_IN_RATIO;
+    }
+    while(ratio <= MESHTASTIC_MAP_PINCH_OUT_RATIO &&
+          target > MESHTASTIC_MAP_MIN_ZOOM) {
+        target--;
+        ratio /= MESHTASTIC_MAP_PINCH_OUT_RATIO;
+    }
+    return target;
+}
+
+static int mesh_map_handle_pinch(lv_obj_t *map)
+{
+    ui_touch_point_t a;
+    ui_touch_point_t b;
+    double distance;
+    int target_zoom;
+
+    if(!mesh_map_get_touch_pair(map, &a, &b)) {
+        return 0;
+    }
+    distance = mesh_map_touch_distance(&a, &b);
+    if(distance < 24.0) {
+        return 1;
+    }
+    if(!mesh_map_pinch_active) {
+        if(mesh_map_drag_dirty) {
+            mesh_map_pan_by_pixels(mesh_map_drag_total_dx,
+                                   mesh_map_drag_total_dy);
+            mesh_map_drag_total_dx = 0;
+            mesh_map_drag_total_dy = 0;
+            mesh_map_drag_dirty = 0;
+        }
+        mesh_map_pinch_active = 1;
+        mesh_map_drag_active = 0;
+        mesh_map_pinch_start_distance = distance;
+        mesh_map_pinch_start_zoom = mesh_map_zoom;
+        return 1;
+    }
+
+    target_zoom = mesh_map_pinch_target_zoom(distance);
+    if(target_zoom != mesh_map_zoom) {
+        mesh_map_zoom = target_zoom;
+        mesh_map_drag_dirty = 1;
+    }
+    app_request_fast_refresh();
+    return 1;
 }
 
 static void mesh_map_drag_event_cb(lv_event_t *event)
@@ -5508,9 +5637,16 @@ static void mesh_map_drag_event_cb(lv_event_t *event)
         return;
     }
     lv_indev_get_point(indev, &point);
+    if((code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING) &&
+       mesh_map_handle_pinch(map)) {
+        lv_event_stop_processing(event);
+        return;
+    }
     if(code == LV_EVENT_PRESSED) {
         mesh_map_drag_active = 1;
         mesh_map_drag_dirty = 0;
+        mesh_map_drag_total_dx = 0;
+        mesh_map_drag_total_dy = 0;
         mesh_map_drag_last_point = point;
         lv_event_stop_processing(event);
         return;
@@ -5524,8 +5660,9 @@ static void mesh_map_drag_event_cb(lv_event_t *event)
         if(abs(dx) < 1 && abs(dy) < 1) {
             return;
         }
-        mesh_map_pan_by_pixels(dx, dy);
-        mesh_map_shift_children(map, dx, dy);
+        mesh_map_shift_layer(dx, dy);
+        mesh_map_drag_total_dx += dx;
+        mesh_map_drag_total_dy += dy;
         mesh_map_drag_last_point = point;
         mesh_map_drag_dirty = 1;
         app_request_fast_refresh();
@@ -5533,11 +5670,21 @@ static void mesh_map_drag_event_cb(lv_event_t *event)
         return;
     }
     if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        if(mesh_map_drag_active && mesh_map_drag_dirty) {
+        if(mesh_map_pinch_active) {
+            if(mesh_map_drag_dirty) {
+                mesh_map_save_prefs();
+                lv_async_call(mesh_map_rebuild_async, NULL);
+            }
+        } else if(mesh_map_drag_active && mesh_map_drag_dirty) {
+            mesh_map_pan_by_pixels(mesh_map_drag_total_dx,
+                                   mesh_map_drag_total_dy);
             lv_async_call(mesh_map_rebuild_async, NULL);
         }
         mesh_map_drag_active = 0;
         mesh_map_drag_dirty = 0;
+        mesh_map_drag_total_dx = 0;
+        mesh_map_drag_total_dy = 0;
+        mesh_map_pinch_active = 0;
         lv_event_stop_processing(event);
     }
 }
@@ -5616,6 +5763,13 @@ static void mesh_map_rebuild(void)
         map_h = 180;
     }
     mesh_map_load_prefs();
+    mesh_map_view_obj = NULL;
+    mesh_map_layer_obj = NULL;
+    mesh_map_drag_active = 0;
+    mesh_map_drag_dirty = 0;
+    mesh_map_drag_total_dx = 0;
+    mesh_map_drag_total_dy = 0;
+    mesh_map_pinch_active = 0;
     lv_obj_clean(mesh_map_overlay);
 
     if(mesh_ipc_command("STATUS\n", status, sizeof(status)) != 0) {
@@ -5722,6 +5876,7 @@ static void mesh_map_rebuild(void)
     }
 
     map = lv_obj_create(panel);
+    mesh_map_view_obj = map;
     lv_obj_set_pos(map, map_x, map_y);
     lv_obj_set_size(map, map_w, map_h);
     lv_obj_set_style_bg_color(map, lv_color_hex(0x08111C), 0);

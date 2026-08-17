@@ -24,6 +24,7 @@ DO_BUILD=1
 DEPLOY_APP=1
 DEPLOY_FIRMWARE=0
 DEPLOY_MEDIA=0
+DEPLOY_MAPS=0
 RESTART_APP=1
 DO_REBOOT=0
 DRY_RUN=0
@@ -52,7 +53,9 @@ Options:
   --firmware                 Also deploy /boot/Image and RM69A10 DTB.
   --firmware-only            Deploy only /boot/Image and RM69A10 DTB.
   --full                     Deploy app, face model, firmware, and media resources.
-  --media                    Also deploy launcher resources/music, resources/videos, resources/notification, and resources/maps.
+  --media                    Also deploy launcher resources/music, resources/videos, and resources/notification.
+  --maps                     Also deploy launcher resources/maps to /root/maps.
+                             Map tiles are not part of --media or images by default.
   --no-restart              Do not restart k230_phone_ui after app deployment.
   --reboot                   Reboot after deployment.
   --no-reboot                Do not reboot after deployment. This is the default.
@@ -141,6 +144,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --media)
             DEPLOY_MEDIA=1
+            shift
+            ;;
+        --maps)
+            DEPLOY_MAPS=1
             shift
             ;;
         --no-restart)
@@ -285,6 +292,7 @@ Backup      : ${REMOTE_BACKUP}
 Deploy app  : ${DEPLOY_APP}
 Deploy boot : ${DEPLOY_FIRMWARE}
 Deploy media: ${DEPLOY_MEDIA}
+Deploy maps : ${DEPLOY_MAPS}
 Restart app : ${RESTART_APP}
 Reboot      : ${DO_REBOOT}
 EOF
@@ -297,7 +305,7 @@ fi
 echo
 echo "[1/5] Prepare target and backup current files"
 ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
-    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_BACKUP='${REMOTE_BACKUP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' sh -s" <<'REMOTE'
+    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_BACKUP='${REMOTE_BACKUP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' DEPLOY_MAPS='${DEPLOY_MAPS}' sh -s" <<'REMOTE'
 set -e
 mkdir -p "${REMOTE_TMP}/app" "${REMOTE_TMP}/face_detect" \
          "${REMOTE_TMP}/boot" "${REMOTE_TMP}/music" "${REMOTE_TMP}/videos" \
@@ -325,6 +333,8 @@ if [ "${DEPLOY_MEDIA}" = "1" ]; then
     [ -d /root/music ] && cp -a /root/music "${REMOTE_BACKUP}/media/music" 2>/dev/null || true
     [ -d /root/videos ] && cp -a /root/videos "${REMOTE_BACKUP}/media/videos" 2>/dev/null || true
     [ -d /root/notification ] && cp -a /root/notification "${REMOTE_BACKUP}/media/notification" 2>/dev/null || true
+fi
+if [ "${DEPLOY_MAPS}" = "1" ]; then
     [ -d /root/maps ] && cp -a /root/maps "${REMOTE_BACKUP}/media/maps" 2>/dev/null || true
 fi
 REMOTE
@@ -367,6 +377,9 @@ if [[ "${DEPLOY_MEDIA}" -eq 1 ]]; then
     else
         echo "No notification resource directory: ${NOTIFICATION_SRC}"
     fi
+fi
+
+if [[ "${DEPLOY_MAPS}" -eq 1 ]]; then
     if [[ -d "${MAP_SRC}" ]]; then
         tar -C "${MAP_SRC}" -cf - . | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
             "tar -C '${REMOTE_TMP}/maps' -xf -"
@@ -377,7 +390,7 @@ fi
 
 echo "[3/5] Install on target"
 ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
-    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' REMOTE_MUSIC_DIR='${REMOTE_MUSIC_DIR}' REMOTE_VIDEO_DIR='${REMOTE_VIDEO_DIR}' REMOTE_NOTIFICATION_DIR='${REMOTE_NOTIFICATION_DIR}' REMOTE_MAP_DIR='${REMOTE_MAP_DIR}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' RESTART_APP='${RESTART_APP}' SET_AUDIO_OUTPUT='${SET_AUDIO_OUTPUT}' sh -s" <<'REMOTE'
+    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' REMOTE_MUSIC_DIR='${REMOTE_MUSIC_DIR}' REMOTE_VIDEO_DIR='${REMOTE_VIDEO_DIR}' REMOTE_NOTIFICATION_DIR='${REMOTE_NOTIFICATION_DIR}' REMOTE_MAP_DIR='${REMOTE_MAP_DIR}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' DEPLOY_MAPS='${DEPLOY_MAPS}' RESTART_APP='${RESTART_APP}' SET_AUDIO_OUTPUT='${SET_AUDIO_OUTPUT}' sh -s" <<'REMOTE'
 set -e
 
 if [ "${DEPLOY_APP}" = "1" ]; then
@@ -422,7 +435,7 @@ if [ "${DEPLOY_FIRMWARE}" = "1" ]; then
 fi
 
 if [ "${DEPLOY_MEDIA}" = "1" ]; then
-    mkdir -p "${REMOTE_MUSIC_DIR}" "${REMOTE_VIDEO_DIR}" "${REMOTE_NOTIFICATION_DIR}" "${REMOTE_MAP_DIR}" /root/nes /root/photos /root/screenshots /root/recordings /root/lorawan
+    mkdir -p "${REMOTE_MUSIC_DIR}" "${REMOTE_VIDEO_DIR}" "${REMOTE_NOTIFICATION_DIR}" /root/nes /root/photos /root/screenshots /root/recordings /root/lorawan
     if [ "$(find "${REMOTE_TMP}/music" -mindepth 1 -print -quit 2>/dev/null)" ]; then
         rm -rf "${REMOTE_MUSIC_DIR}"
         mkdir -p "${REMOTE_MUSIC_DIR}"
@@ -438,6 +451,10 @@ if [ "${DEPLOY_MEDIA}" = "1" ]; then
         mkdir -p "${REMOTE_NOTIFICATION_DIR}"
         cp -a "${REMOTE_TMP}/notification/." "${REMOTE_NOTIFICATION_DIR}/"
     fi
+fi
+
+if [ "${DEPLOY_MAPS}" = "1" ]; then
+    mkdir -p "${REMOTE_MAP_DIR}"
     if [ "$(find "${REMOTE_TMP}/maps" -mindepth 1 -print -quit 2>/dev/null)" ]; then
         rm -rf "${REMOTE_MAP_DIR}"
         mkdir -p "${REMOTE_MAP_DIR}"

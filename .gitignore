@@ -3,3 +3,5 @@
 
 k230_bsp/images/*
 !k230_bsp/images/.gitkeep
+k230_launcher/resources/maps/*
+!k230_launcher/resources/maps/README.MD
