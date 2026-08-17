@@ -218,9 +218,11 @@ static lv_obj_t *date_label;
 static lv_obj_t *home_temp_value_label;
 static lv_obj_t *home_power_source_value_label;
 static lv_obj_t *home_power_draw_value_label;
+static lv_obj_t *home_eth_value_label;
 static lv_obj_t *home_temp_badge;
 static lv_obj_t *home_power_source_badge;
 static lv_obj_t *home_power_draw_badge;
+static lv_obj_t *home_eth_badge;
 static lv_obj_t *home_apps_scroll;
 static uint64_t home_telemetry_last_us;
 static lv_timer_t *home_telemetry_timer;
@@ -232,9 +234,11 @@ static unsigned int home_telemetry_displayed_generation;
 static char home_temp_cache[64] = "--";
 static char home_power_source_cache[64] = "--";
 static char home_power_draw_cache[64] = "--";
+static char home_eth_cache[64] = "--";
 static uint32_t home_temp_cache_color = 0x9AA4AF;
 static uint32_t home_power_source_cache_color = 0x9AA4AF;
 static uint32_t home_power_draw_cache_color = 0x9AA4AF;
+static uint32_t home_eth_cache_color = 0x9AA4AF;
 static int32_t home_saved_scroll_y;
 static int home_saved_scroll_valid;
 static int home_restore_scroll_on_create;
@@ -1994,14 +1998,64 @@ static int read_power_draw_summary(char *buf, size_t len)
     return 0;
 }
 
+static int read_ethernet_summary(char *buf, size_t len, uint32_t *color)
+{
+    char path[128];
+    char ip[64];
+    int carrier;
+
+    if(!buf || len == 0) {
+        return -1;
+    }
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s", NET_ETH_IFACE);
+    if(!path_exists(path)) {
+        snprintf(buf, len, "Missing");
+        if(color) {
+            *color = 0x9AA4AF;
+        }
+        return -1;
+    }
+
+    carrier = ui_read_iface_carrier(NET_ETH_IFACE);
+    if(carrier == 0) {
+        snprintf(buf, len, "No link");
+        if(color) {
+            *color = 0x9AA4AF;
+        }
+        return -1;
+    }
+
+    if(ui_read_iface_ip(NET_ETH_IFACE, ip, sizeof(ip)) == 0) {
+        char *slash = strchr(ip, '/');
+
+        if(slash) {
+            *slash = '\0';
+        }
+        snprintf(buf, len, "%s", ip[0] ? ip : "--");
+        if(color) {
+            *color = 0x25C281;
+        }
+        return 0;
+    }
+
+    snprintf(buf, len, carrier == 1 ? "No IP" : "Unknown");
+    if(color) {
+        *color = carrier == 1 ? 0xF5A524 : 0x9AA4AF;
+    }
+    return -1;
+}
+
 static void *home_telemetry_thread_cb(void *arg)
 {
     char temp_text[64];
     char power_source_text[64];
     char power_draw_text[64];
+    char eth_text[64];
     uint32_t temp_color;
     uint32_t source_color;
     uint32_t draw_color;
+    uint32_t eth_color;
 
     (void)arg;
 
@@ -2013,6 +2067,7 @@ static void *home_telemetry_thread_cb(void *arg)
     draw_color = read_power_draw_summary(power_draw_text,
                                          sizeof(power_draw_text)) == 0 ?
                  0x22D3EE : 0x9AA4AF;
+    read_ethernet_summary(eth_text, sizeof(eth_text), &eth_color);
 
     pthread_mutex_lock(&home_telemetry_lock);
     snprintf(home_temp_cache, sizeof(home_temp_cache), "%s", temp_text);
@@ -2020,9 +2075,11 @@ static void *home_telemetry_thread_cb(void *arg)
              power_source_text);
     snprintf(home_power_draw_cache, sizeof(home_power_draw_cache), "%s",
              power_draw_text);
+    snprintf(home_eth_cache, sizeof(home_eth_cache), "%s", eth_text);
     home_temp_cache_color = temp_color;
     home_power_source_cache_color = source_color;
     home_power_draw_cache_color = draw_color;
+    home_eth_cache_color = eth_color;
     home_telemetry_cache_valid = 1;
     home_telemetry_generation++;
     home_telemetry_worker_active = 0;
@@ -2060,15 +2117,17 @@ static void update_home_telemetry_labels(int force)
     char temp_text[64];
     char power_source_text[64];
     char power_draw_text[64];
+    char eth_text[64];
     uint32_t temp_color;
     uint32_t source_color;
     uint32_t draw_color;
+    uint32_t eth_color;
     unsigned int generation;
     int cache_valid;
     uint64_t now_us = ui_monotonic_us();
 
     if(!home_temp_value_label && !home_power_source_value_label &&
-       !home_power_draw_value_label) {
+       !home_power_draw_value_label && !home_eth_value_label) {
         return;
     }
     if(force || !home_telemetry_last_us ||
@@ -2085,9 +2144,11 @@ static void update_home_telemetry_labels(int force)
              home_power_source_cache);
     snprintf(power_draw_text, sizeof(power_draw_text), "%s",
              home_power_draw_cache);
+    snprintf(eth_text, sizeof(eth_text), "%s", home_eth_cache);
     temp_color = home_temp_cache_color;
     source_color = home_power_source_cache_color;
     draw_color = home_power_draw_cache_color;
+    eth_color = home_eth_cache_color;
     pthread_mutex_unlock(&home_telemetry_lock);
 
     if(!cache_valid ||
@@ -2123,6 +2184,14 @@ static void update_home_telemetry_labels(int force)
     if(home_power_draw_badge && lv_obj_is_valid(home_power_draw_badge)) {
         lv_obj_set_style_bg_color(home_power_draw_badge,
                                   lv_color_hex(draw_color), 0);
+    }
+    if(home_eth_value_label && lv_obj_is_valid(home_eth_value_label)) {
+        lv_label_set_text(home_eth_value_label, eth_text);
+        lv_obj_set_style_text_color(home_eth_value_label,
+                                    lv_color_hex(eth_color), 0);
+    }
+    if(home_eth_badge && lv_obj_is_valid(home_eth_badge)) {
+        lv_obj_set_style_bg_color(home_eth_badge, lv_color_hex(eth_color), 0);
     }
 }
 
@@ -4095,9 +4164,11 @@ static void create_home(lv_obj_t *scr)
     char temp_text[64];
     char power_source_text[64];
     char power_draw_text[64];
+    char eth_text[64];
     uint32_t temp_color;
     uint32_t source_color;
     uint32_t draw_color;
+    uint32_t eth_color;
     int logical_w = display_logical_width();
     int logical_h = display_logical_height();
     int landscape = display_orientation_is_landscape();
@@ -4108,18 +4179,22 @@ static void create_home(lv_obj_t *scr)
     home_temp_value_label = NULL;
     home_power_source_value_label = NULL;
     home_power_draw_value_label = NULL;
+    home_eth_value_label = NULL;
     home_temp_badge = NULL;
     home_power_source_badge = NULL;
     home_power_draw_badge = NULL;
+    home_eth_badge = NULL;
     pthread_mutex_lock(&home_telemetry_lock);
     snprintf(temp_text, sizeof(temp_text), "%s", home_temp_cache);
     snprintf(power_source_text, sizeof(power_source_text), "%s",
              home_power_source_cache);
     snprintf(power_draw_text, sizeof(power_draw_text), "%s",
              home_power_draw_cache);
+    snprintf(eth_text, sizeof(eth_text), "%s", home_eth_cache);
     temp_color = home_temp_cache_color;
     source_color = home_power_source_cache_color;
     draw_color = home_power_draw_cache_color;
+    eth_color = home_eth_cache_color;
     pthread_mutex_unlock(&home_telemetry_lock);
 
     if(landscape) {
@@ -4190,37 +4265,32 @@ static void create_home(lv_obj_t *scr)
             lv_obj_set_style_radius(accent, 3, 0);
             lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
 
-            home_time_label = label(dash, "--:--", &lv_font_montserrat_42,
-                                    0xF2F5F8);
-            lv_obj_align(home_time_label, LV_ALIGN_TOP_LEFT, 18, 4);
+            home_time_label = NULL;
 
-            date_label = label(dash, "--", &lv_font_montserrat_16, 0x9AA4AF);
-            lv_obj_set_width(date_label, left_w - 52);
-            lv_label_set_long_mode(date_label, LV_LABEL_LONG_DOT);
-            lv_obj_align(date_label, LV_ALIGN_TOP_LEFT, 20, 62);
-
-            lv_obj_t *name = label(dash, "T-Display K230",
+            lv_obj_t *name = label(dash, "T-Display-K230",
                                    &lv_font_montserrat_22,
                                    0xF2F5F8);
             lv_obj_set_width(name, left_w - 52);
             lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-            lv_obj_align(name, LV_ALIGN_TOP_LEFT, 20, 100);
+            lv_obj_align(name, LV_ALIGN_TOP_LEFT, 20, 10);
 
-            lv_obj_t *panel_name = label(dash, "RM69A10 AMOLED",
-                                         &lv_font_montserrat_16, 0x9AA4AF);
-            lv_obj_set_width(panel_name, left_w - 52);
-            lv_label_set_long_mode(panel_name, LV_LABEL_LONG_DOT);
-            lv_obj_align(panel_name, LV_ALIGN_TOP_LEFT, 20, 132);
+            date_label = label(dash, "--", &lv_font_montserrat_16, 0x9AA4AF);
+            lv_obj_set_width(date_label, left_w - 52);
+            lv_label_set_long_mode(date_label, LV_LABEL_LONG_DOT);
+            lv_obj_align(date_label, LV_ALIGN_TOP_LEFT, 20, 44);
 
             card_w = left_w - 34;
-            home_status_row(dash, 172, card_w, "TMP", "K230 Thermal",
+            home_status_row(dash, 88, card_w, "ETH", "Ethernet IP",
+                            eth_text, eth_color, &home_eth_value_label,
+                            &home_eth_badge);
+            home_status_row(dash, 166, card_w, "TMP", "K230 Thermal",
                             temp_text, temp_color, &home_temp_value_label,
                             &home_temp_badge);
-            home_status_row(dash, 254, card_w, "PWR", "Power Source",
+            home_status_row(dash, 244, card_w, "PWR", "Power Source",
                             power_source_text, source_color,
                             &home_power_source_value_label,
                             &home_power_source_badge);
-            home_status_row(dash, 336, card_w, "ENE", "Energy",
+            home_status_row(dash, 322, card_w, "ENE", "Energy",
                             power_draw_text, draw_color,
                             &home_power_draw_value_label,
                             &home_power_draw_badge);
@@ -4246,17 +4316,36 @@ static void create_home(lv_obj_t *scr)
     lv_obj_t *hero = panel(scr, 24, 70, 520, 150);
     lv_obj_set_style_bg_color(hero, lv_color_hex(0x142033), 0);
 
-    home_time_label = label(hero, "--:--", &lv_font_montserrat_48, 0xF2F5F8);
-    lv_obj_align(home_time_label, LV_ALIGN_LEFT_MID, 4, -20);
+    home_time_label = NULL;
+
+    lv_obj_t *name = label(hero, "T-Display-K230", &lv_font_montserrat_26,
+                           0xF2F5F8);
+    lv_obj_set_width(name, 272);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_align(name, LV_ALIGN_TOP_LEFT, 6, 18);
 
     date_label = label(hero, "--", &lv_font_montserrat_18, 0x9AA4AF);
-    lv_obj_align(date_label, LV_ALIGN_LEFT_MID, 8, 28);
+    lv_obj_set_width(date_label, 272);
+    lv_label_set_long_mode(date_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(date_label, LV_ALIGN_TOP_LEFT, 8, 58);
 
-    lv_obj_t *name = label(hero, "T-Display K230", &lv_font_montserrat_24, 0xF2F5F8);
-    lv_obj_align(name, LV_ALIGN_RIGHT_MID, -6, -18);
+    home_eth_badge = lv_obj_create(hero);
+    lv_obj_set_size(home_eth_badge, 54, 54);
+    lv_obj_set_style_radius(home_eth_badge, 8, 0);
+    lv_obj_set_style_bg_color(home_eth_badge, lv_color_hex(eth_color), 0);
+    lv_obj_set_style_bg_opa(home_eth_badge, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(home_eth_badge, 0, 0);
+    lv_obj_clear_flag(home_eth_badge, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(home_eth_badge, LV_ALIGN_RIGHT_MID, -168, 0);
+    lv_obj_t *eth_icon = label(home_eth_badge, "ETH", &lv_font_montserrat_14,
+                               0xFFFFFF);
+    lv_obj_center(eth_icon);
 
-    lv_obj_t *panel_name = label(hero, "RM69A10 AMOLED", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_align(panel_name, LV_ALIGN_RIGHT_MID, -8, 22);
+    home_eth_value_label = label(hero, eth_text, &lv_font_montserrat_22,
+                                 eth_color);
+    lv_obj_set_width(home_eth_value_label, 142);
+    lv_label_set_long_mode(home_eth_value_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(home_eth_value_label, LV_ALIGN_RIGHT_MID, -8, -2);
 
     lv_obj_t *thermal_card = panel(scr, 24, 238, 250, 160);
     lv_obj_t *thermal_title = label(thermal_card, "K230 Thermal",
@@ -8263,9 +8352,11 @@ static void cleanup_page_state(void)
     home_temp_value_label = NULL;
     home_power_source_value_label = NULL;
     home_power_draw_value_label = NULL;
+    home_eth_value_label = NULL;
     home_temp_badge = NULL;
     home_power_source_badge = NULL;
     home_power_draw_badge = NULL;
+    home_eth_badge = NULL;
     home_apps_scroll = NULL;
     home_telemetry_last_us = 0;
     touch_area = NULL;

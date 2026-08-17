@@ -3099,9 +3099,7 @@ void ui_cellular_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
     lv_obj_t *summary;
-    lv_obj_t *actions;
-    lv_obj_t *gnss_panel;
-    lv_obj_t *log_panel;
+    lv_obj_t *info_panel;
     int landscape = ui_is_landscape();
     int body_h = ui_body_height(144);
     int margin = ui_page_side_margin();
@@ -3112,25 +3110,27 @@ void ui_cellular_create(lv_obj_t *scr)
     int right_x = landscape ? left_x + left_w + gap : left_x;
     int right_w = landscape ? panel_w - left_w - gap : panel_w;
     int summary_y = landscape ? 16 : 20;
-    int summary_h = landscape ? 346 : 352;
-    int actions_y = landscape ? summary_y + summary_h + 18 :
-                    summary_y + summary_h + 24;
-    int actions_h = landscape ? 152 : 212;
-    int gnss_y = landscape ? 16 : actions_y + actions_h + 24;
-    int gnss_h = landscape ? (body_h - 48) * 66 / 100 : 560;
-    int log_y = landscape ? gnss_y + gnss_h + 18 : gnss_y + gnss_h + 24;
-    int log_h = landscape ? body_h - log_y - 18 : 440;
+    int summary_h = landscape ? body_h - 32 : 430;
+    int info_y = landscape ? 16 : summary_y + summary_h + 24;
+    int info_h = landscape ? body_h - 32 : body_h - info_y - 24;
     int card_w = (left_w - 44) / 2;
-    int action_btn_w = landscape ? (left_w - 56) / 3 : (left_w - 44) / 2;
-    int gnss_inner_w = right_w - 48;
-    int log_inner_w = right_w - 48;
+    int action_btn_w = (left_w - 56) / 3;
+    int info_inner_w = right_w - 48;
+    int status_y0 = landscape ? 82 : 88;
+    int status_row_gap = 8;
+    int button_y = summary_h - 82;
+    int gps_label_h = landscape ? 58 : 76;
+    int ttff_y = 42 + gps_label_h + 8;
+    int chart_y = ttff_y + 34;
+    int log_title_y = chart_y + 162;
+    int log_text_y = log_title_y + 38;
 
     pthread_mutex_lock(&cellular_lock);
     cellular_page_active = 1;
     pthread_mutex_unlock(&cellular_lock);
 
-    if(log_h < 118) {
-        log_h = 118;
+    if(info_h < 360) {
+        info_h = 360;
     }
 
     ui_create_header(scr, "Cellular");
@@ -3153,98 +3153,81 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_label_set_long_mode(cellular_status_label, LV_LABEL_LONG_DOT);
     lv_obj_align(cellular_status_label, LV_ALIGN_TOP_LEFT, 0, 46);
 
-    cellular_status_card(summary, 0, 88, card_w, "Link", 0x60A5FA,
+    cellular_status_card(summary, 0, status_y0, card_w, "Link", 0x60A5FA,
                          &cellular_link_label);
-    cellular_status_card(summary, card_w + 12, 88, card_w, "SIM card",
-                         0xA3E635, &cellular_sim_label);
-    cellular_status_card(summary, 0, 172, card_w, "LTE", 0x25C281,
+    cellular_status_card(summary, card_w + 12, status_y0, card_w,
+                         "SIM card", 0xA3E635, &cellular_sim_label);
+    cellular_status_card(summary, 0, status_y0 + 76 + status_row_gap,
+                         card_w, "LTE", 0x25C281,
                          &cellular_lte_label);
-    cellular_status_card(summary, card_w + 12, 172, card_w, "GNSS",
-                         0xF5A524, &cellular_gnss_label);
-    cellular_status_card(summary, 0, 256, card_w, "IMEI", 0x38BDF8,
+    cellular_status_card(summary, card_w + 12,
+                         status_y0 + 76 + status_row_gap,
+                         card_w, "GNSS", 0xF5A524, &cellular_gnss_label);
+    cellular_status_card(summary, 0,
+                         status_y0 + (76 + status_row_gap) * 2,
+                         card_w, "IMEI", 0x38BDF8,
                          &cellular_imei_label);
-    cellular_status_card(summary, card_w + 12, 256, card_w, "Network",
-                         0x34D399, &cellular_network_label);
+    cellular_status_card(summary, card_w + 12,
+                         status_y0 + (76 + status_row_gap) * 2,
+                         card_w, "Network", 0x34D399,
+                         &cellular_network_label);
 
-    actions = ui_panel(body, left_x, actions_y, left_w, actions_h);
-    lv_obj_set_style_bg_color(actions, lv_color_hex(0x151B22), 0);
-    ui_label(actions, "Diagnostics", &lv_font_montserrat_20,
-             0xF2F5F8);
-    lv_obj_align(lv_obj_get_child(actions, lv_obj_get_child_count(actions) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, 0);
-
-    cellular_button(actions, 0, 46,
-                    landscape ? action_btn_w : left_w - 32,
+    cellular_button(summary, 0, button_y, action_btn_w,
                     "Run", 0x25C281,
                     cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_FULL_TEST);
-    cellular_cno_button = cellular_button(actions,
-                                          landscape ?
-                                          action_btn_w + 12 : 0,
-                                          landscape ? 46 : 116,
-                                          landscape ? action_btn_w :
-                                          action_btn_w,
+    cellular_cno_button = cellular_button(summary, action_btn_w + 12,
+                                          button_y, action_btn_w,
                                           "GNSS", 0xF97316,
                                           cellular_cno_monitor_event_cb, NULL);
-    cellular_button(actions,
-                    landscape ? (action_btn_w + 12) * 2 :
-                    action_btn_w + 12,
-                    landscape ? 46 : 116,
+    cellular_button(summary,
+                    (action_btn_w + 12) * 2, button_y,
                     action_btn_w, "Clear log",
                     0x94A3B8,
                     cellular_clear_event_cb, NULL);
 
-    gnss_panel = ui_panel(body, right_x, gnss_y, right_w, gnss_h);
-    lv_obj_set_style_bg_color(gnss_panel, lv_color_hex(0x101820), 0);
-    lv_obj_add_flag(gnss_panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(gnss_panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(gnss_panel, LV_SCROLLBAR_MODE_AUTO);
+    info_panel = ui_panel(body, right_x, info_y, right_w, info_h);
+    lv_obj_set_style_bg_color(info_panel, lv_color_hex(0x101820), 0);
+    lv_obj_add_flag(info_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(info_panel, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(info_panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_bottom(info_panel, 36, 0);
 
-    ui_label(gnss_panel, "GPS information", &lv_font_montserrat_20, 0xF2F5F8);
-    lv_obj_align(lv_obj_get_child(gnss_panel,
-                                  lv_obj_get_child_count(gnss_panel) - 1),
+    ui_label(info_panel, "GPS information", &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_align(lv_obj_get_child(info_panel,
+                                  lv_obj_get_child_count(info_panel) - 1),
                  LV_ALIGN_TOP_LEFT, 0, 0);
 
-    cellular_gps_label = ui_label(gnss_panel, "Waiting for NMEA",
+    cellular_gps_label = ui_label(info_panel, "Waiting for NMEA",
                                   &lv_font_montserrat_16, 0xDCE5EE);
-    lv_obj_set_width(cellular_gps_label, gnss_inner_w);
-    lv_obj_set_height(cellular_gps_label, landscape ? 64 : 98);
+    lv_obj_set_width(cellular_gps_label, info_inner_w);
+    lv_obj_set_height(cellular_gps_label, gps_label_h);
     lv_label_set_long_mode(cellular_gps_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(cellular_gps_label, LV_ALIGN_TOP_LEFT, 0, 42);
 
-    cellular_ttff_label = ui_label(gnss_panel, "TTFF: not started",
+    cellular_ttff_label = ui_label(info_panel, "TTFF: not started",
                                    &lv_font_montserrat_16, 0xF5A524);
-    lv_obj_set_width(cellular_ttff_label, gnss_inner_w);
+    lv_obj_set_width(cellular_ttff_label, info_inner_w);
     lv_label_set_long_mode(cellular_ttff_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(cellular_ttff_label, LV_ALIGN_TOP_LEFT, 0,
-                 landscape ? 112 : 150);
+    lv_obj_align(cellular_ttff_label, LV_ALIGN_TOP_LEFT, 0, ttff_y);
 
-    cellular_sat_chart = cellular_cn0_chart_create(gnss_panel, gnss_inner_w);
-    lv_obj_align(cellular_sat_chart, LV_ALIGN_TOP_LEFT, 0,
-                 landscape ? 154 : 194);
+    cellular_sat_chart = cellular_cn0_chart_create(info_panel, info_inner_w);
+    lv_obj_align(cellular_sat_chart, LV_ALIGN_TOP_LEFT, 0, chart_y);
+    cellular_sat_label = NULL;
 
-    cellular_sat_label = ui_label(gnss_panel, "No satellite data",
-                                  &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_width(cellular_sat_label, gnss_inner_w);
-    lv_label_set_long_mode(cellular_sat_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(cellular_sat_label, LV_ALIGN_TOP_LEFT, 0,
-                 landscape ? 318 : 358);
-
-    log_panel = ui_panel(body, right_x, log_y, right_w, log_h);
-    lv_obj_set_style_bg_color(log_panel, lv_color_hex(0x0B0F14), 0);
-    lv_obj_add_flag(log_panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(log_panel, LV_DIR_VER);
-
-    ui_label(log_panel, "Serial log", &lv_font_montserrat_20, 0xF2F5F8);
-    lv_obj_align(lv_obj_get_child(log_panel,
-                                  lv_obj_get_child_count(log_panel) - 1),
+    ui_label(info_panel, "Serial log", &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_align(lv_obj_get_child(info_panel,
+                                  lv_obj_get_child_count(info_panel) - 1),
                  LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_y(lv_obj_get_child(info_panel,
+                                  lv_obj_get_child_count(info_panel) - 1),
+                 log_title_y);
 
-    cellular_log_label = ui_label(log_panel, "No log yet",
+    cellular_log_label = ui_label(info_panel, "No log yet",
                                   &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_width(cellular_log_label, log_inner_w);
+    lv_obj_set_width(cellular_log_label, info_inner_w);
     lv_label_set_long_mode(cellular_log_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(cellular_log_label, LV_ALIGN_TOP_LEFT, 0, 42);
+    lv_obj_align(cellular_log_label, LV_ALIGN_TOP_LEFT, 0, log_text_y);
 
     cellular_check_panel = lv_obj_create(lv_layer_top());
     ui_set_fullscreen(cellular_check_panel);

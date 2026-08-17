@@ -391,6 +391,7 @@ static const ui_translation_t ui_translations[] = {
     { "Time to full", "预计充满", "満充電まで" },
     { "Temperature", "温度", "温度" },
     { "K230 Thermal", "K230 温度", "K230 温度" },
+    { "Ethernet IP", "以太网 IP", "イーサネット IP" },
     { "Power Source", "供电来源", "電源" },
     { "Energy", "能耗", "エネルギー" },
     { "Internal temp", "内部温度", "内部温度" },
