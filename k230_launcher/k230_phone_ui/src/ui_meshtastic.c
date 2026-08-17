@@ -93,6 +93,17 @@
 #define MESHTASTIC_PREF_MAP_FAKE_GPS "meshtastic.map.fake_gps"
 #define MESHTASTIC_PREF_MAP_ZOOM "meshtastic.map.zoom"
 #define MESHTASTIC_NODE_RECENT_WINDOW_S 900
+#define MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS 6
+
+typedef enum {
+    MESH_NODES_OVERLAY_NONE = 0,
+    MESH_NODES_OVERLAY_LIST,
+    MESH_NODES_OVERLAY_DETAIL,
+} mesh_nodes_overlay_kind_t;
+
+static void mesh_nodes_event_cb(lv_event_t *event);
+static void mesh_detector_event_cb(lv_event_t *event);
+static void mesh_overlay_auto_refresh_tick(void);
 
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
@@ -159,8 +170,10 @@ static lv_obj_t *mesh_map_view_obj;
 static lv_obj_t *mesh_map_layer_obj;
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
+static lv_obj_t *mesh_nodes_panel;
 static lv_obj_t *mesh_map_overlay;
 static lv_obj_t *mesh_detector_overlay;
+static lv_obj_t *mesh_detector_panel;
 static lv_obj_t *mesh_choice_overlay;
 static lv_obj_t *mesh_channel_overlay;
 static lv_obj_t *mesh_channel_profiles_overlay;
@@ -214,6 +227,14 @@ static int mesh_channel_scan_ready;
 static int mesh_channel_scan_ok;
 static char mesh_channel_scan_status[512];
 static char mesh_channel_profile_paths[MESHTASTIC_CHANNEL_PROFILE_MAX][160];
+static mesh_nodes_overlay_kind_t mesh_nodes_overlay_kind =
+    MESH_NODES_OVERLAY_NONE;
+static int mesh_nodes_auto_refresh_ticks =
+    MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+static int mesh_detector_auto_refresh_ticks =
+    MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+static int mesh_nodes_preserve_scroll;
+static int mesh_detector_preserve_scroll;
 
 typedef enum {
     MESH_FIELD_REGION = 0,
@@ -2158,10 +2179,69 @@ static void mesh_refresh_status(void)
     }
 }
 
+static int32_t mesh_overlay_scroll_y(lv_obj_t *panel)
+{
+    if(panel && lv_obj_is_valid(panel)) {
+        return lv_obj_get_scroll_y(panel);
+    }
+    return 0;
+}
+
+static void mesh_overlay_restore_scroll(lv_obj_t *panel, int32_t scroll_y)
+{
+    if(panel && lv_obj_is_valid(panel) && scroll_y > 0) {
+        lv_obj_scroll_to_y(panel, scroll_y, LV_ANIM_OFF);
+    }
+}
+
+static int mesh_overlay_is_valid(lv_obj_t *overlay)
+{
+    return overlay && lv_obj_is_valid(overlay);
+}
+
+static void mesh_overlay_auto_refresh_tick(void)
+{
+    if(!app_current_page_is(PAGE_MESHTASTIC)) {
+        mesh_nodes_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+        mesh_detector_auto_refresh_ticks =
+            MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+        return;
+    }
+
+    if(mesh_overlay_is_valid(mesh_nodes_overlay) &&
+       mesh_nodes_overlay_kind == MESH_NODES_OVERLAY_LIST) {
+        if(--mesh_nodes_auto_refresh_ticks <= 0) {
+            mesh_nodes_auto_refresh_ticks =
+                MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+            mesh_nodes_preserve_scroll = 1;
+            mesh_nodes_event_cb(NULL);
+            mesh_nodes_preserve_scroll = 0;
+        }
+        mesh_detector_auto_refresh_ticks =
+            MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+        return;
+    }
+    mesh_nodes_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+
+    if(mesh_overlay_is_valid(mesh_detector_overlay) &&
+       !mesh_overlay_is_valid(mesh_nodes_overlay)) {
+        if(--mesh_detector_auto_refresh_ticks <= 0) {
+            mesh_detector_auto_refresh_ticks =
+                MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+            mesh_detector_preserve_scroll = 1;
+            mesh_detector_event_cb(NULL);
+            mesh_detector_preserve_scroll = 0;
+        }
+        return;
+    }
+    mesh_detector_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+}
+
 static void mesh_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
     mesh_refresh_status();
+    mesh_overlay_auto_refresh_tick();
 }
 
 static void mesh_background_timer_cb(lv_timer_t *timer)
@@ -3891,6 +3971,10 @@ static void mesh_close_nodes_page(void)
         lv_obj_delete(mesh_nodes_overlay);
     }
     mesh_nodes_overlay = NULL;
+    mesh_nodes_panel = NULL;
+    mesh_nodes_overlay_kind = MESH_NODES_OVERLAY_NONE;
+    mesh_nodes_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+    mesh_nodes_preserve_scroll = 0;
     mesh_node_request_status_label = NULL;
 }
 
@@ -4836,9 +4920,6 @@ static void mesh_nodes_close_event_cb(lv_event_t *event)
     (void)event;
     mesh_close_nodes_page();
 }
-
-static void mesh_nodes_event_cb(lv_event_t *event);
-static void mesh_detector_event_cb(lv_event_t *event);
 
 static int mesh_node_line_value(const char *line, const char *key,
                                 char *out, size_t out_len)
@@ -6150,6 +6231,10 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
         lv_obj_delete(mesh_nodes_overlay);
     }
+    mesh_nodes_panel = NULL;
+    mesh_nodes_overlay_kind = MESH_NODES_OVERLAY_DETAIL;
+    mesh_nodes_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+    mesh_nodes_preserve_scroll = 0;
     mesh_nodes_overlay = lv_obj_create(lv_screen_active());
     ui_set_fullscreen(mesh_nodes_overlay);
     lv_obj_set_style_bg_color(mesh_nodes_overlay, lv_color_hex(0x05070A), 0);
@@ -6161,6 +6246,7 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
     lv_obj_move_foreground(mesh_nodes_overlay);
 
     panel = ui_scroll_panel(mesh_nodes_overlay, 0, 0, screen_w, screen_h);
+    mesh_nodes_panel = panel;
     lv_obj_set_style_radius(panel, 0, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
@@ -6543,6 +6629,9 @@ static void mesh_detector_close(void)
         lv_obj_delete(mesh_detector_overlay);
     }
     mesh_detector_overlay = NULL;
+    mesh_detector_panel = NULL;
+    mesh_detector_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+    mesh_detector_preserve_scroll = 0;
 }
 
 static void mesh_detector_close_event_cb(lv_event_t *event)
@@ -6688,6 +6777,9 @@ static void mesh_detector_event_cb(lv_event_t *event)
     long packets_total = 0;
     long best_rssi = 0;
     double best_snr = 0.0;
+    int32_t old_scroll_y =
+        mesh_detector_preserve_scroll ?
+        mesh_overlay_scroll_y(mesh_detector_panel) : 0;
 
     (void)event;
     ui_input_hide_inline_active();
@@ -6776,6 +6868,7 @@ static void mesh_detector_event_cb(lv_event_t *event)
     lv_obj_move_foreground(mesh_detector_overlay);
 
     panel = ui_scroll_panel(mesh_detector_overlay, 0, 0, screen_w, screen_h);
+    mesh_detector_panel = panel;
     lv_obj_set_style_radius(panel, 0, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
@@ -6874,6 +6967,9 @@ static void mesh_detector_event_cb(lv_event_t *event)
         lv_obj_set_pos(label, margin, y);
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        mesh_detector_auto_refresh_ticks =
+            MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+        mesh_overlay_restore_scroll(mesh_detector_panel, old_scroll_y);
         return;
     }
 
@@ -6885,6 +6981,8 @@ static void mesh_detector_event_cb(lv_event_t *event)
         mesh_detector_node_row(panel, &nodes[i], x, row_y, node_w, node_h,
                                (size_t)(i + 1));
     }
+    mesh_detector_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+    mesh_overlay_restore_scroll(mesh_detector_panel, old_scroll_y);
 }
 
 static void mesh_profile_event_cb(lv_event_t *event)
@@ -7092,6 +7190,9 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     int stale_count = 0;
     char subtitle_text[192];
     char empty_text[192];
+    int32_t old_scroll_y =
+        mesh_nodes_preserve_scroll ? mesh_overlay_scroll_y(mesh_nodes_panel) :
+        0;
 
     (void)event;
     ui_input_hide_inline_active();
@@ -7130,6 +7231,8 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
         lv_obj_delete(mesh_nodes_overlay);
     }
+    mesh_nodes_panel = NULL;
+    mesh_nodes_overlay_kind = MESH_NODES_OVERLAY_LIST;
     mesh_nodes_overlay = lv_obj_create(lv_screen_active());
     ui_set_fullscreen(mesh_nodes_overlay);
     lv_obj_set_style_bg_color(mesh_nodes_overlay, lv_color_hex(0x05070A), 0);
@@ -7141,6 +7244,7 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     lv_obj_move_foreground(mesh_nodes_overlay);
 
     panel = ui_scroll_panel(mesh_nodes_overlay, 0, 0, screen_w, screen_h);
+    mesh_nodes_panel = panel;
     lv_obj_set_style_radius(panel, 0, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
@@ -7188,6 +7292,8 @@ static void mesh_nodes_event_cb(lv_event_t *event)
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     }
+    mesh_nodes_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+    mesh_overlay_restore_scroll(mesh_nodes_panel, old_scroll_y);
 }
 
 static void mesh_send_text_now(const char *text, const char *source,
@@ -7897,10 +8003,7 @@ void ui_meshtastic_cleanup(void)
     }
     mesh_settings_overlay = NULL;
     memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
-    if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
-        lv_obj_delete(mesh_nodes_overlay);
-    }
-    mesh_nodes_overlay = NULL;
+    mesh_close_nodes_page();
     mesh_detector_close();
     mesh_map_close();
     mesh_close_channel_page();
