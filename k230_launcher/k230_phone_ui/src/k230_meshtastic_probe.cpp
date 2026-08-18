@@ -894,6 +894,7 @@ typedef struct {
     bool client_log = false;
     bool client_chat = false;
     bool client_nodes = false;
+    bool client_map = false;
     bool client_waypoints = false;
     bool client_channel_url = false;
     bool client_quit = false;
@@ -17077,6 +17078,143 @@ static std::string daemon_nodes_response(void)
     return response;
 }
 
+static std::string daemon_map_response(const probe_options_t &opts,
+                                       chip_type_t chip)
+{
+    char line[1024];
+    std::string response;
+    uint64_t now = monotonic_us();
+    uint64_t last_nmea_ms = 0ULL;
+    size_t positioned_count = 0U;
+    size_t visible_waypoints = 0U;
+    double self_lat = 0.0;
+    double self_lon = 0.0;
+    bool self_has_pos = false;
+    bool self_fixed = false;
+    std::string local_name = mesh_clean_text(opts.node_name);
+    std::string local_short;
+
+    if(mesh_gnss.last_nmea_us > 0ULL && now >= mesh_gnss.last_nmea_us) {
+        last_nmea_ms = (now - mesh_gnss.last_nmea_us) / 1000ULL;
+    }
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        if(mesh_nodes[i].has_position) {
+            positioned_count++;
+        }
+    }
+    for(size_t i = 0; i < mesh_waypoint_count; i++) {
+        if(mesh_waypoints[i].valid &&
+           !mesh_waypoint_is_expired(mesh_waypoints[i], mesh_now_epoch())) {
+            visible_waypoints++;
+        }
+    }
+    if(local_name.empty() || local_name == "k230-t-display") {
+        local_name = phoneapi_default_node_name(opts);
+    }
+    local_short = make_short_node_name(local_name);
+    if(opts.fixed_position_enabled) {
+        self_has_pos = true;
+        self_fixed = true;
+        self_lat = opts.fixed_position_latitude_i * 1e-7;
+        self_lon = opts.fixed_position_longitude_i * 1e-7;
+    } else if(mesh_gnss.has_fix &&
+              mesh_gnss.position.has_latitude &&
+              mesh_gnss.position.has_longitude) {
+        self_has_pos = true;
+        self_lat = mesh_gnss.position.latitude_i * 1e-7;
+        self_lon = mesh_gnss.position.longitude_i * 1e-7;
+    }
+
+    snprintf(line, sizeof(line),
+             "OK map version=1 chip=%s nodes=%u positioned=%u waypoints=%u "
+             "nrf9151=%s gps=%s phase=%s lat=%.7f lon=%.7f sats=%u "
+             "nmea_rx=%lu nmea_valid=%lu nmea_nofix=%lu last_nmea_ms=%lu "
+             "ttff_ms=%lu ttff_valid=%s\n",
+             chip_name(chip), (unsigned)mesh_node_count,
+             (unsigned)positioned_count, (unsigned)visible_waypoints,
+             mesh_gnss.modem_state, mesh_gnss.gps_state,
+             nrf9151_gnss_phase(), self_has_pos ? self_lat : 0.0,
+             self_has_pos ? self_lon : 0.0,
+             mesh_gnss.has_fix ? mesh_gnss.position.sats_in_view : 0U,
+             (unsigned long)mesh_gnss.nmea_rx_count,
+             (unsigned long)mesh_gnss.nmea_valid_count,
+             (unsigned long)mesh_gnss.nmea_nofix_count,
+             (unsigned long)last_nmea_ms,
+             (unsigned long)mesh_gnss.ttff_ms,
+             mesh_gnss.ttff_valid ? "1" : "0");
+    response += line;
+    snprintf(line, sizeof(line),
+             "SELF id=0x%08x name=%s short=%s has_pos=%s fixed=%s "
+             "lat=%.7f lon=%.7f alt=%d sats=%u precision=%u ts=%u\n",
+             opts.from_node,
+             mesh_ipc_token(local_name.c_str(), 48U).c_str(),
+             mesh_ipc_token(local_short.c_str(), 8U).c_str(),
+             self_has_pos ? "1" : "0", self_fixed ? "1" : "0",
+             self_has_pos ? self_lat : 0.0, self_has_pos ? self_lon : 0.0,
+             (mesh_gnss.has_fix && mesh_gnss.position.has_altitude) ?
+             mesh_gnss.position.altitude_m :
+             (opts.fixed_position_has_altitude ?
+              opts.fixed_position_altitude_m : 0),
+             mesh_gnss.has_fix ? mesh_gnss.position.sats_in_view : 0U,
+             mesh_gnss.has_fix ? mesh_gnss.position.precision_bits : 0U,
+             mesh_gnss.has_fix ? mesh_gnss.position.timestamp : 0U);
+    response += line;
+
+    for(size_t i = 0; i < mesh_node_count; i++) {
+        const mesh_node_entry_t &node = mesh_nodes[i];
+        std::string long_name = mesh_ipc_token(
+            node.long_name[0] ? node.long_name : "-", 48U);
+        std::string short_name = mesh_ipc_token(
+            node.short_name[0] ? node.short_name : "-", 12U);
+        int battery = node.has_battery_level ? (int)node.battery_level : -1;
+        double voltage = node.has_device_voltage ? node.device_voltage : 0.0;
+        double ch_util = node.has_channel_utilization ?
+                         node.channel_utilization : -1.0;
+        double air_tx = node.has_air_util_tx ? node.air_util_tx : -1.0;
+
+        snprintf(line, sizeof(line),
+                 "NODE id=0x%08x name=%s short=%s hw=%d key=%s "
+                 "age_s=%u rx=%lu rssi=%d snr=%.1f has_pos=%s "
+                 "lat=%.7f lon=%.7f alt=%d sats=%u precision=%u ts=%u "
+                 "battery=%d voltage=%.2f ch_util=%.1f air_tx=%.2f "
+                 "favorite=%s ignored=%s muted=%s\n",
+                 node.node, long_name.c_str(), short_name.c_str(),
+                 node.hw_model, node.has_public_key ? "1" : "0",
+                 mesh_node_age_seconds(node), (unsigned long)node.rx_count,
+                 node.rssi_dbm, node.snr, node.has_position ? "1" : "0",
+                 node.has_position ? node.latitude_i * 1e-7 : 0.0,
+                 node.has_position ? node.longitude_i * 1e-7 : 0.0,
+                 node.has_altitude ? node.altitude_m : 0,
+                 node.sats_in_view, node.precision_bits,
+                 node.position_timestamp, battery, voltage, ch_util, air_tx,
+                 node.is_favorite ? "1" : "0",
+                 node.is_ignored ? "1" : "0",
+                 node.is_muted ? "1" : "0");
+        response += line;
+    }
+
+    for(size_t i = 0; i < mesh_waypoint_count; i++) {
+        const mesh_waypoint_info_t &wp = mesh_waypoints[i];
+        uint32_t now_epoch = mesh_now_epoch();
+
+        if(!wp.valid || mesh_waypoint_is_expired(wp, now_epoch)) {
+            continue;
+        }
+        snprintf(line, sizeof(line),
+                 "WAYPOINT id=0x%08x from=0x%08x age_s=%u "
+                 "lat=%.7f lon=%.7f expire=%u locked=0x%08x "
+                 "icon=0x%08x name=%s desc=%s\n",
+                 wp.id, wp.from_node, mesh_waypoint_age_seconds(wp),
+                 wp.has_latitude ? wp.latitude_i * 1e-7 : 0.0,
+                 wp.has_longitude ? wp.longitude_i * 1e-7 : 0.0,
+                 wp.expire, wp.locked_to, wp.icon,
+                 mesh_ipc_token(wp.name, 40U).c_str(),
+                 mesh_ipc_token(wp.description, 96U).c_str());
+        response += line;
+    }
+    return response;
+}
+
 static std::string daemon_waypoints_response(void)
 {
     char line[512];
@@ -17409,6 +17547,9 @@ static std::string handle_daemon_command(const std::string &line,
     }
     if(line == "NODES" || line == "nodes") {
         return daemon_nodes_response();
+    }
+    if(line == "MAP" || line == "map") {
+        return daemon_map_response(opts, chip);
     }
     if(line == "WAYPOINTS" || line == "waypoints") {
         return daemon_waypoints_response();
@@ -18060,6 +18201,8 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "CHAT\n";
     } else if(opts.client_nodes) {
         command = "NODES\n";
+    } else if(opts.client_map) {
+        command = "MAP\n";
     } else if(opts.client_waypoints) {
         command = "WAYPOINTS\n";
     } else if(opts.client_send_waypoint_requested) {
@@ -18175,7 +18318,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-waypoints|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-map|--cmd-waypoints|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -18183,6 +18326,7 @@ static void print_usage(const char *argv0)
             "  --cmd-log       Query recent daemon TX/RX event log and exit\n"
             "  --cmd-chat      Query recent decoded text messages and exit\n"
             "  --cmd-nodes     Query recently seen mesh nodes and exit\n"
+            "  --cmd-map       Query machine-readable map/node data and exit\n"
             "  --cmd-waypoints Query recently received mesh waypoints and exit\n"
             "  --cmd-channel-url Query Meshtastic channel sharing URL and exit\n"
             "  --cmd-publish-nodeinfo  Ask daemon to publish this node info now\n"
@@ -18504,6 +18648,8 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_chat = true;
         } else if(strcmp(arg, "--cmd-nodes") == 0) {
             opts->client_nodes = true;
+        } else if(strcmp(arg, "--cmd-map") == 0) {
+            opts->client_map = true;
         } else if(strcmp(arg, "--cmd-waypoints") == 0) {
             opts->client_waypoints = true;
         } else if(strcmp(arg, "--cmd-channel-url") == 0) {
@@ -19224,6 +19370,7 @@ int main(int argc, char **argv)
                               (opts.client_log ? 1 : 0) +
                               (opts.client_chat ? 1 : 0) +
                               (opts.client_nodes ? 1 : 0) +
+                              (opts.client_map ? 1 : 0) +
                               (opts.client_waypoints ? 1 : 0) +
                               (opts.client_channel_url ? 1 : 0) +
                               (opts.client_publish_nodeinfo ? 1 : 0) +
