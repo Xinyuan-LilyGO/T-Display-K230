@@ -125,6 +125,8 @@
 #define MESHTASTIC_PREF_MAP_ZOOM "meshtastic.map.zoom"
 #define MESHTASTIC_NODE_RECENT_WINDOW_S 900
 #define MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS 6
+#define MESHTASTIC_NODE_DETAIL_REFRESH_TICKS 1
+#define MESHTASTIC_NODE_DETAIL_REFRESH_ATTEMPTS 5
 
 typedef enum {
     MESH_NODES_OVERLAY_NONE = 0,
@@ -135,6 +137,8 @@ typedef enum {
 static void mesh_nodes_event_cb(lv_event_t *event);
 static void mesh_detector_event_cb(lv_event_t *event);
 static void mesh_overlay_auto_refresh_tick(void);
+static void mesh_node_detail_refresh_current(void);
+static void mesh_node_detail_open(const char *line);
 static void mesh_layout_main(void);
 static uint16_t mesh_rgb565(uint32_t rgb);
 
@@ -164,6 +168,7 @@ static char mesh_last_ble_state[32] = "offline";
 static char mesh_node_select_ids[MESHTASTIC_UI_NODE_SELECT_MAX][24];
 static char mesh_node_select_lines[MESHTASTIC_UI_NODE_SELECT_MAX][MESHTASTIC_UI_NODE_LINE_MAX];
 static char mesh_node_detail_target_id[24];
+static char mesh_node_detail_status_text[160];
 static char mesh_radio_pause_owner[32];
 static int mesh_keyboard_reserved_h;
 static int mesh_status_panel_h;
@@ -338,6 +343,9 @@ static int mesh_detector_auto_refresh_ticks =
     MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
 static int mesh_nodes_preserve_scroll;
 static int mesh_detector_preserve_scroll;
+static int mesh_node_detail_refresh_ticks;
+static int mesh_node_detail_refresh_attempts;
+static uint32_t mesh_node_detail_status_color = 0x94A3B8;
 
 typedef enum {
     MESH_FIELD_REGION = 0,
@@ -3825,7 +3833,23 @@ static void mesh_overlay_auto_refresh_tick(void)
             MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
         return;
     }
+    if(mesh_overlay_is_valid(mesh_nodes_overlay) &&
+       mesh_nodes_overlay_kind == MESH_NODES_OVERLAY_DETAIL) {
+        if(mesh_node_detail_refresh_attempts > 0) {
+            if(--mesh_node_detail_refresh_ticks <= 0) {
+                mesh_node_detail_refresh_ticks =
+                    MESHTASTIC_NODE_DETAIL_REFRESH_TICKS;
+                mesh_node_detail_refresh_attempts--;
+                mesh_node_detail_refresh_current();
+            }
+        }
+        mesh_nodes_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+        mesh_detector_auto_refresh_ticks =
+            MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+        return;
+    }
     mesh_nodes_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
+    mesh_node_detail_refresh_attempts = 0;
 
     if(mesh_overlay_is_valid(mesh_detector_overlay) &&
        !mesh_overlay_is_valid(mesh_nodes_overlay)) {
@@ -5757,6 +5781,11 @@ static void mesh_close_nodes_page(void)
     mesh_nodes_overlay_kind = MESH_NODES_OVERLAY_NONE;
     mesh_nodes_auto_refresh_ticks = MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS;
     mesh_nodes_preserve_scroll = 0;
+    mesh_node_detail_refresh_ticks = 0;
+    mesh_node_detail_refresh_attempts = 0;
+    mesh_node_detail_target_id[0] = '\0';
+    mesh_node_detail_status_text[0] = '\0';
+    mesh_node_detail_status_color = 0x94A3B8;
     mesh_node_request_status_label = NULL;
 }
 
@@ -7170,6 +7199,74 @@ static int mesh_fetch_legacy_nodes(char *nodes_text, size_t nodes_len,
     return 0;
 }
 
+static int mesh_find_legacy_node_line(const char *target_id, char *out,
+                                      size_t out_len)
+{
+    char response[512];
+    char nodes_text[8192];
+    char *saveptr = NULL;
+    char *line;
+
+    if(!target_id || !target_id[0] || !out || out_len == 0U) {
+        return -1;
+    }
+    out[0] = '\0';
+    if(mesh_fetch_legacy_nodes(nodes_text, sizeof(nodes_text), response,
+                               sizeof(response), NULL, 0) != 0) {
+        ui_trim_text(response);
+        mesh_append_log("node refresh failed: %s", response);
+        return -1;
+    }
+    line = strtok_r(nodes_text, "\n", &saveptr);
+    while(line) {
+        char node_id[24];
+
+        if(strncmp(line, "0x", 2) == 0 &&
+           sscanf(line, "%23s", node_id) == 1 &&
+           strcmp(node_id, target_id) == 0) {
+            snprintf(out, out_len, "%s", line);
+            return 0;
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    return -1;
+}
+
+static void mesh_node_detail_set_status(const char *text, uint32_t color)
+{
+    snprintf(mesh_node_detail_status_text,
+             sizeof(mesh_node_detail_status_text), "%s", text ? text : "");
+    mesh_node_detail_status_color = color;
+    if(mesh_node_request_status_label &&
+       lv_obj_is_valid(mesh_node_request_status_label)) {
+        lv_label_set_text(mesh_node_request_status_label,
+                          mesh_node_detail_status_text[0] ?
+                          ui_tr(mesh_node_detail_status_text) :
+                          ui_tr("Tap a request button to update this node"));
+        lv_obj_set_style_text_color(mesh_node_request_status_label,
+                                    lv_color_hex(mesh_node_detail_status_color),
+                                    0);
+    }
+}
+
+static void mesh_node_detail_refresh_current(void)
+{
+    char target_id[24];
+    char line[MESHTASTIC_UI_NODE_LINE_MAX];
+
+    if(!mesh_node_detail_target_id[0]) {
+        return;
+    }
+    snprintf(target_id, sizeof(target_id), "%s", mesh_node_detail_target_id);
+    if(mesh_find_legacy_node_line(target_id, line, sizeof(line)) == 0) {
+        mesh_node_detail_set_status("Refreshed. Reply may still be in flight.",
+                                    0x25C281);
+        mesh_node_detail_open(line);
+        return;
+    }
+    mesh_node_detail_set_status("Waiting for node reply...", 0xF59E0B);
+}
+
 static void mesh_node_append_line(char *out, size_t out_len,
                                   const char *name, const char *value)
 {
@@ -7320,26 +7417,27 @@ static void mesh_node_remote_request_event_cb(lv_event_t *event)
              mesh_node_detail_target_id);
     if(mesh_ipc_command(command, response, sizeof(response)) == 0) {
         ui_trim_text(response);
-        mesh_append_log("request %s: %s",
-                        mesh_node_detail_target_id, response);
-        if(mesh_node_request_status_label &&
-           lv_obj_is_valid(mesh_node_request_status_label)) {
-            lv_label_set_text(mesh_node_request_status_label,
-                              response[0] ? response : "Request sent");
-            lv_obj_set_style_text_color(mesh_node_request_status_label,
-                                        lv_color_hex(0x25C281), 0);
+        if(strncmp(response, "OK", 2) == 0) {
+            mesh_append_log("request %s: %s",
+                            mesh_node_detail_target_id, response);
+            mesh_node_detail_set_status("Request queued. Refreshing node data...",
+                                        0x25C281);
+            mesh_node_detail_refresh_ticks =
+                MESHTASTIC_NODE_DETAIL_REFRESH_TICKS;
+            mesh_node_detail_refresh_attempts =
+                MESHTASTIC_NODE_DETAIL_REFRESH_ATTEMPTS;
+        } else {
+            mesh_append_log("request rejected %s: %s",
+                            mesh_node_detail_target_id, response);
+            mesh_node_detail_set_status(response[0] ? response :
+                                        "Request failed", 0xEF4D5A);
         }
     } else {
         ui_trim_text(response);
         mesh_append_log("request failed %s: %s",
                         mesh_node_detail_target_id, response);
-        if(mesh_node_request_status_label &&
-           lv_obj_is_valid(mesh_node_request_status_label)) {
-            lv_label_set_text(mesh_node_request_status_label,
-                              response[0] ? response : "Request failed");
-            lv_obj_set_style_text_color(mesh_node_request_status_label,
-                                        lv_color_hex(0xEF4D5A), 0);
-        }
+        mesh_node_detail_set_status(response[0] ? response : "Request failed",
+                                    0xEF4D5A);
     }
     mesh_refresh_status();
 }
@@ -8915,9 +9013,8 @@ static void mesh_map_event_cb(lv_event_t *event)
     }
 }
 
-static void mesh_node_detail_event_cb(lv_event_t *event)
+static void mesh_node_detail_open(const char *line)
 {
-    const char *line = (const char *)lv_event_get_user_data(event);
     lv_obj_t *panel;
     lv_obj_t *title;
     lv_obj_t *subtitle;
@@ -9049,8 +9146,12 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
 
     y = 88 + request_rows * 46 + 6;
     mesh_node_request_status_label =
-        ui_label(panel, "Tap a request button to update this node",
-                 &lv_font_montserrat_14, 0x94A3B8);
+        ui_label(panel,
+                 mesh_node_detail_status_text[0] ?
+                 ui_tr(mesh_node_detail_status_text) :
+                 ui_tr("Tap a request button to update this node"),
+                 &lv_font_montserrat_14,
+                 mesh_node_detail_status_color);
     lv_obj_set_pos(mesh_node_request_status_label, margin, y);
     lv_obj_set_width(mesh_node_request_status_label, content_w);
     lv_label_set_long_mode(mesh_node_request_status_label,
@@ -9155,6 +9256,17 @@ static void mesh_node_detail_event_cb(lv_event_t *event)
         lv_obj_set_width(label, content_w);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     }
+}
+
+static void mesh_node_detail_event_cb(lv_event_t *event)
+{
+    const char *line = (const char *)lv_event_get_user_data(event);
+
+    mesh_node_detail_status_text[0] = '\0';
+    mesh_node_detail_status_color = 0x94A3B8;
+    mesh_node_detail_refresh_ticks = 0;
+    mesh_node_detail_refresh_attempts = 0;
+    mesh_node_detail_open(line);
 }
 
 static void mesh_add_node_card(lv_obj_t *panel, const char *line,
