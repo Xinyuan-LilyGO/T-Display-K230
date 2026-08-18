@@ -248,6 +248,7 @@ static lv_obj_t *mesh_detector_panel;
 static lv_obj_t *mesh_choice_overlay;
 static lv_obj_t *mesh_channel_overlay;
 static lv_obj_t *mesh_channels_overlay;
+static lv_obj_t *mesh_channel_edit_overlay;
 static lv_obj_t *mesh_channel_profiles_overlay;
 static lv_obj_t *mesh_channel_profile_delete_overlay;
 static lv_obj_t *mesh_channel_import_overlay;
@@ -315,6 +316,15 @@ static char mesh_channel_profile_edit_path[160];
 static char mesh_channel_profile_delete_path[160];
 static char mesh_channel_import_pending_url[1024];
 static char mesh_channel_scan_pending_url[1024];
+static int mesh_channel_edit_index = -1;
+static char mesh_channel_edit_role[16] = "secondary";
+static char mesh_channel_edit_name[64];
+static char mesh_channel_edit_psk[96] = "default";
+static lv_obj_t *mesh_channel_edit_title_label;
+static lv_obj_t *mesh_channel_edit_role_label;
+static lv_obj_t *mesh_channel_edit_name_label;
+static lv_obj_t *mesh_channel_edit_psk_label;
+static lv_obj_t *mesh_channel_edit_status_label;
 static char mesh_canned_messages[MESHTASTIC_CANNED_MAX][160];
 static int mesh_canned_manage_mode;
 static int mesh_canned_delete_index = -1;
@@ -7030,6 +7040,27 @@ static void mesh_channels_close_event_cb(lv_event_t *event)
     mesh_channels_close();
 }
 
+static void mesh_channel_edit_close(void)
+{
+    if(mesh_channel_edit_overlay && lv_obj_is_valid(mesh_channel_edit_overlay)) {
+        lv_obj_delete(mesh_channel_edit_overlay);
+    }
+    mesh_channel_edit_overlay = NULL;
+    mesh_channel_edit_title_label = NULL;
+    mesh_channel_edit_role_label = NULL;
+    mesh_channel_edit_name_label = NULL;
+    mesh_channel_edit_psk_label = NULL;
+    mesh_channel_edit_status_label = NULL;
+}
+
+static void mesh_channel_edit_close_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_channel_edit_close();
+}
+
 static const char *mesh_channel_role_label(const char *role)
 {
     if(role && strcmp(role, "primary") == 0) {
@@ -7041,10 +7072,360 @@ static const char *mesh_channel_role_label(const char *role)
     return ui_tr("Disabled");
 }
 
+static void mesh_channel_edit_refresh(void)
+{
+    char text[160];
+    const char *role = mesh_channel_edit_role[0] ?
+                       mesh_channel_edit_role : "secondary";
+    const char *name = mesh_channel_edit_name[0] ?
+                       mesh_channel_edit_name : "default";
+    const char *psk = mesh_channel_edit_psk[0] ?
+                      mesh_channel_edit_psk : "default";
+
+    if(mesh_channel_edit_title_label &&
+       lv_obj_is_valid(mesh_channel_edit_title_label)) {
+        snprintf(text, sizeof(text), "%s CH%d",
+                 ui_tr("Channel slot"), mesh_channel_edit_index);
+        lv_label_set_text(mesh_channel_edit_title_label, text);
+    }
+    if(mesh_channel_edit_role_label &&
+       lv_obj_is_valid(mesh_channel_edit_role_label)) {
+        snprintf(text, sizeof(text), "%s: %s", ui_tr("Role"),
+                 mesh_channel_role_label(role));
+        lv_label_set_text(mesh_channel_edit_role_label, text);
+    }
+    if(mesh_channel_edit_name_label &&
+       lv_obj_is_valid(mesh_channel_edit_name_label)) {
+        snprintf(text, sizeof(text), "%s: %s", ui_tr("Channel name"), name);
+        lv_label_set_text(mesh_channel_edit_name_label, text);
+    }
+    if(mesh_channel_edit_psk_label &&
+       lv_obj_is_valid(mesh_channel_edit_psk_label)) {
+        snprintf(text, sizeof(text), "%s: %s", ui_tr("PSK"),
+                 strcmp(psk, "default") == 0 ? "default" : "custom");
+        lv_label_set_text(mesh_channel_edit_psk_label, text);
+    }
+}
+
+static void mesh_channel_edit_set_role_event_cb(lv_event_t *event)
+{
+    const char *role = (const char *)lv_event_get_user_data(event);
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(!role || !role[0]) {
+        return;
+    }
+    snprintf(mesh_channel_edit_role, sizeof(mesh_channel_edit_role), "%s",
+             role);
+    mesh_channel_edit_refresh();
+}
+
+static void mesh_channel_edit_name_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    if(!text || !text[0] || strcmp(text, "-") == 0 ||
+       strcasecmp(text, "default") == 0) {
+        mesh_channel_edit_name[0] = '\0';
+    } else {
+        mesh_safe_arg(mesh_channel_edit_name, sizeof(mesh_channel_edit_name),
+                      text);
+    }
+    mesh_channel_edit_refresh();
+}
+
+static void mesh_channel_edit_psk_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    if(!text || !text[0]) {
+        snprintf(mesh_channel_edit_psk, sizeof(mesh_channel_edit_psk),
+                 "default");
+    } else {
+        mesh_safe_arg(mesh_channel_edit_psk, sizeof(mesh_channel_edit_psk),
+                      text);
+    }
+    mesh_channel_edit_refresh();
+}
+
+static void mesh_channel_edit_name_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    memset(&config, 0, sizeof(config));
+    config.title = ui_tr("Channel name");
+    config.placeholder = mesh_channel_edit_name[0] ?
+                         mesh_channel_edit_name : "-";
+    config.max_length = 12;
+    config.submit_cb = mesh_channel_edit_name_submit_cb;
+    config.submit_text = ui_tr("Save");
+    config.cancel_text = ui_tr("Cancel");
+    ui_input_dialog_open(&config);
+}
+
+static void mesh_channel_edit_psk_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    memset(&config, 0, sizeof(config));
+    config.title = ui_tr("PSK");
+    config.placeholder = mesh_channel_edit_psk[0] ?
+                         mesh_channel_edit_psk : "default";
+    config.password_mode = 1;
+    config.max_length = 80;
+    config.submit_cb = mesh_channel_edit_psk_submit_cb;
+    config.submit_text = ui_tr("Save");
+    config.cancel_text = ui_tr("Cancel");
+    ui_input_dialog_open(&config);
+}
+
+static const char *mesh_channel_edit_role_token(void)
+{
+    if(strcmp(mesh_channel_edit_role, "primary") == 0) {
+        return "primary";
+    }
+    if(strcmp(mesh_channel_edit_role, "disabled") == 0) {
+        return "disabled";
+    }
+    return "secondary";
+}
+
+static void mesh_channel_edit_save_event_cb(lv_event_t *event)
+{
+    char command[256];
+    char response[2048];
+    const char *role = mesh_channel_edit_role_token();
+    const char *name = mesh_channel_edit_name[0] ?
+                       mesh_channel_edit_name : "-";
+    const char *psk = mesh_channel_edit_psk[0] ?
+                      mesh_channel_edit_psk : "default";
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(mesh_channel_edit_index < 0 ||
+       mesh_channel_edit_index >= MESHTASTIC_UI_CHANNEL_SLOT_MAX) {
+        return;
+    }
+    snprintf(command, sizeof(command), "SET_CHANNEL_SLOT %d %s %s %s\n",
+             mesh_channel_edit_index, role, name, psk);
+    if(mesh_ipc_command(command, response, sizeof(response)) != 0 ||
+       strncmp(response, "OK channels", 11) != 0) {
+        ui_trim_text(response);
+        if(mesh_channel_edit_status_label &&
+           lv_obj_is_valid(mesh_channel_edit_status_label)) {
+            lv_label_set_text(mesh_channel_edit_status_label,
+                              response[0] ? response : ui_tr("Save failed"));
+            lv_obj_set_style_text_color(mesh_channel_edit_status_label,
+                                        lv_color_hex(0xFCA5A5), 0);
+        }
+        mesh_append_log("channel slot save failed: %s", response);
+        return;
+    }
+    mesh_append_log("channel slot saved: CH%d %s",
+                    mesh_channel_edit_index, role);
+    mesh_refresh_tx_channel_from_daemon(1);
+    mesh_channel_edit_close();
+    mesh_channels_event_cb(NULL);
+}
+
+static void mesh_channel_edit_open(int index, const char *role,
+                                   const char *name, const char *psk)
+{
+    lv_obj_t *dialog;
+    lv_obj_t *label;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int dialog_w = ui_is_landscape() ? 620 : 500;
+    int dialog_h = ui_is_landscape() ? 360 : 430;
+    int pad = 24;
+    int button_gap = 10;
+    int role_w;
+    int y;
+
+    if(dialog_w > screen_w - 48) {
+        dialog_w = screen_w - 48;
+    }
+    if(dialog_w < 320) {
+        dialog_w = 320;
+    }
+    if(dialog_h > screen_h - 48) {
+        dialog_h = screen_h - 48;
+    }
+    if(dialog_h < 300) {
+        dialog_h = 300;
+    }
+
+    mesh_channel_edit_close();
+    mesh_channel_edit_index = index;
+    snprintf(mesh_channel_edit_role, sizeof(mesh_channel_edit_role), "%s",
+             role && strcmp(role, "disabled") != 0 ? role : "secondary");
+    snprintf(mesh_channel_edit_name, sizeof(mesh_channel_edit_name), "%s",
+             name && strcmp(name, "default") != 0 ? name : "");
+    snprintf(mesh_channel_edit_psk, sizeof(mesh_channel_edit_psk), "%s",
+             psk && psk[0] && strcmp(psk, "invalid") != 0 ? psk :
+             "default");
+
+    mesh_channel_edit_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_channel_edit_overlay);
+    lv_obj_set_style_bg_color(mesh_channel_edit_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_channel_edit_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(mesh_channel_edit_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_channel_edit_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_channel_edit_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    dialog = ui_panel(mesh_channel_edit_overlay, 0, 0, dialog_w, dialog_h);
+    lv_obj_align(dialog, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(dialog, 16, 0);
+    lv_obj_set_style_border_color(dialog, lv_color_hex(0x243044), 0);
+    lv_obj_set_style_pad_all(dialog, 0, 0);
+
+    mesh_channel_edit_title_label =
+        ui_label(dialog, "", &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_pos(mesh_channel_edit_title_label, pad, pad);
+    lv_obj_set_width(mesh_channel_edit_title_label, dialog_w - pad * 2);
+    lv_label_set_long_mode(mesh_channel_edit_title_label, LV_LABEL_LONG_DOT);
+
+    y = pad + 48;
+    mesh_channel_edit_role_label =
+        ui_label(dialog, "", &lv_font_montserrat_16, 0xCBD5E1);
+    lv_obj_set_pos(mesh_channel_edit_role_label, pad, y);
+    lv_obj_set_width(mesh_channel_edit_role_label, dialog_w - pad * 2);
+    lv_label_set_long_mode(mesh_channel_edit_role_label, LV_LABEL_LONG_DOT);
+
+    y += 34;
+    role_w = (dialog_w - pad * 2 - button_gap * 2) / 3;
+    btn = ui_command_button(dialog, pad, y, role_w, ui_tr("Primary"),
+                            0x25C281);
+    lv_obj_set_height(btn, 44);
+    lv_obj_add_event_cb(btn, mesh_channel_edit_set_role_event_cb,
+                        LV_EVENT_CLICKED, "primary");
+    btn = ui_command_button(dialog, pad + role_w + button_gap, y, role_w,
+                            ui_tr("Secondary"), 0x3DA5FF);
+    lv_obj_set_height(btn, 44);
+    lv_obj_add_event_cb(btn, mesh_channel_edit_set_role_event_cb,
+                        LV_EVENT_CLICKED, "secondary");
+    btn = ui_command_button(dialog, pad + (role_w + button_gap) * 2, y,
+                            role_w, ui_tr("Disabled"), 0x64748B);
+    lv_obj_set_height(btn, 44);
+    lv_obj_add_event_cb(btn, mesh_channel_edit_set_role_event_cb,
+                        LV_EVENT_CLICKED, "disabled");
+
+    y += 62;
+    mesh_channel_edit_name_label =
+        ui_label(dialog, "", &lv_font_montserrat_16, 0xF2F5F8);
+    lv_obj_set_pos(mesh_channel_edit_name_label, pad, y);
+    lv_obj_set_width(mesh_channel_edit_name_label, dialog_w - pad * 2 - 110);
+    lv_label_set_long_mode(mesh_channel_edit_name_label, LV_LABEL_LONG_DOT);
+    btn = ui_command_button(dialog, dialog_w - pad - 92, y - 8, 92,
+                            ui_tr("Edit"), 0x3DA5FF);
+    lv_obj_set_height(btn, 42);
+    lv_obj_add_event_cb(btn, mesh_channel_edit_name_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    y += 54;
+    mesh_channel_edit_psk_label =
+        ui_label(dialog, "", &lv_font_montserrat_16, 0xF2F5F8);
+    lv_obj_set_pos(mesh_channel_edit_psk_label, pad, y);
+    lv_obj_set_width(mesh_channel_edit_psk_label, dialog_w - pad * 2 - 110);
+    lv_label_set_long_mode(mesh_channel_edit_psk_label, LV_LABEL_LONG_DOT);
+    btn = ui_command_button(dialog, dialog_w - pad - 92, y - 8, 92,
+                            ui_tr("Edit"), 0x3DA5FF);
+    lv_obj_set_height(btn, 42);
+    lv_obj_add_event_cb(btn, mesh_channel_edit_psk_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    y += 54;
+    label = ui_label(dialog,
+                     ui_tr("Use primary for the radio channel; secondary can receive matching channel hashes"),
+                     &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(label, pad, y);
+    lv_obj_set_width(label, dialog_w - pad * 2);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+    mesh_channel_edit_status_label =
+        ui_label(dialog, "", &lv_font_montserrat_14, 0xFCA5A5);
+    lv_obj_set_pos(mesh_channel_edit_status_label, pad, dialog_h - pad - 98);
+    lv_obj_set_width(mesh_channel_edit_status_label, dialog_w - pad * 2);
+    lv_label_set_long_mode(mesh_channel_edit_status_label, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(dialog, pad, dialog_h - pad - 54,
+                            (dialog_w - pad * 2 - button_gap) / 2,
+                            ui_tr("Cancel"), 0x64748B);
+    lv_obj_set_height(btn, 54);
+    lv_obj_add_event_cb(btn, mesh_channel_edit_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    btn = ui_command_button(dialog,
+                            pad + (dialog_w - pad * 2 + button_gap) / 2,
+                            dialog_h - pad - 54,
+                            (dialog_w - pad * 2 - button_gap) / 2,
+                            ui_tr("Save"), 0x25C281);
+    lv_obj_set_height(btn, 54);
+    lv_obj_add_event_cb(btn, mesh_channel_edit_save_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    mesh_channel_edit_refresh();
+}
+
+static void mesh_channel_slot_edit_event_cb(lv_event_t *event)
+{
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+    char response[2048];
+    char *saveptr = NULL;
+    char *line;
+    char role[16] = "disabled";
+    char name[64] = "default";
+    char psk[16] = "default";
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(index < 0 || index >= MESHTASTIC_UI_CHANNEL_SLOT_MAX) {
+        return;
+    }
+    if(mesh_ipc_command("CHANNELS\n", response, sizeof(response)) == 0 &&
+       strncmp(response, "OK channels", 11) == 0) {
+        line = strtok_r(response, "\n", &saveptr);
+        while(line) {
+            char index_text[8];
+            unsigned long value;
+
+            if(strncmp(line, "CH ", 3) == 0) {
+                mesh_status_field(line, "index", index_text,
+                                  sizeof(index_text), "");
+                if(mesh_parse_u32_text(index_text, &value) == 0 &&
+                   (int)value == index) {
+                    mesh_status_field(line, "role", role, sizeof(role),
+                                      "disabled");
+                    mesh_status_field(line, "name", name, sizeof(name),
+                                      "default");
+                    mesh_status_field(line, "psk", psk, sizeof(psk),
+                                      "default");
+                    break;
+                }
+            }
+            line = strtok_r(NULL, "\n", &saveptr);
+        }
+    }
+    mesh_channel_edit_open(index, role, name, psk);
+}
+
 static void mesh_select_tx_channel_event_cb(lv_event_t *event)
 {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
 
+    if(event) {
+        lv_event_stop_processing(event);
+    }
     if(index < 0 || index >= MESHTASTIC_UI_CHANNEL_SLOT_MAX) {
         return;
     }
@@ -7072,7 +7453,7 @@ static void mesh_channels_event_cb(lv_event_t *event)
     int columns = landscape ? 2 : 1;
     int gap = 12;
     int card_w = columns == 2 ? (content_w - gap) / 2 : content_w;
-    int card_h = landscape ? 82 : 92;
+    int card_h = landscape ? 116 : 126;
     int y = 96;
     int count = 0;
 
@@ -7161,12 +7542,6 @@ static void mesh_channels_event_cb(lv_event_t *event)
                 lv_obj_set_style_bg_color(card,
                                           lv_color_hex(selected ? 0x123328 :
                                                        0x101820), 0);
-                if(!disabled) {
-                    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-                    lv_obj_add_event_cb(card, mesh_select_tx_channel_event_cb,
-                                        LV_EVENT_CLICKED,
-                                        (void *)(intptr_t)index_value);
-                }
                 snprintf(text, sizeof(text), "CH%lu  %s",
                          index_value, name[0] ? name : "default");
                 label = ui_label(card, text, &lv_font_montserrat_18,
@@ -7181,6 +7556,30 @@ static void mesh_channels_event_cb(lv_event_t *event)
                 lv_obj_set_pos(label, 14, 44);
                 lv_obj_set_width(label, card_w - 28);
                 lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+                if(!disabled) {
+                    lv_obj_t *use_btn =
+                        ui_command_button(card, 14, card_h - 44,
+                                          (card_w - 38) / 2,
+                                          ui_tr("Use"), 0x25C281);
+                    lv_obj_set_height(use_btn, 34);
+                    lv_obj_add_event_cb(use_btn,
+                                        mesh_select_tx_channel_event_cb,
+                                        LV_EVENT_CLICKED,
+                                        (void *)(intptr_t)index_value);
+                }
+                {
+                    int edit_x = disabled ? 14 : 24 + (card_w - 38) / 2;
+                    int edit_w = disabled ? card_w - 28 :
+                                 (card_w - 38) / 2;
+                    lv_obj_t *edit_btn =
+                        ui_command_button(card, edit_x, card_h - 44, edit_w,
+                                          ui_tr("Edit"), 0x3DA5FF);
+                    lv_obj_set_height(edit_btn, 34);
+                    lv_obj_add_event_cb(edit_btn,
+                                        mesh_channel_slot_edit_event_cb,
+                                        LV_EVENT_CLICKED,
+                                        (void *)(intptr_t)index_value);
+                }
                 count++;
             }
         }
@@ -12432,6 +12831,7 @@ void ui_meshtastic_cleanup(void)
     mesh_choice_close();
     mesh_canned_delete_confirm_close();
     mesh_canned_close();
+    mesh_channel_edit_close();
     mesh_channel_profiles_close();
     mesh_channels_close();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
@@ -12475,6 +12875,10 @@ int ui_meshtastic_handle_back(void)
     if(mesh_channel_profiles_overlay &&
        lv_obj_is_valid(mesh_channel_profiles_overlay)) {
         mesh_channel_profiles_close();
+        return 1;
+    }
+    if(mesh_channel_edit_overlay && lv_obj_is_valid(mesh_channel_edit_overlay)) {
+        mesh_channel_edit_close();
         return 1;
     }
     if(mesh_channel_scan_overlay &&

@@ -900,6 +900,7 @@ typedef struct {
     bool client_map = false;
     bool client_waypoints = false;
     bool client_channels = false;
+    bool client_set_channel_slot = false;
     bool client_channel_url = false;
     bool client_quit = false;
     bool client_publish_nodeinfo = false;
@@ -911,6 +912,7 @@ typedef struct {
     std::string client_send_voice_path;
     bool client_send_waypoint_requested = false;
     std::string client_send_waypoint_text;
+    std::string client_set_channel_slot_command;
     bool client_publish_position = false;
     bool client_publish_telemetry = false;
     bool client_request_nodeinfo = false;
@@ -9314,7 +9316,7 @@ static bool phoneapi_apply_admin_writes(const phoneapi_admin_request_t &admin,
                 mesh_channel_slot_t &slot = opts->channels[index];
 
                 slot = mesh_channel_slot_t();
-                slot.configured = true;
+                slot.configured = false;
                 slot.role = MESHTASTIC_CHANNEL_ROLE_DISABLED;
                 if(index == opts->primary_channel_index) {
                     opts->primary_channel_index = 0U;
@@ -17024,6 +17026,108 @@ static std::string daemon_channels_response(const probe_options_t &opts)
     return response;
 }
 
+static bool daemon_channel_role_from_token(const char *text, uint32_t *role)
+{
+    if(!text || !role) {
+        return false;
+    }
+    if(strcasecmp(text, "primary") == 0 || strcmp(text, "1") == 0) {
+        *role = MESHTASTIC_CHANNEL_ROLE_PRIMARY;
+        return true;
+    }
+    if(strcasecmp(text, "secondary") == 0 || strcmp(text, "2") == 0) {
+        *role = MESHTASTIC_CHANNEL_ROLE_SECONDARY;
+        return true;
+    }
+    if(strcasecmp(text, "disabled") == 0 || strcasecmp(text, "off") == 0 ||
+       strcmp(text, "0") == 0) {
+        *role = MESHTASTIC_CHANNEL_ROLE_DISABLED;
+        return true;
+    }
+    return false;
+}
+
+static std::string daemon_set_channel_slot_response(const std::string &line,
+                                                    const probe_options_t &opts)
+{
+    probe_options_t updated = opts;
+    char role_text[20];
+    char name_text[80];
+    char psk_text[100];
+    unsigned index;
+    uint32_t role;
+    bool request_reconfigure = false;
+    std::vector<uint8_t> key;
+
+    if(sscanf(line.c_str(), "SET_CHANNEL_SLOT %u %19s %79s %99s",
+              &index, role_text, name_text, psk_text) != 4 &&
+       sscanf(line.c_str(), "set_channel_slot %u %19s %79s %99s",
+              &index, role_text, name_text, psk_text) != 4) {
+        return "ERR usage SET_CHANNEL_SLOT <0-7> <primary|secondary|disabled> <name|-> <psk>\n";
+    }
+    if(index >= MESHTASTIC_PHONEAPI_MAX_CHANNELS) {
+        return "ERR invalid-channel\n";
+    }
+    if(!daemon_channel_role_from_token(role_text, &role)) {
+        return "ERR invalid-role\n";
+    }
+    if(role == MESHTASTIC_CHANNEL_ROLE_DISABLED &&
+       index == updated.primary_channel_index) {
+        return "ERR cannot-disable-primary\n";
+    }
+    if(role != MESHTASTIC_CHANNEL_ROLE_DISABLED &&
+       !parse_psk(psk_text, &key)) {
+        return "ERR invalid-psk\n";
+    }
+    if(role == MESHTASTIC_CHANNEL_ROLE_SECONDARY &&
+       index == updated.primary_channel_index) {
+        return "ERR primary-role-required\n";
+    }
+
+    updated.channels[index] = mesh_channel_slot_t();
+    updated.channels[index].configured =
+        role != MESHTASTIC_CHANNEL_ROLE_DISABLED;
+    updated.channels[index].role = role;
+    if(role != MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+        if(strcmp(name_text, "-") == 0 || strcasecmp(name_text, "default") == 0) {
+            updated.channels[index].name.clear();
+        } else {
+            updated.channels[index].name = mesh_clean_text(name_text);
+        }
+        updated.channels[index].psk = psk_text;
+    }
+
+    if(role == MESHTASTIC_CHANNEL_ROLE_PRIMARY) {
+        for(uint32_t i = 0U; i < MESHTASTIC_PHONEAPI_MAX_CHANNELS; i++) {
+            if(i != index && updated.channels[i].configured &&
+               updated.channels[i].role == MESHTASTIC_CHANNEL_ROLE_PRIMARY) {
+                updated.channels[i].role = MESHTASTIC_CHANNEL_ROLE_SECONDARY;
+            }
+        }
+        updated.primary_channel_index = index;
+        updated.channel_name = updated.channels[index].name;
+        updated.psk = updated.channels[index].psk.empty() ?
+                      std::string("default") : updated.channels[index].psk;
+        request_reconfigure = true;
+    }
+
+    if(request_reconfigure && !apply_meshtastic_profile(&updated)) {
+        return "ERR unsupported-profile\n";
+    }
+    if(!phoneapi_persist_meshtastic_opts(updated)) {
+        return "ERR persist-failed\n";
+    }
+    phoneapi_store_runtime_opts(updated, request_reconfigure);
+    daemon_event("Daemon SET_CHANNEL_SLOT index=%u role=%s name=%s psk=%s reconfig=%s",
+                 index, daemon_channel_role_name(role),
+                 role == MESHTASTIC_CHANNEL_ROLE_DISABLED ? "-" :
+                 mesh_channel_slot_name(updated, index).c_str(),
+                 role == MESHTASTIC_CHANNEL_ROLE_DISABLED ? "-" :
+                 (strcmp(psk_text, "default") == 0 ? "default" : "custom"),
+                 request_reconfigure ? "yes" : "no");
+    return daemon_channels_response(updated);
+}
+
 static int base64url_value(char c)
 {
     if(c >= 'A' && c <= 'Z') {
@@ -17918,6 +18022,10 @@ static std::string handle_daemon_command(const std::string &line,
     if(line == "CHANNELS" || line == "channels") {
         return daemon_channels_response(opts);
     }
+    if(line.compare(0, 17, "SET_CHANNEL_SLOT ") == 0 ||
+       line.compare(0, 17, "set_channel_slot ") == 0) {
+        return daemon_set_channel_slot_response(line, opts);
+    }
     if(line.compare(0, 14, "SEND_WAYPOINT ") == 0 ||
        line.compare(0, 14, "send_waypoint ") == 0) {
         mesh_waypoint_info_t waypoint;
@@ -18573,6 +18681,12 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "WAYPOINTS\n";
     } else if(opts.client_channels) {
         command = "CHANNELS\n";
+    } else if(opts.client_set_channel_slot) {
+        if(opts.client_set_channel_slot_command.empty()) {
+            fprintf(stderr, "--cmd-set-channel-slot value is empty\n");
+            return 2;
+        }
+        command = opts.client_set_channel_slot_command + "\n";
     } else if(opts.client_send_waypoint_requested) {
         if(opts.client_send_waypoint_text.empty()) {
             fprintf(stderr, "--cmd-send-waypoint value is empty\n");
@@ -18686,7 +18800,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-map|--cmd-request-status|--cmd-waypoints|--cmd-channels|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-map|--cmd-request-status|--cmd-waypoints|--cmd-channels|--cmd-set-channel-slot INDEX ROLE NAME PSK|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -18698,6 +18812,7 @@ static void print_usage(const char *argv0)
             "  --cmd-request-status Query recent remote request state and exit\n"
             "  --cmd-waypoints Query recently received mesh waypoints and exit\n"
             "  --cmd-channels  Query local Meshtastic channel slots and exit\n"
+            "  --cmd-set-channel-slot INDEX ROLE NAME PSK  Configure a local channel slot\n"
             "  --cmd-channel-url Query Meshtastic channel sharing URL and exit\n"
             "  --cmd-publish-nodeinfo  Ask daemon to publish this node info now\n"
             "  --cmd-publish-position  Ask daemon to publish current GNSS position now\n"
@@ -18807,19 +18922,26 @@ static void phoneapi_load_meshtastic_channel_slots(probe_options_t *opts)
         char key[64];
         mesh_channel_slot_t &slot = opts->channels[i];
         uint32_t value;
+        bool psk_nondefault = false;
+
+        slot = mesh_channel_slot_t();
+        slot.role = (i == primary) ? MESHTASTIC_CHANNEL_ROLE_PRIMARY :
+                    MESHTASTIC_CHANNEL_ROLE_DISABLED;
 
         phoneapi_channel_pref_key(key, sizeof(key), i, "role");
         if(phoneapi_pref_get(entries, key, &text) &&
            parse_u32(text.c_str(), &value, 10) &&
            value <= MESHTASTIC_CHANNEL_ROLE_SECONDARY) {
-            slot.configured = true;
             slot.role = value;
             has_channel_slot_pref = true;
         }
         phoneapi_channel_pref_key(key, sizeof(key), i, "name");
         if(phoneapi_pref_get(entries, key, &text)) {
-            slot.configured = true;
-            slot.name = mesh_clean_text(text);
+            std::string clean = mesh_clean_text(text);
+
+            if(!clean.empty()) {
+                slot.name = clean;
+            }
             has_channel_slot_pref = true;
         }
         phoneapi_channel_pref_key(key, sizeof(key), i, "psk");
@@ -18827,26 +18949,23 @@ static void phoneapi_load_meshtastic_channel_slots(probe_options_t *opts)
             std::vector<uint8_t> key_bytes;
 
             if(parse_psk(text, &key_bytes)) {
-                slot.configured = true;
                 slot.psk = text;
+                psk_nondefault = text != "default";
                 has_channel_slot_pref = true;
             }
         }
         phoneapi_channel_pref_key(key, sizeof(key), i, "uplink");
         if(phoneapi_pref_get(entries, key, &text)) {
-            slot.configured = true;
             slot.uplink_enabled = phoneapi_pref_bool_text(text);
             has_channel_slot_pref = true;
         }
         phoneapi_channel_pref_key(key, sizeof(key), i, "downlink");
         if(phoneapi_pref_get(entries, key, &text)) {
-            slot.configured = true;
             slot.downlink_enabled = phoneapi_pref_bool_text(text);
             has_channel_slot_pref = true;
         }
         phoneapi_channel_pref_key(key, sizeof(key), i, "muted");
         if(phoneapi_pref_get(entries, key, &text)) {
-            slot.configured = true;
             slot.is_muted = phoneapi_pref_bool_text(text);
             has_channel_slot_pref = true;
         }
@@ -18854,11 +18973,20 @@ static void phoneapi_load_meshtastic_channel_slots(probe_options_t *opts)
                                   "position_precision");
         if(phoneapi_pref_get(entries, key, &text) &&
            parse_u32(text.c_str(), &value, 10)) {
-            slot.configured = true;
-            slot.has_position_precision = true;
-            slot.position_precision = value;
+            if(value > 0U) {
+                slot.has_position_precision = true;
+                slot.position_precision = value;
+            }
             has_channel_slot_pref = true;
         }
+        slot.configured = (i == primary) ||
+                          slot.role != MESHTASTIC_CHANNEL_ROLE_DISABLED ||
+                          !slot.name.empty() ||
+                          psk_nondefault ||
+                          slot.uplink_enabled ||
+                          slot.downlink_enabled ||
+                          slot.is_muted ||
+                          slot.has_position_precision;
     }
 
     if(!has_channel_slot_pref) {
@@ -19029,6 +19157,17 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_waypoints = true;
         } else if(strcmp(arg, "--cmd-channels") == 0) {
             opts->client_channels = true;
+        } else if(strcmp(arg, "--cmd-set-channel-slot") == 0 &&
+                  i + 4 < argc) {
+            opts->client_set_channel_slot = true;
+            opts->client_set_channel_slot_command = "SET_CHANNEL_SLOT ";
+            opts->client_set_channel_slot_command += argv[++i];
+            opts->client_set_channel_slot_command += " ";
+            opts->client_set_channel_slot_command += argv[++i];
+            opts->client_set_channel_slot_command += " ";
+            opts->client_set_channel_slot_command += argv[++i];
+            opts->client_set_channel_slot_command += " ";
+            opts->client_set_channel_slot_command += argv[++i];
         } else if(strcmp(arg, "--cmd-channel-url") == 0) {
             opts->client_channel_url = true;
         } else if(strcmp(arg, "--cmd-publish-nodeinfo") == 0) {
@@ -19751,6 +19890,7 @@ int main(int argc, char **argv)
                               (opts.client_request_status ? 1 : 0) +
                               (opts.client_waypoints ? 1 : 0) +
                               (opts.client_channels ? 1 : 0) +
+                              (opts.client_set_channel_slot ? 1 : 0) +
                               (opts.client_channel_url ? 1 : 0) +
                               (opts.client_publish_nodeinfo ? 1 : 0) +
                               (opts.client_publish_position ? 1 : 0) +
