@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -31,6 +32,7 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <codec2.h>
+#include <jpeglib.h>
 #include <opus/opus.h>
 
 #include <algorithm>
@@ -131,6 +133,15 @@
 #define MESHTASTIC_FLRC_VOICE_PACKET_GAP_US 2500U
 #define MESHTASTIC_FLRC_VOICE_START_REPEAT 3U
 #define MESHTASTIC_FLRC_VOICE_DONE_REPEAT 3U
+#define MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG 0x81U
+#define MESHTASTIC_FLRC_PHOTO_MAX_W 680U
+#define MESHTASTIC_FLRC_PHOTO_MAX_H 480U
+#define MESHTASTIC_FLRC_PHOTO_JPEG_QUALITY 42
+#define MESHTASTIC_FLRC_PHOTO_MAX_PACKETS 512U
+#define MESHTASTIC_FLRC_PHOTO_MAX_BYTES \
+    (MESHTASTIC_FLRC_PHOTO_MAX_PACKETS * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN)
+#define MESHTASTIC_PHOTO_SOURCE_DIR "/root/photos"
+#define MESHTASTIC_PHOTO_STORE_DIR "/root/meshtastic/photos"
 #define MESHTASTIC_AIRTIME_CHANNEL_PERIODS 6U
 #define MESHTASTIC_AIRTIME_CHANNEL_PERIOD_US (10ULL * 1000000ULL)
 #define MESHTASTIC_AIRTIME_TX_PERIODS 60U
@@ -1030,11 +1041,13 @@ typedef struct {
     std::vector<uint8_t> bytes;
     std::string summary;
     std::vector<uint8_t> flrc_voice_payload;
+    std::vector<uint8_t> flrc_photo_payload;
     bool rebroadcast = false;
     bool want_ack = false;
     bool routing_ack = false;
     bool phoneapi_origin = false;
     bool flrc_voice_after_tx = false;
+    bool flrc_photo_after_tx = false;
     uint32_t rebroadcast_from = 0;
     uint32_t to_node = 0;
     uint32_t from_node = 0;
@@ -1045,6 +1058,11 @@ typedef struct {
     uint32_t flrc_voice_payload_crc = 0;
     uint16_t flrc_voice_total_packets = 0;
     uint8_t flrc_voice_codec_mode = 0;
+    uint32_t flrc_photo_stream_id = 0;
+    uint32_t flrc_photo_payload_crc = 0;
+    uint16_t flrc_photo_total_packets = 0;
+    uint16_t flrc_photo_width = 0;
+    uint16_t flrc_photo_height = 0;
     uint8_t channel = 0;
     uint8_t old_hop = 0;
     uint8_t new_hop = 0;
@@ -1097,6 +1115,13 @@ typedef struct {
     uint32_t flrc_voice_payload_crc = 0;
     uint16_t flrc_voice_total_packets = 0;
     uint8_t flrc_voice_codec_mode = 0;
+    bool flrc_photo_after_tx = false;
+    std::vector<uint8_t> flrc_photo_payload;
+    uint32_t flrc_photo_stream_id = 0;
+    uint32_t flrc_photo_payload_crc = 0;
+    uint16_t flrc_photo_total_packets = 0;
+    uint16_t flrc_photo_width = 0;
+    uint16_t flrc_photo_height = 0;
     std::string summary;
 } mesh_send_request_t;
 
@@ -1896,6 +1921,62 @@ static bool daemon_chat_update_voice_stream_status(uint32_t stream_id,
         char *file_pos;
 
         if(strncmp(line, "TX ", 3) != 0 || !strstr(line, " voice ") ||
+           !strstr(line, stream_text)) {
+            continue;
+        }
+        state_pos = strstr(line, " state=");
+        if(state_pos) {
+            after_state = state_pos + 7;
+            while(*after_state && !isspace((unsigned char)*after_state)) {
+                after_state++;
+            }
+            snprintf(updated, sizeof(updated), "%.*s state=%s%s%s",
+                     (int)(state_pos - line), line, state, elapsed_text,
+                     after_state);
+        } else {
+            file_pos = strstr(line, " file=");
+            if(file_pos) {
+                snprintf(updated, sizeof(updated), "%.*s state=%s%s%s",
+                         (int)(file_pos - line), line, state, elapsed_text,
+                         file_pos);
+            } else {
+                snprintf(updated, sizeof(updated), "%s state=%s%s",
+                         line, state, elapsed_text);
+            }
+        }
+        snprintf(line, MESHTASTIC_CHAT_LOG_LINE_LEN, "%s", updated);
+        pthread_mutex_unlock(&daemon_log_mutex);
+        return true;
+    }
+    pthread_mutex_unlock(&daemon_log_mutex);
+    return false;
+}
+
+static bool daemon_chat_update_photo_stream_status(uint32_t stream_id,
+                                                   const char *state,
+                                                   unsigned long elapsed_ms)
+{
+    char stream_text[24];
+    char updated[MESHTASTIC_CHAT_LOG_LINE_LEN];
+    char elapsed_text[32] = "";
+
+    if(stream_id == 0U || !state || !state[0]) {
+        return false;
+    }
+    snprintf(stream_text, sizeof(stream_text), "stream=0x%08x", stream_id);
+    if(elapsed_ms > 0UL) {
+        snprintf(elapsed_text, sizeof(elapsed_text), " elapsed=%lums",
+                 elapsed_ms);
+    }
+
+    pthread_mutex_lock(&daemon_log_mutex);
+    for(size_t i = 0; i < daemon_chat_log_count; i++) {
+        char *line = daemon_chat_log[i];
+        char *state_pos;
+        char *after_state;
+        char *file_pos;
+
+        if(strncmp(line, "TX ", 3) != 0 || !strstr(line, " photo ") ||
            !strstr(line, stream_text)) {
             continue;
         }
@@ -12902,6 +12983,11 @@ static uint64_t mesh_voice_tx_chunk_count;
 static uint64_t mesh_voice_rx_chunk_count;
 static uint64_t mesh_voice_rx_complete_count;
 static uint64_t mesh_voice_rx_decode_fail_count;
+static uint64_t mesh_photo_tx_stream_count;
+static uint64_t mesh_photo_tx_chunk_count;
+static uint64_t mesh_photo_rx_chunk_count;
+static uint64_t mesh_photo_rx_complete_count;
+static uint64_t mesh_photo_rx_decode_fail_count;
 
 static void mesh_voice_rx_stream_reset(mesh_voice_rx_stream_t *stream)
 {
@@ -13548,6 +13634,354 @@ static bool mesh_voice_encode_codec2_pcm_file_stream(
 }
 
 typedef struct {
+    struct jpeg_error_mgr pub;
+    jmp_buf setjmp_buffer;
+} mesh_jpeg_error_mgr_t;
+
+static void mesh_jpeg_error_exit(j_common_ptr cinfo)
+{
+    mesh_jpeg_error_mgr_t *err =
+        (mesh_jpeg_error_mgr_t *)cinfo->err;
+    longjmp(err->setjmp_buffer, 1);
+}
+
+static void mesh_photo_set_error(char *errbuf, size_t errbuf_len,
+                                 const char *fmt, ...)
+{
+    va_list ap;
+
+    if(!errbuf || errbuf_len == 0U) {
+        return;
+    }
+    va_start(ap, fmt);
+    vsnprintf(errbuf, errbuf_len, fmt, ap);
+    va_end(ap);
+}
+
+static bool mesh_photo_source_path_allowed(const std::string &path)
+{
+    const char *prefix = MESHTASTIC_PHOTO_SOURCE_DIR "/";
+    size_t prefix_len = strlen(prefix);
+    size_t len = path.size();
+
+    if(path.compare(0, prefix_len, prefix) != 0 ||
+       path.find('\n') != std::string::npos ||
+       path.find('\r') != std::string::npos) {
+        return false;
+    }
+    if(path.find("/../") != std::string::npos ||
+       path.find("/./") != std::string::npos) {
+        return false;
+    }
+    return len > 4U && strcasecmp(path.c_str() + len - 4U, ".ppm") == 0;
+}
+
+static bool mesh_photo_read_ppm_token(FILE *fp, char *token,
+                                      size_t token_len)
+{
+    int c;
+    size_t n = 0U;
+
+    if(!fp || !token || token_len == 0U) {
+        return false;
+    }
+    token[0] = '\0';
+    while((c = fgetc(fp)) != EOF) {
+        if(isspace(c)) {
+            continue;
+        }
+        if(c == '#') {
+            while((c = fgetc(fp)) != EOF && c != '\n') {
+            }
+            continue;
+        }
+        break;
+    }
+    if(c == EOF) {
+        return false;
+    }
+    do {
+        if(c == '#') {
+            while((c = fgetc(fp)) != EOF && c != '\n') {
+            }
+            break;
+        }
+        if(isspace(c)) {
+            break;
+        }
+        if(n + 1U < token_len) {
+            token[n++] = (char)c;
+        }
+    } while((c = fgetc(fp)) != EOF);
+    token[n] = '\0';
+    return n > 0U;
+}
+
+static bool mesh_photo_read_ppm_rgb(const char *path,
+                                    std::vector<uint8_t> *rgb,
+                                    unsigned *width, unsigned *height,
+                                    char *errbuf, size_t errbuf_len)
+{
+    FILE *fp;
+    char token[32];
+    long data_len;
+    unsigned w;
+    unsigned h;
+    unsigned maxval;
+    size_t want;
+    size_t got;
+
+    if(!path || !rgb || !width || !height) {
+        mesh_photo_set_error(errbuf, errbuf_len, "invalid photo argument");
+        return false;
+    }
+    fp = fopen(path, "rb");
+    if(!fp) {
+        mesh_photo_set_error(errbuf, errbuf_len, "open failed: %s",
+                             strerror(errno));
+        return false;
+    }
+    if(!mesh_photo_read_ppm_token(fp, token, sizeof(token)) ||
+       strcmp(token, "P6") != 0 ||
+       !mesh_photo_read_ppm_token(fp, token, sizeof(token))) {
+        fclose(fp);
+        mesh_photo_set_error(errbuf, errbuf_len, "unsupported image format");
+        return false;
+    }
+    w = (unsigned)strtoul(token, nullptr, 10);
+    if(!mesh_photo_read_ppm_token(fp, token, sizeof(token))) {
+        fclose(fp);
+        mesh_photo_set_error(errbuf, errbuf_len, "missing ppm height");
+        return false;
+    }
+    h = (unsigned)strtoul(token, nullptr, 10);
+    if(!mesh_photo_read_ppm_token(fp, token, sizeof(token))) {
+        fclose(fp);
+        mesh_photo_set_error(errbuf, errbuf_len, "missing ppm maxval");
+        return false;
+    }
+    maxval = (unsigned)strtoul(token, nullptr, 10);
+    if(w == 0U || h == 0U || w > 8192U || h > 8192U ||
+       maxval != 255U) {
+        fclose(fp);
+        mesh_photo_set_error(errbuf, errbuf_len,
+                             "unsupported ppm %ux%u max=%u", w, h, maxval);
+        return false;
+    }
+    want = (size_t)w * (size_t)h * 3U;
+    data_len = ftell(fp);
+    (void)data_len;
+    rgb->assign(want, 0U);
+    got = fread(rgb->data(), 1U, want, fp);
+    fclose(fp);
+    if(got != want) {
+        rgb->clear();
+        mesh_photo_set_error(errbuf, errbuf_len,
+                             "ppm truncated got=%u want=%u",
+                             (unsigned)got, (unsigned)want);
+        return false;
+    }
+    *width = w;
+    *height = h;
+    return true;
+}
+
+static void mesh_photo_scale_to_canvas(const std::vector<uint8_t> &src,
+                                       unsigned src_w, unsigned src_h,
+                                       std::vector<uint8_t> *dst,
+                                       unsigned dst_w, unsigned dst_h)
+{
+    unsigned draw_w = dst_w;
+    unsigned draw_h = dst_h;
+    unsigned off_x;
+    unsigned off_y;
+
+    dst->assign((size_t)dst_w * (size_t)dst_h * 3U, 0U);
+    if(src_w == 0U || src_h == 0U || src.empty()) {
+        return;
+    }
+    if((uint64_t)src_w * dst_h > (uint64_t)src_h * dst_w) {
+        draw_h = (unsigned)(((uint64_t)src_h * dst_w) / src_w);
+        if(draw_h == 0U) {
+            draw_h = 1U;
+        }
+    } else {
+        draw_w = (unsigned)(((uint64_t)src_w * dst_h) / src_h);
+        if(draw_w == 0U) {
+            draw_w = 1U;
+        }
+    }
+    off_x = (dst_w - draw_w) / 2U;
+    off_y = (dst_h - draw_h) / 2U;
+    for(unsigned y = 0U; y < draw_h; y++) {
+        unsigned sy = (unsigned)(((uint64_t)y * src_h) / draw_h);
+        if(sy >= src_h) {
+            sy = src_h - 1U;
+        }
+        for(unsigned x = 0U; x < draw_w; x++) {
+            unsigned sx = (unsigned)(((uint64_t)x * src_w) / draw_w);
+            size_t src_off;
+            size_t dst_off;
+
+            if(sx >= src_w) {
+                sx = src_w - 1U;
+            }
+            src_off = ((size_t)sy * src_w + sx) * 3U;
+            dst_off = ((size_t)(off_y + y) * dst_w + (off_x + x)) * 3U;
+            (*dst)[dst_off + 0U] = src[src_off + 0U];
+            (*dst)[dst_off + 1U] = src[src_off + 1U];
+            (*dst)[dst_off + 2U] = src[src_off + 2U];
+        }
+    }
+}
+
+static bool mesh_photo_encode_jpeg_rgb(const std::vector<uint8_t> &rgb,
+                                       unsigned width, unsigned height,
+                                       int quality,
+                                       std::vector<uint8_t> *jpeg,
+                                       char *errbuf, size_t errbuf_len)
+{
+    struct jpeg_compress_struct cinfo;
+    mesh_jpeg_error_mgr_t jerr;
+    unsigned char *mem = nullptr;
+    unsigned long mem_size = 0UL;
+
+    if(!jpeg || rgb.empty() || width == 0U || height == 0U) {
+        mesh_photo_set_error(errbuf, errbuf_len, "invalid jpeg source");
+        return false;
+    }
+    jpeg->clear();
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = mesh_jpeg_error_exit;
+    if(setjmp(jerr.setjmp_buffer)) {
+        jpeg_destroy_compress(&cinfo);
+        if(mem) {
+            free(mem);
+        }
+        mesh_photo_set_error(errbuf, errbuf_len, "jpeg encode failed");
+        return false;
+    }
+    jpeg_create_compress(&cinfo);
+    jpeg_mem_dest(&cinfo, &mem, &mem_size);
+    cinfo.image_width = width;
+    cinfo.image_height = height;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, quality, TRUE);
+    cinfo.optimize_coding = TRUE;
+    jpeg_start_compress(&cinfo, TRUE);
+    while(cinfo.next_scanline < cinfo.image_height) {
+        JSAMPROW row_pointer[1];
+        row_pointer[0] =
+            (JSAMPROW)&rgb[(size_t)cinfo.next_scanline * width * 3U];
+        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+    }
+    jpeg_finish_compress(&cinfo);
+    jpeg->assign(mem, mem + mem_size);
+    jpeg_destroy_compress(&cinfo);
+    free(mem);
+    return !jpeg->empty();
+}
+
+static bool mesh_photo_write_file(const char *path,
+                                  const std::vector<uint8_t> &data,
+                                  char *errbuf, size_t errbuf_len)
+{
+    FILE *fp;
+
+    if(!path || data.empty()) {
+        mesh_photo_set_error(errbuf, errbuf_len, "invalid file write");
+        return false;
+    }
+    fp = fopen(path, "wb");
+    if(!fp) {
+        mesh_photo_set_error(errbuf, errbuf_len, "create failed: %s",
+                             strerror(errno));
+        return false;
+    }
+    if(fwrite(data.data(), 1U, data.size(), fp) != data.size()) {
+        fclose(fp);
+        unlink(path);
+        mesh_photo_set_error(errbuf, errbuf_len, "write failed: %s",
+                             strerror(errno));
+        return false;
+    }
+    fclose(fp);
+    return true;
+}
+
+static bool mesh_photo_prepare_jpeg(const char *path, uint32_t stream_id,
+                                    std::vector<uint8_t> *jpeg,
+                                    std::string *chat_path,
+                                    uint16_t *out_w, uint16_t *out_h,
+                                    char *errbuf, size_t errbuf_len)
+{
+    std::vector<uint8_t> src;
+    std::vector<uint8_t> canvas;
+    unsigned src_w = 0U;
+    unsigned src_h = 0U;
+    char tmp_path[128];
+
+    if(jpeg) {
+        jpeg->clear();
+    }
+    if(chat_path) {
+        chat_path->clear();
+    }
+    if(out_w) {
+        *out_w = MESHTASTIC_FLRC_PHOTO_MAX_W;
+    }
+    if(out_h) {
+        *out_h = MESHTASTIC_FLRC_PHOTO_MAX_H;
+    }
+    if(!path || !jpeg) {
+        mesh_photo_set_error(errbuf, errbuf_len, "invalid photo argument");
+        return false;
+    }
+    if(!mesh_photo_source_path_allowed(path)) {
+        mesh_photo_set_error(errbuf, errbuf_len,
+                             "photo path must be /root/photos/*.ppm");
+        return false;
+    }
+    if(!mesh_photo_read_ppm_rgb(path, &src, &src_w, &src_h, errbuf,
+                                errbuf_len)) {
+        return false;
+    }
+    mesh_photo_scale_to_canvas(src, src_w, src_h, &canvas,
+                               MESHTASTIC_FLRC_PHOTO_MAX_W,
+                               MESHTASTIC_FLRC_PHOTO_MAX_H);
+    for(int quality = MESHTASTIC_FLRC_PHOTO_JPEG_QUALITY;
+        quality >= 28; quality -= 7) {
+        if(mesh_photo_encode_jpeg_rgb(canvas, MESHTASTIC_FLRC_PHOTO_MAX_W,
+                                      MESHTASTIC_FLRC_PHOTO_MAX_H, quality,
+                                      jpeg, errbuf, errbuf_len) &&
+           jpeg->size() <= MESHTASTIC_FLRC_PHOTO_MAX_BYTES) {
+            snprintf(tmp_path, sizeof(tmp_path),
+                     "/tmp/k230_mesh_photo_tx_%08x.jpg", stream_id);
+            if(mesh_photo_write_file(tmp_path, *jpeg, errbuf, errbuf_len)) {
+                if(chat_path) {
+                    *chat_path = tmp_path;
+                }
+                daemon_event("Photo JPEG prepared src=%s stream=0x%08x original=%ux%u encoded=%ux%u bytes=%u quality=%d",
+                             path, stream_id, src_w, src_h,
+                             MESHTASTIC_FLRC_PHOTO_MAX_W,
+                             MESHTASTIC_FLRC_PHOTO_MAX_H,
+                             (unsigned)jpeg->size(), quality);
+                return true;
+            }
+            return false;
+        }
+    }
+    mesh_photo_set_error(errbuf, errbuf_len,
+                         "jpeg too large: %u bytes max=%u",
+                         (unsigned)jpeg->size(),
+                         (unsigned)MESHTASTIC_FLRC_PHOTO_MAX_BYTES);
+    jpeg->clear();
+    return false;
+}
+
+typedef struct {
     uint8_t type = 0;
     uint8_t codec_mode = 0;
     uint16_t payload_len = 0;
@@ -13637,6 +14071,7 @@ static bool mesh_flrc_voice_payload_is_invite(
                                      (unsigned)payload.size(), &parsed) ||
        parsed.type != MESHTASTIC_FLRC_VOICE_TYPE_INVITE ||
        parsed.payload_len != 0U ||
+       parsed.codec_mode == MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG ||
        parsed.total > 64U ||
        parsed.total_size == 0U) {
         return false;
@@ -13658,6 +14093,45 @@ static std::vector<uint8_t> mesh_flrc_voice_make_invite_payload(
                                 MESHTASTIC_FLRC_VOICE_TYPE_INVITE,
                                 stream_id, 0U, total_packets, stream,
                                 nullptr, 0U, duration_ms, codec_mode);
+    return payload;
+}
+
+static bool mesh_flrc_photo_payload_is_invite(
+    const std::vector<uint8_t> &payload, mesh_flrc_voice_header_t *hdr)
+{
+    mesh_flrc_voice_header_t parsed;
+
+    if(!mesh_flrc_voice_parse_packet(payload.data(),
+                                     (unsigned)payload.size(), &parsed) ||
+       parsed.type != MESHTASTIC_FLRC_VOICE_TYPE_INVITE ||
+       parsed.payload_len != 0U ||
+       parsed.codec_mode != MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG ||
+       parsed.total > MESHTASTIC_FLRC_PHOTO_MAX_PACKETS ||
+       parsed.total_size == 0U ||
+       parsed.total_size > MESHTASTIC_FLRC_PHOTO_MAX_BYTES ||
+       parsed.total_size >
+       parsed.total * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN) {
+        return false;
+    }
+    if(hdr) {
+        *hdr = parsed;
+    }
+    return true;
+}
+
+static std::vector<uint8_t> mesh_flrc_photo_make_invite_payload(
+    uint32_t stream_id, const std::vector<uint8_t> &stream,
+    uint16_t width, uint16_t height, uint16_t total_packets)
+{
+    std::vector<uint8_t> payload(MESHTASTIC_FLRC_VOICE_HDR_LEN, 0U);
+    uint32_t dims = ((uint32_t)width << 16U) | height;
+
+    mesh_flrc_voice_make_packet(payload.data(),
+                                MESHTASTIC_FLRC_VOICE_HDR_LEN,
+                                MESHTASTIC_FLRC_VOICE_TYPE_INVITE,
+                                stream_id, 0U, total_packets, stream,
+                                nullptr, 0U, dims,
+                                MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
     return payload;
 }
 
@@ -14089,6 +14563,317 @@ static bool mesh_flrc_voice_rx_session(const probe_options_t &opts,
     return true;
 }
 
+static bool mesh_photo_store_dir_ensure(void)
+{
+    if(mkdir("/root/meshtastic", 0755) != 0 && errno != EEXIST) {
+        daemon_event("Photo store mkdir /root/meshtastic failed: %s",
+                     strerror(errno));
+        return false;
+    }
+    if(mkdir(MESHTASTIC_PHOTO_STORE_DIR, 0755) != 0 &&
+       errno != EEXIST) {
+        daemon_event("Photo store mkdir %s failed: %s",
+                     MESHTASTIC_PHOTO_STORE_DIR, strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
+                                       SX1262 *sx1262, LR2021 *lr2021,
+                                       const probe_profile_t *profile,
+                                       const tx_frame_t &frame)
+{
+    uint8_t packet[MESHTASTIC_FLRC_VOICE_PACKET_LEN];
+    uint64_t start_us;
+    uint16_t total = frame.flrc_photo_total_packets;
+    uint32_t dims = ((uint32_t)frame.flrc_photo_width << 16U) |
+                    frame.flrc_photo_height;
+    int16_t state;
+    bool ok = true;
+
+    if(chip != CHIP_LR2021 || !lr2021 ||
+       !frame.flrc_photo_after_tx || frame.flrc_photo_payload.empty()) {
+        return false;
+    }
+    active_op = OP_IDLE;
+    usleep(MESHTASTIC_FLRC_VOICE_TX_START_DELAY_US);
+    state = mesh_flrc_voice_begin(lr2021);
+    if(state != RADIOLIB_ERR_NONE) {
+        if(!daemon_chat_update_photo_stream_status(frame.flrc_photo_stream_id,
+                                                   "init-failed", 0UL)) {
+            daemon_chat("TX 0x%08x photo FLRC init failed: %s",
+                        frame.from_node, error_name(state));
+        }
+        (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021,
+                                           profile);
+        return true;
+    }
+    daemon_event("FLRC photo TX start stream=0x%08x packets=%u bytes=%u size=%ux%u freq=%.1f br=%u power=%d",
+                 frame.flrc_photo_stream_id, total,
+                 (unsigned)frame.flrc_photo_payload.size(),
+                 frame.flrc_photo_width, frame.flrc_photo_height,
+                 MESHTASTIC_FLRC_VOICE_FREQ_MHZ,
+                 MESHTASTIC_FLRC_VOICE_BR_KBPS,
+                 MESHTASTIC_FLRC_VOICE_POWER_DBM);
+    start_us = monotonic_us();
+    for(unsigned r = 0; r < MESHTASTIC_FLRC_VOICE_START_REPEAT; r++) {
+        mesh_flrc_voice_make_packet(packet, sizeof(packet),
+                                    MESHTASTIC_FLRC_VOICE_TYPE_INVITE,
+                                    frame.flrc_photo_stream_id, 0U, total,
+                                    frame.flrc_photo_payload, nullptr, 0U,
+                                    dims,
+                                    MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
+        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
+        if(state != RADIOLIB_ERR_NONE) {
+            ok = false;
+            daemon_event("FLRC photo TX invite repeat=%u failed state=%d %s",
+                         r + 1U, state, error_name(state));
+            break;
+        }
+        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+    }
+    for(uint16_t seq = 0U; ok && seq < total; seq++) {
+        size_t offset = (size_t)seq * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN;
+        size_t remain = frame.flrc_photo_payload.size() - offset;
+        uint16_t payload_len =
+            (uint16_t)std::min(remain,
+                               (size_t)MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN);
+
+        mesh_flrc_voice_make_packet(packet, sizeof(packet),
+                                    MESHTASTIC_FLRC_VOICE_TYPE_DATA,
+                                    frame.flrc_photo_stream_id, seq, total,
+                                    frame.flrc_photo_payload,
+                                    frame.flrc_photo_payload.data() + offset,
+                                    payload_len, dims,
+                                    MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
+        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
+        if(state != RADIOLIB_ERR_NONE) {
+            ok = false;
+            daemon_event("FLRC photo TX data seq=%u/%u failed state=%d %s",
+                         seq + 1U, total, state, error_name(state));
+            break;
+        }
+        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+    }
+    for(unsigned r = 0; ok && r < MESHTASTIC_FLRC_VOICE_DONE_REPEAT; r++) {
+        mesh_flrc_voice_make_packet(packet, sizeof(packet),
+                                    MESHTASTIC_FLRC_VOICE_TYPE_DONE,
+                                    frame.flrc_photo_stream_id, total - 1U,
+                                    total, frame.flrc_photo_payload, nullptr,
+                                    0U, dims,
+                                    MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
+        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
+        if(state != RADIOLIB_ERR_NONE) {
+            ok = false;
+            daemon_event("FLRC photo TX done repeat=%u failed state=%d %s",
+                         r + 1U, state, error_name(state));
+            break;
+        }
+        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+    }
+    if(ok) {
+        uint64_t elapsed_ms = (monotonic_us() - start_us) / 1000ULL;
+        mesh_photo_tx_stream_count++;
+        mesh_photo_tx_chunk_count += total;
+        if(!daemon_chat_update_photo_stream_status(frame.flrc_photo_stream_id,
+                                                   "sent",
+                                                   (unsigned long)elapsed_ms)) {
+            daemon_chat("TX 0x%08x photo %ux%u jpg packets=%u stream=0x%08x state=sent elapsed=%lums",
+                        frame.from_node, frame.flrc_photo_width,
+                        frame.flrc_photo_height, total,
+                        frame.flrc_photo_stream_id,
+                        (unsigned long)elapsed_ms);
+        }
+        daemon_event("FLRC photo TX done stream=0x%08x elapsed_ms=%lu",
+                     frame.flrc_photo_stream_id, (unsigned long)elapsed_ms);
+    } else {
+        if(!daemon_chat_update_photo_stream_status(frame.flrc_photo_stream_id,
+                                                   "failed", 0UL)) {
+            daemon_chat("TX 0x%08x photo FLRC failed stream=0x%08x",
+                        frame.from_node, frame.flrc_photo_stream_id);
+        }
+    }
+    (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021, profile);
+    return true;
+}
+
+static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
+                                       PhysicalLayer *radio,
+                                       chip_type_t chip, SX1262 *sx1262,
+                                       LR2021 *lr2021,
+                                       const probe_profile_t *profile,
+                                       const mesh_header_t &mesh_header,
+                                       const mesh_flrc_voice_header_t &invite,
+                                       float control_rssi)
+{
+    uint8_t packet[MESHTASTIC_FLRC_VOICE_PACKET_LEN];
+    std::vector<std::vector<uint8_t>> chunks;
+    std::vector<uint8_t> received;
+    std::vector<uint8_t> stream;
+    uint64_t timeout_us;
+    uint64_t start_us;
+    uint16_t received_count = 0U;
+    uint16_t width = (uint16_t)(invite.duration_ms >> 16U);
+    uint16_t height = (uint16_t)(invite.duration_ms & 0xffffU);
+    int16_t state;
+
+    (void)opts;
+    if(chip != CHIP_LR2021 || !lr2021) {
+        daemon_event("FLRC photo invite ignored from=0x%08x reason=not-lr2021 chip=%s",
+                     mesh_header.from, chip_name(chip));
+        return false;
+    }
+    if(invite.total == 0U ||
+       invite.total > MESHTASTIC_FLRC_PHOTO_MAX_PACKETS ||
+       invite.total_size == 0U ||
+       invite.total_size > MESHTASTIC_FLRC_PHOTO_MAX_BYTES ||
+       invite.total_size >
+       invite.total * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN) {
+        daemon_event("FLRC photo invite invalid from=0x%08x stream=0x%08x packets=%u size=%u",
+                     mesh_header.from, invite.stream_id, invite.total,
+                     invite.total_size);
+        return false;
+    }
+    if(width == 0U || height == 0U) {
+        width = MESHTASTIC_FLRC_PHOTO_MAX_W;
+        height = MESHTASTIC_FLRC_PHOTO_MAX_H;
+    }
+    active_op = OP_IDLE;
+    state = mesh_flrc_voice_begin(lr2021);
+    if(state != RADIOLIB_ERR_NONE) {
+        daemon_chat("RX 0x%08x photo FLRC init failed: %s",
+                    mesh_header.from, error_name(state));
+        (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021,
+                                           profile);
+        return true;
+    }
+    chunks.assign(invite.total, std::vector<uint8_t>());
+    received.assign(invite.total, 0U);
+    timeout_us = (uint64_t)invite.total * 9000ULL + 4000000ULL;
+    if(timeout_us < 7000000ULL) {
+        timeout_us = 7000000ULL;
+    }
+    if(timeout_us > 30000000ULL) {
+        timeout_us = 30000000ULL;
+    }
+    start_us = monotonic_us();
+    daemon_event("FLRC photo RX window from=0x%08x stream=0x%08x packets=%u bytes=%u size=%ux%u timeout_ms=%lu control_rssi=%.1f",
+                 mesh_header.from, invite.stream_id, invite.total,
+                 invite.total_size, width, height,
+                 (unsigned long)(timeout_us / 1000ULL), control_rssi);
+    while(monotonic_us() - start_us < timeout_us &&
+          received_count < invite.total) {
+        mesh_flrc_voice_header_t hdr;
+        size_t payload_len;
+
+        take_radio_events();
+        lr2021->clearPacketSentAction();
+        lr2021->setPacketReceivedAction(radio_event_isr);
+        state = lr2021->startReceive(RADIOLIB_LR2021_RX_TIMEOUT_INF,
+                                     RADIOLIB_IRQ_RX_DEFAULT_FLAGS,
+                                     RADIOLIB_IRQ_RX_DEFAULT_MASK,
+                                     MESHTASTIC_FLRC_VOICE_PACKET_LEN);
+        if(state != RADIOLIB_ERR_NONE) {
+            daemon_event("FLRC photo RX start failed state=%d %s",
+                         state, error_name(state));
+            break;
+        }
+        while(take_radio_events() == 0U) {
+            if(monotonic_us() - start_us >= timeout_us) {
+                break;
+            }
+            usleep(1000);
+        }
+        if(monotonic_us() - start_us >= timeout_us) {
+            (void)lr2021->standby();
+            break;
+        }
+        state = lr2021->readData(packet, MESHTASTIC_FLRC_VOICE_PACKET_LEN);
+        (void)lr2021->finishReceive();
+        if(state != RADIOLIB_ERR_NONE) {
+            daemon_event("FLRC photo RX read failed state=%d %s",
+                         state, error_name(state));
+            continue;
+        }
+        if(!mesh_flrc_voice_parse_packet(packet,
+                                         MESHTASTIC_FLRC_VOICE_PACKET_LEN,
+                                         &hdr) ||
+           hdr.stream_id != invite.stream_id ||
+           hdr.total != invite.total ||
+           hdr.codec_mode != MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG) {
+            continue;
+        }
+        if(hdr.type == MESHTASTIC_FLRC_VOICE_TYPE_DONE) {
+            daemon_event("FLRC photo RX done marker stream=0x%08x received=%u/%u",
+                         invite.stream_id, received_count, invite.total);
+            continue;
+        }
+        if(hdr.type != MESHTASTIC_FLRC_VOICE_TYPE_DATA ||
+           hdr.seq >= invite.total || received[hdr.seq]) {
+            continue;
+        }
+        payload_len = hdr.payload_len;
+        chunks[hdr.seq].assign(packet + MESHTASTIC_FLRC_VOICE_HDR_LEN,
+                               packet + MESHTASTIC_FLRC_VOICE_HDR_LEN +
+                                   payload_len);
+        received[hdr.seq] = 1U;
+        received_count++;
+        mesh_photo_rx_chunk_count++;
+        daemon_event("FLRC photo RX data stream=0x%08x seq=%u/%u len=%u rssi=%.1f",
+                     invite.stream_id, hdr.seq + 1U, invite.total,
+                     (unsigned)payload_len, lr2021->getRSSI());
+    }
+    (void)lr2021->standby();
+    if(received_count == invite.total) {
+        char path[192];
+        char errbuf[128];
+
+        stream.reserve(invite.total_size);
+        for(uint16_t seq = 0U; seq < invite.total; seq++) {
+            stream.insert(stream.end(), chunks[seq].begin(), chunks[seq].end());
+        }
+        if(stream.size() > invite.total_size) {
+            stream.resize(invite.total_size);
+        }
+        if((uint32_t)stream.size() == invite.total_size &&
+           crc32_update(0, stream.data(), stream.size()) == invite.stream_crc) {
+            if(mesh_photo_store_dir_ensure()) {
+                snprintf(path, sizeof(path),
+                         MESHTASTIC_PHOTO_STORE_DIR
+                         "/RX_%08x_%08x.jpg",
+                         mesh_header.from, invite.stream_id);
+                if(mesh_photo_write_file(path, stream, errbuf,
+                                         sizeof(errbuf))) {
+                    mesh_photo_rx_complete_count++;
+                    daemon_chat("RX 0x%08x photo %ux%u jpg packets=%u rssi=%ddBm stream=0x%08x file=%s",
+                                mesh_header.from, width, height,
+                                invite.total, (int)roundf(control_rssi),
+                                invite.stream_id, path);
+                } else {
+                    mesh_photo_rx_decode_fail_count++;
+                    daemon_chat("RX 0x%08x FLRC photo write failed: %s",
+                                mesh_header.from, errbuf);
+                }
+            } else {
+                mesh_photo_rx_decode_fail_count++;
+                daemon_chat("RX 0x%08x FLRC photo store unavailable",
+                            mesh_header.from);
+            }
+        } else {
+            mesh_photo_rx_decode_fail_count++;
+            daemon_chat("RX 0x%08x FLRC photo crc failed packets=%u/%u",
+                        mesh_header.from, received_count, invite.total);
+        }
+    } else {
+        mesh_photo_rx_decode_fail_count++;
+        daemon_chat("RX 0x%08x FLRC photo incomplete packets=%u/%u",
+                    mesh_header.from, received_count, invite.total);
+    }
+    (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021, profile);
+    return true;
+}
+
 static uint32_t mesh_voice_estimate_chunks_airtime_ms(
     PhysicalLayer *radio, const probe_options_t &opts, uint32_t portnum,
     const std::vector<std::vector<uint8_t>> &chunks)
@@ -14389,6 +15174,28 @@ static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
                     daemon_chat("RX 0x%08x codec2 voice invalid-header len=%u",
                                 header.from,
                                 (unsigned)decoded.payload.size());
+                }
+            }
+        } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
+                  mesh_flrc_photo_payload_is_invite(decoded.payload,
+                                                    nullptr)) {
+            mesh_flrc_voice_header_t invite;
+
+            if(mesh_flrc_photo_payload_is_invite(decoded.payload, &invite)) {
+                uint16_t width = (uint16_t)(invite.duration_ms >> 16U);
+                uint16_t height = (uint16_t)(invite.duration_ms & 0xffffU);
+
+                daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u flrc_photo_invite stream=0x%08x packets=%u bytes=%u size=%ux%u%s",
+                             (unsigned long)rx_count, header.from, header.to,
+                             header.id, header.channel, hop_limit, hop_start,
+                             rssi, snr, decoded.portnum, invite.stream_id,
+                             invite.total, invite.total_size, width, height,
+                             duplicate ? " duplicate" : "");
+                if(!duplicate && secure_match &&
+                   header.from != opts.from_node) {
+                    (void)mesh_flrc_photo_rx_session(
+                        opts, radio, chip, sx1262, lr2021, profile, header,
+                        invite, rssi);
                 }
             }
         } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
@@ -14782,6 +15589,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
     float air_tx = mesh_airtime_tx_util_percent();
     float duty_cycle = meshtastic_region_duty_cycle_percent(opts);
     const char *voice_mode = chip == CHIP_LR2021 ? "flrc" : "disabled";
+    const char *photo_mode = chip == CHIP_LR2021 ? "flrc" : "disabled";
 
     if(opts.position_enabled &&
        (!mesh_gnss.has_fix || strcmp(mesh_gnss.gps_state, "fix") != 0)) {
@@ -14825,6 +15633,8 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "voice=%s voice_freq=%.1f voice_br=%u voice_power=%d "
              "voice_tx_streams=%lu voice_tx_chunks=%lu voice_rx_chunks=%lu "
              "voice_rx_complete=%lu voice_rx_decode_fail=%lu "
+             "photo=%s photo_tx_streams=%lu photo_tx_chunks=%lu "
+             "photo_rx_chunks=%lu photo_rx_complete=%lu photo_rx_decode_fail=%lu "
              "ch_util=%.1f air_tx=%.2f duty=%.1f air_tx_ms=%lu air_rx_ms=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
              "position=%s fixed=%s nrf9151=%s gps=%s gnss_phase=%s gps_detail=%s "
@@ -14864,6 +15674,12 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_voice_rx_chunk_count,
              (unsigned long)mesh_voice_rx_complete_count,
              (unsigned long)mesh_voice_rx_decode_fail_count,
+             photo_mode,
+             (unsigned long)mesh_photo_tx_stream_count,
+             (unsigned long)mesh_photo_tx_chunk_count,
+             (unsigned long)mesh_photo_rx_chunk_count,
+             (unsigned long)mesh_photo_rx_complete_count,
+             (unsigned long)mesh_photo_rx_decode_fail_count,
              channel_util, air_tx, duty_cycle,
              (unsigned long)mesh_airtime_tx_total_ms,
              (unsigned long)mesh_airtime_rx_total_ms,
@@ -15871,6 +16687,99 @@ static std::string handle_daemon_command(const std::string &line,
     if(line == "QUIT" || line == "quit") {
         running = 0;
         return "OK quitting\n";
+    }
+    if(line.compare(0, 16, "SEND_PHOTO_FILE ") == 0 ||
+       line.compare(0, 16, "send_photo_file ") == 0) {
+        std::vector<uint8_t> jpeg_stream;
+        std::vector<uint8_t> invite_payload;
+        char photo_errbuf[160];
+        char buf[240];
+        uint32_t stream_id;
+        uint16_t total_packets;
+        uint32_t stream_crc;
+        uint16_t photo_w = MESHTASTIC_FLRC_PHOTO_MAX_W;
+        uint16_t photo_h = MESHTASTIC_FLRC_PHOTO_MAX_H;
+        const char *path_arg = line.c_str() + 16;
+        std::string path = trim_ipc_line(path_arg);
+        std::string chat_path;
+        mesh_send_request_t request;
+
+        if(!opts.mesh_mode) {
+            return "ERR mesh-disabled\n";
+        }
+        if(!send_queue) {
+            return "ERR internal\n";
+        }
+        if(path.empty()) {
+            return "ERR empty-photo-file\n";
+        }
+        if(mesh_channel_slot_role(opts, mesh_tx_channel_slot_index(opts, 0U)) ==
+           MESHTASTIC_CHANNEL_ROLE_DISABLED) {
+            return "ERR channel-disabled\n";
+        }
+        if(chip != CHIP_LR2021 || !active_lr2021) {
+            daemon_event("Daemon SEND_PHOTO rejected path=%s chip=%s reason=flrc-needs-lr2021",
+                         path.c_str(), chip_name(chip));
+            return "ERR photo-requires-lr2021-flrc\n";
+        }
+        stream_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
+        if(stream_id == 0U) {
+            stream_id = 1U;
+        }
+        if(!mesh_photo_prepare_jpeg(path.c_str(), stream_id, &jpeg_stream,
+                                    &chat_path, &photo_w, &photo_h,
+                                    photo_errbuf, sizeof(photo_errbuf))) {
+            daemon_event("Daemon SEND_PHOTO encode failed path=%s reason=%s",
+                         path.c_str(), photo_errbuf);
+            snprintf(buf, sizeof(buf), "ERR photo-encode %s\n",
+                     photo_errbuf);
+            return std::string(buf);
+        }
+        total_packets = (uint16_t)((jpeg_stream.size() +
+                                    MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN - 1U) /
+                                   MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN);
+        if(total_packets == 0U ||
+           total_packets > MESHTASTIC_FLRC_PHOTO_MAX_PACKETS) {
+            daemon_event("Daemon SEND_PHOTO FLRC packet count invalid stream=0x%08x packets=%u bytes=%u",
+                         stream_id, total_packets,
+                         (unsigned)jpeg_stream.size());
+            return "ERR photo-too-large\n";
+        }
+        if(send_queue->size() >= MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+            daemon_event("Daemon SEND_PHOTO invite queue full depth=%u",
+                         (unsigned)send_queue->size());
+            return "ERR queue-full\n";
+        }
+        stream_crc = crc32_update(0, jpeg_stream.data(), jpeg_stream.size());
+        invite_payload = mesh_flrc_photo_make_invite_payload(
+            stream_id, jpeg_stream, photo_w, photo_h, total_packets);
+        request.raw_payload = true;
+        request.voice = true;
+        request.portnum = MESHTASTIC_PRIVATE_APP;
+        request.payload = invite_payload;
+        request.channel_index = 0U;
+        request.summary = "jpeg-flrc-photo-invite";
+        request.flrc_photo_after_tx = true;
+        request.flrc_photo_payload = jpeg_stream;
+        request.flrc_photo_stream_id = stream_id;
+        request.flrc_photo_payload_crc = stream_crc;
+        request.flrc_photo_total_packets = total_packets;
+        request.flrc_photo_width = photo_w;
+        request.flrc_photo_height = photo_h;
+        send_queue->push_back(request);
+        daemon_chat("TX 0x%08x photo %ux%u jpg packets=%u stream=0x%08x state=queued file=%s",
+                    opts.from_node, photo_w, photo_h, total_packets,
+                    stream_id, chat_path.empty() ? path.c_str() :
+                    chat_path.c_str());
+        daemon_event("Daemon SEND_PHOTO queued stream=0x%08x control=mesh-private packets=%u bytes=%u crc=0x%08x depth=%u op=%s",
+                     stream_id, total_packets, (unsigned)jpeg_stream.size(),
+                     stream_crc, (unsigned)send_queue->size(),
+                     op_name(active_op));
+        snprintf(buf, sizeof(buf),
+                 "OK photo queued stream=0x%08x packets=%u bytes=%u depth=%u\n",
+                 stream_id, total_packets, (unsigned)jpeg_stream.size(),
+                 (unsigned)send_queue->size());
+        return std::string(buf);
     }
     if(line.compare(0, 16, "SEND_VOICE_FILE ") == 0 ||
        line.compare(0, 16, "send_voice_file ") == 0) {
@@ -17153,6 +18062,9 @@ static void handle_tx_event(PhysicalLayer *radio, const probe_options_t &opts,
         if(finished_frame_valid && finished_frame.flrc_voice_after_tx) {
             flrc_session_ran = mesh_flrc_voice_tx_session(
                 radio, chip, sx1262, lr2021, profile, finished_frame);
+        } else if(finished_frame_valid && finished_frame.flrc_photo_after_tx) {
+            flrc_session_ran = mesh_flrc_photo_tx_session(
+                radio, chip, sx1262, lr2021, profile, finished_frame);
         }
     } else {
         fprintf(stderr, "TX finish failed: %d %s\n", state, error_name(state));
@@ -17865,6 +18777,18 @@ int main(int argc, char **argv)
                             request.flrc_voice_total_packets;
                         frame.flrc_voice_codec_mode =
                             request.flrc_voice_codec_mode;
+                    }
+                    if(request.flrc_photo_after_tx) {
+                        frame.flrc_photo_after_tx = true;
+                        frame.flrc_photo_payload = request.flrc_photo_payload;
+                        frame.flrc_photo_stream_id =
+                            request.flrc_photo_stream_id;
+                        frame.flrc_photo_payload_crc =
+                            request.flrc_photo_payload_crc;
+                        frame.flrc_photo_total_packets =
+                            request.flrc_photo_total_packets;
+                        frame.flrc_photo_width = request.flrc_photo_width;
+                        frame.flrc_photo_height = request.flrc_photo_height;
                     }
 
                     if(!mesh_frame_airtime_allowed(radio, tx_opts, frame,

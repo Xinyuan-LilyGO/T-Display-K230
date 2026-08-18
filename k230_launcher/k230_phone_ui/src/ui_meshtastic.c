@@ -61,6 +61,17 @@
     ((MESHTASTIC_VOICE_SAMPLE_RATE * MESHTASTIC_VOICE_SAMPLE_BYTES * \
       MESHTASTIC_VOICE_MIN_MS) / 1000U)
 #define MESHTASTIC_VOICE_MAX_SECONDS "10"
+#define MESHTASTIC_PHOTO_DIR "/root/photos"
+#define MESHTASTIC_PHOTO_STORE_DIR "/root/meshtastic/photos"
+#define MESHTASTIC_PHOTO_MAX_ITEMS 24
+#define MESHTASTIC_PHOTO_THUMB_W 160
+#define MESHTASTIC_PHOTO_THUMB_H 120
+#define MESHTASTIC_PHOTO_THUMB_BYTES \
+    (MESHTASTIC_PHOTO_THUMB_W * MESHTASTIC_PHOTO_THUMB_H * 2)
+#define MESHTASTIC_PHOTO_STORED_THUMB_W 360
+#define MESHTASTIC_PHOTO_STORED_THUMB_H 640
+#define MESHTASTIC_PHOTO_STORED_THUMB_BYTES \
+    (MESHTASTIC_PHOTO_STORED_THUMB_W * MESHTASTIC_PHOTO_STORED_THUMB_H * 2)
 #define MESHTASTIC_PREF_REGION "meshtastic.region"
 #define MESHTASTIC_PREF_PRESET "meshtastic.preset"
 #define MESHTASTIC_PREF_CHANNEL "meshtastic.channel"
@@ -128,6 +139,7 @@ static lv_obj_t *mesh_log_label;
 static lv_obj_t *mesh_send_button;
 static lv_obj_t *mesh_canned_button;
 static lv_obj_t *mesh_voice_button;
+static lv_obj_t *mesh_photo_button;
 static lv_obj_t *mesh_body;
 static lv_obj_t *mesh_status_panel;
 static lv_obj_t *mesh_input_panel;
@@ -171,6 +183,7 @@ static int mesh_fixed_position_enabled = 0;
 static int mesh_telemetry_enabled = 1;
 static int mesh_environment_telemetry_enabled = 1;
 static int mesh_voice_available = 0;
+static int mesh_photo_available = 0;
 static int mesh_map_fake_gps_enabled = 1;
 static int mesh_map_zoom = MESHTASTIC_MAP_DEFAULT_ZOOM;
 static int mesh_map_center_valid = 0;
@@ -205,6 +218,9 @@ static lv_obj_t *mesh_canned_overlay;
 static lv_obj_t *mesh_canned_delete_overlay;
 static lv_obj_t *mesh_voice_preview_overlay;
 static lv_obj_t *mesh_voice_preview_status_label;
+static lv_obj_t *mesh_photo_picker_overlay;
+static lv_obj_t *mesh_photo_preview_overlay;
+static lv_obj_t *mesh_photo_status_label;
 static lv_obj_t *mesh_voice_record_overlay;
 static lv_obj_t *mesh_voice_record_time_label;
 static lv_obj_t *mesh_voice_record_level_label;
@@ -218,6 +234,19 @@ typedef struct {
     lv_obj_t *bubble;
     lv_obj_t *label;
 } mesh_voice_bubble_ctx_t;
+
+typedef struct {
+    char photo[192];
+    char thumb[192];
+    time_t mtime;
+} mesh_photo_item_t;
+
+typedef struct {
+    char path[192];
+    char title[96];
+    unsigned width;
+    unsigned height;
+} mesh_photo_bubble_ctx_t;
 
 typedef enum {
     MESH_MAP_POS_READY = 0,
@@ -256,6 +285,11 @@ static mesh_voice_bubble_ctx_t *mesh_voice_playing_ctx;
 static lv_timer_t *mesh_voice_playing_timer;
 static unsigned mesh_voice_playing_phase;
 static unsigned mesh_voice_record_phase;
+static mesh_photo_item_t mesh_photo_items[MESHTASTIC_PHOTO_MAX_ITEMS];
+static int mesh_photo_item_count;
+static uint8_t mesh_photo_thumb_buf[MESHTASTIC_PHOTO_MAX_ITEMS]
+                                [MESHTASTIC_PHOTO_THUMB_BYTES];
+static uint8_t mesh_photo_stored_thumb_buf[MESHTASTIC_PHOTO_STORED_THUMB_BYTES];
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
 static lv_timer_t *mesh_channel_scan_timer;
@@ -751,6 +785,30 @@ static void mesh_update_voice_capability(const char *status, int online)
         } else {
             lv_obj_add_flag(mesh_voice_button, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_state(mesh_voice_button, LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void mesh_update_photo_capability(const char *status, int online)
+{
+    char photo[24];
+    int available;
+
+    mesh_status_field(status, "photo", photo, sizeof(photo), "disabled");
+    available = online && strcmp(photo, "flrc") == 0;
+    if(mesh_photo_available != available) {
+        mesh_photo_available = available;
+        mesh_layout_main();
+    } else {
+        mesh_photo_available = available;
+    }
+    if(mesh_photo_button && lv_obj_is_valid(mesh_photo_button)) {
+        if(mesh_photo_available) {
+            lv_obj_clear_flag(mesh_photo_button, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_state(mesh_photo_button, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_flag(mesh_photo_button, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_state(mesh_photo_button, LV_STATE_DISABLED);
         }
     }
 }
@@ -1625,6 +1683,103 @@ static int mesh_chat_parse_voice_line(const char *line, char *path,
     return 1;
 }
 
+static int mesh_photo_chat_path_allowed(const char *path)
+{
+    if(!path || !path[0]) {
+        return 0;
+    }
+    if(strncmp(path, "/tmp/k230_mesh_photo_", 20) != 0 &&
+       strncmp(path, MESHTASTIC_PHOTO_STORE_DIR "/",
+               strlen(MESHTASTIC_PHOTO_STORE_DIR) + 1U) != 0) {
+        return 0;
+    }
+    for(size_t i = 0; path[i]; i++) {
+        unsigned char c = (unsigned char)path[i];
+        if(isspace(c) || c == '\'' || c == '"' || c == '`' ||
+           c == '$' || c == ';' || c == '|') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int mesh_chat_parse_photo_line(const char *line, int *sent,
+                                      char *node, size_t node_len,
+                                      char *path, size_t path_len,
+                                      char *dims, size_t dims_len)
+{
+    const char *photo;
+    const char *file;
+    const char *p;
+    size_t used = 0;
+
+    if(sent) {
+        *sent = 0;
+    }
+    if(node && node_len > 0U) {
+        node[0] = '\0';
+    }
+    if(path && path_len > 0U) {
+        path[0] = '\0';
+    }
+    if(dims && dims_len > 0U) {
+        dims[0] = '\0';
+    }
+    if(!line || (strncmp(line, "RX ", 3) != 0 &&
+                 strncmp(line, "TX ", 3) != 0)) {
+        return 0;
+    }
+    if(strstr(line, ": ")) {
+        return 0;
+    }
+    if(sent && strncmp(line, "TX ", 3) == 0) {
+        *sent = 1;
+    }
+    p = line + 3;
+    while(*p && !isspace((unsigned char)*p) && used + 1U < node_len) {
+        if(node) {
+            node[used] = *p;
+        }
+        used++;
+        p++;
+    }
+    if(node && node_len > 0U) {
+        node[used < node_len ? used : node_len - 1U] = '\0';
+    }
+    photo = strstr(line, " photo ");
+    if(!photo) {
+        return 0;
+    }
+    p = photo + 7;
+    used = 0;
+    while(*p && !isspace((unsigned char)*p) && used + 1U < dims_len) {
+        if(dims) {
+            dims[used] = *p;
+        }
+        used++;
+        p++;
+    }
+    if(dims && dims_len > 0U) {
+        dims[used < dims_len ? used : dims_len - 1U] = '\0';
+    }
+    file = strstr(line, " file=");
+    if(file && path && path_len > 0U) {
+        size_t i = 0;
+
+        file += 6;
+        while(file[i] && !isspace((unsigned char)file[i]) &&
+              i + 1U < path_len) {
+            path[i] = file[i];
+            i++;
+        }
+        path[i] = '\0';
+        if(!mesh_photo_chat_path_allowed(path)) {
+            path[0] = '\0';
+        }
+    }
+    return 1;
+}
+
 static int mesh_chat_parse_voice_group_item(const char *line, int *sent,
                                             char *node, size_t node_len,
                                             char *path, size_t path_len,
@@ -1933,6 +2088,114 @@ static void mesh_voice_bubble_event_cb(lv_event_t *event)
     }
 }
 
+static void mesh_photo_preview_close(void)
+{
+    if(mesh_photo_preview_overlay &&
+       lv_obj_is_valid(mesh_photo_preview_overlay)) {
+        lv_obj_delete(mesh_photo_preview_overlay);
+    }
+    mesh_photo_preview_overlay = NULL;
+}
+
+static void mesh_photo_preview_close_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_photo_preview_close();
+}
+
+static void mesh_photo_preview_open(const mesh_photo_bubble_ctx_t *ctx)
+{
+    lv_obj_t *panel;
+    lv_obj_t *img;
+    lv_obj_t *title;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_is_landscape() ? 22 : 18;
+    int panel_w = screen_w - margin * 2;
+    int panel_h = screen_h - margin * 2;
+    int img_w;
+    int img_h;
+    int scale = 256;
+
+    if(!ctx || !ctx->path[0]) {
+        return;
+    }
+    mesh_photo_preview_close();
+    mesh_photo_preview_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_photo_preview_overlay);
+    lv_obj_set_style_bg_color(mesh_photo_preview_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_photo_preview_overlay, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(mesh_photo_preview_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_photo_preview_overlay, 0, 0);
+    lv_obj_add_flag(mesh_photo_preview_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(mesh_photo_preview_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    panel = ui_panel(mesh_photo_preview_overlay, margin, margin,
+                     panel_w, panel_h);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    title = ui_label(panel, ctx->title[0] ? ctx->title : ui_tr("Photo"),
+                     &lv_font_montserrat_18, 0xF2F5F8);
+    lv_obj_set_pos(title, 0, 0);
+    lv_obj_set_width(title, panel_w - 88);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, panel_w - 76, 0, 76,
+                            ui_tr("Close"), 0x374151);
+    lv_obj_set_height(btn, 44);
+    lv_obj_add_event_cb(btn, mesh_photo_preview_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    img = lv_image_create(panel);
+    lv_image_set_src(img, ctx->path);
+    if(ctx->width > 0U && ctx->height > 0U) {
+        int avail_w = panel_w;
+        int avail_h = panel_h - 58;
+        int scale_w = (avail_w * 256) / (int)ctx->width;
+        int scale_h = (avail_h * 256) / (int)ctx->height;
+
+        scale = scale_w < scale_h ? scale_w : scale_h;
+        if(scale < 1) {
+            scale = 1;
+        }
+        if(scale > 512) {
+            scale = 512;
+        }
+    }
+    lv_image_set_scale(img, scale);
+    img_w = ctx->width > 0U ? ((int)ctx->width * scale) / 256 : panel_w;
+    img_h = ctx->height > 0U ? ((int)ctx->height * scale) / 256 :
+            panel_h - 58;
+    lv_obj_set_pos(img, (panel_w - img_w) / 2,
+                   54 + (panel_h - 58 - img_h) / 2);
+    app_request_fast_refresh();
+}
+
+static void mesh_photo_bubble_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    mesh_photo_bubble_ctx_t *ctx =
+        (mesh_photo_bubble_ctx_t *)lv_event_get_user_data(event);
+
+    if(code == LV_EVENT_CLICKED) {
+        if(ctx && ctx->path[0]) {
+            mesh_photo_preview_open(ctx);
+            mesh_append_log("photo preview: %s", ctx->path);
+        }
+        return;
+    }
+    if(code == LV_EVENT_DELETE) {
+        free(ctx);
+    }
+}
+
 static void mesh_chat_format_tx_meta(char *meta, size_t meta_len,
                                      char *status, size_t status_len,
                                      uint32_t *footer_color)
@@ -2118,6 +2381,9 @@ static void mesh_chat_add_bubble(const char *line)
     char body[256];
     char voice_path[512] = "";
     char voice_duration[24] = "";
+    char photo_path[192] = "";
+    char photo_dims[32] = "";
+    char photo_node[32] = "";
     char status[24];
     lv_obj_t *row;
     lv_obj_t *bubble;
@@ -2126,6 +2392,9 @@ static void mesh_chat_add_bubble(const char *line)
     int page_w;
     int bubble_w;
     int is_voice = 0;
+    int is_photo = 0;
+    unsigned photo_w = 680U;
+    unsigned photo_h = 480U;
     uint32_t footer_color = 0x94A3B8;
 
     if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll) ||
@@ -2154,6 +2423,22 @@ static void mesh_chat_add_bubble(const char *line)
         } else {
             snprintf(meta, sizeof(meta), "%s", sent ? "TX voice" : "RX voice");
         }
+    } else if(mesh_chat_parse_photo_line(line, &sent, photo_node,
+                                         sizeof(photo_node), photo_path,
+                                         sizeof(photo_path), photo_dims,
+                                         sizeof(photo_dims))) {
+        is_photo = 1;
+        if(sscanf(photo_dims, "%ux%u", &photo_w, &photo_h) != 2 ||
+           photo_w == 0U || photo_h == 0U) {
+            photo_w = 680U;
+            photo_h = 480U;
+        }
+        snprintf(body, sizeof(body), "%s%s%s",
+                 ui_tr("Photo message"),
+                 photo_dims[0] ? " " : "",
+                 photo_dims);
+        snprintf(meta, sizeof(meta), "%s %s",
+                 sent ? "TX" : "RX", photo_node[0] ? photo_node : "photo");
     }
     ui_trim_text(body);
     ui_trim_text(meta);
@@ -2191,7 +2476,7 @@ static void mesh_chat_add_bubble(const char *line)
     lv_obj_set_width(bubble, bubble_w);
     lv_obj_set_height(bubble, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(bubble,
-                              lv_color_hex(is_voice ? 0x16A34A :
+                              lv_color_hex((is_voice || is_photo) ? 0x16A34A :
                                            (sent ? 0x16A34A : 0x232B35)), 0);
     lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bubble, 0, 0);
@@ -2200,6 +2485,40 @@ static void mesh_chat_add_bubble(const char *line)
     lv_obj_set_style_pad_row(bubble, 5, 0);
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
+
+    if(photo_path[0]) {
+        mesh_photo_bubble_ctx_t *ctx =
+            (mesh_photo_bubble_ctx_t *)calloc(1, sizeof(*ctx));
+        lv_obj_t *img = lv_image_create(bubble);
+        int max_img_w = bubble_w - 20;
+        int max_img_h = ui_is_landscape() ? 160 : 220;
+        int scale_w = (max_img_w * 256) / (int)photo_w;
+        int scale_h = (max_img_h * 256) / (int)photo_h;
+        int scale = scale_w < scale_h ? scale_w : scale_h;
+
+        if(scale < 1) {
+            scale = 1;
+        }
+        if(scale > 256) {
+            scale = 256;
+        }
+        lv_image_set_src(img, photo_path);
+        lv_image_set_scale(img, scale);
+        lv_obj_set_width(img, max_img_w);
+        lv_obj_set_style_radius(img, 6, 0);
+        lv_obj_set_style_clip_corner(img, true, 0);
+        lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE |
+                        LV_OBJ_FLAG_EVENT_BUBBLE);
+        if(ctx) {
+            snprintf(ctx->path, sizeof(ctx->path), "%s", photo_path);
+            snprintf(ctx->title, sizeof(ctx->title), "%s", body);
+            ctx->width = photo_w;
+            ctx->height = photo_h;
+            lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(bubble, mesh_photo_bubble_event_cb,
+                                LV_EVENT_ALL, ctx);
+        }
+    }
 
     text = ui_label(bubble, body, &lv_font_montserrat_18, 0xFFFFFF);
     lv_obj_set_width(text, bubble_w - 20);
@@ -2704,7 +3023,9 @@ static void mesh_layout_main(void)
     int chat_h;
     int send_w = ui_is_landscape() ? 90 : 82;
     int canned_w = ui_is_landscape() ? 52 : 56;
+    int photo_w = ui_is_landscape() ? 52 : 56;
     int voice_w = ui_is_landscape() ? 56 : 58;
+    int photo_enabled = mesh_photo_available;
     int voice_enabled = mesh_voice_available;
     int input_gap = 8;
     int textarea_w;
@@ -2746,10 +3067,21 @@ static void mesh_layout_main(void)
         lv_obj_set_pos(mesh_canned_button, 0, 0);
         lv_obj_set_size(mesh_canned_button, canned_w, input_h - 2);
     }
+    if(mesh_photo_button && lv_obj_is_valid(mesh_photo_button)) {
+        if(photo_enabled) {
+            lv_obj_clear_flag(mesh_photo_button, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(mesh_photo_button, canned_w + input_gap, 0);
+            lv_obj_set_size(mesh_photo_button, photo_w, input_h - 2);
+        } else {
+            lv_obj_add_flag(mesh_photo_button, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     if(mesh_voice_button && lv_obj_is_valid(mesh_voice_button)) {
         if(voice_enabled) {
             lv_obj_clear_flag(mesh_voice_button, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(mesh_voice_button, canned_w + input_gap, 0);
+            lv_obj_set_pos(mesh_voice_button,
+                           canned_w + input_gap +
+                           (photo_enabled ? photo_w + input_gap : 0), 0);
             lv_obj_set_size(mesh_voice_button, voice_w, input_h - 2);
         } else {
             lv_obj_add_flag(mesh_voice_button, LV_OBJ_FLAG_HIDDEN);
@@ -2758,12 +3090,17 @@ static void mesh_layout_main(void)
     if(mesh_textarea && lv_obj_is_valid(mesh_textarea)) {
         int text_x = canned_w + input_gap;
         int gaps = 2;
+        if(photo_enabled) {
+            text_x += photo_w + input_gap;
+            gaps++;
+        }
         if(voice_enabled) {
             text_x += voice_w + input_gap;
-            gaps = 3;
+            gaps++;
         }
         textarea_w = content_w - canned_w - send_w - input_gap * gaps -
-                     (voice_enabled ? voice_w : 0);
+                     (voice_enabled ? voice_w : 0) -
+                     (photo_enabled ? photo_w : 0);
         if(textarea_w < 180) {
             textarea_w = 180;
         }
@@ -2800,6 +3137,7 @@ static void mesh_refresh_status(void)
     mesh_check_pairing_code(mesh_status_text, online);
     mesh_sync_profile_from_status(mesh_status_text, online);
     mesh_update_voice_capability(mesh_status_text, online);
+    mesh_update_photo_capability(mesh_status_text, online);
 
     if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
         lv_label_set_text(mesh_status_label,
@@ -8966,6 +9304,336 @@ static void mesh_voice_preview_open(size_t bytes, unsigned duration_ms)
     app_request_fast_refresh();
 }
 
+static int mesh_photo_read_stored_thumb(const char *path)
+{
+    FILE *fp;
+    size_t total = 0U;
+
+    if(!path || !path[0]) {
+        return -1;
+    }
+    fp = fopen(path, "rb");
+    if(!fp) {
+        return -1;
+    }
+    while(total < MESHTASTIC_PHOTO_STORED_THUMB_BYTES) {
+        size_t n = fread(mesh_photo_stored_thumb_buf + total, 1U,
+                         MESHTASTIC_PHOTO_STORED_THUMB_BYTES - total, fp);
+        if(n == 0U) {
+            break;
+        }
+        total += n;
+    }
+    fclose(fp);
+    return total == MESHTASTIC_PHOTO_STORED_THUMB_BYTES ? 0 : -1;
+}
+
+static void mesh_photo_fill_rgb565(uint8_t *dst, unsigned width,
+                                   unsigned height, uint32_t color)
+{
+    uint16_t rgb565 = mesh_rgb565(color);
+
+    for(unsigned y = 0U; y < height; y++) {
+        for(unsigned x = 0U; x < width; x++) {
+            size_t off = ((size_t)y * width + x) * 2U;
+
+            dst[off + 0U] = (uint8_t)(rgb565 & 0xffU);
+            dst[off + 1U] = (uint8_t)(rgb565 >> 8U);
+        }
+    }
+}
+
+static void mesh_photo_fill_placeholder(uint8_t *dst, unsigned width,
+                                        unsigned height)
+{
+    uint16_t bg = mesh_rgb565(0x0F172A);
+    uint16_t line = mesh_rgb565(0x334155);
+
+    for(unsigned y = 0U; y < height; y++) {
+        for(unsigned x = 0U; x < width; x++) {
+            size_t off = ((size_t)y * width + x) * 2U;
+            uint16_t color = ((x / 12U + y / 12U) % 2U) ? bg : line;
+
+            dst[off + 0U] = (uint8_t)(color & 0xffU);
+            dst[off + 1U] = (uint8_t)(color >> 8U);
+        }
+    }
+}
+
+static void mesh_photo_scale_thumb_cover(uint8_t *dst, unsigned dst_w,
+                                         unsigned dst_h)
+{
+    for(unsigned y = 0U; y < dst_h; y++) {
+        unsigned src_y =
+            (unsigned)(((uint64_t)y * MESHTASTIC_PHOTO_STORED_THUMB_H) /
+                       dst_h);
+
+        if(src_y >= MESHTASTIC_PHOTO_STORED_THUMB_H) {
+            src_y = MESHTASTIC_PHOTO_STORED_THUMB_H - 1U;
+        }
+        for(unsigned x = 0U; x < dst_w; x++) {
+            unsigned src_x =
+                (unsigned)(((uint64_t)x * MESHTASTIC_PHOTO_STORED_THUMB_W) /
+                           dst_w);
+            size_t dst_off = ((size_t)y * dst_w + x) * 2U;
+            size_t src_off;
+
+            if(src_x >= MESHTASTIC_PHOTO_STORED_THUMB_W) {
+                src_x = MESHTASTIC_PHOTO_STORED_THUMB_W - 1U;
+            }
+            src_off = ((size_t)src_y * MESHTASTIC_PHOTO_STORED_THUMB_W +
+                       src_x) * 2U;
+            dst[dst_off + 0U] = mesh_photo_stored_thumb_buf[src_off + 0U];
+            dst[dst_off + 1U] = mesh_photo_stored_thumb_buf[src_off + 1U];
+        }
+    }
+}
+
+static void mesh_photo_apply_thumb(lv_obj_t *canvas, const char *thumb_path,
+                                   uint8_t *buf, unsigned width,
+                                   unsigned height)
+{
+    if(!canvas || !buf) {
+        return;
+    }
+    if(mesh_photo_read_stored_thumb(thumb_path) == 0) {
+        mesh_photo_scale_thumb_cover(buf, width, height);
+    } else {
+        mesh_photo_fill_placeholder(buf, width, height);
+    }
+    lv_canvas_set_buffer(canvas, buf, width, height,
+                         LV_COLOR_FORMAT_RGB565);
+    lv_obj_invalidate(canvas);
+}
+
+static int mesh_photo_picker_scan(void)
+{
+    DIR *dir = opendir(MESHTASTIC_PHOTO_DIR);
+
+    mesh_photo_item_count = 0;
+    if(!dir) {
+        return 0;
+    }
+    while(mesh_photo_item_count < MESHTASTIC_PHOTO_MAX_ITEMS) {
+        struct dirent *ent = readdir(dir);
+        char path[192];
+        char thumb_path[192];
+        struct stat st;
+        size_t len;
+        int insert_at;
+
+        if(!ent) {
+            break;
+        }
+        len = strlen(ent->d_name);
+        if(len < 5U || strcmp(ent->d_name + len - 4U, ".ppm") != 0) {
+            continue;
+        }
+        snprintf(path, sizeof(path), "%s/%s", MESHTASTIC_PHOTO_DIR,
+                 ent->d_name);
+        if(stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            continue;
+        }
+        snprintf(thumb_path, sizeof(thumb_path), "%s/%.*s.thumb.rgb565",
+                 MESHTASTIC_PHOTO_DIR, (int)(len - 4U), ent->d_name);
+        insert_at = mesh_photo_item_count;
+        while(insert_at > 0 &&
+              mesh_photo_items[insert_at - 1].mtime < st.st_mtime) {
+            mesh_photo_items[insert_at] = mesh_photo_items[insert_at - 1];
+            insert_at--;
+        }
+        snprintf(mesh_photo_items[insert_at].photo,
+                 sizeof(mesh_photo_items[insert_at].photo), "%s", path);
+        snprintf(mesh_photo_items[insert_at].thumb,
+                 sizeof(mesh_photo_items[insert_at].thumb), "%s",
+                 thumb_path);
+        mesh_photo_items[insert_at].mtime = st.st_mtime;
+        mesh_photo_item_count++;
+    }
+    closedir(dir);
+    return mesh_photo_item_count;
+}
+
+static void mesh_photo_picker_close(void)
+{
+    if(mesh_photo_picker_overlay &&
+       lv_obj_is_valid(mesh_photo_picker_overlay)) {
+        lv_obj_delete(mesh_photo_picker_overlay);
+    }
+    mesh_photo_picker_overlay = NULL;
+    mesh_photo_status_label = NULL;
+}
+
+static void mesh_photo_picker_close_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_photo_picker_close();
+}
+
+static void mesh_photo_send_path(const char *path)
+{
+    char command[320];
+    char response[256];
+    int ret;
+
+    if(!path || !path[0]) {
+        return;
+    }
+    snprintf(command, sizeof(command), "SEND_PHOTO_FILE %s\n", path);
+    if(mesh_photo_status_label && lv_obj_is_valid(mesh_photo_status_label)) {
+        lv_label_set_text(mesh_photo_status_label, ui_tr("Sending photo"));
+        lv_obj_set_style_text_color(mesh_photo_status_label,
+                                    lv_color_hex(0x25C281), 0);
+    }
+    ret = mesh_ipc_command(command, response, sizeof(response));
+    ui_trim_text(response);
+    if(ret == 0) {
+        mesh_append_log("photo send: %s", response);
+        mesh_photo_picker_close();
+        mesh_refresh_status();
+        mesh_refresh_chat_common(1, 0);
+    } else {
+        const char *message = response[0] ? response :
+                              ui_tr("Photo send failed");
+
+        if(strstr(message, "photo-too-large") ||
+           strstr(message, "photo-encode")) {
+            message = ui_tr("Photo is too large or cannot be encoded");
+        } else if(strstr(message, "requires-lr2021")) {
+            message = ui_tr("LR2021 FLRC is required for photo messages");
+        } else if(strstr(message, "queue")) {
+            message = ui_tr("Radio is busy, try later");
+        }
+        mesh_append_log("photo send failed: %s", response);
+        if(mesh_photo_status_label &&
+           lv_obj_is_valid(mesh_photo_status_label)) {
+            lv_label_set_text(mesh_photo_status_label, message);
+            lv_obj_set_style_text_color(mesh_photo_status_label,
+                                        lv_color_hex(0xEF4D5A), 0);
+        }
+    }
+    app_request_fast_refresh();
+}
+
+static void mesh_photo_tile_event_cb(lv_event_t *event)
+{
+    int index = (int)(intptr_t)lv_event_get_user_data(event);
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(index < 0 || index >= mesh_photo_item_count) {
+        return;
+    }
+    mesh_photo_send_path(mesh_photo_items[index].photo);
+}
+
+static void mesh_photo_picker_open(void)
+{
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int columns = ui_is_landscape() ? 4 : 2;
+    int gap = 12;
+    int tile_w = (content_w - gap * (columns - 1)) / columns;
+    int tile_h = 166;
+    int y = 84;
+    int count;
+
+    if(!mesh_photo_available) {
+        mesh_append_log("photo unavailable: LR2021 FLRC required");
+        return;
+    }
+    mesh_photo_picker_close();
+    count = mesh_photo_picker_scan();
+    mesh_photo_picker_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_photo_picker_overlay);
+    lv_obj_set_style_bg_color(mesh_photo_picker_overlay,
+                              lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_photo_picker_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(mesh_photo_picker_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_photo_picker_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_photo_picker_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    panel = ui_scroll_panel(mesh_photo_picker_overlay, 0, 0,
+                            screen_w, screen_h);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    title = ui_label(panel, ui_tr("Select photo"),
+                     &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, margin, 22);
+    lv_obj_set_width(title, content_w - 96);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 82, 16, 82,
+                            ui_tr("Close"), 0x374151);
+    lv_obj_set_height(btn, 48);
+    lv_obj_add_event_cb(btn, mesh_photo_picker_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    mesh_photo_status_label =
+        ui_label(panel, count > 0 ? ui_tr("Tap a photo to send") :
+                 ui_tr("No photos"),
+                 &lv_font_montserrat_14, count > 0 ? 0x94A3B8 : 0xF5A524);
+    lv_obj_set_pos(mesh_photo_status_label, margin, 56);
+    lv_obj_set_width(mesh_photo_status_label, content_w);
+    lv_label_set_long_mode(mesh_photo_status_label, LV_LABEL_LONG_DOT);
+
+    for(int i = 0; i < count; i++) {
+        int col = i % columns;
+        int row = i / columns;
+        int x = margin + col * (tile_w + gap);
+        int ty = y + row * (tile_h + gap);
+        lv_obj_t *tile = ui_panel(panel, x, ty, tile_w, tile_h);
+        lv_obj_t *canvas;
+        lv_obj_t *caption;
+        const char *base = strrchr(mesh_photo_items[i].photo, '/');
+
+        lv_obj_set_style_bg_color(tile, lv_color_hex(0x101820), 0);
+        lv_obj_set_style_border_color(tile, lv_color_hex(0x223244), 0);
+        lv_obj_set_style_pad_all(tile, 4, 0);
+        lv_obj_add_flag(tile, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(tile, mesh_photo_tile_event_cb,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        canvas = lv_canvas_create(tile);
+        lv_obj_set_pos(canvas, (tile_w - MESHTASTIC_PHOTO_THUMB_W) / 2, 4);
+        lv_obj_set_size(canvas, MESHTASTIC_PHOTO_THUMB_W,
+                        MESHTASTIC_PHOTO_THUMB_H);
+        lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE |
+                        LV_OBJ_FLAG_EVENT_BUBBLE);
+        mesh_photo_apply_thumb(canvas, mesh_photo_items[i].thumb,
+                               mesh_photo_thumb_buf[i],
+                               MESHTASTIC_PHOTO_THUMB_W,
+                               MESHTASTIC_PHOTO_THUMB_H);
+
+        caption = ui_label(tile,
+                           base ? base + 1 : mesh_photo_items[i].photo,
+                           &lv_font_montserrat_14, 0xD3DAE3);
+        lv_obj_set_width(caption, tile_w - 16);
+        lv_label_set_long_mode(caption, LV_LABEL_LONG_DOT);
+        lv_obj_align(caption, LV_ALIGN_BOTTOM_MID, 0, -6);
+        ui_make_click_forwarder(caption);
+    }
+    app_request_fast_refresh();
+}
+
+static void mesh_photo_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    mesh_photo_picker_open();
+}
+
 static int mesh_voice_record_start(const char *source)
 {
     pid_t pid;
@@ -9741,6 +10409,15 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_add_event_cb(mesh_canned_button, mesh_canned_event_cb,
                         LV_EVENT_CLICKED, NULL);
 
+    mesh_photo_button = ui_command_button(mesh_input_panel, 0, 0, 56,
+                                          LV_SYMBOL_IMAGE, 0xEC4899);
+    if(!mesh_photo_available) {
+        lv_obj_add_flag(mesh_photo_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_state(mesh_photo_button, LV_STATE_DISABLED);
+    }
+    lv_obj_add_event_cb(mesh_photo_button, mesh_photo_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
     mesh_voice_button = ui_command_button(mesh_input_panel, 0, 0, 58,
                                           ui_tr("Mic"), 0xF59E0B);
     if(!mesh_voice_available) {
@@ -9782,6 +10459,8 @@ void ui_meshtastic_cleanup(void)
     mesh_voice_stop_playback(1);
     mesh_voice_record_overlay_close();
     mesh_voice_preview_close();
+    mesh_photo_picker_close();
+    mesh_photo_preview_close();
     if(mesh_timer) {
         lv_timer_delete(mesh_timer);
         mesh_timer = NULL;
@@ -9804,6 +10483,7 @@ void ui_meshtastic_cleanup(void)
     mesh_send_button = NULL;
     mesh_canned_button = NULL;
     mesh_voice_button = NULL;
+    mesh_photo_button = NULL;
     mesh_choice_close();
     mesh_canned_delete_confirm_close();
     mesh_canned_close();
@@ -9821,6 +10501,14 @@ void ui_meshtastic_cleanup(void)
 
 int ui_meshtastic_handle_back(void)
 {
+    if(mesh_photo_preview_overlay && lv_obj_is_valid(mesh_photo_preview_overlay)) {
+        mesh_photo_preview_close();
+        return 1;
+    }
+    if(mesh_photo_picker_overlay && lv_obj_is_valid(mesh_photo_picker_overlay)) {
+        mesh_photo_picker_close();
+        return 1;
+    }
     if(mesh_voice_preview_overlay && lv_obj_is_valid(mesh_voice_preview_overlay)) {
         mesh_voice_preview_close();
         return 1;

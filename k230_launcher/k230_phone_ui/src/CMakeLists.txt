@@ -329,6 +329,7 @@ target_link_directories(k230_meshtastic_probe PRIVATE
 target_link_libraries(k230_meshtastic_probe PRIVATE
     gpiod
     crypto
+    jpeg
     opus
     codec2
     m
