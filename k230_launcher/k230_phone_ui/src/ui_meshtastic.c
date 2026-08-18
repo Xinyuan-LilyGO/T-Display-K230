@@ -154,6 +154,8 @@ static lv_obj_t *mesh_send_button;
 static lv_obj_t *mesh_canned_button;
 static lv_obj_t *mesh_voice_button;
 static lv_obj_t *mesh_photo_button;
+static lv_obj_t *mesh_target_button;
+static lv_obj_t *mesh_target_label;
 static lv_obj_t *mesh_channel_button;
 static lv_obj_t *mesh_map_button;
 static lv_obj_t *mesh_nodes_button;
@@ -1331,6 +1333,37 @@ static void mesh_update_profile_label(void)
     }
     if(mesh_profile_label && lv_obj_is_valid(mesh_profile_label)) {
         lv_label_set_text(mesh_profile_label, text);
+    }
+}
+
+static void mesh_target_button_text(char *out, size_t len)
+{
+    if(!out || len == 0U) {
+        return;
+    }
+    if(mesh_to_text_is_broadcast(mesh_to_node)) {
+        snprintf(out, len, "%s  %s", ui_tr("To"),
+                 ui_tr("Channel broadcast"));
+    } else {
+        snprintf(out, len, "%s  %s %s", ui_tr("To"),
+                 ui_tr("Direct message"), mesh_to_node);
+    }
+}
+
+static void mesh_update_target_button(void)
+{
+    char text[96];
+    uint32_t color;
+
+    if(!mesh_target_label || !lv_obj_is_valid(mesh_target_label)) {
+        return;
+    }
+    mesh_target_button_text(text, sizeof(text));
+    color = mesh_to_text_is_broadcast(mesh_to_node) ? 0x25C281 : 0xF5A524;
+    lv_label_set_text(mesh_target_label, text);
+    lv_obj_set_style_text_color(mesh_target_label, lv_color_hex(color), 0);
+    if(mesh_target_button && lv_obj_is_valid(mesh_target_button)) {
+        lv_obj_set_style_border_color(mesh_target_button, lv_color_hex(color), 0);
     }
 }
 
@@ -3533,6 +3566,8 @@ static void mesh_layout_main(void)
     int bottom_pad = ui_is_landscape() ? 8 : 12;
     int available_h;
     int input_y;
+    int target_y;
+    int target_h = ui_is_landscape() ? 36 : 34;
     int chat_y;
     int chat_h;
     int send_w = ui_is_landscape() ? 90 : 82;
@@ -3562,8 +3597,9 @@ static void mesh_layout_main(void)
         available_h = mesh_status_panel_h + input_h + 180;
     }
     input_y = available_h - input_h - bottom_pad;
+    target_y = input_y - target_h - 6;
     chat_y = mesh_status_panel_h + mesh_chat_gap;
-    chat_h = input_y - chat_y - mesh_chat_gap;
+    chat_h = target_y - chat_y - mesh_chat_gap;
     if(chat_h < 140) {
         chat_h = 140;
     }
@@ -3631,6 +3667,13 @@ static void mesh_layout_main(void)
     if(mesh_chat_scroll && lv_obj_is_valid(mesh_chat_scroll)) {
         lv_obj_set_pos(mesh_chat_scroll, x, chat_y);
         lv_obj_set_size(mesh_chat_scroll, content_w, chat_h);
+    }
+    if(mesh_target_button && lv_obj_is_valid(mesh_target_button)) {
+        lv_obj_set_pos(mesh_target_button, x, target_y);
+        lv_obj_set_size(mesh_target_button, content_w, target_h);
+        if(mesh_target_label && lv_obj_is_valid(mesh_target_label)) {
+            lv_obj_set_width(mesh_target_label, content_w - 24);
+        }
     }
     if(mesh_input_panel && lv_obj_is_valid(mesh_input_panel)) {
         lv_obj_set_pos(mesh_input_panel, x, input_y);
@@ -3722,7 +3765,6 @@ static void mesh_refresh_status(void)
     }
     if(mesh_detail_label && lv_obj_is_valid(mesh_detail_label)) {
         char detail[360];
-        char target[96];
         char ack_pending[16];
         char ack_rx[16];
         char nak_rx[16];
@@ -3773,21 +3815,12 @@ static void mesh_refresh_status(void)
             airtime_color = 0xF5A524;
             airtime_state = "Voice limited";
         }
-        if(mesh_to_text_is_broadcast(mesh_to_node)) {
-            snprintf(target, sizeof(target), "%s: %s",
-                     ui_tr("To"), ui_tr("Channel broadcast"));
-            lv_obj_set_style_text_color(mesh_detail_label,
-                                        lv_color_hex(0x25C281), 0);
-        } else {
-            snprintf(target, sizeof(target), "%s: %s %s",
-                     ui_tr("To"), ui_tr("Direct message"), mesh_to_node);
-            lv_obj_set_style_text_color(mesh_detail_label,
-                                        lv_color_hex(0xF5A524), 0);
-        }
+        lv_obj_set_style_text_color(mesh_detail_label,
+                                    lv_color_hex(0x94A3B8), 0);
+        mesh_update_target_button();
         if(ui_is_landscape()) {
             snprintf(detail, sizeof(detail),
-                     "%s  |  GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
-                     target,
+                     "GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
                      nrf9151, gps, sats, position_tx,
                      telemetry_tx, queued_count,
                      mesh_ack_enabled ? "on" : "off",
@@ -3795,8 +3828,8 @@ static void mesh_refresh_status(void)
                      ack_drop);
         } else {
             snprintf(detail, sizeof(detail),
-                     "%s | GPS %s/%s S%s | Q%s ACK %s P%s R%s TO%s",
-                     target, nrf9151, gps, sats, queued_count,
+                     "GPS %s/%s S%s | Q%s ACK %s P%s R%s TO%s",
+                     nrf9151, gps, sats, queued_count,
                      mesh_ack_enabled ? "on" : "off",
                      ack_pending, ack_rx, ack_timeout);
         }
@@ -4607,6 +4640,7 @@ static int mesh_channel_profile_apply_file_ex(const char *path,
     mesh_save_profile_prefs();
     mesh_settings_refresh();
     mesh_update_profile_label();
+    mesh_update_target_button();
     if(close_profiles) {
         mesh_channel_profiles_close();
     }
@@ -5355,6 +5389,7 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
     mesh_normalize_target_ack();
     mesh_save_profile_prefs();
     mesh_settings_refresh();
+    mesh_update_target_button();
     mesh_append_log("settings saved: %s=%s", mesh_setting_name(field),
                     mesh_setting_value(field, tmp, sizeof(tmp)));
 }
@@ -5619,6 +5654,7 @@ static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
         return;
     }
     mesh_save_profile_prefs();
+    mesh_update_target_button();
     if(field == MESH_FIELD_PHOTO_REPEAT ||
        field == MESH_FIELD_PHOTO_REPAIR_ROUNDS ||
        field == MESH_FIELD_PHOTO_REPAIR_REPEAT ||
@@ -7733,6 +7769,7 @@ static void mesh_select_node_target_event_cb(lv_event_t *event)
     }
     mesh_save_profile_prefs();
     mesh_update_profile_label();
+    mesh_update_target_button();
     mesh_close_nodes_page();
     mesh_append_log("target selected: %s",
                     mesh_to_text_is_broadcast(mesh_to_node) ?
@@ -11956,6 +11993,22 @@ void ui_meshtastic_create(lv_obj_t *scr)
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     mesh_chat_add_empty();
 
+    mesh_target_button = ui_command_button(mesh_body, x, 0, content_w,
+                                           "", 0x25C281);
+    lv_obj_set_style_bg_color(mesh_target_button, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_width(mesh_target_button, 1, 0);
+    lv_obj_set_style_border_color(mesh_target_button, lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_radius(mesh_target_button, 8, 0);
+    lv_obj_add_event_cb(mesh_target_button, mesh_nodes_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    mesh_target_label = lv_obj_get_child(mesh_target_button, 0);
+    if(mesh_target_label && lv_obj_is_valid(mesh_target_label)) {
+        lv_obj_set_style_text_font(mesh_target_label,
+                                   ui_font_for_text("mesh_target",
+                                                    &lv_font_montserrat_16), 0);
+        lv_label_set_long_mode(mesh_target_label, LV_LABEL_LONG_DOT);
+    }
+
     mesh_input_panel = ui_panel(mesh_body, x, 0, content_w, 66);
     lv_obj_set_style_bg_color(mesh_input_panel, lv_color_hex(0x0F172A), 0);
     lv_obj_set_style_pad_all(mesh_input_panel, 0, 0);
@@ -12019,6 +12072,7 @@ void ui_meshtastic_create(lv_obj_t *scr)
                  "Meshtastic UI ready");
     }
     mesh_update_profile_label();
+    mesh_update_target_button();
     if(mesh_last_chat_text[0]) {
         mesh_chat_rebuild(mesh_last_chat_text);
     }
