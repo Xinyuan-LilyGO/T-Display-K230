@@ -154,7 +154,7 @@ static lv_obj_t *mesh_send_button;
 static lv_obj_t *mesh_canned_button;
 static lv_obj_t *mesh_voice_button;
 static lv_obj_t *mesh_photo_button;
-static lv_obj_t *mesh_detect_button;
+static lv_obj_t *mesh_channel_button;
 static lv_obj_t *mesh_map_button;
 static lv_obj_t *mesh_nodes_button;
 static lv_obj_t *mesh_settings_button;
@@ -3608,9 +3608,9 @@ static void mesh_layout_main(void)
         if(action_w < 54) {
             action_w = 54;
         }
-        if(mesh_detect_button && lv_obj_is_valid(mesh_detect_button)) {
-            lv_obj_set_pos(mesh_detect_button, action_x0, action_y);
-            lv_obj_set_size(mesh_detect_button, action_w, action_h);
+        if(mesh_channel_button && lv_obj_is_valid(mesh_channel_button)) {
+            lv_obj_set_pos(mesh_channel_button, action_x0, action_y);
+            lv_obj_set_size(mesh_channel_button, action_w, action_h);
         }
         if(mesh_map_button && lv_obj_is_valid(mesh_map_button)) {
             lv_obj_set_pos(mesh_map_button,
@@ -10208,19 +10208,19 @@ static void mesh_profile_event_cb(lv_event_t *event)
                      0xF2F5F8);
     lv_obj_set_pos(title, margin, 22);
     subtitle = ui_label(panel,
-                        "Mesh radio, channel, ACK and node settings",
+                        ui_tr("Mesh radio, channel, ACK and node settings"),
                         &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_pos(subtitle, margin, 56);
     lv_obj_set_width(subtitle, content_w - 120);
     lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
 
-    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96, "Close",
-                            0x374151);
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"), 0x374151);
     lv_obj_add_event_cb(btn, mesh_settings_close_event_cb, LV_EVENT_CLICKED,
                         NULL);
 
     y = 98;
-    section = ui_label(panel, "Connection", &lv_font_montserrat_18,
+    section = ui_label(panel, ui_tr("Mesh control"), &lv_font_montserrat_18,
                        0xF2F5F8);
     lv_obj_set_pos(section, margin, y);
     y += 34;
@@ -10236,12 +10236,12 @@ static void mesh_profile_event_cb(lv_event_t *event)
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL); \
     } while(0)
 
-    MESH_CONN_BUTTON(0, "Start", 0x25C281, mesh_start_event_cb);
-    MESH_CONN_BUTTON(1, "Stop", 0xEF4D5A, mesh_stop_event_cb);
-    MESH_CONN_BUTTON(2, "Refresh", 0x3DA5FF, mesh_refresh_event_cb);
-    MESH_CONN_BUTTON(3, "Nodes", 0x25C281, mesh_nodes_event_cb);
-    MESH_CONN_BUTTON(4, "Share", 0xA78BFA, mesh_channel_event_cb);
-    MESH_CONN_BUTTON(5, "Profiles", 0xF59E0B, mesh_channel_profiles_event_cb);
+    MESH_CONN_BUTTON(0, ui_tr("Start"), 0x25C281, mesh_start_event_cb);
+    MESH_CONN_BUTTON(1, ui_tr("Stop"), 0xEF4D5A, mesh_stop_event_cb);
+    MESH_CONN_BUTTON(2, ui_tr("Refresh"), 0x3DA5FF, mesh_refresh_event_cb);
+    MESH_CONN_BUTTON(3, ui_tr("Detector"), 0xF59E0B, mesh_detector_event_cb);
+    MESH_CONN_BUTTON(4, ui_tr("Channel"), 0xA78BFA, mesh_channel_event_cb);
+    MESH_CONN_BUTTON(5, ui_tr("Profiles"), 0xF59E0B, mesh_channel_profiles_event_cb);
 #undef MESH_CONN_BUTTON
 
     y += (button_cols >= 6 ? button_row_h : button_row_h * 2) + 22;
@@ -10281,7 +10281,7 @@ static void mesh_profile_event_cb(lv_event_t *event)
     lv_label_set_long_mode(mesh_publish_status_label, LV_LABEL_LONG_DOT);
 
     y += 38;
-    section = ui_label(panel, "Radio profile", &lv_font_montserrat_18,
+    section = ui_label(panel, ui_tr("Radio profile"), &lv_font_montserrat_18,
                        0xF2F5F8);
     lv_obj_set_pos(section, margin, y);
     y += 42;
@@ -10319,11 +10319,12 @@ static void mesh_profile_event_cb(lv_event_t *event)
     }
 
     y += 12;
-    log_title = ui_label(panel, "Event log", &lv_font_montserrat_18,
+    log_title = ui_label(panel, ui_tr("Event log"), &lv_font_montserrat_18,
                          0xF2F5F8);
     lv_obj_set_pos(log_title, margin, y);
     y += 36;
-    mesh_log_label = ui_label(panel, mesh_log_text[0] ? mesh_log_text : "Ready",
+    mesh_log_label = ui_label(panel,
+                              mesh_log_text[0] ? mesh_log_text : ui_tr("Ready"),
                               &lv_font_montserrat_14, 0x94A3B8);
     lv_obj_set_pos(mesh_log_label, margin, y);
     lv_obj_set_width(mesh_log_label, content_w);
@@ -11928,9 +11929,9 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_set_style_radius(mesh_chutil_bar, 3, LV_PART_MAIN);
     lv_obj_set_style_radius(mesh_chutil_bar, 3, LV_PART_INDICATOR);
 
-    mesh_detect_button = ui_command_button(mesh_status_panel, 0, 0, 60,
-                                           ui_tr("Detect"), 0xF59E0B);
-    lv_obj_add_event_cb(mesh_detect_button, mesh_detector_event_cb,
+    mesh_channel_button = ui_command_button(mesh_status_panel, 0, 0, 60,
+                                            ui_tr("Channel"), 0xA78BFA);
+    lv_obj_add_event_cb(mesh_channel_button, mesh_channel_event_cb,
                         LV_EVENT_CLICKED, NULL);
     mesh_map_button = ui_command_button(mesh_status_panel, 0, 0, 60,
                                         ui_tr("Map"), 0x3DA5FF);
@@ -12061,7 +12062,7 @@ void ui_meshtastic_cleanup(void)
     mesh_canned_button = NULL;
     mesh_voice_button = NULL;
     mesh_photo_button = NULL;
-    mesh_detect_button = NULL;
+    mesh_channel_button = NULL;
     mesh_map_button = NULL;
     mesh_nodes_button = NULL;
     mesh_settings_button = NULL;
