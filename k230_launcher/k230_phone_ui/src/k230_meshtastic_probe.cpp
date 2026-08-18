@@ -1871,6 +1871,62 @@ static bool daemon_chat_update_tx_status(uint32_t packet_id,
     return false;
 }
 
+static bool daemon_chat_update_voice_stream_status(uint32_t stream_id,
+                                                   const char *state,
+                                                   unsigned long elapsed_ms)
+{
+    char stream_text[24];
+    char updated[MESHTASTIC_CHAT_LOG_LINE_LEN];
+    char elapsed_text[32] = "";
+
+    if(stream_id == 0U || !state || !state[0]) {
+        return false;
+    }
+    snprintf(stream_text, sizeof(stream_text), "stream=0x%08x", stream_id);
+    if(elapsed_ms > 0UL) {
+        snprintf(elapsed_text, sizeof(elapsed_text), " elapsed=%lums",
+                 elapsed_ms);
+    }
+
+    pthread_mutex_lock(&daemon_log_mutex);
+    for(size_t i = 0; i < daemon_chat_log_count; i++) {
+        char *line = daemon_chat_log[i];
+        char *state_pos;
+        char *after_state;
+        char *file_pos;
+
+        if(strncmp(line, "TX ", 3) != 0 || !strstr(line, " voice ") ||
+           !strstr(line, stream_text)) {
+            continue;
+        }
+        state_pos = strstr(line, " state=");
+        if(state_pos) {
+            after_state = state_pos + 7;
+            while(*after_state && !isspace((unsigned char)*after_state)) {
+                after_state++;
+            }
+            snprintf(updated, sizeof(updated), "%.*s state=%s%s%s",
+                     (int)(state_pos - line), line, state, elapsed_text,
+                     after_state);
+        } else {
+            file_pos = strstr(line, " file=");
+            if(file_pos) {
+                snprintf(updated, sizeof(updated), "%.*s state=%s%s%s",
+                         (int)(file_pos - line), line, state, elapsed_text,
+                         file_pos);
+            } else {
+                snprintf(updated, sizeof(updated), "%s state=%s%s",
+                         line, state, elapsed_text);
+            }
+        }
+        snprintf(line, MESHTASTIC_CHAT_LOG_LINE_LEN, "%s", updated);
+        pthread_mutex_unlock(&daemon_log_mutex);
+        return true;
+    }
+    pthread_mutex_unlock(&daemon_log_mutex);
+    return false;
+}
+
 static bool mesh_config_dir_ensure(void)
 {
     if(mkdir(K230_PHONE_UI_CONFIG_PARENT, 0755) != 0 && errno != EEXIST) {
@@ -13138,6 +13194,61 @@ static void mesh_voice_play_file_async(const char *path)
     (void)system(command);
 }
 
+static bool mesh_voice_copy_pcm_cache(const std::string &src,
+                                      uint32_t stream_id,
+                                      std::string *dst)
+{
+    char path[96];
+    FILE *in;
+    FILE *out;
+    uint8_t buf[4096];
+    size_t n;
+    bool ok = true;
+
+    if(dst) {
+        dst->clear();
+    }
+    if(src.empty() || stream_id == 0U || !dst) {
+        return false;
+    }
+    snprintf(path, sizeof(path), "/tmp/k230_mesh_voice_tx_%08x.raw",
+             stream_id);
+    in = fopen(src.c_str(), "rb");
+    if(!in) {
+        daemon_event("Voice TX cache open failed src=%s err=%s",
+                     src.c_str(), strerror(errno));
+        return false;
+    }
+    out = fopen(path, "wb");
+    if(!out) {
+        daemon_event("Voice TX cache create failed path=%s err=%s",
+                     path, strerror(errno));
+        fclose(in);
+        return false;
+    }
+    while((n = fread(buf, 1U, sizeof(buf), in)) > 0U) {
+        if(fwrite(buf, 1U, n, out) != n) {
+            daemon_event("Voice TX cache write failed path=%s err=%s",
+                         path, strerror(errno));
+            ok = false;
+            break;
+        }
+    }
+    if(ferror(in)) {
+        daemon_event("Voice TX cache read failed src=%s err=%s",
+                     src.c_str(), strerror(errno));
+        ok = false;
+    }
+    fclose(out);
+    fclose(in);
+    if(!ok) {
+        unlink(path);
+        return false;
+    }
+    *dst = path;
+    return true;
+}
+
 static bool mesh_voice_handle_rx(const probe_options_t &opts,
                                  const mesh_header_t &header,
                                  const std::vector<uint8_t> &payload,
@@ -13720,8 +13831,11 @@ static bool mesh_flrc_voice_tx_session(PhysicalLayer *radio, chip_type_t chip,
     usleep(MESHTASTIC_FLRC_VOICE_TX_START_DELAY_US);
     state = mesh_flrc_voice_begin(lr2021);
     if(state != RADIOLIB_ERR_NONE) {
-        daemon_chat("TX 0x%08x voice FLRC init failed: %s",
-                    frame.from_node, error_name(state));
+        if(!daemon_chat_update_voice_stream_status(frame.flrc_voice_stream_id,
+                                                   "init-failed", 0UL)) {
+            daemon_chat("TX 0x%08x voice FLRC init failed: %s",
+                        frame.from_node, error_name(state));
+        }
         (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021,
                                            profile);
         return true;
@@ -13793,15 +13907,23 @@ static bool mesh_flrc_voice_tx_session(PhysicalLayer *radio, chip_type_t chip,
         uint64_t elapsed_ms = (monotonic_us() - start_us) / 1000ULL;
         mesh_voice_tx_stream_count++;
         mesh_voice_tx_chunk_count += total;
-        daemon_chat("TX 0x%08x voice %.1fs codec=codec2-flrc packets=%u elapsed=%lums sent",
-                    frame.from_node,
-                    (double)frame.flrc_voice_duration_ms / 1000.0,
-                    total, (unsigned long)elapsed_ms);
+        if(!daemon_chat_update_voice_stream_status(frame.flrc_voice_stream_id,
+                                                   "sent",
+                                                   (unsigned long)elapsed_ms)) {
+            daemon_chat("TX 0x%08x voice %.1fs codec=codec2-flrc packets=%u stream=0x%08x state=sent elapsed=%lums",
+                        frame.from_node,
+                        (double)frame.flrc_voice_duration_ms / 1000.0,
+                        total, frame.flrc_voice_stream_id,
+                        (unsigned long)elapsed_ms);
+        }
         daemon_event("FLRC voice TX done stream=0x%08x elapsed_ms=%lu",
                      frame.flrc_voice_stream_id, (unsigned long)elapsed_ms);
     } else {
-        daemon_chat("TX 0x%08x voice FLRC failed stream=0x%08x",
-                    frame.from_node, frame.flrc_voice_stream_id);
+        if(!daemon_chat_update_voice_stream_status(frame.flrc_voice_stream_id,
+                                                   "failed", 0UL)) {
+            daemon_chat("TX 0x%08x voice FLRC failed stream=0x%08x",
+                        frame.from_node, frame.flrc_voice_stream_id);
+        }
     }
     (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021, profile);
     return true;
@@ -15761,6 +15883,7 @@ static std::string handle_daemon_command(const std::string &line,
         uint32_t stream_crc;
         const char *path_arg = line.c_str() + 16;
         std::string path = trim_ipc_line(path_arg);
+        std::string chat_path;
         double voice_seconds = 0.0;
         unsigned codec2_duration_ms = 0U;
         mesh_send_request_t request;
@@ -15815,6 +15938,9 @@ static std::string handle_daemon_command(const std::string &line,
         voice_seconds = (double)codec2_duration_ms / 1000.0;
         stream_crc = crc32_update(0, codec2_stream.data(),
                                   codec2_stream.size());
+        if(!mesh_voice_copy_pcm_cache(path, stream_id, &chat_path)) {
+            chat_path = path;
+        }
         invite_payload = mesh_flrc_voice_make_invite_payload(
             stream_id, codec2_stream, codec2_duration_ms, total_packets,
             MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE);
@@ -15832,8 +15958,9 @@ static std::string handle_daemon_command(const std::string &line,
         request.flrc_voice_total_packets = total_packets;
         request.flrc_voice_codec_mode = MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE;
         send_queue->push_back(request);
-        daemon_chat("TX 0x%08x voice %.1fs codec=codec2-flrc packets=%u queued",
-                    opts.from_node, voice_seconds, total_packets);
+        daemon_chat("TX 0x%08x voice %.1fs codec=codec2-flrc packets=%u stream=0x%08x state=queued file=%s",
+                    opts.from_node, voice_seconds, total_packets, stream_id,
+                    chat_path.c_str());
         daemon_event("Daemon SEND_VOICE queued stream=0x%08x codec=codec2-flrc control=mesh-private packets=%u bytes=%u crc=0x%08x depth=%u op=%s",
                      stream_id, total_packets,
                      (unsigned)codec2_stream.size(), stream_crc,
