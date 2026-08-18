@@ -780,6 +780,16 @@ static int mesh_status_is_online(const char *status)
     return status && strncmp(status, "OK ", 3) == 0;
 }
 
+int ui_meshtastic_is_running(void)
+{
+    char response[512];
+
+    if(mesh_ipc_command("STATUS\n", response, sizeof(response)) != 0) {
+        return 0;
+    }
+    return mesh_status_is_online(response);
+}
+
 static void mesh_status_field(const char *status, const char *key,
                               char *out, size_t out_len,
                               const char *fallback)

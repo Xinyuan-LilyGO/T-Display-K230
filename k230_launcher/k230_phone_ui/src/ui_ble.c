@@ -1,6 +1,7 @@
 #include "ui_ble.h"
 
 #include "ui_i18n.h"
+#include "ui_meshtastic.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -111,6 +112,7 @@ static void ble_add_device(const char *addr, const char *name, int rssi,
                            int rssi_valid, int ble_uart, int scan_index,
                            int scan_index_valid);
 static void ble_try_start_queued_connection(void);
+static void ble_refresh_ui(void);
 
 #if 0
 static const lv_point_precise_t ble_type_line_center[] = {
@@ -1046,6 +1048,43 @@ static int ble_ensure_adapter(void)
     return rc;
 }
 
+static int ble_prepare_hci_adapter_only(void)
+{
+    char adapter[sizeof(ble_adapter_name)] = "hci0";
+    char cmd[128];
+    int rc;
+
+    ble_update_adapter_cache();
+    if(!ble_find_adapter(adapter, sizeof(adapter))) {
+        pthread_mutex_lock(&ble_lock);
+        ble_adapter_present = 0;
+        ble_adapter_ready = 0;
+        ble_backend = BLE_BACKEND_HCI;
+        snprintf(ble_status, sizeof(ble_status), "%s",
+                 "Meshtastic is using nRF52840");
+        pthread_mutex_unlock(&ble_lock);
+        ble_log("scan skipped: meshtastic owns nRF52840 and no HCI adapter");
+        return -1;
+    }
+
+    ble_start_bluetoothd_once();
+    snprintf(cmd, sizeof(cmd), "hciconfig %s up >/tmp/k230_ble_hciup.log 2>&1",
+             adapter);
+    rc = ble_shell_run(cmd);
+    pthread_mutex_lock(&ble_lock);
+    ble_adapter_present = 1;
+    ble_adapter_ready = rc == 0;
+    ble_backend = BLE_BACKEND_HCI;
+    snprintf(ble_adapter_name, sizeof(ble_adapter_name), "%s", adapter);
+    if(rc != 0) {
+        snprintf(ble_status, sizeof(ble_status), "%s",
+                 "HCI adapter up failed");
+    }
+    pthread_mutex_unlock(&ble_lock);
+    ble_log("hci-only adapter=%s rc=%d", adapter, rc);
+    return rc;
+}
+
 static int ble_addr_valid(const char *addr)
 {
     size_t i;
@@ -1502,6 +1541,7 @@ static void *ble_scan_thread_cb(void *arg)
 {
     int rc;
     ble_backend_t backend;
+    int mesh_running;
 
     (void)arg;
     pthread_mutex_lock(&ble_lock);
@@ -1510,7 +1550,21 @@ static void *ble_scan_thread_cb(void *arg)
     snprintf(ble_status, sizeof(ble_status), "%s", "Scanning...");
     pthread_mutex_unlock(&ble_lock);
 
-    rc = ble_ensure_adapter();
+    mesh_running = ui_meshtastic_is_running();
+    if(mesh_running) {
+        rc = ble_prepare_hci_adapter_only();
+        if(rc != 0) {
+            pthread_mutex_lock(&ble_lock);
+            ble_scanning = 0;
+            ble_busy = 0;
+            snprintf(ble_status, sizeof(ble_status), "%s",
+                     "Meshtastic is using nRF52840");
+            pthread_mutex_unlock(&ble_lock);
+            return NULL;
+        }
+    } else {
+        rc = ble_ensure_adapter();
+    }
     if(rc == 0 && ble_adapter_ready) {
         pthread_mutex_lock(&ble_lock);
         backend = ble_backend;
@@ -1653,6 +1707,8 @@ static void ble_scan_switch_event_cb(lv_event_t *event)
     } else {
         ble_stop_bluetoothd_on_demand();
     }
+    ble_refresh_ui();
+    app_request_fast_refresh();
 }
 
 static void ble_close_confirm(void)
@@ -2041,6 +2097,12 @@ static void ble_refresh_ui(void)
     snprintf(connected_addr, sizeof(connected_addr), "%s", ble_connected_addr);
     snprintf(connected_name, sizeof(connected_name), "%s", ble_connected_name);
     pthread_mutex_unlock(&ble_lock);
+
+    if(!scan_enabled || !strstr(status, "Meshtastic")) {
+        app_set_ble_status(!scan_enabled ? "offline" :
+                           (connected ? "connected" :
+                            (ready ? "ready" : "offline")));
+    }
 
     if(ble_state_label) {
         uint32_t state_color;

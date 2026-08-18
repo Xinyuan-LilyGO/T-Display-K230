@@ -43,6 +43,7 @@ int ui_bq25896_get_usb_present(int *present, int *vbus_mv);
 int ui_bq25896_get_power_state(int *usb_present, int *vbus_mv, int *vbat_mv);
 int ui_bq27220_get_current_ma(int *current_ma);
 int ui_bq27220_get_voltage_mv(int *voltage_mv);
+int ui_bq27220_get_soc_pct(int *soc_pct);
 int ui_hardware_screen_backlight_get(void);
 int ui_hardware_keyboard_backlight_get(void);
 int ui_hardware_boot0_screen_off(void);

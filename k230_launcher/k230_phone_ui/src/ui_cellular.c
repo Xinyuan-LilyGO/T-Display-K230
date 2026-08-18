@@ -970,6 +970,41 @@ static void cellular_status_refresh(void)
     }
 }
 
+int ui_cellular_lte_signal_level(void)
+{
+    char sim[sizeof(cellular_sim_status)];
+    char lte[sizeof(cellular_lte_status)];
+    char ip[sizeof(cellular_ip_status)];
+    int level = 0;
+
+    if(access(NRF9151_UART_DEV, F_OK) != 0) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&cellular_lock);
+    snprintf(sim, sizeof(sim), "%s", cellular_sim_status);
+    snprintf(lte, sizeof(lte), "%s", cellular_lte_status);
+    snprintf(ip, sizeof(ip), "%s", cellular_ip_status);
+    pthread_mutex_unlock(&cellular_lock);
+
+    if(strcmp(sim, "OK") != 0) {
+        return 0;
+    }
+    if(ip[0] && strcmp(ip, "--") != 0 && strcmp(ip, "0.0.0.0") != 0) {
+        return 4;
+    }
+    if(strstr(lte, "Ping OK") || strstr(lte, "IP ")) {
+        level = 4;
+    } else if(strstr(lte, "PDP active") || strstr(lte, "Packet attached")) {
+        level = 3;
+    } else if(strstr(lte, "Registered home") ||
+              strstr(lte, "Registered roaming")) {
+        level = 2;
+    }
+
+    return level;
+}
+
 static int cellular_open_uart(void)
 {
     struct termios tio;

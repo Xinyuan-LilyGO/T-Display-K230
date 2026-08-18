@@ -40,6 +40,21 @@
 #ifndef LV_SYMBOL_GPS
 #define LV_SYMBOL_GPS "GPS"
 #endif
+#ifndef LV_SYMBOL_BATTERY_FULL
+#define LV_SYMBOL_BATTERY_FULL "BAT"
+#endif
+#ifndef LV_SYMBOL_BATTERY_3
+#define LV_SYMBOL_BATTERY_3 LV_SYMBOL_BATTERY_FULL
+#endif
+#ifndef LV_SYMBOL_BATTERY_2
+#define LV_SYMBOL_BATTERY_2 LV_SYMBOL_BATTERY_FULL
+#endif
+#ifndef LV_SYMBOL_BATTERY_1
+#define LV_SYMBOL_BATTERY_1 LV_SYMBOL_BATTERY_FULL
+#endif
+#ifndef LV_SYMBOL_BATTERY_EMPTY
+#define LV_SYMBOL_BATTERY_EMPTY LV_SYMBOL_BATTERY_FULL
+#endif
 
 #define TOUCH_MAX_X 1060
 #define TOUCH_MAX_Y 2400
@@ -100,6 +115,7 @@
 #define STATUS_BAR_ITEM_W 32
 #define STATUS_BAR_ITEM_H 30
 #define STATUS_BAR_ITEM_GAP 6
+#define STATUS_BAR_BATTERY_W 62
 #define STATUS_GNSS_FIX_CACHE "/tmp/k230_nrf9151_gnss_fix.cache"
 #define STATUS_NRF9151_UART_DEV "/dev/ttyS3"
 #define NET_MAX_APS 6
@@ -231,6 +247,8 @@ static lv_obj_t *status_location_label;
 static lv_obj_t *status_lte_bars[4];
 static lv_obj_t *status_wifi_label;
 static lv_obj_t *status_ble_label;
+static lv_obj_t *status_battery_icon_label;
+static lv_obj_t *status_battery_percent_label;
 static lv_obj_t *transition_old_page;
 static int page_transition_active;
 static lv_obj_t *time_label;
@@ -485,6 +503,7 @@ static int shutdown_saved_screen_backlight;
 static int shutdown_saved_keyboard_backlight;
 static int shutdown_last_progress = -1;
 static int shutdown_last_fade_log_progress = -1;
+static char status_wifi_state[24] = "on";
 static char status_ble_state[24] = "offline";
 static uint64_t touch_block_last_log_us;
 
@@ -4026,34 +4045,43 @@ static lv_obj_t *status_lte_item(lv_obj_t *parent)
     return item;
 }
 
-static int status_cellular_iface_has_ip(void)
+static lv_obj_t *status_battery_item(lv_obj_t *parent)
 {
-    static const char *const prefixes[] = {
-        "wwan", "ppp", "rmnet", "usb", "lte", "cell"
-    };
-    DIR *dir = opendir("/sys/class/net");
-    struct dirent *ent;
-    char ip[64];
-    int found = 0;
+    lv_obj_t *item = lv_obj_create(parent);
+    lv_obj_t *row;
 
-    if(!dir) {
-        return 0;
-    }
+    lv_obj_set_size(item, STATUS_BAR_BATTERY_W, STATUS_BAR_ITEM_H);
+    lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(item, lv_color_hex(0x253040), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(item, LV_OPA_40, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(item, 10, 0);
+    lv_obj_set_style_border_width(item, 0, 0);
+    lv_obj_set_style_pad_all(item, 0, 0);
+    lv_obj_clear_flag(item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(item, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(item, app_event_cb, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)PAGE_BATTERY);
 
-    while((ent = readdir(dir)) != NULL && !found) {
-        if(ent->d_name[0] == '.') {
-            continue;
-        }
-        for(size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
-            if(strncmp(ent->d_name, prefixes[i], strlen(prefixes[i])) == 0) {
-                found = read_iface_ip(ent->d_name, ip, sizeof(ip)) == 0;
-                break;
-            }
-        }
-    }
+    row = lv_obj_create(item);
+    lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 3, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(row);
 
-    closedir(dir);
-    return found;
+    status_battery_icon_label = label(row, LV_SYMBOL_BATTERY_EMPTY,
+                                      &lv_font_montserrat_16, 0x8B949E);
+    make_click_forwarder(status_battery_icon_label);
+    status_battery_percent_label = label(row, "--", &lv_font_montserrat_12,
+                                         0x8B949E);
+    make_click_forwarder(status_battery_percent_label);
+    make_click_forwarder(row);
+    return item;
 }
 
 static int status_gnss_has_recent_fix(void)
@@ -4090,6 +4118,67 @@ static uint32_t status_ble_color(void)
     return 0x8B949E;
 }
 
+static uint32_t status_wifi_color(int wifi_present, int wifi_has_ip)
+{
+    if(strcmp(status_wifi_state, "off") == 0) {
+        return 0x8B949E;
+    }
+    if(wifi_has_ip || strcmp(status_wifi_state, "connected") == 0) {
+        return 0x25C281;
+    }
+    if(strcmp(status_wifi_state, "scanning") == 0 ||
+       strcmp(status_wifi_state, "connecting") == 0) {
+        return 0x3DA5FF;
+    }
+    return wifi_present ? 0xF5A524 : 0x8B949E;
+}
+
+static const char *status_battery_symbol(int soc)
+{
+    if(soc >= 88) {
+        return LV_SYMBOL_BATTERY_FULL;
+    }
+    if(soc >= 63) {
+        return LV_SYMBOL_BATTERY_3;
+    }
+    if(soc >= 38) {
+        return LV_SYMBOL_BATTERY_2;
+    }
+    if(soc >= 13) {
+        return LV_SYMBOL_BATTERY_1;
+    }
+    return LV_SYMBOL_BATTERY_EMPTY;
+}
+
+static void status_update_battery(void)
+{
+    int soc = -1;
+    uint32_t color = 0x8B949E;
+    char percent[8];
+
+    if(ui_extension_keyboard_base_available() &&
+       ui_bq27220_get_soc_pct(&soc) == 0) {
+        color = soc <= 15 ? 0xEF4D5A : (soc <= 30 ? 0xF5A524 : 0x25C281);
+        snprintf(percent, sizeof(percent), "%d%%", soc);
+        if(status_battery_icon_label && lv_obj_is_valid(status_battery_icon_label)) {
+            lv_label_set_text(status_battery_icon_label,
+                              status_battery_symbol(soc));
+        }
+    } else {
+        snprintf(percent, sizeof(percent), "--");
+        if(status_battery_icon_label && lv_obj_is_valid(status_battery_icon_label)) {
+            lv_label_set_text(status_battery_icon_label,
+                              LV_SYMBOL_BATTERY_EMPTY);
+        }
+    }
+    status_set_label_color(status_battery_icon_label, color);
+    status_set_label_color(status_battery_percent_label, color);
+    if(status_battery_percent_label &&
+       lv_obj_is_valid(status_battery_percent_label)) {
+        lv_label_set_text(status_battery_percent_label, percent);
+    }
+}
+
 static void status_set_lte_bars(int level, uint32_t color)
 {
     if(level < 0) {
@@ -4115,34 +4204,38 @@ static void status_bar_update(lv_timer_t *timer)
     int wifi_has_ip;
     int wifi_present;
     int modem_present;
-    int cellular_has_ip;
+    int lte_level;
     int gnss_fix;
 
     (void)timer;
 
+    if(!status_bar_obj || !lv_obj_is_valid(status_bar_obj)) {
+        return;
+    }
+
     wifi_present = path_exists("/sys/class/net/" NET_WIFI_IFACE);
     wifi_has_ip = read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip)) == 0;
     status_set_label_color(status_wifi_label,
-                           wifi_has_ip ? 0x25C281 :
-                           (wifi_present ? 0xF5A524 : 0x8B949E));
+                           status_wifi_color(wifi_present, wifi_has_ip));
 
     modem_present = path_exists(STATUS_NRF9151_UART_DEV);
-    cellular_has_ip = status_cellular_iface_has_ip();
-    status_set_lte_bars(cellular_has_ip ? 4 : (modem_present ? 1 : 0),
-                        cellular_has_ip ? 0x25C281 :
-                        (modem_present ? 0x3DA5FF : 0x8B949E));
+    lte_level = modem_present ? ui_cellular_lte_signal_level() : 0;
+    status_set_lte_bars(lte_level,
+                        lte_level > 0 ? 0x25C281 : 0x8B949E);
 
     gnss_fix = status_gnss_has_recent_fix();
     status_set_label_color(status_location_label,
                            gnss_fix ? 0x25C281 :
                            (modem_present ? 0xF5A524 : 0x8B949E));
     status_set_label_color(status_ble_label, status_ble_color());
+    status_update_battery();
 }
 
 static void status_bar_relayout(void)
 {
     const int status_group_w =
-        STATUS_BAR_ITEM_W * 4 + STATUS_BAR_ITEM_GAP * 3;
+        STATUS_BAR_ITEM_W * 4 + STATUS_BAR_BATTERY_W +
+        STATUS_BAR_ITEM_GAP * 4;
 
     if(!status_bar_obj || !lv_obj_is_valid(status_bar_obj)) {
         return;
@@ -4161,7 +4254,8 @@ static void status_bar_relayout(void)
 static void create_status_bar(lv_obj_t *scr)
 {
     const int status_group_w =
-        STATUS_BAR_ITEM_W * 4 + STATUS_BAR_ITEM_GAP * 3;
+        STATUS_BAR_ITEM_W * 4 + STATUS_BAR_BATTERY_W +
+        STATUS_BAR_ITEM_GAP * 4;
     lv_obj_t *bar = lv_obj_create(scr);
     status_bar_obj = bar;
     lv_obj_set_pos(bar, 0, 0);
@@ -4195,9 +4289,18 @@ static void create_status_bar(lv_obj_t *scr)
                      0x8B949E, &status_wifi_label);
     status_icon_item(status_group_obj, LV_SYMBOL_BLUETOOTH, PAGE_BLE,
                      0x8B949E, &status_ble_label);
+    status_battery_item(status_group_obj);
 
     status_bar_update(NULL);
     status_bar_relayout();
+}
+
+void app_set_wifi_status(const char *state)
+{
+    const char *value = state && state[0] ? state : "on";
+
+    snprintf(status_wifi_state, sizeof(status_wifi_state), "%s", value);
+    status_bar_update(NULL);
 }
 
 void app_set_ble_status(const char *state)

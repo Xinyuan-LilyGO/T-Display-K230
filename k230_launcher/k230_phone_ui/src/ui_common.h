@@ -115,6 +115,7 @@ void app_take_screenshot(void);
 void app_request_fast_refresh(void);
 void app_refresh_current_page(void);
 int app_current_page_is(page_id_t page);
+void app_set_wifi_status(const char *state);
 void app_set_ble_status(const char *state);
 void app_note_user_activity(void);
 int app_edge_back_enabled(void);

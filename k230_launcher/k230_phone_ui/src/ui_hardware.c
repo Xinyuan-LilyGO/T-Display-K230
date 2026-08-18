@@ -2812,6 +2812,17 @@ int ui_bq27220_get_voltage_mv(int *voltage_mv)
     return 0;
 }
 
+int ui_bq27220_get_soc_pct(int *soc_pct)
+{
+    bq27220_reading_t reading;
+
+    if(!soc_pct || bq27220_read(&reading) != 0) {
+        return -1;
+    }
+    *soc_pct = clamp_int(reading.soc_pct, 0, 100);
+    return 0;
+}
+
 static const char *tca8418_key_name(int code)
 {
     static const char *const names[TCA8418_ROWS * TCA8418_COLS + 1] = {

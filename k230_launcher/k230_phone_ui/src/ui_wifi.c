@@ -982,6 +982,12 @@ static void wifi_update_page(void)
                                         0);
         }
     }
+    app_set_wifi_status(!enabled ? "off" :
+                        (connect_busy ? "connecting" :
+                         (scan_busy ? "scanning" :
+                          (ui_read_iface_ip(NET_WIFI_IFACE, ip,
+                                            sizeof(ip)) == 0 ?
+                           "connected" : "on"))));
     if(wifi_connect_spinner) {
         if(enabled && connect_busy) {
             lv_obj_clear_flag(wifi_connect_spinner, LV_OBJ_FLAG_HIDDEN);
@@ -1145,6 +1151,7 @@ static void wifi_start_scan(int force)
     pthread_mutex_unlock(&wifi_lock);
 
     if(start_thread) {
+        app_set_wifi_status("scanning");
         if(pthread_create(&thread, NULL, wifi_scan_thread_cb, NULL) == 0) {
             pthread_detach(thread);
         } else {
@@ -1306,6 +1313,7 @@ static int wifi_start_connect_request(const char *ssid, const char *password,
         return -1;
     }
 
+    app_set_wifi_status("connecting");
     app_request_fast_refresh();
     return 0;
 }
@@ -1411,6 +1419,7 @@ static void wifi_switch_event_cb(lv_event_t *event)
     wifi_set_status_locked(enabled ? "Wi-Fi on" : "Wi-Fi off");
     pthread_mutex_unlock(&wifi_lock);
 
+    app_set_wifi_status(enabled ? "scanning" : "off");
     if(enabled) {
         ui_wifi_autoconnect_start();
         wifi_start_scan(1);
