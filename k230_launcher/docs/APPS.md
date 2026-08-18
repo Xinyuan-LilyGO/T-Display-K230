@@ -58,7 +58,7 @@ Use the `MTP` app to expose these folders to a host computer over USB.
 | `MTP` | Enables USB MTP file access for the SD-card/root filesystem folders. | Tap the MTP control, connect USB to a host computer, and manage files such as photos, screenshots, music, videos, and ROMs. |
 | `Gallery` | Shows captured photos as thumbnails and opens them in a full-screen viewer. | Tap a thumbnail to view it. Swipe left or right to browse adjacent photos. |
 | `Screenshot` | Saves the current screen as a PNG under `/root/screenshots`. | Tap the app icon, or press `FN + LILYGO` on the hardware keyboard. Export files with `MTP`. |
-| `Terminal` | Provides an on-device terminal with special keys and font-size controls. | Type commands with the on-screen keyboard or hardware keyboard. Use the special-key row for terminal control keys. |
+| `Terminal` | Provides an on-device terminal with special keys and persistent font-size controls. | Type commands with the on-screen keyboard or hardware keyboard. The terminal viewport follows the selected font size. |
 | `I2S Test` | Generates audio test output for the internal audio route or the MAX98357A external amplifier. | Select the audio output in `Settings` > `Audio`, then run the tone test. |
 | `I2C Scan` | Scans available I2C buses and highlights detected device addresses. | Use it to verify AHT20, BQ25896, BQ27220, XL9555, TCA8418, and other board devices. |
 | `Battery` | Shows battery gauge, charger, voltage, current, capacity, and related telemetry when supported devices are present. | Open the page to view current battery and charging state. Charger controls are available through Settings when supported. |

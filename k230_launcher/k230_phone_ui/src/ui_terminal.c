@@ -5,6 +5,7 @@
 #include "ui_common.h"
 #include "ui_hardware.h"
 #include "ui_i18n.h"
+#include "ui_prefs.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -31,10 +32,13 @@
 #define TERMINAL_LOG_PATH "/tmp/k230_terminal.log"
 #define TERMINAL_ROWS 32U
 #define TERMINAL_COLS 72U
+#define TERMINAL_MIN_ROWS 4U
+#define TERMINAL_MIN_COLS 24U
 #define TERMINAL_ROW_TEXT_MAX (TERMINAL_COLS * 4U + 8U)
 #define TERMINAL_PENDING_MAX 8192U
 #define TERMINAL_TIMER_MS 35
 #define TERMINAL_SHELL "/bin/sh"
+#define TERMINAL_FONT_PREF_KEY "terminal.font_level"
 
 #ifndef LV_KEYBOARD_CTRL_BUTTON_MODE_TEXT_LOWER
 #define LV_KEYBOARD_CTRL_BUTTON_MODE_TEXT_LOWER "abc"
@@ -75,13 +79,14 @@ typedef enum {
 typedef struct {
     const lv_font_t *font;
     int line_height;
+    int char_width;
     const char *name;
 } terminal_font_zoom_t;
 
 static const terminal_font_zoom_t terminal_font_zoom[] = {
-    { &lv_font_montserrat_12, 16, "Small" },
-    { &lv_font_montserrat_14, 18, "Medium" },
-    { &lv_font_montserrat_16, 20, "Large" },
+    { &lv_font_montserrat_12, 16, 7, "Small" },
+    { &lv_font_montserrat_14, 18, 8, "Medium" },
+    { &lv_font_montserrat_16, 20, 9, "Large" },
 };
 
 static const char *const terminal_kbd_lower_map[] = {
@@ -121,6 +126,9 @@ static int terminal_dirty;
 static int terminal_ctrl_armed;
 static int terminal_cursor_visible = 1;
 static int terminal_font_level = 0;
+static int terminal_font_pref_loaded;
+static size_t terminal_active_rows = TERMINAL_ROWS;
+static size_t terminal_active_cols = TERMINAL_COLS;
 static terminal_keyboard_mode_t terminal_keyboard_mode = TERMINAL_KBD_LOWER;
 static char terminal_last_rows[TERMINAL_ROWS][TERMINAL_ROW_TEXT_MAX];
 
@@ -141,6 +149,52 @@ static int terminal_default_row_width(void)
 
 static void terminal_stop_shell(void);
 static int terminal_spawn_shell(void);
+static void terminal_apply_font_zoom(void);
+static void terminal_log(const char *fmt, ...);
+
+static int terminal_clamp_font_level(int level)
+{
+    int max_level =
+        (int)(sizeof(terminal_font_zoom) / sizeof(terminal_font_zoom[0])) - 1;
+
+    if(level < 0) {
+        return 0;
+    }
+    if(level > max_level) {
+        return max_level;
+    }
+    return level;
+}
+
+static void terminal_load_font_pref(void)
+{
+    char value[16];
+    char *end = NULL;
+    long level;
+
+    if(terminal_font_pref_loaded) {
+        return;
+    }
+    terminal_font_pref_loaded = 1;
+
+    if(ui_prefs_get(TERMINAL_FONT_PREF_KEY, value, sizeof(value), "0") != 0) {
+        return;
+    }
+
+    level = strtol(value, &end, 10);
+    if(end == value) {
+        return;
+    }
+    terminal_font_level = terminal_clamp_font_level((int)level);
+}
+
+static void terminal_save_font_pref(void)
+{
+    char value[16];
+
+    snprintf(value, sizeof(value), "%d", terminal_font_level);
+    ui_prefs_set(TERMINAL_FONT_PREF_KEY, value);
+}
 
 static int terminal_row_width(void)
 {
@@ -156,6 +210,87 @@ static int terminal_row_width(void)
     }
 
     return w > 120 ? w : 120;
+}
+
+static size_t terminal_clamp_size(size_t value, size_t min_value,
+                                  size_t max_value)
+{
+    if(value < min_value) {
+        return min_value;
+    }
+    if(value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
+static size_t terminal_compute_active_rows(void)
+{
+    const terminal_font_zoom_t *zoom =
+        &terminal_font_zoom[terminal_clamp_font_level(terminal_font_level)];
+    int h = 0;
+
+    if(terminal_output_box) {
+        lv_obj_update_layout(terminal_output_box);
+        h = lv_obj_get_height(terminal_output_box) - 12;
+    }
+    if(h <= 0) {
+        return TERMINAL_ROWS;
+    }
+    return terminal_clamp_size((size_t)(h / zoom->line_height),
+                               TERMINAL_MIN_ROWS, TERMINAL_ROWS);
+}
+
+static size_t terminal_compute_active_cols(void)
+{
+    const terminal_font_zoom_t *zoom =
+        &terminal_font_zoom[terminal_clamp_font_level(terminal_font_level)];
+    int w = terminal_row_width();
+
+    return terminal_clamp_size((size_t)(w / zoom->char_width),
+                               TERMINAL_MIN_COLS, TERMINAL_COLS);
+}
+
+static void terminal_set_active_geometry_locked(size_t rows, size_t cols)
+{
+    struct winsize ws;
+    int changed = 0;
+
+    rows = terminal_clamp_size(rows, TERMINAL_MIN_ROWS, TERMINAL_ROWS);
+    cols = terminal_clamp_size(cols, TERMINAL_MIN_COLS, TERMINAL_COLS);
+
+    if(rows != terminal_active_rows || cols != terminal_active_cols) {
+        terminal_active_rows = rows;
+        terminal_active_cols = cols;
+        changed = 1;
+    }
+
+    if(terminal_tmt &&
+       (changed || tmt_screen(terminal_tmt)->nline != rows ||
+        tmt_screen(terminal_tmt)->ncol != cols)) {
+        if(!tmt_resize(terminal_tmt, rows, cols)) {
+            terminal_log("tmt_resize failed rows=%zu cols=%zu", rows, cols);
+        } else {
+            terminal_dirty = 1;
+        }
+    }
+
+    if(terminal_master_fd >= 0) {
+        memset(&ws, 0, sizeof(ws));
+        ws.ws_row = (unsigned short)rows;
+        ws.ws_col = (unsigned short)cols;
+        ioctl(terminal_master_fd, TIOCSWINSZ, &ws);
+    }
+}
+
+static void terminal_sync_geometry(void)
+{
+    size_t rows = terminal_compute_active_rows();
+    size_t cols = terminal_compute_active_cols();
+
+    pthread_mutex_lock(&terminal_lock);
+    terminal_set_active_geometry_locked(rows, cols);
+    pthread_mutex_unlock(&terminal_lock);
 }
 
 static void terminal_log(const char *fmt, ...)
@@ -236,8 +371,8 @@ static int terminal_open_tmt_locked(void)
         return 0;
     }
 
-    terminal_tmt = tmt_open(TERMINAL_ROWS, TERMINAL_COLS, terminal_tmt_cb,
-                            NULL, NULL);
+    terminal_tmt = tmt_open(terminal_active_rows, terminal_active_cols,
+                            terminal_tmt_cb, NULL, NULL);
     if(!terminal_tmt) {
         terminal_log("tmt_open failed");
         return -1;
@@ -339,8 +474,14 @@ static void terminal_clear_output(void)
 static void terminal_apply_font_zoom(void)
 {
     const terminal_font_zoom_t *zoom =
-        &terminal_font_zoom[terminal_font_level];
+        &terminal_font_zoom[terminal_clamp_font_level(terminal_font_level)];
     size_t row;
+    size_t active_rows;
+
+    terminal_sync_geometry();
+    pthread_mutex_lock(&terminal_lock);
+    active_rows = terminal_active_rows;
+    pthread_mutex_unlock(&terminal_lock);
 
     for(row = 0; row < TERMINAL_ROWS; row++) {
         if(!terminal_row_labels[row]) {
@@ -351,21 +492,20 @@ static void terminal_apply_font_zoom(void)
                        (int)row * zoom->line_height);
         lv_obj_set_size(terminal_row_labels[row], terminal_row_width(),
                         zoom->line_height);
+        if(row < active_rows) {
+            lv_obj_clear_flag(terminal_row_labels[row], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(terminal_row_labels[row], LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
 static void terminal_adjust_font_zoom(int delta)
 {
-    int max_level =
-        (int)(sizeof(terminal_font_zoom) / sizeof(terminal_font_zoom[0])) - 1;
     int next = terminal_font_level + delta;
     char status[64];
 
-    if(next < 0) {
-        next = 0;
-    } else if(next > max_level) {
-        next = max_level;
-    }
+    next = terminal_clamp_font_level(next);
     if(next == terminal_font_level) {
         snprintf(status, sizeof(status), "Font %s",
                  terminal_font_zoom[terminal_font_level].name);
@@ -374,6 +514,7 @@ static void terminal_adjust_font_zoom(int delta)
     }
 
     terminal_font_level = next;
+    terminal_save_font_pref();
     terminal_apply_font_zoom();
     snprintf(status, sizeof(status), "Font %s",
              terminal_font_zoom[terminal_font_level].name);
@@ -720,8 +861,8 @@ static int terminal_spawn_shell(void)
         }
 
         memset(&ws, 0, sizeof(ws));
-        ws.ws_row = TERMINAL_ROWS;
-        ws.ws_col = TERMINAL_COLS;
+        ws.ws_row = (unsigned short)terminal_active_rows;
+        ws.ws_col = (unsigned short)terminal_active_cols;
         ioctl(slave, TIOCSWINSZ, &ws);
         ioctl(slave, TIOCSCTTY, 0);
 
@@ -877,11 +1018,13 @@ static void terminal_timer_cb(lv_timer_t *timer)
     char rows[TERMINAL_ROWS][TERMINAL_ROW_TEXT_MAX];
     int dirty;
     size_t row;
+    size_t active_rows;
 
     (void)timer;
     memset(rows, 0, sizeof(rows));
 
     pthread_mutex_lock(&terminal_lock);
+    active_rows = terminal_active_rows;
     if(terminal_pending_len > 0) {
         terminal_feed_tmt_locked((const char *)terminal_pending,
                                  terminal_pending_len);
@@ -889,7 +1032,7 @@ static void terminal_timer_cb(lv_timer_t *timer)
     }
     dirty = terminal_dirty;
     if(dirty) {
-        for(row = 0; row < TERMINAL_ROWS; row++) {
+        for(row = 0; row < active_rows; row++) {
             terminal_format_row_locked(row, rows[row], sizeof(rows[row]));
         }
         if(terminal_tmt) {
@@ -903,6 +1046,10 @@ static void terminal_timer_cb(lv_timer_t *timer)
         for(row = 0; row < TERMINAL_ROWS; row++) {
             if(!terminal_row_labels[row]) {
                 continue;
+            }
+            if(row >= active_rows) {
+                rows[row][0] = ' ';
+                rows[row][1] = '\0';
             }
             if(strcmp(terminal_last_rows[row], rows[row]) != 0) {
                 lv_label_set_text(terminal_row_labels[row], rows[row][0] ?
@@ -994,6 +1141,7 @@ void ui_terminal_create(lv_obj_t *scr)
     if(!setlocale(LC_CTYPE, "")) {
         setlocale(LC_CTYPE, "C");
     }
+    terminal_load_font_pref();
     memset(terminal_last_rows, 0, sizeof(terminal_last_rows));
     memset(terminal_row_labels, 0, sizeof(terminal_row_labels));
 
@@ -1014,12 +1162,17 @@ void ui_terminal_create(lv_obj_t *scr)
     lv_obj_set_style_pad_all(terminal_output_box, 6, 0);
     lv_obj_clear_flag(terminal_output_box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_update_layout(terminal_output_box);
+    terminal_sync_geometry();
 
     for(row = 0; row < TERMINAL_ROWS; row++) {
         terminal_row_labels[row] = ui_label(terminal_output_box, " ",
-                                            &lv_font_montserrat_12, 0xCDE7D8);
-        lv_obj_set_pos(terminal_row_labels[row], 0, (int)row * 16);
-        lv_obj_set_size(terminal_row_labels[row], terminal_row_width(), 16);
+                                            terminal_font_zoom[terminal_font_level].font,
+                                            0xCDE7D8);
+        lv_obj_set_pos(terminal_row_labels[row], 0,
+                       (int)row *
+                       terminal_font_zoom[terminal_font_level].line_height);
+        lv_obj_set_size(terminal_row_labels[row], terminal_row_width(),
+                        terminal_font_zoom[terminal_font_level].line_height);
         lv_label_set_long_mode(terminal_row_labels[row], LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_letter_space(terminal_row_labels[row], 0, 0);
         lv_obj_set_style_text_line_space(terminal_row_labels[row], 0, 0);
@@ -1116,7 +1269,8 @@ void ui_terminal_create(lv_obj_t *scr)
     pthread_mutex_unlock(&terminal_lock);
 
     terminal_clear_output();
-    terminal_append_line("[terminal] libtmt ansi 72x32");
+    terminal_append_line("[terminal] libtmt ansi %zux%zu",
+                         terminal_active_cols, terminal_active_rows);
     terminal_append_line("[terminal] /bin/sh -l");
     if(terminal_use_hardware_keyboard) {
         terminal_append_line("[terminal] hardware keyboard active");

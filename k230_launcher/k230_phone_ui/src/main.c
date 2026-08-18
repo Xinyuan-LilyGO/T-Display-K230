@@ -502,6 +502,9 @@ static lv_obj_t *shutdown_progress_arc;
 static lv_obj_t *shutdown_detail_label;
 static lv_obj_t *shutdown_hint_label;
 static lv_obj_t *screenshot_toast_obj;
+static lv_obj_t *reboot_status_label;
+static lv_obj_t *reboot_confirm_btn;
+static int reboot_confirm_started;
 static int shutdown_visual_active;
 static int shutdown_visual_committed;
 static int shutdown_visual_poweroff_started;
@@ -9394,6 +9397,166 @@ static void create_placeholder_page(lv_obj_t *scr, const char *title, const char
     info_row(body, 214, "Integration", "Next stage", 0xF5A524);
 }
 
+static void reboot_timer_cb(lv_timer_t *timer)
+{
+    int rc;
+
+    (void)timer;
+
+    touch_trace_log("REBOOT_EXECUTE");
+    rc = system("(sync; reboot -f || reboot) >/tmp/k230_reboot.log 2>&1 &");
+    touch_trace_log("REBOOT_COMMAND rc=%d", rc);
+}
+
+static void reboot_confirm_event_cb(lv_event_t *event)
+{
+    lv_timer_t *timer;
+
+    (void)event;
+
+    if(reboot_confirm_started) {
+        return;
+    }
+    reboot_confirm_started = 1;
+    touch_trace_log("REBOOT_CONFIRM");
+
+    if(reboot_confirm_btn && lv_obj_is_valid(reboot_confirm_btn)) {
+        lv_obj_add_state(reboot_confirm_btn, LV_STATE_DISABLED);
+    }
+    if(reboot_status_label && lv_obj_is_valid(reboot_status_label)) {
+        lv_label_set_text(reboot_status_label, ui_tr("Rebooting..."));
+        lv_obj_set_style_text_color(reboot_status_label,
+                                    lv_color_hex(0xF5A524), 0);
+    }
+    request_fast_refresh();
+
+    timer = lv_timer_create(reboot_timer_cb, 250, NULL);
+    if(timer) {
+        lv_timer_set_repeat_count(timer, 1);
+    }
+}
+
+static void reboot_cancel_event_cb(lv_event_t *event)
+{
+    (void)event;
+
+    if(reboot_confirm_started) {
+        return;
+    }
+    app_nav_back();
+}
+
+static void create_reboot_page(lv_obj_t *scr)
+{
+    int body_y = page_content_top_y(154);
+    int body_w = page_body_width();
+    int body_h = page_body_height_from(154);
+    int landscape = display_orientation_is_landscape();
+    int card_h = landscape ? body_h : 420;
+    int icon_size = landscape ? 82 : 96;
+    int content_x;
+    int content_y;
+    int content_w;
+    int button_y;
+    int button_gap = 18;
+    int button_w;
+
+    reboot_status_label = NULL;
+    reboot_confirm_btn = NULL;
+    reboot_confirm_started = 0;
+
+    if(card_h > body_h) {
+        card_h = body_h;
+    }
+    if(card_h < 330) {
+        card_h = 330;
+    }
+
+    create_header(scr, "Reboot");
+
+    lv_obj_t *body = panel(scr, 24, body_y, body_w, card_h);
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x111820), 0);
+
+    lv_obj_t *icon_box = lv_obj_create(body);
+    lv_obj_set_size(icon_box, icon_size, icon_size);
+    lv_obj_set_style_radius(icon_box, 8, 0);
+    lv_obj_set_style_bg_color(icon_box, lv_color_hex(0x2A171C), 0);
+    lv_obj_set_style_bg_opa(icon_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(icon_box, 1, 0);
+    lv_obj_set_style_border_color(icon_box, lv_color_hex(0x7F1D1D), 0);
+    lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    if(landscape) {
+        lv_obj_align(icon_box, LV_ALIGN_TOP_LEFT, 24, 24);
+        content_x = 24 + icon_size + 28;
+        content_y = 24;
+        content_w = body_w - content_x - 24;
+    } else {
+        lv_obj_align(icon_box, LV_ALIGN_TOP_MID, 0, 24);
+        content_x = 20;
+        content_y = 144;
+        content_w = body_w - 40;
+    }
+
+    lv_obj_t *icon = label(icon_box, LV_SYMBOL_POWER, &lv_font_montserrat_32,
+                           0xEF4D5A);
+    lv_obj_center(icon);
+
+    lv_obj_t *title = label(body, "Reboot device", &lv_font_montserrat_28,
+                            0xF2F5F8);
+    lv_obj_set_pos(title, content_x, content_y);
+    lv_obj_set_width(title, content_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    lv_obj_t *detail = label(body, "Restart the K230 now?",
+                             &lv_font_montserrat_20, 0xCBD5E1);
+    lv_obj_set_pos(detail, content_x, content_y + 54);
+    lv_obj_set_width(detail, content_w);
+    lv_label_set_long_mode(detail, LV_LABEL_LONG_WRAP);
+
+    lv_obj_t *hint = label(body,
+                           "The launcher will close and Linux will reboot.",
+                           &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_pos(hint, content_x, content_y + 98);
+    lv_obj_set_width(hint, content_w);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+
+    reboot_status_label = label(body, "Ready", &lv_font_montserrat_18,
+                                0x25C281);
+    lv_obj_set_pos(reboot_status_label, content_x, content_y + 160);
+    lv_obj_set_width(reboot_status_label, content_w);
+    lv_label_set_long_mode(reboot_status_label, LV_LABEL_LONG_DOT);
+
+    button_y = card_h - 84;
+    button_w = (body_w - 40 - button_gap) / 2;
+    if(button_w > 240) {
+        button_w = 240;
+    }
+    if(landscape) {
+        int buttons_total = button_w * 2 + button_gap;
+        int button_x = body_w - 24 - buttons_total;
+
+        lv_obj_t *cancel = command_button(body, button_x, button_y,
+                                          button_w, "Cancel", 0xCBD5E1);
+        lv_obj_add_event_cb(cancel, reboot_cancel_event_cb, LV_EVENT_CLICKED,
+                            NULL);
+        reboot_confirm_btn = command_button(body,
+                                            button_x + button_w + button_gap,
+                                            button_y, button_w, "Reboot",
+                                            0xEF4D5A);
+    } else {
+        lv_obj_t *cancel = command_button(body, 20, button_y, button_w,
+                                          "Cancel", 0xCBD5E1);
+        lv_obj_add_event_cb(cancel, reboot_cancel_event_cb, LV_EVENT_CLICKED,
+                            NULL);
+        reboot_confirm_btn = command_button(body, 20 + button_w + button_gap,
+                                            button_y, button_w, "Reboot",
+                                            0xEF4D5A);
+    }
+    lv_obj_add_event_cb(reboot_confirm_btn, reboot_confirm_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+}
+
 static void screenshot_log(const char *fmt, ...)
 {
     FILE *fp;
@@ -9838,7 +10001,7 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         ui_settings_create(scr);
         break;
     case PAGE_REBOOT:
-        create_placeholder_page(scr, "Reboot", "Confirmation pending", 0xEF4D5A);
+        create_reboot_page(scr);
         break;
     case PAGE_DISPLAY:
         create_display_page(scr);
