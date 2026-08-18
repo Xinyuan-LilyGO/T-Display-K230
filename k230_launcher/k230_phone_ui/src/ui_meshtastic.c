@@ -113,6 +113,7 @@ typedef enum {
 static void mesh_nodes_event_cb(lv_event_t *event);
 static void mesh_detector_event_cb(lv_event_t *event);
 static void mesh_overlay_auto_refresh_tick(void);
+static void mesh_layout_main(void);
 
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
@@ -166,6 +167,7 @@ static int mesh_position_enabled = 1;
 static int mesh_fixed_position_enabled = 0;
 static int mesh_telemetry_enabled = 1;
 static int mesh_environment_telemetry_enabled = 1;
+static int mesh_voice_available = 0;
 static int mesh_map_fake_gps_enabled = 1;
 static int mesh_map_zoom = MESHTASTIC_MAP_DEFAULT_ZOOM;
 static int mesh_map_center_valid = 0;
@@ -706,6 +708,30 @@ static float mesh_status_float_field(const char *status, const char *key,
         return fallback;
     }
     return parsed;
+}
+
+static void mesh_update_voice_capability(const char *status, int online)
+{
+    char voice[24];
+    int available;
+
+    mesh_status_field(status, "voice", voice, sizeof(voice), "disabled");
+    available = online && strcmp(voice, "flrc") == 0;
+    if(mesh_voice_available != available) {
+        mesh_voice_available = available;
+        mesh_layout_main();
+    } else {
+        mesh_voice_available = available;
+    }
+    if(mesh_voice_button && lv_obj_is_valid(mesh_voice_button)) {
+        if(mesh_voice_available) {
+            lv_obj_clear_flag(mesh_voice_button, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_state(mesh_voice_button, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_flag(mesh_voice_button, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_state(mesh_voice_button, LV_STATE_DISABLED);
+        }
+    }
 }
 
 static void mesh_apply_ble_status(const char *status, int online)
@@ -2412,6 +2438,7 @@ static void mesh_layout_main(void)
     int send_w = ui_is_landscape() ? 90 : 82;
     int canned_w = ui_is_landscape() ? 52 : 56;
     int voice_w = ui_is_landscape() ? 56 : 58;
+    int voice_enabled = mesh_voice_available;
     int input_gap = 8;
     int textarea_w;
 
@@ -2453,15 +2480,27 @@ static void mesh_layout_main(void)
         lv_obj_set_size(mesh_canned_button, canned_w, input_h - 2);
     }
     if(mesh_voice_button && lv_obj_is_valid(mesh_voice_button)) {
-        lv_obj_set_pos(mesh_voice_button, canned_w + input_gap, 0);
-        lv_obj_set_size(mesh_voice_button, voice_w, input_h - 2);
+        if(voice_enabled) {
+            lv_obj_clear_flag(mesh_voice_button, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(mesh_voice_button, canned_w + input_gap, 0);
+            lv_obj_set_size(mesh_voice_button, voice_w, input_h - 2);
+        } else {
+            lv_obj_add_flag(mesh_voice_button, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     if(mesh_textarea && lv_obj_is_valid(mesh_textarea)) {
-        textarea_w = content_w - canned_w - voice_w - send_w - input_gap * 3;
+        int text_x = canned_w + input_gap;
+        int gaps = 2;
+        if(voice_enabled) {
+            text_x += voice_w + input_gap;
+            gaps = 3;
+        }
+        textarea_w = content_w - canned_w - send_w - input_gap * gaps -
+                     (voice_enabled ? voice_w : 0);
         if(textarea_w < 180) {
             textarea_w = 180;
         }
-        lv_obj_set_pos(mesh_textarea, canned_w + voice_w + input_gap * 2, 0);
+        lv_obj_set_pos(mesh_textarea, text_x, 0);
         lv_obj_set_size(mesh_textarea, textarea_w, input_h - 2);
     }
     if(mesh_send_button && lv_obj_is_valid(mesh_send_button)) {
@@ -2493,6 +2532,7 @@ static void mesh_refresh_status(void)
     mesh_apply_ble_status(mesh_status_text, online);
     mesh_check_pairing_code(mesh_status_text, online);
     mesh_sync_profile_from_status(mesh_status_text, online);
+    mesh_update_voice_capability(mesh_status_text, online);
 
     if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
         lv_label_set_text(mesh_status_label,
@@ -8531,6 +8571,10 @@ static int mesh_voice_record_start(const char *source)
     pid_t pid;
     int logfd;
 
+    if(!mesh_voice_available) {
+        mesh_append_log("voice unavailable: LR2021 FLRC required");
+        return -1;
+    }
     if(mesh_voice_record_pid > 0) {
         return 0;
     }
@@ -9093,6 +9137,9 @@ void ui_meshtastic_handle_voice_key(int pressed)
     if(!app_current_page_is(PAGE_MESHTASTIC)) {
         return;
     }
+    if(!mesh_voice_available) {
+        return;
+    }
     if(pressed) {
         (void)mesh_voice_record_start("MIC_KEY");
     } else {
@@ -9294,6 +9341,10 @@ void ui_meshtastic_create(lv_obj_t *scr)
 
     mesh_voice_button = ui_command_button(mesh_input_panel, 0, 0, 58,
                                           ui_tr("Mic"), 0xF59E0B);
+    if(!mesh_voice_available) {
+        lv_obj_add_flag(mesh_voice_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_state(mesh_voice_button, LV_STATE_DISABLED);
+    }
     lv_obj_add_event_cb(mesh_voice_button, mesh_voice_event_cb,
                         LV_EVENT_ALL, NULL);
 

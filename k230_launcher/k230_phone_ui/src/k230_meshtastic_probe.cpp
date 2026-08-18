@@ -111,6 +111,25 @@
     (MESHTASTIC_VOICE_SAMPLE_RATE * 2U * 2U)
 #define MESHTASTIC_VOICE_CHUNK_TARGET_BYTES 220U
 #define MESHTASTIC_VOICE_RX_STREAMS 4U
+#define MESHTASTIC_FLRC_VOICE_MAGIC 0x3156464BU
+#define MESHTASTIC_FLRC_VOICE_TYPE_INVITE 1U
+#define MESHTASTIC_FLRC_VOICE_TYPE_DATA 2U
+#define MESHTASTIC_FLRC_VOICE_TYPE_DONE 3U
+#define MESHTASTIC_FLRC_VOICE_HDR_LEN 32U
+#define MESHTASTIC_FLRC_VOICE_PACKET_LEN 252U
+#define MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN \
+    (MESHTASTIC_FLRC_VOICE_PACKET_LEN - MESHTASTIC_FLRC_VOICE_HDR_LEN)
+#define MESHTASTIC_FLRC_VOICE_FREQ_MHZ 2400.0f
+#define MESHTASTIC_FLRC_VOICE_FREQ_TENTHS 24000U
+#define MESHTASTIC_FLRC_VOICE_BR_KBPS 2600U
+#define MESHTASTIC_FLRC_VOICE_POWER_DBM 8
+#define MESHTASTIC_FLRC_VOICE_PREAMBLE 16U
+#define MESHTASTIC_FLRC_VOICE_SYNC_LEN 4U
+#define MESHTASTIC_FLRC_VOICE_RX_GUARD_MS 2600U
+#define MESHTASTIC_FLRC_VOICE_TX_START_DELAY_US 220000ULL
+#define MESHTASTIC_FLRC_VOICE_PACKET_GAP_US 2500U
+#define MESHTASTIC_FLRC_VOICE_START_REPEAT 3U
+#define MESHTASTIC_FLRC_VOICE_DONE_REPEAT 3U
 #define MESHTASTIC_AIRTIME_CHANNEL_PERIODS 6U
 #define MESHTASTIC_AIRTIME_CHANNEL_PERIOD_US (10ULL * 1000000ULL)
 #define MESHTASTIC_AIRTIME_TX_PERIODS 60U
@@ -1009,15 +1028,22 @@ typedef struct {
 typedef struct {
     std::vector<uint8_t> bytes;
     std::string summary;
+    std::vector<uint8_t> flrc_voice_payload;
     bool rebroadcast = false;
     bool want_ack = false;
     bool routing_ack = false;
     bool phoneapi_origin = false;
+    bool flrc_voice_after_tx = false;
     uint32_t rebroadcast_from = 0;
     uint32_t to_node = 0;
     uint32_t from_node = 0;
     uint32_t packet_id = 0;
     uint32_t ack_request_id = 0;
+    uint32_t flrc_voice_stream_id = 0;
+    uint32_t flrc_voice_duration_ms = 0;
+    uint32_t flrc_voice_payload_crc = 0;
+    uint16_t flrc_voice_total_packets = 0;
+    uint8_t flrc_voice_codec_mode = 0;
     uint8_t channel = 0;
     uint8_t old_hop = 0;
     uint8_t new_hop = 0;
@@ -1063,6 +1089,13 @@ typedef struct {
     bool want_ack = false;
     bool raw_payload = false;
     bool voice = false;
+    bool flrc_voice_after_tx = false;
+    std::vector<uint8_t> flrc_voice_payload;
+    uint32_t flrc_voice_stream_id = 0;
+    uint32_t flrc_voice_duration_ms = 0;
+    uint32_t flrc_voice_payload_crc = 0;
+    uint16_t flrc_voice_total_packets = 0;
+    uint8_t flrc_voice_codec_mode = 0;
     std::string summary;
 } mesh_send_request_t;
 
@@ -1073,6 +1106,11 @@ typedef struct {
     uint32_t reply_id = 0;
     bool want_response = false;
 } mesh_data_proto_t;
+
+static int16_t begin_chip(chip_type_t chip, PhysicalLayer *radio,
+                          SX1262 *sx1262, LR2021 *lr2021,
+                          const probe_profile_t *profile);
+static int start_rx(PhysicalLayer *radio);
 
 typedef struct {
     bool active = false;
@@ -3177,6 +3215,19 @@ static uint32_t get_le32(const uint8_t *src)
 static uint16_t get_le16(const uint8_t *src)
 {
     return (uint16_t)((uint16_t)src[0] | ((uint16_t)src[1] << 8));
+}
+
+static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len)
+{
+    crc ^= 0xFFFFFFFFU;
+    for(size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for(unsigned bit = 0; bit < 8U; bit++) {
+            uint32_t mask = 0U - (crc & 1U);
+            crc = (crc >> 1) ^ (0xEDB88320U & mask);
+        }
+    }
+    return crc ^ 0xFFFFFFFFU;
 }
 
 static uint32_t djb2_hash(const char *text)
@@ -13344,6 +13395,563 @@ static bool mesh_voice_encode_codec2_pcm_file(
     return true;
 }
 
+static bool mesh_voice_encode_codec2_pcm_file_stream(
+    const char *path, std::vector<uint8_t> *payload, unsigned *duration_ms,
+    char *errbuf, size_t errbuf_len)
+{
+    std::vector<std::vector<uint8_t>> chunks;
+
+    if(!payload) {
+        mesh_voice_set_error(errbuf, errbuf_len,
+                             "invalid codec2 stream argument");
+        return false;
+    }
+    if(!mesh_voice_encode_codec2_pcm_file(path, &chunks, duration_ms, errbuf,
+                                          errbuf_len)) {
+        payload->clear();
+        return false;
+    }
+    payload->clear();
+    for(size_t i = 0; i < chunks.size(); i++) {
+        if(!mesh_voice_payload_is_codec2(chunks[i])) {
+            mesh_voice_set_error(errbuf, errbuf_len,
+                                 "codec2 stream chunk header invalid");
+            payload->clear();
+            return false;
+        }
+        if(i == 0U) {
+            payload->insert(payload->end(), chunks[i].begin(), chunks[i].end());
+        } else {
+            payload->insert(payload->end(),
+                            chunks[i].begin() +
+                                MESHTASTIC_VOICE_CODEC2_HEADER_LEN,
+                            chunks[i].end());
+        }
+    }
+    if(payload->empty()) {
+        mesh_voice_set_error(errbuf, errbuf_len, "codec2 stream empty");
+        return false;
+    }
+    return true;
+}
+
+typedef struct {
+    uint8_t type = 0;
+    uint8_t codec_mode = 0;
+    uint16_t payload_len = 0;
+    uint32_t stream_id = 0;
+    uint16_t seq = 0;
+    uint16_t total = 0;
+    uint32_t total_size = 0;
+    uint32_t payload_crc = 0;
+    uint32_t stream_crc = 0;
+    uint32_t duration_ms = 0;
+} mesh_flrc_voice_header_t;
+
+static void mesh_flrc_voice_make_packet(uint8_t *packet, unsigned packet_len,
+                                        uint8_t type, uint32_t stream_id,
+                                        uint16_t seq, uint16_t total,
+                                        const std::vector<uint8_t> &stream,
+                                        const uint8_t *payload,
+                                        uint16_t payload_len,
+                                        uint32_t duration_ms,
+                                        uint8_t codec_mode)
+{
+    uint32_t payload_crc = payload && payload_len > 0U ?
+        crc32_update(0, payload, payload_len) : 0U;
+    uint32_t stream_crc = stream.empty() ? 0U :
+        crc32_update(0, stream.data(), stream.size());
+
+    memset(packet, 0, packet_len);
+    put_le32(packet + 0U, MESHTASTIC_FLRC_VOICE_MAGIC);
+    packet[4] = type;
+    packet[5] = codec_mode;
+    put_le16(packet + 6U, payload_len);
+    put_le32(packet + 8U, stream_id);
+    put_le16(packet + 12U, seq);
+    put_le16(packet + 14U, total);
+    put_le32(packet + 16U, (uint32_t)stream.size());
+    put_le32(packet + 20U, payload_crc);
+    put_le32(packet + 24U, stream_crc);
+    put_le32(packet + 28U, duration_ms);
+    if(payload && payload_len > 0U &&
+       MESHTASTIC_FLRC_VOICE_HDR_LEN + payload_len <= packet_len) {
+        memcpy(packet + MESHTASTIC_FLRC_VOICE_HDR_LEN, payload, payload_len);
+    }
+}
+
+static bool mesh_flrc_voice_parse_packet(const uint8_t *packet,
+                                         unsigned packet_len,
+                                         mesh_flrc_voice_header_t *hdr)
+{
+    if(!packet || !hdr || packet_len < MESHTASTIC_FLRC_VOICE_HDR_LEN ||
+       get_le32(packet + 0U) != MESHTASTIC_FLRC_VOICE_MAGIC) {
+        return false;
+    }
+    hdr->type = packet[4];
+    hdr->codec_mode = packet[5];
+    hdr->payload_len = get_le16(packet + 6U);
+    hdr->stream_id = get_le32(packet + 8U);
+    hdr->seq = get_le16(packet + 12U);
+    hdr->total = get_le16(packet + 14U);
+    hdr->total_size = get_le32(packet + 16U);
+    hdr->payload_crc = get_le32(packet + 20U);
+    hdr->stream_crc = get_le32(packet + 24U);
+    hdr->duration_ms = get_le32(packet + 28U);
+    if(hdr->type < MESHTASTIC_FLRC_VOICE_TYPE_INVITE ||
+       hdr->type > MESHTASTIC_FLRC_VOICE_TYPE_DONE ||
+       hdr->payload_len > packet_len - MESHTASTIC_FLRC_VOICE_HDR_LEN ||
+       hdr->stream_id == 0U || hdr->total == 0U) {
+        return false;
+    }
+    if(hdr->type == MESHTASTIC_FLRC_VOICE_TYPE_DATA &&
+       hdr->seq >= hdr->total) {
+        return false;
+    }
+    if(hdr->payload_len > 0U &&
+       crc32_update(0, packet + MESHTASTIC_FLRC_VOICE_HDR_LEN,
+                    hdr->payload_len) != hdr->payload_crc) {
+        return false;
+    }
+    return true;
+}
+
+static bool mesh_flrc_voice_payload_is_invite(
+    const std::vector<uint8_t> &payload, mesh_flrc_voice_header_t *hdr)
+{
+    mesh_flrc_voice_header_t parsed;
+
+    if(!mesh_flrc_voice_parse_packet(payload.data(),
+                                     (unsigned)payload.size(), &parsed) ||
+       parsed.type != MESHTASTIC_FLRC_VOICE_TYPE_INVITE ||
+       parsed.payload_len != 0U ||
+       parsed.total > 64U ||
+       parsed.total_size == 0U) {
+        return false;
+    }
+    if(hdr) {
+        *hdr = parsed;
+    }
+    return true;
+}
+
+static std::vector<uint8_t> mesh_flrc_voice_make_invite_payload(
+    uint32_t stream_id, const std::vector<uint8_t> &stream,
+    uint32_t duration_ms, uint16_t total_packets, uint8_t codec_mode)
+{
+    std::vector<uint8_t> payload(MESHTASTIC_FLRC_VOICE_HDR_LEN, 0U);
+
+    mesh_flrc_voice_make_packet(payload.data(),
+                                MESHTASTIC_FLRC_VOICE_HDR_LEN,
+                                MESHTASTIC_FLRC_VOICE_TYPE_INVITE,
+                                stream_id, 0U, total_packets, stream,
+                                nullptr, 0U, duration_ms, codec_mode);
+    return payload;
+}
+
+static int mesh_flrc_voice_should_retry_xtal(int16_t state)
+{
+    return state == RADIOLIB_ERR_SPI_CMD_INVALID ||
+           state == RADIOLIB_ERR_SPI_CMD_FAILED;
+}
+
+static int16_t mesh_flrc_voice_set_hf_power(LR2021 *lr2021, int power)
+{
+    int safe_power = power;
+    int16_t state;
+
+    if(!lr2021) {
+        return RADIOLIB_ERR_CHIP_NOT_FOUND;
+    }
+    if(safe_power < -19) {
+        safe_power = -19;
+    }
+    if(safe_power > 9) {
+        safe_power = 9;
+    }
+    state = lr2021->setOutputPower((int8_t)safe_power);
+    if(state == RADIOLIB_ERR_SPI_CMD_INVALID) {
+        return RADIOLIB_ERR_NONE;
+    }
+    return state;
+}
+
+static int16_t mesh_flrc_voice_begin(LR2021 *lr2021)
+{
+    uint8_t sync[MESHTASTIC_FLRC_VOICE_SYNC_LEN] = {0x2D, 0x01, 0x4B, 0x1D};
+    int16_t state;
+
+    if(!lr2021) {
+        return RADIOLIB_ERR_CHIP_NOT_FOUND;
+    }
+    take_radio_events();
+    lr2021->clearPacketReceivedAction();
+    lr2021->clearPacketSentAction();
+    (void)lr2021->standby();
+    lr2021->irqDioNum = LORA_LR2021_IRQ_DIO_NUM;
+    state = lr2021->beginFLRC(MESHTASTIC_FLRC_VOICE_FREQ_MHZ,
+                              MESHTASTIC_FLRC_VOICE_BR_KBPS,
+                              RADIOLIB_LR2021_FLRC_CR_3_4,
+                              MESHTASTIC_FLRC_VOICE_POWER_DBM,
+                              MESHTASTIC_FLRC_VOICE_PREAMBLE,
+                              RADIOLIB_SHAPING_0_5, 3.0f);
+    if(mesh_flrc_voice_should_retry_xtal(state)) {
+        state = lr2021->beginFLRC(MESHTASTIC_FLRC_VOICE_FREQ_MHZ,
+                                  MESHTASTIC_FLRC_VOICE_BR_KBPS,
+                                  RADIOLIB_LR2021_FLRC_CR_3_4,
+                                  MESHTASTIC_FLRC_VOICE_POWER_DBM,
+                                  MESHTASTIC_FLRC_VOICE_PREAMBLE,
+                                  RADIOLIB_SHAPING_0_5, 0.0f);
+    }
+    if(state != RADIOLIB_ERR_NONE &&
+       state != RADIOLIB_ERR_SPI_CMD_INVALID) {
+        return state;
+    }
+    lr2021->setRfSwitchTable(lr2021_16e8_rf_switch_dio_pins,
+                             lr2021_16e8_rf_switch_table);
+    state = mesh_flrc_voice_set_hf_power(lr2021,
+                                         MESHTASTIC_FLRC_VOICE_POWER_DBM);
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+    state = lr2021->setPreambleLength(MESHTASTIC_FLRC_VOICE_PREAMBLE);
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+    state = lr2021->setDataShaping(RADIOLIB_SHAPING_0_5);
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+    state = lr2021->setSyncWord(sync, sizeof(sync));
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+    state = lr2021->fixedPacketLengthMode(MESHTASTIC_FLRC_VOICE_PACKET_LEN);
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+    return lr2021->setCRC(2);
+}
+
+static bool mesh_flrc_voice_restore_lora(chip_type_t chip,
+                                         PhysicalLayer *radio,
+                                         SX1262 *sx1262,
+                                         LR2021 *lr2021,
+                                         const probe_profile_t *profile)
+{
+    int16_t state = begin_chip(chip, radio, sx1262, lr2021, profile);
+
+    if(state != RADIOLIB_ERR_NONE) {
+        daemon_event("FLRC voice restore LoRa failed state=%d %s", state,
+                     error_name(state));
+        return false;
+    }
+    return true;
+}
+
+static int16_t mesh_flrc_voice_fast_transmit(LR2021 *lr2021,
+                                             const uint8_t *packet,
+                                             size_t len)
+{
+    uint64_t start_us;
+    uint64_t timeout_us;
+    int16_t state;
+
+    if(!lr2021 || !packet || len == 0U) {
+        return RADIOLIB_ERR_UNKNOWN;
+    }
+    take_radio_events();
+    lr2021->clearPacketReceivedAction();
+    lr2021->setPacketSentAction(radio_event_isr);
+    (void)lr2021->clearTxFifo();
+    state = lr2021->startTransmit(packet, len);
+    if(state != RADIOLIB_ERR_NONE) {
+        return state;
+    }
+    timeout_us = ((uint64_t)len * 8ULL * 1000ULL) /
+                 MESHTASTIC_FLRC_VOICE_BR_KBPS;
+    timeout_us = timeout_us * 6ULL + 30000ULL;
+    if(timeout_us < 40000ULL) {
+        timeout_us = 40000ULL;
+    }
+    start_us = monotonic_us();
+    while(take_radio_events() == 0U) {
+        if(monotonic_us() - start_us > timeout_us) {
+            (void)lr2021->finishTransmit();
+            return RADIOLIB_ERR_TX_TIMEOUT;
+        }
+        usleep(500);
+    }
+    return lr2021->finishTransmit();
+}
+
+static bool mesh_flrc_voice_tx_session(PhysicalLayer *radio, chip_type_t chip,
+                                       SX1262 *sx1262, LR2021 *lr2021,
+                                       const probe_profile_t *profile,
+                                       const tx_frame_t &frame)
+{
+    uint8_t packet[MESHTASTIC_FLRC_VOICE_PACKET_LEN];
+    uint64_t start_us;
+    uint16_t total = frame.flrc_voice_total_packets;
+    int16_t state;
+    bool ok = true;
+
+    if(chip != CHIP_LR2021 || !lr2021 ||
+       !frame.flrc_voice_after_tx || frame.flrc_voice_payload.empty()) {
+        return false;
+    }
+    active_op = OP_IDLE;
+    usleep(MESHTASTIC_FLRC_VOICE_TX_START_DELAY_US);
+    state = mesh_flrc_voice_begin(lr2021);
+    if(state != RADIOLIB_ERR_NONE) {
+        daemon_chat("TX 0x%08x voice FLRC init failed: %s",
+                    frame.from_node, error_name(state));
+        (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021,
+                                           profile);
+        return true;
+    }
+    daemon_event("FLRC voice TX start stream=0x%08x packets=%u bytes=%u freq=%.1f br=%u power=%d",
+                 frame.flrc_voice_stream_id, total,
+                 (unsigned)frame.flrc_voice_payload.size(),
+                 MESHTASTIC_FLRC_VOICE_FREQ_MHZ,
+                 MESHTASTIC_FLRC_VOICE_BR_KBPS,
+                 MESHTASTIC_FLRC_VOICE_POWER_DBM);
+    start_us = monotonic_us();
+    for(unsigned r = 0; r < MESHTASTIC_FLRC_VOICE_START_REPEAT; r++) {
+        mesh_flrc_voice_make_packet(packet, sizeof(packet),
+                                    MESHTASTIC_FLRC_VOICE_TYPE_INVITE,
+                                    frame.flrc_voice_stream_id, 0U, total,
+                                    frame.flrc_voice_payload, nullptr, 0U,
+                                    frame.flrc_voice_duration_ms,
+                                    frame.flrc_voice_codec_mode);
+        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
+        if(state != RADIOLIB_ERR_NONE) {
+            ok = false;
+            daemon_event("FLRC voice TX invite repeat=%u failed state=%d %s",
+                         r + 1U, state, error_name(state));
+            break;
+        }
+        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+    }
+    for(uint16_t seq = 0U; ok && seq < total; seq++) {
+        size_t offset = (size_t)seq * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN;
+        size_t remain = frame.flrc_voice_payload.size() - offset;
+        uint16_t payload_len =
+            (uint16_t)std::min(remain,
+                               (size_t)MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN);
+
+        mesh_flrc_voice_make_packet(packet, sizeof(packet),
+                                    MESHTASTIC_FLRC_VOICE_TYPE_DATA,
+                                    frame.flrc_voice_stream_id, seq, total,
+                                    frame.flrc_voice_payload,
+                                    frame.flrc_voice_payload.data() + offset,
+                                    payload_len,
+                                    frame.flrc_voice_duration_ms,
+                                    frame.flrc_voice_codec_mode);
+        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
+        if(state != RADIOLIB_ERR_NONE) {
+            ok = false;
+            daemon_event("FLRC voice TX data seq=%u/%u failed state=%d %s",
+                         seq + 1U, total, state, error_name(state));
+            break;
+        }
+        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+    }
+    for(unsigned r = 0; ok && r < MESHTASTIC_FLRC_VOICE_DONE_REPEAT; r++) {
+        mesh_flrc_voice_make_packet(packet, sizeof(packet),
+                                    MESHTASTIC_FLRC_VOICE_TYPE_DONE,
+                                    frame.flrc_voice_stream_id, total - 1U,
+                                    total, frame.flrc_voice_payload, nullptr,
+                                    0U, frame.flrc_voice_duration_ms,
+                                    frame.flrc_voice_codec_mode);
+        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
+        if(state != RADIOLIB_ERR_NONE) {
+            ok = false;
+            daemon_event("FLRC voice TX done repeat=%u failed state=%d %s",
+                         r + 1U, state, error_name(state));
+            break;
+        }
+        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+    }
+    if(ok) {
+        uint64_t elapsed_ms = (monotonic_us() - start_us) / 1000ULL;
+        mesh_voice_tx_stream_count++;
+        mesh_voice_tx_chunk_count += total;
+        daemon_chat("TX 0x%08x voice %.1fs codec=codec2-flrc packets=%u elapsed=%lums sent",
+                    frame.from_node,
+                    (double)frame.flrc_voice_duration_ms / 1000.0,
+                    total, (unsigned long)elapsed_ms);
+        daemon_event("FLRC voice TX done stream=0x%08x elapsed_ms=%lu",
+                     frame.flrc_voice_stream_id, (unsigned long)elapsed_ms);
+    } else {
+        mesh_voice_rx_decode_fail_count++;
+        daemon_chat("TX 0x%08x voice FLRC failed stream=0x%08x",
+                    frame.from_node, frame.flrc_voice_stream_id);
+    }
+    (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021, profile);
+    return true;
+}
+
+static bool mesh_flrc_voice_rx_session(const probe_options_t &opts,
+                                       PhysicalLayer *radio,
+                                       chip_type_t chip, SX1262 *sx1262,
+                                       LR2021 *lr2021,
+                                       const probe_profile_t *profile,
+                                       const mesh_header_t &mesh_header,
+                                       const mesh_flrc_voice_header_t &invite,
+                                       float control_rssi)
+{
+    uint8_t packet[MESHTASTIC_FLRC_VOICE_PACKET_LEN];
+    std::vector<std::vector<uint8_t>> chunks;
+    std::vector<uint8_t> received;
+    std::vector<uint8_t> stream;
+    uint64_t timeout_us;
+    uint64_t start_us;
+    uint16_t received_count = 0U;
+    int16_t state;
+
+    if(chip != CHIP_LR2021 || !lr2021) {
+        daemon_event("FLRC voice invite ignored from=0x%08x reason=not-lr2021 chip=%s",
+                     mesh_header.from, chip_name(chip));
+        return false;
+    }
+    if(invite.total == 0U || invite.total > 64U ||
+       invite.total_size == 0U ||
+       invite.total_size >
+       invite.total * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN) {
+        daemon_event("FLRC voice invite invalid from=0x%08x stream=0x%08x packets=%u size=%u",
+                     mesh_header.from, invite.stream_id, invite.total,
+                     invite.total_size);
+        return false;
+    }
+    active_op = OP_IDLE;
+    state = mesh_flrc_voice_begin(lr2021);
+    if(state != RADIOLIB_ERR_NONE) {
+        daemon_chat("RX 0x%08x voice FLRC init failed: %s",
+                    mesh_header.from, error_name(state));
+        (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021,
+                                           profile);
+        return true;
+    }
+    chunks.assign(invite.total, std::vector<uint8_t>());
+    received.assign(invite.total, 0U);
+    timeout_us = ((uint64_t)invite.duration_ms +
+                  MESHTASTIC_FLRC_VOICE_RX_GUARD_MS) * 1000ULL;
+    if(timeout_us < 5000000ULL) {
+        timeout_us = 5000000ULL;
+    }
+    start_us = monotonic_us();
+    daemon_event("FLRC voice RX window from=0x%08x stream=0x%08x packets=%u bytes=%u timeout_ms=%lu control_rssi=%.1f",
+                 mesh_header.from, invite.stream_id, invite.total,
+                 invite.total_size, (unsigned long)(timeout_us / 1000ULL),
+                 control_rssi);
+    while(monotonic_us() - start_us < timeout_us &&
+          received_count < invite.total) {
+        mesh_flrc_voice_header_t hdr;
+        size_t payload_len;
+
+        take_radio_events();
+        lr2021->clearPacketSentAction();
+        lr2021->setPacketReceivedAction(radio_event_isr);
+        state = lr2021->startReceive(RADIOLIB_LR2021_RX_TIMEOUT_INF,
+                                     RADIOLIB_IRQ_RX_DEFAULT_FLAGS,
+                                     RADIOLIB_IRQ_RX_DEFAULT_MASK,
+                                     MESHTASTIC_FLRC_VOICE_PACKET_LEN);
+        if(state != RADIOLIB_ERR_NONE) {
+            daemon_event("FLRC voice RX start failed state=%d %s",
+                         state, error_name(state));
+            break;
+        }
+        while(take_radio_events() == 0U) {
+            if(monotonic_us() - start_us >= timeout_us) {
+                break;
+            }
+            usleep(1000);
+        }
+        if(monotonic_us() - start_us >= timeout_us) {
+            (void)lr2021->standby();
+            break;
+        }
+        state = lr2021->readData(packet, MESHTASTIC_FLRC_VOICE_PACKET_LEN);
+        (void)lr2021->finishReceive();
+        if(state != RADIOLIB_ERR_NONE) {
+            daemon_event("FLRC voice RX read failed state=%d %s",
+                         state, error_name(state));
+            continue;
+        }
+        if(!mesh_flrc_voice_parse_packet(packet,
+                                         MESHTASTIC_FLRC_VOICE_PACKET_LEN,
+                                         &hdr) ||
+           hdr.stream_id != invite.stream_id ||
+           hdr.total != invite.total) {
+            continue;
+        }
+        if(hdr.type == MESHTASTIC_FLRC_VOICE_TYPE_DONE) {
+            daemon_event("FLRC voice RX done marker stream=0x%08x received=%u/%u",
+                         invite.stream_id, received_count, invite.total);
+            continue;
+        }
+        if(hdr.type != MESHTASTIC_FLRC_VOICE_TYPE_DATA ||
+           hdr.seq >= invite.total || received[hdr.seq]) {
+            continue;
+        }
+        payload_len = hdr.payload_len;
+        chunks[hdr.seq].assign(packet + MESHTASTIC_FLRC_VOICE_HDR_LEN,
+                               packet + MESHTASTIC_FLRC_VOICE_HDR_LEN +
+                                   payload_len);
+        received[hdr.seq] = 1U;
+        received_count++;
+        mesh_voice_rx_chunk_count++;
+        daemon_event("FLRC voice RX data stream=0x%08x seq=%u/%u len=%u rssi=%.1f",
+                     invite.stream_id, hdr.seq + 1U, invite.total,
+                     (unsigned)payload_len, lr2021->getRSSI());
+    }
+    (void)lr2021->standby();
+    if(received_count == invite.total) {
+        char path[128];
+        char errbuf[128];
+        unsigned duration_ms = 0U;
+
+        stream.reserve(invite.total_size);
+        for(uint16_t seq = 0U; seq < invite.total; seq++) {
+            stream.insert(stream.end(), chunks[seq].begin(), chunks[seq].end());
+        }
+        if(stream.size() > invite.total_size) {
+            stream.resize(invite.total_size);
+        }
+        if((uint32_t)stream.size() == invite.total_size &&
+           crc32_update(0, stream.data(), stream.size()) == invite.stream_crc) {
+            snprintf(path, sizeof(path),
+                     "/tmp/k230_mesh_voice_rx_%08x_%08x.raw",
+                     mesh_header.from, invite.stream_id);
+            if(mesh_voice_decode_codec2_payload_to_file(stream, path,
+                                                        &duration_ms,
+                                                        errbuf,
+                                                        sizeof(errbuf))) {
+                mesh_voice_rx_complete_count++;
+                daemon_chat("RX 0x%08x voice %.1fs codec=codec2-flrc packets=%u rssi=%ddBm file=%s",
+                            mesh_header.from,
+                            (double)duration_ms / 1000.0,
+                            invite.total, (int)roundf(control_rssi), path);
+            } else {
+                mesh_voice_rx_decode_fail_count++;
+                daemon_chat("RX 0x%08x FLRC voice decode failed: %s",
+                            mesh_header.from, errbuf);
+            }
+        } else {
+            mesh_voice_rx_decode_fail_count++;
+            daemon_chat("RX 0x%08x FLRC voice crc failed packets=%u/%u",
+                        mesh_header.from, received_count, invite.total);
+        }
+    } else {
+        mesh_voice_rx_decode_fail_count++;
+        daemon_chat("RX 0x%08x FLRC voice incomplete packets=%u/%u",
+                    mesh_header.from, received_count, invite.total);
+    }
+    (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021, profile);
+    return true;
+}
+
 static uint32_t mesh_voice_estimate_chunks_airtime_ms(
     PhysicalLayer *radio, const probe_options_t &opts, uint32_t portnum,
     const std::vector<std::vector<uint8_t>> &chunks)
@@ -13464,9 +14072,12 @@ static bool mesh_decode_payload_for_pki(
     return true;
 }
 
-static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
-                            size_t len, float rssi, float snr,
-                            tx_frame_t *rebroadcast_frame)
+static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
+                            chip_type_t chip, SX1262 *sx1262,
+                            LR2021 *lr2021,
+                            const probe_profile_t *profile,
+                            const uint8_t *data, size_t len, float rssi,
+                            float snr, tx_frame_t *rebroadcast_frame)
 {
     mesh_header_t header;
     mesh_channel_match_t channel_info;
@@ -13641,6 +14252,25 @@ static bool process_mesh_rx(const probe_options_t &opts, const uint8_t *data,
                     daemon_chat("RX 0x%08x codec2 voice invalid-header len=%u",
                                 header.from,
                                 (unsigned)decoded.payload.size());
+                }
+            }
+        } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
+                  mesh_flrc_voice_payload_is_invite(decoded.payload,
+                                                    nullptr)) {
+            mesh_flrc_voice_header_t invite;
+
+            if(mesh_flrc_voice_payload_is_invite(decoded.payload, &invite)) {
+                daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u flrc_voice_invite stream=0x%08x packets=%u bytes=%u%s",
+                             (unsigned long)rx_count, header.from, header.to,
+                             header.id, header.channel, hop_limit, hop_start,
+                             rssi, snr, decoded.portnum, invite.stream_id,
+                             invite.total, invite.total_size,
+                             duplicate ? " duplicate" : "");
+                if(!duplicate && secure_match &&
+                   header.from != opts.from_node) {
+                    (void)mesh_flrc_voice_rx_session(
+                        opts, radio, chip, sx1262, lr2021, profile, header,
+                        invite, rssi);
                 }
             }
         } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
@@ -14014,6 +14644,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
     float channel_util = mesh_airtime_channel_util_percent();
     float air_tx = mesh_airtime_tx_util_percent();
     float duty_cycle = meshtastic_region_duty_cycle_percent(opts);
+    const char *voice_mode = chip == CHIP_LR2021 ? "flrc" : "disabled";
 
     if(opts.position_enabled &&
        (!mesh_gnss.has_fix || strcmp(mesh_gnss.gps_state, "fix") != 0)) {
@@ -14054,6 +14685,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "delayed=%u next_rebroadcast_ms=%u "
              "ack_pending=%u ack_next_ms=%u ack_rx=%lu nak_rx=%lu "
              "ack_retry=%lu ack_timeout=%lu ack_drop=%lu "
+             "voice=%s voice_freq=%.1f voice_br=%u voice_power=%d "
              "voice_tx_streams=%lu voice_tx_chunks=%lu voice_rx_chunks=%lu "
              "voice_rx_complete=%lu voice_rx_decode_fail=%lu "
              "ch_util=%.1f air_tx=%.2f duty=%.1f air_tx_ms=%lu air_rx_ms=%lu "
@@ -14087,6 +14719,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_ack_retry_count,
              (unsigned long)mesh_ack_timeout_count,
              (unsigned long)mesh_ack_drop_count,
+             voice_mode, MESHTASTIC_FLRC_VOICE_FREQ_MHZ,
+             MESHTASTIC_FLRC_VOICE_BR_KBPS,
+             MESHTASTIC_FLRC_VOICE_POWER_DBM,
              (unsigned long)mesh_voice_tx_stream_count,
              (unsigned long)mesh_voice_tx_chunk_count,
              (unsigned long)mesh_voice_rx_chunk_count,
@@ -15102,19 +15737,18 @@ static std::string handle_daemon_command(const std::string &line,
     }
     if(line.compare(0, 16, "SEND_VOICE_FILE ") == 0 ||
        line.compare(0, 16, "send_voice_file ") == 0) {
-        std::vector<std::vector<uint8_t>> chunks;
-        char errbuf[128];
+        std::vector<uint8_t> codec2_stream;
+        std::vector<uint8_t> invite_payload;
         char codec2_errbuf[128];
-        char buf[160];
+        char buf[192];
         uint32_t stream_id;
-        uint32_t estimated_airtime_ms = 0U;
-        uint32_t voice_portnum = MESHTASTIC_AUDIO_APP;
+        uint16_t total_packets;
+        uint32_t stream_crc;
         const char *path_arg = line.c_str() + 16;
         std::string path = trim_ipc_line(path_arg);
-        struct stat voice_st;
         double voice_seconds = 0.0;
-        const char *voice_codec = "codec2";
         unsigned codec2_duration_ms = 0U;
+        mesh_send_request_t request;
 
         if(!opts.mesh_mode) {
             return "ERR mesh-disabled\n";
@@ -15129,78 +15763,70 @@ static std::string handle_daemon_command(const std::string &line,
            MESHTASTIC_CHANNEL_ROLE_DISABLED) {
             return "ERR channel-disabled\n";
         }
+        if(chip != CHIP_LR2021 || !active_lr2021) {
+            daemon_event("Daemon SEND_VOICE rejected path=%s chip=%s reason=flrc-needs-lr2021",
+                         path.c_str(), chip_name(chip));
+            return "ERR voice-requires-lr2021-flrc\n";
+        }
         stream_id = (uint32_t)(monotonic_us() & 0xffffffffU) ^ ++seq_count;
         if(stream_id == 0U) {
             stream_id = 1U;
         }
-        if(mesh_voice_encode_codec2_pcm_file(path.c_str(), &chunks,
-                                             &codec2_duration_ms,
-                                             codec2_errbuf,
-                                             sizeof(codec2_errbuf))) {
-            voice_seconds = (double)codec2_duration_ms / 1000.0;
-        } else {
-            daemon_event("Daemon SEND_VOICE codec2 encode failed path=%s reason=%s; falling back to opus-private",
+        if(!mesh_voice_encode_codec2_pcm_file_stream(path.c_str(),
+                                                     &codec2_stream,
+                                                     &codec2_duration_ms,
+                                                     codec2_errbuf,
+                                                     sizeof(codec2_errbuf))) {
+            daemon_event("Daemon SEND_VOICE codec2 stream encode failed path=%s reason=%s",
                          path.c_str(), codec2_errbuf);
-            voice_portnum = MESHTASTIC_PRIVATE_APP;
-            voice_codec = "opus";
-            if(!mesh_voice_encode_pcm_file(path.c_str(), stream_id, &chunks,
-                                           errbuf, sizeof(errbuf))) {
-                daemon_event("Daemon SEND_VOICE encode failed path=%s reason=%s",
-                             path.c_str(), errbuf);
-                snprintf(buf, sizeof(buf), "ERR voice-encode %s\n", errbuf);
-                return std::string(buf);
-            }
-        }
-        estimated_airtime_ms =
-            mesh_voice_estimate_chunks_airtime_ms(radio, opts, voice_portnum,
-                                                  chunks);
-        if(!mesh_airtime_allowed(opts, estimated_airtime_ms, true,
-                                 errbuf, sizeof(errbuf))) {
-            daemon_event("Daemon SEND_VOICE airtime rejected path=%s chunks=%u airtime_ms=%u reason=%s",
-                         path.c_str(), (unsigned)chunks.size(),
-                         estimated_airtime_ms, errbuf);
-            snprintf(buf, sizeof(buf), "ERR voice-airtime %s\n", errbuf);
+            snprintf(buf, sizeof(buf), "ERR voice-encode %s\n",
+                     codec2_errbuf);
             return std::string(buf);
         }
-        if(voice_seconds <= 0.0 &&
-           stat(path.c_str(), &voice_st) == 0 && voice_st.st_size > 0) {
-            voice_seconds = (double)std::min((off_t)MESHTASTIC_VOICE_MAX_PCM_BYTES,
-                                             voice_st.st_size) /
-                            (double)(MESHTASTIC_VOICE_SAMPLE_RATE * 2U);
+        total_packets = (uint16_t)((codec2_stream.size() +
+                                    MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN - 1U) /
+                                   MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN);
+        if(total_packets == 0U || total_packets > 64U) {
+            daemon_event("Daemon SEND_VOICE FLRC packet count invalid stream=0x%08x packets=%u bytes=%u",
+                         stream_id, total_packets,
+                         (unsigned)codec2_stream.size());
+            return "ERR voice-too-large\n";
         }
-        if(send_queue->size() + chunks.size() >
-           MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
-            daemon_event("Daemon SEND_VOICE queue full chunks=%u depth=%u",
-                         (unsigned)chunks.size(),
+        if(send_queue->size() >= MESHTASTIC_DAEMON_SEND_QUEUE_MAX) {
+            daemon_event("Daemon SEND_VOICE invite queue full depth=%u",
                          (unsigned)send_queue->size());
             return "ERR queue-full\n";
         }
-        for(size_t i = 0; i < chunks.size(); i++) {
-            mesh_send_request_t request;
-            request.raw_payload = true;
-            request.voice = true;
-            request.portnum = voice_portnum;
-            request.payload = chunks[i];
-            request.channel_index = 0U;
-            request.summary = voice_codec;
-            request.summary += "-voice";
-            send_queue->push_back(request);
-        }
-        mesh_voice_tx_stream_count++;
-        mesh_voice_tx_chunk_count += chunks.size();
-        daemon_chat("TX 0x%08x voice %.1fs codec=%s packets=%u airtime=%.1fs queued",
-                    opts.from_node, voice_seconds, voice_codec,
-                    (unsigned)chunks.size(),
-                    (double)estimated_airtime_ms / 1000.0);
-        daemon_event("Daemon SEND_VOICE queued stream=0x%08x codec=%s port=%u chunks=%u airtime_ms=%u depth=%u op=%s",
-                     stream_id, voice_codec, voice_portnum,
-                     (unsigned)chunks.size(),
-                     estimated_airtime_ms, (unsigned)send_queue->size(),
+        voice_seconds = (double)codec2_duration_ms / 1000.0;
+        stream_crc = crc32_update(0, codec2_stream.data(),
+                                  codec2_stream.size());
+        invite_payload = mesh_flrc_voice_make_invite_payload(
+            stream_id, codec2_stream, codec2_duration_ms, total_packets,
+            MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE);
+        request.raw_payload = true;
+        request.voice = true;
+        request.portnum = MESHTASTIC_PRIVATE_APP;
+        request.payload = invite_payload;
+        request.channel_index = 0U;
+        request.summary = "codec2-flrc-voice-invite";
+        request.flrc_voice_after_tx = true;
+        request.flrc_voice_payload = codec2_stream;
+        request.flrc_voice_stream_id = stream_id;
+        request.flrc_voice_duration_ms = codec2_duration_ms;
+        request.flrc_voice_payload_crc = stream_crc;
+        request.flrc_voice_total_packets = total_packets;
+        request.flrc_voice_codec_mode = MESHTASTIC_VOICE_CODEC2_DEFAULT_MODE;
+        send_queue->push_back(request);
+        daemon_chat("TX 0x%08x voice %.1fs codec=codec2-flrc packets=%u queued",
+                    opts.from_node, voice_seconds, total_packets);
+        daemon_event("Daemon SEND_VOICE queued stream=0x%08x codec=codec2-flrc control=mesh-private packets=%u bytes=%u crc=0x%08x depth=%u op=%s",
+                     stream_id, total_packets,
+                     (unsigned)codec2_stream.size(), stream_crc,
+                     (unsigned)send_queue->size(),
                      op_name(active_op));
         snprintf(buf, sizeof(buf),
-                 "OK voice queued codec=%s stream=0x%08x packets=%u airtime_ms=%u depth=%u\n",
-                 voice_codec, stream_id, (unsigned)chunks.size(),
-                 estimated_airtime_ms,
+                 "OK voice queued codec=codec2-flrc stream=0x%08x packets=%u bytes=%u depth=%u\n",
+                 stream_id, total_packets, (unsigned)codec2_stream.size(),
                  (unsigned)send_queue->size());
         return std::string(buf);
     }
@@ -16286,7 +16912,10 @@ static int start_tx(PhysicalLayer *radio, const tx_frame_t &frame)
     return 0;
 }
 
-static void handle_rx_event(PhysicalLayer *radio, const probe_options_t &opts)
+static void handle_rx_event(PhysicalLayer *radio, const probe_options_t &opts,
+                            chip_type_t chip, SX1262 *sx1262,
+                            LR2021 *lr2021,
+                            const probe_profile_t *profile)
 {
     uint8_t data[MESHTASTIC_MAX_LORA_PAYLOAD_LEN + 1U];
     tx_frame_t followup_frame;
@@ -16314,8 +16943,9 @@ static void handle_rx_event(PhysicalLayer *radio, const probe_options_t &opts)
         (void)radio->finishReceive();
         rx_count++;
         if(opts.mesh_mode) {
-            rebroadcast_pending = process_mesh_rx(opts, data, len, rssi, snr,
-                                                  &followup_frame);
+            rebroadcast_pending = process_mesh_rx(opts, radio, chip, sx1262,
+                                                  lr2021, profile, data, len,
+                                                  rssi, snr, &followup_frame);
         } else {
             for(size_t i = 0; i < len; i++) {
                 if(data[i] < 32U || data[i] > 126U) {
@@ -16341,14 +16971,23 @@ static void handle_rx_event(PhysicalLayer *radio, const probe_options_t &opts)
     (void)start_rx(radio);
 }
 
-static void handle_tx_event(PhysicalLayer *radio)
+static void handle_tx_event(PhysicalLayer *radio, const probe_options_t &opts,
+                            chip_type_t chip, SX1262 *sx1262,
+                            LR2021 *lr2021,
+                            const probe_profile_t *profile)
 {
     int16_t state;
+    tx_frame_t finished_frame;
+    bool finished_frame_valid;
+    bool flrc_session_ran = false;
 
     if(!radio || active_op != OP_TX) {
         return;
     }
 
+    (void)opts;
+    finished_frame = active_tx_frame;
+    finished_frame_valid = active_tx_frame_valid;
     state = radio->finishTransmit();
     active_op = OP_IDLE;
     if(active_lr2021) {
@@ -16369,6 +17008,10 @@ static void handle_tx_event(PhysicalLayer *radio)
             (void)daemon_chat_update_tx_status(active_tx_frame.packet_id,
                                                "sent");
         }
+        if(finished_frame_valid && finished_frame.flrc_voice_after_tx) {
+            flrc_session_ran = mesh_flrc_voice_tx_session(
+                radio, chip, sx1262, lr2021, profile, finished_frame);
+        }
     } else {
         fprintf(stderr, "TX finish failed: %d %s\n", state, error_name(state));
         if(active_tx_frame_valid) {
@@ -16378,15 +17021,22 @@ static void handle_tx_event(PhysicalLayer *radio)
     }
     active_tx_airtime_ms = 0U;
     active_tx_frame_valid = false;
-    (void)start_rx(radio);
+    if(!flrc_session_ran) {
+        (void)start_rx(radio);
+    } else if(active_op != OP_RX) {
+        (void)start_rx(radio);
+    }
 }
 
-static void handle_radio_event(PhysicalLayer *radio, const probe_options_t &opts)
+static void handle_radio_event(PhysicalLayer *radio, const probe_options_t &opts,
+                               chip_type_t chip, SX1262 *sx1262,
+                               LR2021 *lr2021,
+                               const probe_profile_t *profile)
 {
     if(active_op == OP_TX) {
-        handle_tx_event(radio);
+        handle_tx_event(radio, opts, chip, sx1262, lr2021, profile);
     } else if(active_op == OP_RX) {
-        handle_rx_event(radio, opts);
+        handle_rx_event(radio, opts, chip, sx1262, lr2021, profile);
     }
 }
 
@@ -16687,7 +17337,8 @@ int main(int argc, char **argv)
         }
 
         if(events > 0U) {
-            handle_radio_event(radio, opts);
+            handle_radio_event(radio, opts, chip, sx1262, lr2021,
+                               &opts.profile);
             if(active_op != OP_TX && !opts.auto_tx && send_once_started &&
                !send_once_finished &&
                (!send_once_awaiting_ack || mesh_ack_pending_count() == 0U)) {
@@ -17059,6 +17710,21 @@ int main(int argc, char **argv)
                                     request.portnum == MESHTASTIC_NODEINFO_APP ||
                                     request.portnum == MESHTASTIC_TELEMETRY_APP));
 
+                    if(request.flrc_voice_after_tx) {
+                        frame.flrc_voice_after_tx = true;
+                        frame.flrc_voice_payload = request.flrc_voice_payload;
+                        frame.flrc_voice_stream_id =
+                            request.flrc_voice_stream_id;
+                        frame.flrc_voice_duration_ms =
+                            request.flrc_voice_duration_ms;
+                        frame.flrc_voice_payload_crc =
+                            request.flrc_voice_payload_crc;
+                        frame.flrc_voice_total_packets =
+                            request.flrc_voice_total_packets;
+                        frame.flrc_voice_codec_mode =
+                            request.flrc_voice_codec_mode;
+                    }
+
                     if(!mesh_frame_airtime_allowed(radio, tx_opts, frame,
                                                    polite,
                                                    errbuf, sizeof(errbuf),
@@ -17259,7 +17925,8 @@ int main(int argc, char **argv)
         if(active_op == OP_TX &&
            elapsed_after(now, active_op_start_us,
                          tx_poll_finish_delay_us(active_tx_len))) {
-            handle_tx_event(radio);
+            handle_tx_event(radio, opts, chip, sx1262, lr2021,
+                            &opts.profile);
             if(send_once_started &&
                (!send_once_awaiting_ack || mesh_ack_pending_count() == 0U)) {
                 send_once_finished = true;
