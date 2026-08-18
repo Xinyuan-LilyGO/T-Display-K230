@@ -98,6 +98,8 @@
 #define MESHTASTIC_WAYPOINT_CACHE_SIZE 16U
 #define MESHTASTIC_PACKET_HISTORY_SIZE 64U
 #define MESHTASTIC_PACKET_HISTORY_TTL_US (30ULL * 60ULL * 1000000ULL)
+#define MESHTASTIC_NODE_ACTIVE_5M_S 300U
+#define MESHTASTIC_NODE_ACTIVE_15M_S 900U
 #define MESHTASTIC_CHAT_DEDUP_SIZE 16U
 #define MESHTASTIC_CHAT_DEDUP_TTL_US (45ULL * 1000000ULL)
 #define MESHTASTIC_VOICE_MAGIC "KPV1"
@@ -17086,6 +17088,9 @@ static std::string daemon_map_response(const probe_options_t &opts,
     uint64_t now = monotonic_us();
     uint64_t last_nmea_ms = 0ULL;
     size_t positioned_count = 0U;
+    size_t active_5m_count = 0U;
+    size_t active_15m_count = 0U;
+    size_t stale_count = 0U;
     size_t visible_waypoints = 0U;
     double self_lat = 0.0;
     double self_lon = 0.0;
@@ -17098,8 +17103,17 @@ static std::string daemon_map_response(const probe_options_t &opts,
         last_nmea_ms = (now - mesh_gnss.last_nmea_us) / 1000ULL;
     }
     for(size_t i = 0; i < mesh_node_count; i++) {
+        uint32_t age_s = mesh_node_age_seconds(mesh_nodes[i]);
         if(mesh_nodes[i].has_position) {
             positioned_count++;
+        }
+        if(age_s <= MESHTASTIC_NODE_ACTIVE_5M_S) {
+            active_5m_count++;
+        }
+        if(age_s <= MESHTASTIC_NODE_ACTIVE_15M_S) {
+            active_15m_count++;
+        } else {
+            stale_count++;
         }
     }
     for(size_t i = 0; i < mesh_waypoint_count; i++) {
@@ -17127,12 +17141,15 @@ static std::string daemon_map_response(const probe_options_t &opts,
 
     snprintf(line, sizeof(line),
              "OK map version=1 chip=%s nodes=%u positioned=%u waypoints=%u "
+             "active_5m=%u active_15m=%u stale=%u "
              "nrf9151=%s gps=%s phase=%s lat=%.7f lon=%.7f sats=%u "
              "gnss_sats_seen=%u "
              "nmea_rx=%lu nmea_valid=%lu nmea_nofix=%lu last_nmea_ms=%lu "
              "ttff_ms=%lu ttff_valid=%s\n",
              chip_name(chip), (unsigned)mesh_node_count,
              (unsigned)positioned_count, (unsigned)visible_waypoints,
+             (unsigned)active_5m_count, (unsigned)active_15m_count,
+             (unsigned)stale_count,
              mesh_gnss.modem_state, mesh_gnss.gps_state,
              nrf9151_gnss_phase(), self_has_pos ? self_lat : 0.0,
              self_has_pos ? self_lon : 0.0,

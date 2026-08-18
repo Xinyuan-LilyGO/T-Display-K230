@@ -7130,7 +7130,8 @@ static int mesh_map_build_legacy_waypoints(const char *map_text, char *out,
 }
 
 static int mesh_fetch_legacy_nodes(char *nodes_text, size_t nodes_len,
-                                   char *error_text, size_t error_len)
+                                   char *error_text, size_t error_len,
+                                   char *map_status, size_t map_status_len)
 {
     char map_response[MESHTASTIC_MAP_RESPONSE_MAX];
     char response[8192];
@@ -7141,12 +7142,19 @@ static int mesh_fetch_legacy_nodes(char *nodes_text, size_t nodes_len,
     if(error_text && error_len > 0U) {
         error_text[0] = '\0';
     }
+    if(map_status && map_status_len > 0U) {
+        map_status[0] = '\0';
+    }
     if(!nodes_text || nodes_len == 0U) {
         return -1;
     }
     if(mesh_ipc_command("MAP\n", map_response, sizeof(map_response)) == 0 &&
        strncmp(map_response, "OK map", 6) == 0 &&
        mesh_map_build_legacy_nodes(map_response, nodes_text, nodes_len) >= 0) {
+        if(map_status && map_status_len > 0U) {
+            (void)mesh_map_extract_first_line(map_response, map_status,
+                                             map_status_len);
+        }
         return 0;
     }
     if(mesh_ipc_command("NODES\n", response, sizeof(response)) != 0) {
@@ -9540,7 +9548,8 @@ static void mesh_detector_event_cb(lv_event_t *event)
         snprintf(status, sizeof(status), "%s", "ERR offline");
     }
     if(mesh_fetch_legacy_nodes(nodes_text, sizeof(nodes_text),
-                               nodes_response, sizeof(nodes_response)) != 0) {
+                               nodes_response, sizeof(nodes_response),
+                               NULL, 0) != 0) {
         ui_trim_text(nodes_response);
         mesh_append_log("detector nodes failed: %s", nodes_response);
         nodes_text[0] = '\0';
@@ -9912,6 +9921,7 @@ static void mesh_nodes_event_cb(lv_event_t *event)
 {
     char response[8192];
     char nodes_text[8192];
+    char map_status[512];
     mesh_detector_node_t nodes[MESHTASTIC_UI_NODE_SELECT_MAX];
     char *saveptr = NULL;
     char *line;
@@ -9944,7 +9954,8 @@ static void mesh_nodes_event_cb(lv_event_t *event)
     (void)event;
     ui_input_hide_inline_active();
     if(mesh_fetch_legacy_nodes(nodes_text, sizeof(nodes_text),
-                               response, sizeof(response)) != 0) {
+                               response, sizeof(response),
+                               map_status, sizeof(map_status)) != 0) {
         ui_trim_text(response);
         mesh_append_log("nodes failed: %s", response);
         return;
@@ -9968,9 +9979,25 @@ static void mesh_nodes_event_cb(lv_event_t *event)
         line = strtok_r(NULL, "\n", &saveptr);
     }
     mesh_detector_sort_nodes(nodes, shown_count);
-    snprintf(subtitle_text, sizeof(subtitle_text), "%s  15m %d / db %d",
-             ui_tr("Recently active mesh nodes; tap one for direct messages"),
-             recent_count, db_count);
+    if(map_status[0]) {
+        char active_5m_text[16];
+        char active_15m_text[16];
+        char stale_text[16];
+        mesh_status_field(map_status, "active_5m", active_5m_text,
+                          sizeof(active_5m_text), "-");
+        mesh_status_field(map_status, "active_15m", active_15m_text,
+                          sizeof(active_15m_text), "-");
+        mesh_status_field(map_status, "stale", stale_text,
+                          sizeof(stale_text), "-");
+        snprintf(subtitle_text, sizeof(subtitle_text),
+                 "%s  5m %s / 15m %s / db %d / stale %s",
+                 ui_tr("Recently active mesh nodes; tap one for direct messages"),
+                 active_5m_text, active_15m_text, db_count, stale_text);
+    } else {
+        snprintf(subtitle_text, sizeof(subtitle_text), "%s  15m %d / db %d",
+                 ui_tr("Recently active mesh nodes; tap one for direct messages"),
+                 recent_count, db_count);
+    }
 
     if(mesh_nodes_overlay && lv_obj_is_valid(mesh_nodes_overlay)) {
         lv_obj_delete(mesh_nodes_overlay);
