@@ -48,6 +48,7 @@
 #define LORA_SPI_SPEED_HZ 4000000U
 #define MESHTASTIC_DAEMON_SEND_QUEUE_MAX 16U
 #define MESHTASTIC_DAEMON_REQUEST_QUEUE_MAX 8U
+#define MESHTASTIC_REMOTE_STATUS_HISTORY_MAX 16U
 #define LORA_PIN_CS 14U
 #define LORA_PIN_RST 5U
 #define LORA_PIN_BUSY 19U
@@ -916,6 +917,7 @@ typedef struct {
     bool client_request_telemetry = false;
     bool client_request_traceroute = false;
     bool client_request_neighborinfo = false;
+    bool client_request_status = false;
     std::string client_request_target;
     bool client_import_node_key = false;
     std::string client_import_node;
@@ -1118,7 +1120,19 @@ typedef enum {
 typedef struct {
     mesh_remote_request_type_t type = MESH_REMOTE_REQ_NODEINFO;
     uint32_t to_node = 0;
+    uint32_t request_id = 0;
 } mesh_remote_request_t;
+
+typedef struct {
+    mesh_remote_request_type_t type = MESH_REMOTE_REQ_NODEINFO;
+    uint32_t to_node = 0;
+    uint32_t request_id = 0;
+    uint32_t airtime_ms = 0;
+    uint64_t queued_us = 0;
+    uint64_t updated_us = 0;
+    char state[32] = { 0 };
+    char detail[128] = { 0 };
+} mesh_remote_request_status_t;
 
 typedef struct {
     std::string message;
@@ -1471,6 +1485,11 @@ static mesh_node_entry_t mesh_nodes[MESHTASTIC_NODE_CACHE_SIZE];
 static size_t mesh_node_count;
 static mesh_waypoint_info_t mesh_waypoints[MESHTASTIC_WAYPOINT_CACHE_SIZE];
 static size_t mesh_waypoint_count;
+static mesh_remote_request_status_t
+    mesh_remote_status_history[MESHTASTIC_REMOTE_STATUS_HISTORY_MAX];
+static size_t mesh_remote_status_count;
+static size_t mesh_remote_status_next;
+static uint32_t mesh_remote_request_next_id = 1U;
 static bool mesh_nodedb_dirty;
 static bool mesh_nodedb_loaded;
 static uint64_t mesh_nodedb_next_save_us;
@@ -12517,6 +12536,100 @@ static const char *mesh_remote_request_name(mesh_remote_request_type_t type)
     }
 }
 
+static uint32_t mesh_remote_request_alloc_id(void)
+{
+    uint32_t id = mesh_remote_request_next_id++;
+
+    if(mesh_remote_request_next_id == 0U) {
+        mesh_remote_request_next_id = 1U;
+    }
+    return id ? id : mesh_remote_request_alloc_id();
+}
+
+static mesh_remote_request_status_t *mesh_remote_status_find(uint32_t request_id)
+{
+    if(request_id == 0U) {
+        return nullptr;
+    }
+    for(size_t i = 0; i < mesh_remote_status_count; i++) {
+        if(mesh_remote_status_history[i].request_id == request_id) {
+            return &mesh_remote_status_history[i];
+        }
+    }
+    return nullptr;
+}
+
+static void mesh_remote_status_record(const mesh_remote_request_t &request,
+                                      const char *state, const char *detail,
+                                      uint32_t airtime_ms)
+{
+    mesh_remote_request_status_t *entry;
+    uint64_t now_us = monotonic_us();
+
+    entry = mesh_remote_status_find(request.request_id);
+    if(!entry) {
+        entry = &mesh_remote_status_history[mesh_remote_status_next];
+        mesh_remote_status_next =
+            (mesh_remote_status_next + 1U) %
+            MESHTASTIC_REMOTE_STATUS_HISTORY_MAX;
+        if(mesh_remote_status_count < MESHTASTIC_REMOTE_STATUS_HISTORY_MAX) {
+            mesh_remote_status_count++;
+        }
+        memset(entry, 0, sizeof(*entry));
+        entry->type = request.type;
+        entry->to_node = request.to_node;
+        entry->request_id = request.request_id;
+        entry->queued_us = now_us;
+    }
+    entry->updated_us = now_us;
+    entry->airtime_ms = airtime_ms;
+    snprintf(entry->state, sizeof(entry->state), "%s",
+             state ? state : "unknown");
+    snprintf(entry->detail, sizeof(entry->detail), "%s",
+             detail ? detail : "-");
+}
+
+static size_t mesh_remote_status_pending_count(
+    const std::deque<mesh_remote_request_t> *request_queue)
+{
+    return request_queue ? request_queue->size() : 0U;
+}
+
+static std::string daemon_remote_request_status_response(
+    const std::deque<mesh_remote_request_t> *request_queue)
+{
+    std::string out;
+    char line[256];
+    uint64_t now_us = monotonic_us();
+
+    snprintf(line, sizeof(line), "OK request_status pending=%u history=%u\n",
+             (unsigned)mesh_remote_status_pending_count(request_queue),
+             (unsigned)mesh_remote_status_count);
+    out += line;
+    for(size_t n = 0; n < mesh_remote_status_count; n++) {
+        size_t idx = (mesh_remote_status_next +
+                      MESHTASTIC_REMOTE_STATUS_HISTORY_MAX -
+                      mesh_remote_status_count + n) %
+                     MESHTASTIC_REMOTE_STATUS_HISTORY_MAX;
+        const mesh_remote_request_status_t &entry =
+            mesh_remote_status_history[idx];
+        uint64_t age_ms = 0ULL;
+
+        if(entry.updated_us != 0ULL && now_us >= entry.updated_us) {
+            age_ms = (now_us - entry.updated_us) / 1000ULL;
+        }
+        snprintf(line, sizeof(line),
+                 "REQ id=%u target=0x%08x type=%s state=%s age_ms=%llu "
+                 "airtime_ms=%u detail=%s\n",
+                 entry.request_id, entry.to_node,
+                 mesh_remote_request_name(entry.type), entry.state,
+                 (unsigned long long)age_ms, entry.airtime_ms,
+                 entry.detail[0] ? entry.detail : "-");
+        out += line;
+    }
+    return out;
+}
+
 static bool mesh_select_local_position(const probe_options_t &opts,
                                        mesh_position_info_t *position,
                                        const char **source)
@@ -17532,12 +17645,17 @@ static std::string daemon_queue_remote_request(
     }
     request.type = type;
     request.to_node = target;
+    request.request_id = mesh_remote_request_alloc_id();
     request_queue->push_back(request);
+    snprintf(buf, sizeof(buf), "queue_depth=%u",
+             (unsigned)request_queue->size());
+    mesh_remote_status_record(request, "queued", buf, 0U);
     daemon_event("Remote request queued target=0x%08x type=%s depth=%u",
                  target, mesh_remote_request_name(type),
                  (unsigned)request_queue->size());
-    snprintf(buf, sizeof(buf), "OK request queued target=0x%08x type=%s depth=%u\n",
-             target, mesh_remote_request_name(type),
+    snprintf(buf, sizeof(buf),
+             "OK request queued id=%u target=0x%08x type=%s depth=%u\n",
+             request.request_id, target, mesh_remote_request_name(type),
              (unsigned)request_queue->size());
     return std::string(buf);
 }
@@ -17569,6 +17687,9 @@ static std::string handle_daemon_command(const std::string &line,
     }
     if(line == "MAP" || line == "map") {
         return daemon_map_response(opts, chip);
+    }
+    if(line == "REQUEST_STATUS" || line == "request_status") {
+        return daemon_remote_request_status_response(request_queue);
     }
     if(line == "WAYPOINTS" || line == "waypoints") {
         return daemon_waypoints_response();
@@ -18222,6 +18343,8 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "NODES\n";
     } else if(opts.client_map) {
         command = "MAP\n";
+    } else if(opts.client_request_status) {
+        command = "REQUEST_STATUS\n";
     } else if(opts.client_waypoints) {
         command = "WAYPOINTS\n";
     } else if(opts.client_send_waypoint_requested) {
@@ -18337,7 +18460,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-map|--cmd-waypoints|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-map|--cmd-request-status|--cmd-waypoints|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -18346,6 +18469,7 @@ static void print_usage(const char *argv0)
             "  --cmd-chat      Query recent decoded text messages and exit\n"
             "  --cmd-nodes     Query recently seen mesh nodes and exit\n"
             "  --cmd-map       Query machine-readable map/node data and exit\n"
+            "  --cmd-request-status Query recent remote request state and exit\n"
             "  --cmd-waypoints Query recently received mesh waypoints and exit\n"
             "  --cmd-channel-url Query Meshtastic channel sharing URL and exit\n"
             "  --cmd-publish-nodeinfo  Ask daemon to publish this node info now\n"
@@ -18669,6 +18793,8 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_nodes = true;
         } else if(strcmp(arg, "--cmd-map") == 0) {
             opts->client_map = true;
+        } else if(strcmp(arg, "--cmd-request-status") == 0) {
+            opts->client_request_status = true;
         } else if(strcmp(arg, "--cmd-waypoints") == 0) {
             opts->client_waypoints = true;
         } else if(strcmp(arg, "--cmd-channel-url") == 0) {
@@ -19390,6 +19516,7 @@ int main(int argc, char **argv)
                               (opts.client_chat ? 1 : 0) +
                               (opts.client_nodes ? 1 : 0) +
                               (opts.client_map ? 1 : 0) +
+                              (opts.client_request_status ? 1 : 0) +
                               (opts.client_waypoints ? 1 : 0) +
                               (opts.client_channel_url ? 1 : 0) +
                               (opts.client_publish_nodeinfo ? 1 : 0) +
@@ -19858,6 +19985,13 @@ int main(int argc, char **argv)
                                                errbuf, sizeof(errbuf),
                                                &airtime_ms)) {
                     if(now - last_reliable_hold_log_us > 2000000ULL) {
+                        char detail[128];
+
+                        snprintf(detail, sizeof(detail),
+                                 "airtime_ms=%u_reason=%s", airtime_ms,
+                                 errbuf);
+                        mesh_remote_status_record(request, "held", detail,
+                                                  airtime_ms);
                         daemon_event("Remote request ChUtil held target=0x%08x type=%s airtime_ms=%u reason=%s depth=%u",
                                      request.to_node,
                                      mesh_remote_request_name(request.type),
@@ -19867,16 +20001,30 @@ int main(int argc, char **argv)
                     }
                 } else {
                     pending_remote_requests.pop_front();
+                    {
+                        char detail[80];
+
+                        snprintf(detail, sizeof(detail), "queue_depth=%u",
+                                 (unsigned)pending_remote_requests.size());
+                        mesh_remote_status_record(request, "sending", detail,
+                                                  airtime_ms);
+                    }
                     daemon_event("Remote request dequeue target=0x%08x type=%s depth=%u airtime_ms=%u",
                                  request.to_node,
                                  mesh_remote_request_name(request.type),
                                  (unsigned)pending_remote_requests.size(),
                                  airtime_ms);
                     if(start_tx(radio, frame) == 0) {
-                    if(frame.want_ack) {
-                        (void)mesh_ack_track_frame(frame);
-                    }
+                        mesh_remote_status_record(request, "sent",
+                                                  "radio_tx_started",
+                                                  airtime_ms);
+                        if(frame.want_ack) {
+                            (void)mesh_ack_track_frame(frame);
+                        }
                     } else {
+                        mesh_remote_status_record(request, "tx-failed",
+                                                  "start_tx_failed",
+                                                  airtime_ms);
                         daemon_event("Remote request TX start failed target=0x%08x type=%s",
                                      request.to_node,
                                      mesh_remote_request_name(request.type));
@@ -19884,6 +20032,8 @@ int main(int argc, char **argv)
                 }
             } else {
                 pending_remote_requests.pop_front();
+                mesh_remote_status_record(request, "build-failed",
+                                          "frame_build_failed", 0U);
                 daemon_event("Remote request build failed target=0x%08x type=%s",
                              request.to_node,
                              mesh_remote_request_name(request.type));

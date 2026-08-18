@@ -7249,18 +7249,121 @@ static void mesh_node_detail_set_status(const char *text, uint32_t color)
     }
 }
 
+static const char *mesh_node_request_state_label(const char *state,
+                                                 uint32_t *color)
+{
+    if(color) {
+        *color = 0x94A3B8;
+    }
+    if(!state || !state[0]) {
+        return "Unknown";
+    }
+    if(strcmp(state, "queued") == 0) {
+        if(color) {
+            *color = 0x25C281;
+        }
+        return "Queued";
+    }
+    if(strcmp(state, "held") == 0) {
+        if(color) {
+            *color = 0xF59E0B;
+        }
+        return "Radio busy";
+    }
+    if(strcmp(state, "sending") == 0) {
+        if(color) {
+            *color = 0x3DA5FF;
+        }
+        return "Sending";
+    }
+    if(strcmp(state, "sent") == 0) {
+        if(color) {
+            *color = 0x25C281;
+        }
+        return "Sent";
+    }
+    if(strcmp(state, "tx-failed") == 0 ||
+       strcmp(state, "build-failed") == 0) {
+        if(color) {
+            *color = 0xEF4D5A;
+        }
+        return "Failed";
+    }
+    return state;
+}
+
+static int mesh_node_detail_fetch_request_status(const char *target_id,
+                                                 char *out, size_t out_len,
+                                                 uint32_t *color)
+{
+    char response[4096];
+    char copy[4096];
+    char target_key[40];
+    char *saveptr = NULL;
+    char *line;
+    char last_line[256] = { 0 };
+    char type[40];
+    char state[40];
+    char age_ms[24];
+
+    if(!target_id || !target_id[0] || !out || out_len == 0U) {
+        return -1;
+    }
+    out[0] = '\0';
+    if(color) {
+        *color = 0x94A3B8;
+    }
+    if(mesh_ipc_command("REQUEST_STATUS\n", response, sizeof(response)) != 0 ||
+       strncmp(response, "OK request_status", 17) != 0) {
+        return -1;
+    }
+    snprintf(copy, sizeof(copy), "%s", response);
+    snprintf(target_key, sizeof(target_key), "target=%s", target_id);
+    line = strtok_r(copy, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "REQ ", 4) == 0 && strstr(line, target_key)) {
+            snprintf(last_line, sizeof(last_line), "%s", line);
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    if(!last_line[0]) {
+        return -1;
+    }
+    mesh_node_line_value(last_line, "type=", type, sizeof(type));
+    mesh_node_line_value(last_line, "state=", state, sizeof(state));
+    mesh_node_line_value(last_line, "age_ms=", age_ms, sizeof(age_ms));
+    if(!type[0]) {
+        snprintf(type, sizeof(type), "%s", "request");
+    }
+    if(!age_ms[0]) {
+        snprintf(age_ms, sizeof(age_ms), "%s", "-");
+    }
+    snprintf(out, out_len, "%s %s: %s, %sms",
+             ui_tr("Request"), type,
+             ui_tr(mesh_node_request_state_label(state, color)), age_ms);
+    return 0;
+}
+
 static void mesh_node_detail_refresh_current(void)
 {
     char target_id[24];
     char line[MESHTASTIC_UI_NODE_LINE_MAX];
+    char request_status[160];
+    uint32_t request_color = 0x94A3B8;
 
     if(!mesh_node_detail_target_id[0]) {
         return;
     }
     snprintf(target_id, sizeof(target_id), "%s", mesh_node_detail_target_id);
     if(mesh_find_legacy_node_line(target_id, line, sizeof(line)) == 0) {
-        mesh_node_detail_set_status("Refreshed. Reply may still be in flight.",
-                                    0x25C281);
+        if(mesh_node_detail_fetch_request_status(target_id, request_status,
+                                                 sizeof(request_status),
+                                                 &request_color) == 0) {
+            mesh_node_detail_set_status(request_status, request_color);
+        } else {
+            mesh_node_detail_set_status(
+                "Refreshed. Reply may still be in flight.", 0x25C281);
+        }
         mesh_node_detail_open(line);
         return;
     }
