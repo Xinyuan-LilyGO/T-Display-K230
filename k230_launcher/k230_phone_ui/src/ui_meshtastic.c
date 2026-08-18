@@ -3702,7 +3702,7 @@ static void mesh_layout_main(void)
         return;
     }
 
-    mesh_status_panel_h = landscape ? 116 : 166;
+    mesh_status_panel_h = landscape ? 116 : 184;
     mesh_chat_gap = landscape ? 8 : 10;
 
     body_h = lv_obj_get_height(mesh_body);
@@ -3731,7 +3731,7 @@ static void mesh_layout_main(void)
         int action_h = landscape ? 44 : 40;
         int action_w = landscape ? 64 :
             (inner_w - action_gap * (action_count - 1)) / action_count;
-        int action_y = landscape ? 4 : 114;
+        int action_y = landscape ? 4 : 132;
         int action_x0 = landscape ?
             panel_pad + inner_w - action_count * action_w -
             action_gap * (action_count - 1) : panel_pad;
@@ -3743,23 +3743,23 @@ static void mesh_layout_main(void)
         lv_obj_set_pos(mesh_status_panel, x, 0);
         lv_obj_set_size(mesh_status_panel, content_w, mesh_status_panel_h);
         if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
-            lv_obj_set_pos(mesh_status_label, panel_pad, 0);
+            lv_obj_set_pos(mesh_status_label, panel_pad, landscape ? 0 : 6);
             lv_obj_set_width(mesh_status_label, text_w);
         }
         if(mesh_profile_label && lv_obj_is_valid(mesh_profile_label)) {
-            lv_obj_set_pos(mesh_profile_label, panel_pad, landscape ? 28 : 26);
+            lv_obj_set_pos(mesh_profile_label, panel_pad, landscape ? 28 : 34);
             lv_obj_set_width(mesh_profile_label, text_w);
         }
         if(mesh_detail_label && lv_obj_is_valid(mesh_detail_label)) {
-            lv_obj_set_pos(mesh_detail_label, panel_pad, landscape ? 52 : 50);
+            lv_obj_set_pos(mesh_detail_label, panel_pad, landscape ? 52 : 60);
             lv_obj_set_width(mesh_detail_label, text_w);
         }
         if(mesh_airtime_label && lv_obj_is_valid(mesh_airtime_label)) {
-            lv_obj_set_pos(mesh_airtime_label, panel_pad, landscape ? 76 : 74);
+            lv_obj_set_pos(mesh_airtime_label, panel_pad, landscape ? 76 : 88);
             lv_obj_set_width(mesh_airtime_label, text_w);
         }
         if(mesh_chutil_bar && lv_obj_is_valid(mesh_chutil_bar)) {
-            lv_obj_set_pos(mesh_chutil_bar, panel_pad, landscape ? 100 : 98);
+            lv_obj_set_pos(mesh_chutil_bar, panel_pad, landscape ? 100 : 112);
             lv_obj_set_size(mesh_chutil_bar, text_w, 6);
         }
         if(action_w < 54) {
@@ -10509,7 +10509,7 @@ static void mesh_profile_event_cb(lv_event_t *event)
     int value_w = content_w - value_x - edit_w - 18;
     int button_w;
     int button_gap = 10;
-    int button_cols = ui_is_landscape() ? 6 : 3;
+    int button_cols = ui_is_landscape() ? 7 : 3;
     int button_row_h = 56;
     int publish_w;
     int y = 0;
@@ -10575,9 +10575,10 @@ static void mesh_profile_event_cb(lv_event_t *event)
     MESH_CONN_BUTTON(3, ui_tr("Detector"), 0xF59E0B, mesh_detector_event_cb);
     MESH_CONN_BUTTON(4, ui_tr("Channel"), 0xA78BFA, mesh_channel_event_cb);
     MESH_CONN_BUTTON(5, ui_tr("Profiles"), 0xF59E0B, mesh_channel_profiles_event_cb);
+    MESH_CONN_BUTTON(6, ui_tr("Slots"), 0xEC4899, mesh_channels_event_cb);
 #undef MESH_CONN_BUTTON
 
-    y += (button_cols >= 6 ? button_row_h : button_row_h * 2) + 22;
+    y += (ui_is_landscape() ? button_row_h : button_row_h * 3) + 22;
     status = ui_label(panel, mesh_status_text, &lv_font_montserrat_14,
                       0xCBD5E1);
     lv_obj_set_pos(status, margin, y);
