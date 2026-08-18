@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -426,6 +429,28 @@ int ui_fit_width(lv_obj_t *parent, int x, int design_w)
     return fit_w > design_w ? fit_w : design_w;
 }
 
+static void ui_portrait_scroll_refresh_cb(lv_event_t *event)
+{
+    static uint64_t last_refresh_us;
+    uint64_t now;
+    lv_obj_t *screen;
+    lv_obj_t *target;
+
+    if(ui_is_landscape()) {
+        return;
+    }
+    now = ui_monotonic_us();
+    if(last_refresh_us != 0ULL && now - last_refresh_us < 8000ULL) {
+        return;
+    }
+    last_refresh_us = now;
+
+    screen = lv_scr_act();
+    target = lv_event_get_target(event);
+    lv_obj_invalidate(screen ? screen : target);
+    app_request_fast_refresh();
+}
+
 void ui_make_scrollable(lv_obj_t *obj, int bottom_pad)
 {
     if(!obj) {
@@ -436,6 +461,8 @@ void ui_make_scrollable(lv_obj_t *obj, int bottom_pad)
     lv_obj_set_scroll_dir(obj, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_bottom(obj, bottom_pad, 0);
+    lv_obj_add_event_cb(obj, ui_portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL, NULL);
 }
 
 lv_obj_t *ui_scroll_panel(lv_obj_t *parent, int x, int y, int w, int h)
@@ -682,21 +709,38 @@ int ui_read_cmd_first_line(const char *cmd, char *buf, size_t len)
 
 int ui_read_iface_ip(const char *iface, char *buf, size_t len)
 {
-    char cmd[160];
+    struct ifaddrs *ifaddr = NULL;
+    struct ifaddrs *ifa;
+    int rc = -1;
 
     if(!iface || !buf || len == 0) {
         return -1;
     }
 
-    snprintf(cmd, sizeof(cmd),
-             "ip -4 addr show dev %s 2>/dev/null | awk '/inet / {print $2; exit}'",
-             iface);
-    if(ui_read_cmd_first_line(cmd, buf, len) == 0) {
-        return 0;
+    if(getifaddrs(&ifaddr) != 0) {
+        snprintf(buf, len, "--");
+        return -1;
     }
 
-    snprintf(buf, len, "--");
-    return -1;
+    for(ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        struct sockaddr_in *sin;
+
+        if(!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET ||
+           strcmp(ifa->ifa_name, iface) != 0) {
+            continue;
+        }
+        sin = (struct sockaddr_in *)ifa->ifa_addr;
+        if(inet_ntop(AF_INET, &sin->sin_addr, buf, len)) {
+            rc = 0;
+            break;
+        }
+    }
+    freeifaddrs(ifaddr);
+
+    if(rc != 0) {
+        snprintf(buf, len, "--");
+    }
+    return rc;
 }
 
 int ui_read_iface_carrier(const char *iface)

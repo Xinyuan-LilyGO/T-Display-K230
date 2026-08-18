@@ -20,6 +20,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <lvgl/lvgl.h>
 #include <lvgl/src/core/lv_refr.h>
 #include <lvgl/src/debugging/sysmon/lv_sysmon.h>
@@ -115,7 +118,9 @@
 #define STATUS_BAR_ITEM_W 32
 #define STATUS_BAR_ITEM_H 30
 #define STATUS_BAR_ITEM_GAP 6
+#define STATUS_BAR_LTE_W 40
 #define STATUS_BAR_BATTERY_W 62
+#define STATUS_BATTERY_REFRESH_US 10000000ULL
 #define STATUS_GNSS_FIX_CACHE "/tmp/k230_nrf9151_gnss_fix.cache"
 #define STATUS_NRF9151_UART_DEV "/dev/ttyS3"
 #define NET_MAX_APS 6
@@ -245,9 +250,13 @@ static lv_obj_t *status_bar_obj;
 static lv_obj_t *status_group_obj;
 static lv_obj_t *status_location_label;
 static lv_obj_t *status_lte_bars[4];
+static lv_obj_t *status_lte_x_label;
+static lv_obj_t *status_wifi_item_obj;
 static lv_obj_t *status_wifi_label;
 static lv_obj_t *status_ble_label;
-static lv_obj_t *status_battery_icon_label;
+static lv_obj_t *status_battery_shell_obj;
+static lv_obj_t *status_battery_fill_obj;
+static lv_obj_t *status_battery_tip_obj;
 static lv_obj_t *status_battery_percent_label;
 static lv_obj_t *transition_old_page;
 static int page_transition_active;
@@ -505,6 +514,13 @@ static int shutdown_last_progress = -1;
 static int shutdown_last_fade_log_progress = -1;
 static char status_wifi_state[24] = "on";
 static char status_ble_state[24] = "offline";
+static int status_wifi_visible = 1;
+static pthread_mutex_t status_hw_lock = PTHREAD_MUTEX_INITIALIZER;
+static int status_battery_cache_valid;
+static int status_battery_available_cache;
+static int status_battery_soc_cache = -1;
+static int status_battery_refresh_busy;
+static uint64_t status_battery_next_refresh_us;
 static uint64_t touch_block_last_log_us;
 
 static lv_style_t style_panel;
@@ -585,6 +601,7 @@ static void request_fast_refresh(void);
 static void start_power_key_monitor(void);
 static void stop_power_key_monitor(void);
 static void power_key_shutdown_visual_poll(void);
+static void status_bar_relayout(void);
 
 static void sig_handler(int sig)
 {
@@ -1719,6 +1736,28 @@ static lv_obj_t *panel(lv_obj_t *parent, int x, int y, int w, int h)
     return obj;
 }
 
+static void portrait_scroll_refresh_cb(lv_event_t *event)
+{
+    static uint64_t last_refresh_us;
+    uint64_t now;
+    lv_obj_t *target;
+
+    if(display_logical_width() >= display_logical_height()) {
+        return;
+    }
+    now = monotonic_us();
+    if(last_refresh_us != 0ULL && now - last_refresh_us < 8000ULL) {
+        return;
+    }
+    last_refresh_us = now;
+
+    target = app_screen ? app_screen : lv_event_get_target(event);
+    if(target) {
+        lv_obj_invalidate(target);
+    }
+    request_fast_refresh();
+}
+
 static lv_obj_t *scroll_panel(lv_obj_t *parent, int x, int y, int w, int h)
 {
     lv_obj_t *obj = panel(parent, x, y, w, h);
@@ -1727,6 +1766,8 @@ static lv_obj_t *scroll_panel(lv_obj_t *parent, int x, int y, int w, int h)
     lv_obj_set_scroll_dir(obj, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_bottom(obj, 48, 0);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL, NULL);
     return obj;
 }
 
@@ -1743,6 +1784,8 @@ static lv_obj_t *scroll_region(lv_obj_t *parent, int x, int y, int w, int h)
     lv_obj_set_scroll_dir(obj, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL, NULL);
     return obj;
 }
 
@@ -2311,21 +2354,39 @@ static void read_storage_summary(char *buf, size_t len)
 
 static int read_iface_ip(const char *iface, char *buf, size_t len)
 {
-    char cmd[160];
+    struct ifaddrs *ifaddr = NULL;
+    struct ifaddrs *ifa;
+    int rc = -1;
 
     if(!iface || !buf || len == 0) {
         return -1;
     }
 
-    snprintf(cmd, sizeof(cmd),
-             "ip -4 addr show dev %s 2>/dev/null | awk '/inet / {print $2; exit}'",
-             iface);
-    if(read_cmd_first_line(cmd, buf, len) == 0) {
-        return 0;
+    if(getifaddrs(&ifaddr) != 0) {
+        snprintf(buf, len, "--");
+        return -1;
     }
 
-    snprintf(buf, len, "--");
-    return -1;
+    for(ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        struct sockaddr_in *sin;
+
+        if(!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET ||
+           strcmp(ifa->ifa_name, iface) != 0) {
+            continue;
+        }
+
+        sin = (struct sockaddr_in *)ifa->ifa_addr;
+        if(inet_ntop(AF_INET, &sin->sin_addr, buf, len)) {
+            rc = 0;
+            break;
+        }
+    }
+    freeifaddrs(ifaddr);
+
+    if(rc != 0) {
+        snprintf(buf, len, "--");
+    }
+    return rc;
 }
 
 static void read_iface_state(const char *iface, char *buf, size_t len,
@@ -4015,7 +4076,7 @@ static lv_obj_t *status_lte_item(lv_obj_t *parent)
     const int heights[4] = {7, 11, 15, 19};
     lv_obj_t *item = lv_obj_create(parent);
 
-    lv_obj_set_size(item, STATUS_BAR_ITEM_W, STATUS_BAR_ITEM_H);
+    lv_obj_set_size(item, STATUS_BAR_LTE_W, STATUS_BAR_ITEM_H);
     lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(item, lv_color_hex(0x253040), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(item, LV_OPA_40, LV_STATE_PRESSED);
@@ -4041,6 +4102,10 @@ static lv_obj_t *status_lte_item(lv_obj_t *parent)
         lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
         make_click_forwarder(bar);
     }
+    status_lte_x_label = label(item, "x", &lv_font_montserrat_14, 0x8B949E);
+    lv_obj_align(status_lte_x_label, LV_ALIGN_RIGHT_MID, -1, 1);
+    lv_obj_add_flag(status_lte_x_label, LV_OBJ_FLAG_HIDDEN);
+    make_click_forwarder(status_lte_x_label);
 
     return item;
 }
@@ -4048,7 +4113,6 @@ static lv_obj_t *status_lte_item(lv_obj_t *parent)
 static lv_obj_t *status_battery_item(lv_obj_t *parent)
 {
     lv_obj_t *item = lv_obj_create(parent);
-    lv_obj_t *row;
 
     lv_obj_set_size(item, STATUS_BAR_BATTERY_W, STATUS_BAR_ITEM_H);
     lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, 0);
@@ -4062,25 +4126,46 @@ static lv_obj_t *status_battery_item(lv_obj_t *parent)
     lv_obj_add_event_cb(item, app_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)PAGE_BATTERY);
 
-    row = lv_obj_create(item);
-    lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_set_style_pad_column(row, 3, 0);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_center(row);
+    status_battery_shell_obj = lv_obj_create(item);
+    lv_obj_set_pos(status_battery_shell_obj, 4, 9);
+    lv_obj_set_size(status_battery_shell_obj, 24, 13);
+    lv_obj_set_style_bg_opa(status_battery_shell_obj, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(status_battery_shell_obj, 2, 0);
+    lv_obj_set_style_border_color(status_battery_shell_obj,
+                                  lv_color_hex(0x8B949E), 0);
+    lv_obj_set_style_radius(status_battery_shell_obj, 3, 0);
+    lv_obj_set_style_pad_all(status_battery_shell_obj, 0, 0);
+    lv_obj_clear_flag(status_battery_shell_obj, LV_OBJ_FLAG_SCROLLABLE);
+    make_click_forwarder(status_battery_shell_obj);
 
-    status_battery_icon_label = label(row, LV_SYMBOL_BATTERY_EMPTY,
-                                      &lv_font_montserrat_16, 0x8B949E);
-    make_click_forwarder(status_battery_icon_label);
-    status_battery_percent_label = label(row, "--", &lv_font_montserrat_12,
+    status_battery_fill_obj = lv_obj_create(status_battery_shell_obj);
+    lv_obj_set_pos(status_battery_fill_obj, 2, 2);
+    lv_obj_set_size(status_battery_fill_obj, 0, 5);
+    lv_obj_set_style_bg_color(status_battery_fill_obj, lv_color_hex(0x8B949E),
+                              0);
+    lv_obj_set_style_bg_opa(status_battery_fill_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(status_battery_fill_obj, 0, 0);
+    lv_obj_set_style_radius(status_battery_fill_obj, 1, 0);
+    lv_obj_set_style_pad_all(status_battery_fill_obj, 0, 0);
+    lv_obj_clear_flag(status_battery_fill_obj, LV_OBJ_FLAG_SCROLLABLE);
+    make_click_forwarder(status_battery_fill_obj);
+
+    status_battery_tip_obj = lv_obj_create(item);
+    lv_obj_set_pos(status_battery_tip_obj, 29, 12);
+    lv_obj_set_size(status_battery_tip_obj, 3, 7);
+    lv_obj_set_style_bg_color(status_battery_tip_obj, lv_color_hex(0x8B949E),
+                              0);
+    lv_obj_set_style_bg_opa(status_battery_tip_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(status_battery_tip_obj, 0, 0);
+    lv_obj_set_style_radius(status_battery_tip_obj, 1, 0);
+    lv_obj_set_style_pad_all(status_battery_tip_obj, 0, 0);
+    lv_obj_clear_flag(status_battery_tip_obj, LV_OBJ_FLAG_SCROLLABLE);
+    make_click_forwarder(status_battery_tip_obj);
+
+    status_battery_percent_label = label(item, "--", &lv_font_montserrat_12,
                                          0x8B949E);
+    lv_obj_align(status_battery_percent_label, LV_ALIGN_RIGHT_MID, -1, 1);
     make_click_forwarder(status_battery_percent_label);
-    make_click_forwarder(row);
     return item;
 }
 
@@ -4133,50 +4218,118 @@ static uint32_t status_wifi_color(int wifi_present, int wifi_has_ip)
     return wifi_present ? 0xF5A524 : 0x8B949E;
 }
 
-static const char *status_battery_symbol(int soc)
-{
-    if(soc >= 88) {
-        return LV_SYMBOL_BATTERY_FULL;
-    }
-    if(soc >= 63) {
-        return LV_SYMBOL_BATTERY_3;
-    }
-    if(soc >= 38) {
-        return LV_SYMBOL_BATTERY_2;
-    }
-    if(soc >= 13) {
-        return LV_SYMBOL_BATTERY_1;
-    }
-    return LV_SYMBOL_BATTERY_EMPTY;
-}
-
-static void status_update_battery(void)
+static void *status_battery_probe_thread(void *arg)
 {
     int soc = -1;
-    uint32_t color = 0x8B949E;
-    char percent[8];
+    int available = 0;
 
+    (void)arg;
     if(ui_extension_keyboard_base_available() &&
        ui_bq27220_get_soc_pct(&soc) == 0) {
-        color = soc <= 15 ? 0xEF4D5A : (soc <= 30 ? 0xF5A524 : 0x25C281);
-        snprintf(percent, sizeof(percent), "%d%%", soc);
-        if(status_battery_icon_label && lv_obj_is_valid(status_battery_icon_label)) {
-            lv_label_set_text(status_battery_icon_label,
-                              status_battery_symbol(soc));
+        available = 1;
+    }
+
+    pthread_mutex_lock(&status_hw_lock);
+    status_battery_cache_valid = 1;
+    status_battery_available_cache = available;
+    status_battery_soc_cache = available ? soc : -1;
+    status_battery_refresh_busy = 0;
+    status_battery_next_refresh_us =
+        monotonic_us() + STATUS_BATTERY_REFRESH_US;
+    pthread_mutex_unlock(&status_hw_lock);
+
+    return NULL;
+}
+
+static void status_schedule_battery_probe(void)
+{
+    pthread_t thread;
+    uint64_t now = monotonic_us();
+    int start = 0;
+
+    pthread_mutex_lock(&status_hw_lock);
+    if(!status_battery_refresh_busy &&
+       (!status_battery_cache_valid ||
+        now >= status_battery_next_refresh_us)) {
+        status_battery_refresh_busy = 1;
+        start = 1;
+    }
+    pthread_mutex_unlock(&status_hw_lock);
+
+    if(!start) {
+        return;
+    }
+    if(pthread_create(&thread, NULL, status_battery_probe_thread, NULL) == 0) {
+        pthread_detach(thread);
+        return;
+    }
+
+    pthread_mutex_lock(&status_hw_lock);
+    status_battery_refresh_busy = 0;
+    status_battery_next_refresh_us =
+        monotonic_us() + STATUS_BATTERY_REFRESH_US;
+    pthread_mutex_unlock(&status_hw_lock);
+}
+
+static void status_draw_battery_level(int available, int soc)
+{
+    uint32_t color = available ?
+                     (soc <= 15 ? 0xEF4D5A :
+                      (soc <= 30 ? 0xF5A524 : 0x25C281)) :
+                     0x8B949E;
+    int fill_w = 0;
+    char percent[8];
+
+    if(available) {
+        if(soc < 0) {
+            soc = 0;
+        } else if(soc > 100) {
+            soc = 100;
         }
+        fill_w = (18 * soc) / 100;
+        if(soc > 0 && fill_w < 2) {
+            fill_w = 2;
+        }
+        snprintf(percent, sizeof(percent), "%d%%", soc);
     } else {
         snprintf(percent, sizeof(percent), "--");
-        if(status_battery_icon_label && lv_obj_is_valid(status_battery_icon_label)) {
-            lv_label_set_text(status_battery_icon_label,
-                              LV_SYMBOL_BATTERY_EMPTY);
-        }
     }
-    status_set_label_color(status_battery_icon_label, color);
+
+    if(status_battery_shell_obj && lv_obj_is_valid(status_battery_shell_obj)) {
+        lv_obj_set_style_border_color(status_battery_shell_obj,
+                                      lv_color_hex(color), 0);
+    }
+    if(status_battery_fill_obj && lv_obj_is_valid(status_battery_fill_obj)) {
+        lv_obj_set_size(status_battery_fill_obj, fill_w, 5);
+        lv_obj_set_style_bg_color(status_battery_fill_obj,
+                                  lv_color_hex(color), 0);
+    }
+    if(status_battery_tip_obj && lv_obj_is_valid(status_battery_tip_obj)) {
+        lv_obj_set_style_bg_color(status_battery_tip_obj,
+                                  lv_color_hex(color), 0);
+    }
     status_set_label_color(status_battery_percent_label, color);
     if(status_battery_percent_label &&
        lv_obj_is_valid(status_battery_percent_label)) {
         lv_label_set_text(status_battery_percent_label, percent);
     }
+}
+
+static void status_update_battery(void)
+{
+    int cache_valid;
+    int available;
+    int soc;
+
+    status_schedule_battery_probe();
+
+    pthread_mutex_lock(&status_hw_lock);
+    cache_valid = status_battery_cache_valid;
+    available = status_battery_available_cache;
+    soc = status_battery_soc_cache;
+    pthread_mutex_unlock(&status_hw_lock);
+
+    status_draw_battery_level(cache_valid && available, soc);
 }
 
 static void status_set_lte_bars(int level, uint32_t color)
@@ -4196,6 +4349,46 @@ static void status_set_lte_bars(int level, uint32_t color)
                                       lv_color_hex(bar_color), 0);
         }
     }
+    if(status_lte_x_label && lv_obj_is_valid(status_lte_x_label)) {
+        if(level <= 0) {
+            lv_obj_clear_flag(status_lte_x_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_color(status_lte_x_label,
+                                        lv_color_hex(color), 0);
+        } else {
+            lv_obj_add_flag(status_lte_x_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static int status_group_width_current(void)
+{
+    int items = 4;
+    int width = STATUS_BAR_ITEM_W + STATUS_BAR_LTE_W +
+                STATUS_BAR_ITEM_W + STATUS_BAR_BATTERY_W;
+
+    if(status_wifi_visible) {
+        width += STATUS_BAR_ITEM_W;
+        items++;
+    }
+    return width + STATUS_BAR_ITEM_GAP * (items - 1);
+}
+
+static void status_set_wifi_visible(int visible)
+{
+    visible = visible ? 1 : 0;
+    if(status_wifi_visible == visible) {
+        return;
+    }
+
+    status_wifi_visible = visible;
+    if(status_wifi_item_obj && lv_obj_is_valid(status_wifi_item_obj)) {
+        if(visible) {
+            lv_obj_clear_flag(status_wifi_item_obj, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(status_wifi_item_obj, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    status_bar_relayout();
 }
 
 static void status_bar_update(lv_timer_t *timer)
@@ -4215,13 +4408,15 @@ static void status_bar_update(lv_timer_t *timer)
 
     wifi_present = path_exists("/sys/class/net/" NET_WIFI_IFACE);
     wifi_has_ip = read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip)) == 0;
+    status_set_wifi_visible(wifi_has_ip);
     status_set_label_color(status_wifi_label,
                            status_wifi_color(wifi_present, wifi_has_ip));
 
     modem_present = path_exists(STATUS_NRF9151_UART_DEV);
     lte_level = modem_present ? ui_cellular_lte_signal_level() : 0;
     status_set_lte_bars(lte_level,
-                        lte_level > 0 ? 0x25C281 : 0x8B949E);
+                        lte_level > 0 ? 0x25C281 :
+                        (modem_present ? 0xEF4D5A : 0x8B949E));
 
     gnss_fix = status_gnss_has_recent_fix();
     status_set_label_color(status_location_label,
@@ -4233,9 +4428,7 @@ static void status_bar_update(lv_timer_t *timer)
 
 static void status_bar_relayout(void)
 {
-    const int status_group_w =
-        STATUS_BAR_ITEM_W * 4 + STATUS_BAR_BATTERY_W +
-        STATUS_BAR_ITEM_GAP * 4;
+    const int status_group_w = status_group_width_current();
 
     if(!status_bar_obj || !lv_obj_is_valid(status_bar_obj)) {
         return;
@@ -4253,9 +4446,7 @@ static void status_bar_relayout(void)
 
 static void create_status_bar(lv_obj_t *scr)
 {
-    const int status_group_w =
-        STATUS_BAR_ITEM_W * 4 + STATUS_BAR_BATTERY_W +
-        STATUS_BAR_ITEM_GAP * 4;
+    const int status_group_w = status_group_width_current();
     lv_obj_t *bar = lv_obj_create(scr);
     status_bar_obj = bar;
     lv_obj_set_pos(bar, 0, 0);
@@ -4285,8 +4476,9 @@ static void create_status_bar(lv_obj_t *scr)
     status_icon_item(status_group_obj, LV_SYMBOL_GPS, PAGE_CELLULAR,
                      0x8B949E, &status_location_label);
     status_lte_item(status_group_obj);
-    status_icon_item(status_group_obj, LV_SYMBOL_WIFI, PAGE_WIFI,
-                     0x8B949E, &status_wifi_label);
+    status_wifi_item_obj = status_icon_item(status_group_obj, LV_SYMBOL_WIFI,
+                                            PAGE_WIFI, 0x8B949E,
+                                            &status_wifi_label);
     status_icon_item(status_group_obj, LV_SYMBOL_BLUETOOTH, PAGE_BLE,
                      0x8B949E, &status_ble_label);
     status_battery_item(status_group_obj);

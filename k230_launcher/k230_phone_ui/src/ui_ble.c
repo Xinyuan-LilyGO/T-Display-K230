@@ -2,6 +2,7 @@
 
 #include "ui_i18n.h"
 #include "ui_meshtastic.h"
+#include "ui_prefs.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -37,11 +38,20 @@
 #define BLE_NRF_BAUD B115200
 #define BLE_NRF_SCAN_SECONDS 5
 #define BLE_AUTO_SCAN_PERIOD_US 5000000ULL
+#define BLE_PREF_ENABLED "ble.enabled"
+#define BLE_PREF_MODE "ble.mode"
+#define BLE_MODE_PREF_MESH "mesh"
+#define BLE_MODE_PREF_CUSTOM "custom"
 
 typedef enum {
     BLE_BACKEND_HCI = 0,
     BLE_BACKEND_NRF_AT = 1,
 } ble_backend_t;
+
+typedef enum {
+    BLE_MODE_MESH_EXCLUSIVE = 0,
+    BLE_MODE_CUSTOM = 1,
+} ble_mode_t;
 
 typedef struct {
     char addr[BLE_ADDR_LEN];
@@ -67,6 +77,8 @@ static int ble_selected = -1;
 static int ble_busy;
 static int ble_scanning;
 static int ble_scan_enabled = 1;
+static int ble_prefs_loaded;
+static ble_mode_t ble_mode = BLE_MODE_MESH_EXCLUSIVE;
 static uint64_t ble_next_scan_us;
 static int ble_adapter_present;
 static int ble_adapter_ready;
@@ -89,6 +101,8 @@ static lv_obj_t *ble_summary_panel;
 static lv_obj_t *ble_state_label;
 static lv_obj_t *ble_status_label;
 static lv_obj_t *ble_scan_switch;
+static lv_obj_t *ble_mode_mesh_btn;
+static lv_obj_t *ble_mode_custom_btn;
 static lv_obj_t *ble_list_title_label;
 static lv_obj_t *ble_device_list;
 static lv_obj_t *ble_detail_panel;
@@ -111,6 +125,7 @@ static lv_timer_t *ble_timer;
 static void ble_add_device(const char *addr, const char *name, int rssi,
                            int rssi_valid, int ble_uart, int scan_index,
                            int scan_index_valid);
+static int ble_prepare_hci_adapter_only(void);
 static void ble_try_start_queued_connection(void);
 static void ble_refresh_ui(void);
 
@@ -152,6 +167,70 @@ static void ble_log(const char *fmt, ...)
     va_end(ap);
     fprintf(fp, "\n");
     fclose(fp);
+}
+
+static ble_mode_t ble_mode_from_text(const char *value)
+{
+    if(value && strcmp(value, BLE_MODE_PREF_CUSTOM) == 0) {
+        return BLE_MODE_CUSTOM;
+    }
+    return BLE_MODE_MESH_EXCLUSIVE;
+}
+
+static const char *ble_mode_pref_value(ble_mode_t mode)
+{
+    return mode == BLE_MODE_CUSTOM ? BLE_MODE_PREF_CUSTOM : BLE_MODE_PREF_MESH;
+}
+
+static void ble_load_prefs_locked(void)
+{
+    char value[16];
+
+    if(ble_prefs_loaded) {
+        return;
+    }
+
+    ui_prefs_get(BLE_PREF_ENABLED, value, sizeof(value), "1");
+    ble_scan_enabled = strcmp(value, "0") != 0;
+    ui_prefs_get(BLE_PREF_MODE, value, sizeof(value), BLE_MODE_PREF_MESH);
+    ble_mode = ble_mode_from_text(value);
+    ble_prefs_loaded = 1;
+}
+
+static void ble_save_enabled(int enabled)
+{
+    if(ui_prefs_set(BLE_PREF_ENABLED, enabled ? "1" : "0") != 0) {
+        ble_log("save %s=%d failed", BLE_PREF_ENABLED, enabled ? 1 : 0);
+    }
+}
+
+static void ble_save_mode(ble_mode_t mode)
+{
+    if(ui_prefs_set(BLE_PREF_MODE, ble_mode_pref_value(mode)) != 0) {
+        ble_log("save %s=%s failed", BLE_PREF_MODE, ble_mode_pref_value(mode));
+    }
+}
+
+int ui_ble_meshtastic_bridge_enabled(void)
+{
+    int enabled;
+
+    pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
+    enabled = ble_scan_enabled && ble_mode == BLE_MODE_MESH_EXCLUSIVE;
+    pthread_mutex_unlock(&ble_lock);
+    return enabled;
+}
+
+static int ble_custom_mode_enabled(void)
+{
+    int enabled;
+
+    pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
+    enabled = ble_scan_enabled && ble_mode == BLE_MODE_CUSTOM;
+    pthread_mutex_unlock(&ble_lock);
+    return enabled;
 }
 
 static void ble_scan_log_line(const char *fmt, ...)
@@ -976,6 +1055,9 @@ static int ble_ensure_adapter(void)
     int rc;
 
     ble_log("ensure begin");
+    if(!ble_custom_mode_enabled()) {
+        return ble_prepare_hci_adapter_only();
+    }
     ble_shell_run("modprobe bluetooth >/tmp/k230_ble_modprobe.log 2>&1 || true; "
                   "modprobe btusb >>/tmp/k230_ble_modprobe.log 2>&1 || true");
     ble_log("modprobe bluetooth/btusb requested");
@@ -1541,30 +1623,35 @@ static void *ble_scan_thread_cb(void *arg)
 {
     int rc;
     ble_backend_t backend;
-    int mesh_running;
+    ble_mode_t mode;
+    int enabled;
 
     (void)arg;
     pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
+    enabled = ble_scan_enabled;
+    mode = ble_mode;
+    if(!enabled) {
+        ble_scanning = 0;
+        ble_busy = 0;
+        snprintf(ble_status, sizeof(ble_status), "%s", "Bluetooth off");
+        pthread_mutex_unlock(&ble_lock);
+        return NULL;
+    }
+    if(mode == BLE_MODE_MESH_EXCLUSIVE) {
+        ble_scanning = 0;
+        ble_busy = 0;
+        snprintf(ble_status, sizeof(ble_status), "%s",
+                 "Meshtastic BLE exclusive");
+        pthread_mutex_unlock(&ble_lock);
+        return NULL;
+    }
     ble_busy = 1;
     ble_scanning = 1;
     snprintf(ble_status, sizeof(ble_status), "%s", "Scanning...");
     pthread_mutex_unlock(&ble_lock);
 
-    mesh_running = ui_meshtastic_is_running();
-    if(mesh_running) {
-        rc = ble_prepare_hci_adapter_only();
-        if(rc != 0) {
-            pthread_mutex_lock(&ble_lock);
-            ble_scanning = 0;
-            ble_busy = 0;
-            snprintf(ble_status, sizeof(ble_status), "%s",
-                     "Meshtastic is using nRF52840");
-            pthread_mutex_unlock(&ble_lock);
-            return NULL;
-        }
-    } else {
-        rc = ble_ensure_adapter();
-    }
+    rc = ble_ensure_adapter();
     if(rc == 0 && ble_adapter_ready) {
         pthread_mutex_lock(&ble_lock);
         backend = ble_backend;
@@ -1680,9 +1767,12 @@ static void ble_scan_switch_event_cb(lv_event_t *event)
 {
     lv_obj_t *sw = lv_event_get_target(event);
     int enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    ble_mode_t mode;
 
     pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
     ble_scan_enabled = enabled;
+    mode = ble_mode;
     ble_next_scan_us = 0;
     if(!enabled) {
         ble_detail_mode = 0;
@@ -1698,17 +1788,96 @@ static void ble_scan_switch_event_cb(lv_event_t *event)
         snprintf(ble_gatt_text, sizeof(ble_gatt_text), "%s", "No GATT data");
     }
     snprintf(ble_status, sizeof(ble_status), "%s",
-             enabled ? "Bluetooth on" : "Bluetooth off");
+             !enabled ? "Bluetooth off" :
+             (mode == BLE_MODE_MESH_EXCLUSIVE ? "Meshtastic BLE exclusive" :
+              "Bluetooth on"));
     pthread_mutex_unlock(&ble_lock);
+    ble_save_enabled(enabled);
+    ui_meshtastic_apply_ble_setting();
 
-    ble_log("auto scan %s", enabled ? "on" : "off");
-    if(enabled) {
+    ble_log("bluetooth switch %s mode=%s", enabled ? "on" : "off",
+            ble_mode_pref_value(mode));
+    if(enabled && mode == BLE_MODE_CUSTOM) {
         ble_start_worker(ble_scan_thread_cb, NULL);
     } else {
         ble_stop_bluetoothd_on_demand();
     }
     ble_refresh_ui();
     app_request_fast_refresh();
+}
+
+static void ble_mode_reset_runtime_locked(void)
+{
+    ble_device_count = 0;
+    ble_selected = -1;
+    ble_detail_mode = 0;
+    ble_connected = 0;
+    ble_connect_queued = 0;
+    ble_gatt_busy = 0;
+    ble_connected_addr[0] = '\0';
+    ble_connected_name[0] = '\0';
+    ble_queued_addr[0] = '\0';
+    ble_queued_name[0] = '\0';
+    ble_queued_scan_index = -1;
+    ble_queued_scan_index_valid = 0;
+    snprintf(ble_gatt_text, sizeof(ble_gatt_text), "%s", "No GATT data");
+}
+
+static void ble_mode_event_cb(lv_event_t *event)
+{
+    ble_mode_t mode = (ble_mode_t)(intptr_t)lv_event_get_user_data(event);
+    int enabled;
+
+    pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
+    if(ble_mode == mode) {
+        pthread_mutex_unlock(&ble_lock);
+        return;
+    }
+    ble_mode = mode;
+    enabled = ble_scan_enabled;
+    ble_next_scan_us = 0;
+    ble_mode_reset_runtime_locked();
+    snprintf(ble_status, sizeof(ble_status), "%s",
+             mode == BLE_MODE_MESH_EXCLUSIVE ?
+             "Meshtastic BLE exclusive" : "Bluetooth on");
+    pthread_mutex_unlock(&ble_lock);
+
+    ble_save_mode(mode);
+    ble_log("mode changed to %s", ble_mode_pref_value(mode));
+    ui_meshtastic_apply_ble_setting();
+    if(enabled && mode == BLE_MODE_CUSTOM) {
+        ble_start_worker(ble_scan_thread_cb, NULL);
+    } else {
+        ble_stop_bluetoothd_on_demand();
+    }
+    ble_refresh_ui();
+    app_request_fast_refresh();
+}
+
+static lv_obj_t *ble_mode_button_create(lv_obj_t *parent, int x, int y, int w,
+                                        const char *text, ble_mode_t mode)
+{
+    lv_obj_t *btn = lv_obj_create(parent);
+    lv_obj_t *label;
+
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_size(btn, w, 48);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x2A3037), 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(btn, ble_mode_event_cb, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)mode);
+
+    label = ui_label(btn, text, &lv_font_montserrat_16, 0xC9D3DF);
+    lv_obj_center(label);
+    ui_make_click_forwarder(label);
+    return btn;
 }
 
 static void ble_close_confirm(void)
@@ -1786,6 +1955,7 @@ static void ble_update_connect_overlay(int show, const char *name,
 static void ble_show_device_list(void)
 {
     pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
     ble_detail_mode = 0;
     ble_connected = 0;
     ble_connect_queued = 0;
@@ -1798,7 +1968,9 @@ static void ble_show_device_list(void)
     ble_queued_scan_index_valid = 0;
     snprintf(ble_gatt_text, sizeof(ble_gatt_text), "%s", "No GATT data");
     snprintf(ble_status, sizeof(ble_status), "%s",
-             ble_scan_enabled ? "Bluetooth on" : "Bluetooth off");
+             !ble_scan_enabled ? "Bluetooth off" :
+             (ble_mode == BLE_MODE_MESH_EXCLUSIVE ?
+              "Meshtastic BLE exclusive" : "Bluetooth on"));
     ble_next_scan_us = 0;
     pthread_mutex_unlock(&ble_lock);
 }
@@ -1841,6 +2013,7 @@ static int ble_open_device_detail(const char *addr, const char *name,
     ble_connect_req_t *req;
     int busy;
     int enabled;
+    ble_mode_t mode;
 
     if(!addr || !addr[0]) {
         return 0;
@@ -1858,12 +2031,15 @@ static int ble_open_device_detail(const char *addr, const char *name,
     req->scan_index_valid = scan_index_valid ? 1 : 0;
 
     pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
     busy = ble_busy;
     enabled = ble_scan_enabled;
-    if(!enabled) {
+    mode = ble_mode;
+    if(!enabled || mode != BLE_MODE_CUSTOM) {
         pthread_mutex_unlock(&ble_lock);
         free(req);
-        ble_set_status("Bluetooth off");
+        ble_set_status(!enabled ? "Bluetooth off" :
+                       "Meshtastic BLE exclusive");
         return 0;
     }
 
@@ -1905,12 +2081,15 @@ static void ble_try_start_queued_connection(void)
     int queued;
     int busy;
     int enabled;
+    ble_mode_t mode;
 
     pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
     queued = ble_connect_queued;
     busy = ble_busy;
     enabled = ble_scan_enabled;
-    if(!queued || busy || !enabled) {
+    mode = ble_mode;
+    if(!queued || busy || !enabled || mode != BLE_MODE_CUSTOM) {
         pthread_mutex_unlock(&ble_lock);
         return;
     }
@@ -2031,13 +2210,16 @@ static void ble_device_event_cb(lv_event_t *event)
 {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
     int enabled;
+    ble_mode_t mode;
     char addr[BLE_ADDR_LEN];
     char name[BLE_NAME_MAX];
     int scan_index = -1;
     int scan_index_valid = 0;
 
     pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
     enabled = ble_scan_enabled;
+    mode = ble_mode;
     if(index >= 0 && index < ble_device_count) {
         ble_selected = index;
         snprintf(addr, sizeof(addr), "%s", ble_devices[index].addr);
@@ -2050,8 +2232,9 @@ static void ble_device_event_cb(lv_event_t *event)
     }
     pthread_mutex_unlock(&ble_lock);
 
-    if(!enabled) {
-        ble_set_status("Bluetooth off");
+    if(!enabled || mode != BLE_MODE_CUSTOM) {
+        ble_set_status(!enabled ? "Bluetooth off" :
+                       "Meshtastic BLE exclusive");
         return;
     }
     if(addr[0]) {
@@ -2068,6 +2251,7 @@ static void ble_refresh_ui(void)
     int ready;
     int scanning;
     int scan_enabled;
+    ble_mode_t mode;
     int gatt_busy;
     int detail_mode;
     int connected;
@@ -2081,12 +2265,14 @@ static void ble_refresh_ui(void)
     ble_update_adapter_cache();
 
     pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
     count = ble_device_count;
     selected = ble_selected;
     present = ble_adapter_present;
     ready = ble_adapter_ready;
     scanning = ble_scanning;
     scan_enabled = ble_scan_enabled;
+    mode = ble_mode;
     gatt_busy = ble_gatt_busy;
     detail_mode = ble_detail_mode;
     connected = ble_connected;
@@ -2098,7 +2284,7 @@ static void ble_refresh_ui(void)
     snprintf(connected_name, sizeof(connected_name), "%s", ble_connected_name);
     pthread_mutex_unlock(&ble_lock);
 
-    if(!scan_enabled || !strstr(status, "Meshtastic")) {
+    if(!scan_enabled || mode == BLE_MODE_CUSTOM) {
         app_set_ble_status(!scan_enabled ? "offline" :
                            (connected ? "connected" :
                             (ready ? "ready" : "offline")));
@@ -2109,6 +2295,8 @@ static void ble_refresh_ui(void)
 
         if(!scan_enabled) {
             lv_label_set_text(ble_state_label, ui_tr("Bluetooth off"));
+        } else if(mode == BLE_MODE_MESH_EXCLUSIVE) {
+            lv_label_set_text(ble_state_label, ui_tr("Meshtastic BLE exclusive"));
         } else if(ready) {
             char text[64];
             snprintf(text, sizeof(text), "%s  %s", ui_tr("Adapter ready"),
@@ -2123,14 +2311,17 @@ static void ble_refresh_ui(void)
             lv_label_set_text(ble_state_label, ui_tr("No BLE adapter"));
         }
         state_color = !scan_enabled ? 0x64748B :
-                      (ready ? 0x25C281 :
-                       (present ? 0xF5A524 : 0xEF4D5A));
+                      (mode == BLE_MODE_MESH_EXCLUSIVE ? 0x3DA5FF :
+                       (ready ? 0x25C281 :
+                        (present ? 0xF5A524 : 0xEF4D5A)));
         lv_obj_set_style_text_color(ble_state_label, lv_color_hex(state_color), 0);
     }
     if(ble_status_label) {
         const char *status_text = !scan_enabled ? "Bluetooth off" :
-                                  (scanning ? "Scanning..." :
-                                   (gatt_busy ? "Discovering GATT..." : status));
+                                  (mode == BLE_MODE_MESH_EXCLUSIVE ?
+                                   "Meshtastic owns nRF52840" :
+                                   (scanning ? "Scanning..." :
+                                   (gatt_busy ? "Discovering GATT..." : status)));
 
         lv_label_set_text(ble_status_label, ui_tr(status_text));
     }
@@ -2141,12 +2332,26 @@ static void ble_refresh_ui(void)
             lv_obj_clear_state(ble_scan_switch, LV_STATE_CHECKED);
         }
     }
+    if(ble_mode_mesh_btn) {
+        uint32_t bg = mode == BLE_MODE_MESH_EXCLUSIVE ? 0x1E3A8A : 0x1F2937;
+        uint32_t border = mode == BLE_MODE_MESH_EXCLUSIVE ? 0x3DA5FF : 0x2A3037;
+        lv_obj_set_style_bg_color(ble_mode_mesh_btn, lv_color_hex(bg), 0);
+        lv_obj_set_style_border_color(ble_mode_mesh_btn, lv_color_hex(border), 0);
+    }
+    if(ble_mode_custom_btn) {
+        uint32_t bg = mode == BLE_MODE_CUSTOM ? 0x14532D : 0x1F2937;
+        uint32_t border = mode == BLE_MODE_CUSTOM ? 0x25C281 : 0x2A3037;
+        lv_obj_set_style_bg_color(ble_mode_custom_btn, lv_color_hex(bg), 0);
+        lv_obj_set_style_border_color(ble_mode_custom_btn, lv_color_hex(border), 0);
+    }
     if(ble_list_title_label) {
         char text[64];
         snprintf(text, sizeof(text), "%s  %d", ui_tr("Available BLE devices"),
                  count);
         lv_label_set_text(ble_list_title_label,
-                          scan_enabled ? text : ui_tr("Bluetooth is off"));
+                          !scan_enabled ? ui_tr("Bluetooth is off") :
+                          (mode == BLE_MODE_MESH_EXCLUSIVE ?
+                           ui_tr("Meshtastic BLE exclusive") : text));
     }
     if(ble_device_list) {
         if(detail_mode) {
@@ -2271,6 +2476,7 @@ static void ble_timer_cb(lv_timer_t *timer)
     int busy;
     int connected;
     int detail_mode;
+    ble_mode_t mode;
     uint64_t next_scan;
     uint64_t now = ui_monotonic_us();
 
@@ -2279,12 +2485,15 @@ static void ble_timer_cb(lv_timer_t *timer)
     ble_try_start_queued_connection();
 
     pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
     enabled = ble_scan_enabled;
+    mode = ble_mode;
     busy = ble_busy;
     connected = ble_connected;
     detail_mode = ble_detail_mode;
     next_scan = ble_next_scan_us;
-    if(enabled && !busy && !connected && !detail_mode &&
+    if(enabled && mode == BLE_MODE_CUSTOM &&
+       !busy && !connected && !detail_mode &&
        (next_scan == 0 || now >= next_scan)) {
         ble_next_scan_us = now + BLE_AUTO_SCAN_PERIOD_US;
     } else {
@@ -2311,6 +2520,8 @@ void ui_ble_cleanup(void)
     ble_state_label = NULL;
     ble_status_label = NULL;
     ble_scan_switch = NULL;
+    ble_mode_mesh_btn = NULL;
+    ble_mode_custom_btn = NULL;
     ble_list_title_label = NULL;
     ble_device_list = NULL;
     ble_detail_panel = NULL;
@@ -2354,6 +2565,10 @@ void ui_ble_create(lv_obj_t *scr)
         list_h = 360;
     }
 
+    pthread_mutex_lock(&ble_lock);
+    ble_load_prefs_locked();
+    pthread_mutex_unlock(&ble_lock);
+
     ui_create_header(scr, "Bluetooth");
 
     body = ui_page_body(scr, 144);
@@ -2384,6 +2599,22 @@ void ui_ble_create(lv_obj_t *scr)
     lv_obj_add_event_cb(ble_scan_switch, ble_scan_switch_event_cb,
                         LV_EVENT_VALUE_CHANGED, NULL);
 
+    {
+        int mode_gap = 12;
+        int mode_w = (panel_w - mode_gap) / 2;
+
+        if(mode_w > 250) {
+            mode_w = 250;
+        }
+        ble_mode_mesh_btn = ble_mode_button_create(summary, 0, 116, mode_w,
+                                                   "Meshtastic",
+                                                   BLE_MODE_MESH_EXCLUSIVE);
+        ble_mode_custom_btn = ble_mode_button_create(summary, mode_w + mode_gap,
+                                                     116, mode_w,
+                                                     "Scan BLE",
+                                                     BLE_MODE_CUSTOM);
+    }
+
     ui_label(summary, "Tap a device name to connect and inspect GATT.",
              &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_width(lv_obj_get_child(summary, lv_obj_get_child_count(summary) - 1),
@@ -2392,7 +2623,7 @@ void ui_ble_create(lv_obj_t *scr)
                                             lv_obj_get_child_count(summary) - 1),
                            LV_LABEL_LONG_WRAP);
     lv_obj_align(lv_obj_get_child(summary, lv_obj_get_child_count(summary) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, 122);
+                 LV_ALIGN_TOP_LEFT, 0, 172);
 
     list = ui_panel(body, panel_x, list_y, panel_w, list_h);
     ble_device_list = list;
@@ -2509,7 +2740,7 @@ void ui_ble_create(lv_obj_t *scr)
 
     ble_timer = lv_timer_create(ble_timer_cb, 500, NULL);
     ble_refresh_ui();
-    if(ble_scan_enabled) {
+    if(ble_custom_mode_enabled()) {
         ble_start_worker(ble_scan_thread_cb, NULL);
     }
 }

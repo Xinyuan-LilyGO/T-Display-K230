@@ -924,6 +924,7 @@ typedef struct {
     std::string client_import_key;
     bool rebroadcast = true;
     bool advertise_nodeinfo = true;
+    bool phoneapi_enabled = true;
     bool position_enabled = true;
     bool telemetry_enabled = true;
     bool environment_telemetry_enabled = true;
@@ -16753,7 +16754,12 @@ static std::string daemon_status_response(const probe_options_t &opts,
        (!mesh_gnss.has_fix || strcmp(mesh_gnss.gps_state, "fix") != 0)) {
         (void)nrf9151_gnss_apply_cache_fix(true);
     }
-    ble_state = phoneapi_bridge_get_state(ble_detail, sizeof(ble_detail));
+    if(opts.phoneapi_enabled) {
+        ble_state = phoneapi_bridge_get_state(ble_detail, sizeof(ble_detail));
+    } else {
+        ble_state = PHONEAPI_BRIDGE_OFFLINE;
+        snprintf(ble_detail, sizeof(ble_detail), "%s", "disabled");
+    }
     if(mesh_pki_public_key_available()) {
         pki_key = mesh_hex_encode_bytes(mesh_pki_identity.public_key, 4U);
     }
@@ -18635,6 +18641,7 @@ static void print_usage(const char *argv0)
             "  --no-ack         Disable Routing ACK request\n"
             "  --nodeinfo       Send one NodeInfo packet when daemon starts (default)\n"
             "  --no-nodeinfo    Do not advertise this node on daemon start\n"
+            "  --no-phoneapi   Disable the nRF52840 PhoneAPI/BLE bridge\n"
             "  --nodeinfo-interval SEC  Periodic daemon NodeInfo interval, default 600\n"
             "  --position       Enable nRF9151 GNSS Position broadcast (default)\n"
             "  --no-position    Disable GNSS Position broadcast\n"
@@ -18840,6 +18847,8 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->mesh_mode = true;
         } else if(strcmp(arg, "--no-rebroadcast") == 0) {
             opts->rebroadcast = false;
+        } else if(strcmp(arg, "--no-phoneapi") == 0) {
+            opts->phoneapi_enabled = false;
         } else if(strcmp(arg, "--nodeinfo") == 0) {
             opts->advertise_nodeinfo = true;
         } else if(strcmp(arg, "--no-nodeinfo") == 0) {
@@ -19780,8 +19789,10 @@ int main(int argc, char **argv)
                                opts.position_enabled ? "unavailable" : "off",
                                opts.position_enabled ? "Waiting" :
                                "Position disabled");
-        if(opts.mesh_mode) {
+        if(opts.mesh_mode && opts.phoneapi_enabled) {
             phoneapi_start(opts);
+        } else if(opts.mesh_mode) {
+            phoneapi_bridge_set_state(PHONEAPI_BRIDGE_OFFLINE, "disabled");
         }
     }
     printf("Listening. Press Ctrl-C to stop.\n");

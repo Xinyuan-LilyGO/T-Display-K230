@@ -9,6 +9,7 @@ extern "C" {
 
 void ui_ble_create(lv_obj_t *scr);
 void ui_ble_cleanup(void);
+int ui_ble_meshtastic_bridge_enabled(void);
 
 #ifdef __cplusplus
 }

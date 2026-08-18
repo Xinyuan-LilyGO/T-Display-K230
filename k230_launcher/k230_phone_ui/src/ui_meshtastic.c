@@ -1,6 +1,7 @@
 #include "ui_meshtastic.h"
 
 #include "ui_audio.h"
+#include "ui_ble.h"
 #include "ui_hardware.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
@@ -893,7 +894,12 @@ static void mesh_apply_ble_status(const char *status, int online)
 {
     char ble_state[32];
 
-    mesh_status_field(status, "ble", ble_state, sizeof(ble_state), "offline");
+    if(!ui_ble_meshtastic_bridge_enabled()) {
+        snprintf(ble_state, sizeof(ble_state), "%s", "offline");
+    } else {
+        mesh_status_field(status, "ble", ble_state, sizeof(ble_state),
+                          "offline");
+    }
     if(!online) {
         snprintf(ble_state, sizeof(ble_state), "%s", "offline");
     }
@@ -3931,6 +3937,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     char telemetry_device_interval_arg[16];
     char telemetry_environment_interval_arg[16];
     char media_option[192];
+    char phoneapi_option[32];
     char command[1792];
     int rc;
 
@@ -4024,28 +4031,30 @@ static void mesh_start_event_cb(lv_event_t *event)
              mesh_photo_repeat, mesh_photo_repair_rounds,
              mesh_photo_repair_repeat, mesh_photo_repair_window_ms,
              mesh_photo_cache_ttl_sec);
+    snprintf(phoneapi_option, sizeof(phoneapi_option), "%s",
+             ui_ble_meshtastic_bridge_enabled() ? "" : "--no-phoneapi ");
     if(mesh_channel_name[0]) {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s%s"
+                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s%s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, channel_arg, slot_option, psk_arg,
                  power_option, node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
                  position_option, fixed_position_option, telemetry_option,
-                 media_option);
+                 media_option, phoneapi_option);
     } else {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s%s"
+                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s%s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, slot_option, psk_arg, power_option,
                  node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
                  position_option, fixed_position_option, telemetry_option,
-                 media_option);
+                 media_option, phoneapi_option);
     }
     rc = system(command);
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
@@ -4158,6 +4167,14 @@ static void mesh_restart_daemon_if_online(void)
     }
     usleep(220000);
     mesh_start_event_cb(NULL);
+}
+
+void ui_meshtastic_apply_ble_setting(void)
+{
+    if(!ui_ble_meshtastic_bridge_enabled()) {
+        app_set_ble_status("offline");
+    }
+    mesh_restart_daemon_if_online();
 }
 
 static void mesh_publish_event_cb(lv_event_t *event)

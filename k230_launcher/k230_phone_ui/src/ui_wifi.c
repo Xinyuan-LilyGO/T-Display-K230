@@ -2,6 +2,7 @@
 
 #include "ui_i18n.h"
 #include "ui_input.h"
+#include "ui_prefs.h"
 
 #include <ctype.h>
 #include <pthread.h>
@@ -19,6 +20,7 @@
 #define WIFI_CONNECT_LOG "/tmp/k230_wifi_connect.log"
 #define WIFI_PROFILE_PATH "/root/app/k230_phone_ui/wifi_profiles.conf"
 #define WIFI_PROFILE_TMP_PATH "/root/app/k230_phone_ui/wifi_profiles.conf.tmp"
+#define WIFI_PREF_ENABLED "wifi.enabled"
 #define WIFI_MAX_PROFILES 12
 #define WIFI_SCAN_WAIT_STEP_US 100000U
 #define WIFI_SCAN_WAIT_MAX_STEPS 100U
@@ -53,10 +55,12 @@ static wifi_profile_t wifi_profiles[WIFI_MAX_PROFILES];
 static int wifi_ap_count;
 static int wifi_profile_count;
 static int wifi_profiles_loaded;
+static int wifi_prefs_loaded;
 static int wifi_selected_ap = -1;
 static int wifi_enabled = 1;
 static int wifi_scan_busy;
 static int wifi_connect_busy;
+static int wifi_power_worker_busy;
 static int wifi_selected_encrypted;
 static int wifi_autoconnect_started;
 static int wifi_suppress_click_index = -1;
@@ -117,6 +121,26 @@ static void wifi_log(const char *fmt, ...)
     va_end(ap);
     fputc('\n', fp);
     fclose(fp);
+}
+
+static void wifi_load_prefs_locked(void)
+{
+    char value[8];
+
+    if(wifi_prefs_loaded) {
+        return;
+    }
+
+    ui_prefs_get(WIFI_PREF_ENABLED, value, sizeof(value), "1");
+    wifi_enabled = strcmp(value, "0") != 0;
+    wifi_prefs_loaded = 1;
+}
+
+static void wifi_save_enabled(int enabled)
+{
+    if(ui_prefs_set(WIFI_PREF_ENABLED, enabled ? "1" : "0") != 0) {
+        wifi_log("Failed to save %s=%d", WIFI_PREF_ENABLED, enabled ? 1 : 0);
+    }
 }
 
 static void wifi_load_modules(void)
@@ -920,6 +944,7 @@ static void wifi_update_page(void)
     char status[NET_STATUS_MAX];
     char state[96];
     char ip[64];
+    int ip_valid;
     uint32_t color = 0x9AA4AF;
 
     if(!wifi_status_label) {
@@ -927,9 +952,11 @@ static void wifi_update_page(void)
     }
 
     ui_read_iface_state(NET_WIFI_IFACE, state, sizeof(state), &color);
-    ui_read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip));
+    ip[0] = '\0';
+    ip_valid = ui_read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip)) == 0;
 
     pthread_mutex_lock(&wifi_lock);
+    wifi_load_prefs_locked();
     wifi_profiles_load_locked();
     memcpy(aps, wifi_aps, sizeof(aps));
     count = wifi_ap_count;
@@ -957,7 +984,7 @@ static void wifi_update_page(void)
                                     lv_color_hex(enabled ? color : 0x9AA4AF), 0);
     }
     if(wifi_ip_label) {
-        lv_label_set_text(wifi_ip_label, enabled ? ip : "--");
+        lv_label_set_text(wifi_ip_label, enabled && ip_valid ? ip : "--");
     }
     if(wifi_status_label) {
         if(!enabled) {
@@ -985,9 +1012,7 @@ static void wifi_update_page(void)
     app_set_wifi_status(!enabled ? "off" :
                         (connect_busy ? "connecting" :
                          (scan_busy ? "scanning" :
-                          (ui_read_iface_ip(NET_WIFI_IFACE, ip,
-                                            sizeof(ip)) == 0 ?
-                           "connected" : "on"))));
+                          (ip_valid ? "connected" : "on"))));
     if(wifi_connect_spinner) {
         if(enabled && connect_busy) {
             lv_obj_clear_flag(wifi_connect_spinner, LV_OBJ_FLAG_HIDDEN);
@@ -1079,6 +1104,13 @@ static void *wifi_scan_thread_cb(void *arg)
     rc = wifi_scan_collect(list, &count, err, sizeof(err));
 
     pthread_mutex_lock(&wifi_lock);
+    if(!wifi_enabled) {
+        wifi_scan_busy = 0;
+        wifi_set_status_locked("Wi-Fi off");
+        pthread_mutex_unlock(&wifi_lock);
+        return NULL;
+    }
+
     if(wifi_selected_ssid[0]) {
         snprintf(selected_ssid, sizeof(selected_ssid), "%s", wifi_selected_ssid);
     } else if(wifi_selected_ap >= 0 && wifi_selected_ap < wifi_ap_count) {
@@ -1131,6 +1163,51 @@ static void *wifi_scan_thread_cb(void *arg)
     pthread_mutex_unlock(&wifi_lock);
 
     return NULL;
+}
+
+static void *wifi_power_off_thread_cb(void *arg)
+{
+    int rc;
+
+    (void)arg;
+    rc = system("wpa_cli -i " NET_WIFI_IFACE " terminate >/dev/null 2>&1 || true; "
+                "ifconfig " NET_WIFI_IFACE " down >/dev/null 2>&1 || true");
+
+    pthread_mutex_lock(&wifi_lock);
+    wifi_power_worker_busy = 0;
+    if(rc == -1 && !wifi_enabled) {
+        wifi_set_status_locked("Wi-Fi down command failed");
+    } else if(!wifi_enabled) {
+        wifi_set_status_locked("Wi-Fi off");
+    }
+    pthread_mutex_unlock(&wifi_lock);
+
+    app_set_wifi_status("off");
+    app_request_fast_refresh();
+    return NULL;
+}
+
+static void wifi_start_power_off(void)
+{
+    pthread_t thread;
+
+    pthread_mutex_lock(&wifi_lock);
+    if(wifi_power_worker_busy) {
+        pthread_mutex_unlock(&wifi_lock);
+        return;
+    }
+    wifi_power_worker_busy = 1;
+    pthread_mutex_unlock(&wifi_lock);
+
+    if(pthread_create(&thread, NULL, wifi_power_off_thread_cb, NULL) == 0) {
+        pthread_detach(thread);
+        return;
+    }
+
+    pthread_mutex_lock(&wifi_lock);
+    wifi_power_worker_busy = 0;
+    wifi_set_status_locked("Wi-Fi down worker failed");
+    pthread_mutex_unlock(&wifi_lock);
 }
 
 static void wifi_start_scan(int force)
@@ -1367,7 +1444,18 @@ void ui_wifi_autoconnect_start(void)
     char ssid[NET_SSID_MAX] = "";
     char password[NET_PASS_MAX] = "";
     int encrypted = 0;
+    int enabled;
     int should_start = 0;
+
+    pthread_mutex_lock(&wifi_lock);
+    wifi_load_prefs_locked();
+    enabled = wifi_enabled;
+    pthread_mutex_unlock(&wifi_lock);
+    if(!enabled) {
+        app_set_wifi_status("off");
+        wifi_log("Auto reconnect skipped: Wi-Fi disabled by preference");
+        return;
+    }
 
     if(ui_read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip)) == 0 &&
        wifi_wpa_completed()) {
@@ -1381,6 +1469,7 @@ void ui_wifi_autoconnect_start(void)
     }
 
     pthread_mutex_lock(&wifi_lock);
+    wifi_load_prefs_locked();
     wifi_profiles_load_locked();
     if(!wifi_autoconnect_started && wifi_enabled && !wifi_connect_busy &&
        wifi_profile_count > 0) {
@@ -1418,19 +1507,14 @@ static void wifi_switch_event_cb(lv_event_t *event)
     wifi_selected_ssid[0] = '\0';
     wifi_set_status_locked(enabled ? "Wi-Fi on" : "Wi-Fi off");
     pthread_mutex_unlock(&wifi_lock);
+    wifi_save_enabled(enabled);
 
     app_set_wifi_status(enabled ? "scanning" : "off");
     if(enabled) {
         ui_wifi_autoconnect_start();
         wifi_start_scan(1);
     } else {
-        int down_rc = system("wpa_cli -i " NET_WIFI_IFACE " terminate >/dev/null 2>&1 || true; "
-                             "ifconfig " NET_WIFI_IFACE " down >/dev/null 2>&1 || true");
-        if(down_rc == -1) {
-            pthread_mutex_lock(&wifi_lock);
-            wifi_set_status_locked("Wi-Fi down command failed");
-            pthread_mutex_unlock(&wifi_lock);
-        }
+        wifi_start_power_off();
     }
 
     wifi_update_page();
@@ -1567,6 +1651,7 @@ void ui_wifi_create(lv_obj_t *scr)
     int list_y = 228;
     int list_h = landscape ?
                  ui_screen_height() - ui_page_top_y(144) - list_y - 24 : 810;
+    int enabled;
 
     if(panel_w < 520) {
         panel_w = 520;
@@ -1585,10 +1670,17 @@ void ui_wifi_create(lv_obj_t *scr)
     title = ui_label(summary, "Wi-Fi", &lv_font_montserrat_24, 0xF2F5F8);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
+    pthread_mutex_lock(&wifi_lock);
+    wifi_load_prefs_locked();
+    enabled = wifi_enabled;
+    pthread_mutex_unlock(&wifi_lock);
+
     wifi_switch_obj = lv_switch_create(summary);
     lv_obj_set_size(wifi_switch_obj, 84, 44);
     lv_obj_align(wifi_switch_obj, LV_ALIGN_TOP_RIGHT, 0, 0);
-    lv_obj_add_state(wifi_switch_obj, LV_STATE_CHECKED);
+    if(enabled) {
+        lv_obj_add_state(wifi_switch_obj, LV_STATE_CHECKED);
+    }
     lv_obj_set_style_bg_color(wifi_switch_obj, lv_color_hex(0x25303A), 0);
     lv_obj_set_style_bg_color(wifi_switch_obj, lv_color_hex(0x25C281),
                               LV_PART_INDICATOR | LV_STATE_CHECKED);
@@ -1692,10 +1784,13 @@ void ui_wifi_create(lv_obj_t *scr)
              wifi_wpa_completed();
 
     pthread_mutex_lock(&wifi_lock);
+    wifi_load_prefs_locked();
     wifi_profiles_load_locked();
-    wifi_enabled = 1;
+    enabled = wifi_enabled;
     wifi_last_scan_us = 0;
-    if(has_ip) {
+    if(!enabled) {
+        wifi_set_status_locked("Wi-Fi off");
+    } else if(has_ip) {
         wifi_set_status_locked("Wi-Fi connected");
     } else {
         wifi_set_status_locked("Wi-Fi on");
@@ -1703,6 +1798,8 @@ void ui_wifi_create(lv_obj_t *scr)
     pthread_mutex_unlock(&wifi_lock);
 
     wifi_timer = lv_timer_create(wifi_timer_cb, 1000, NULL);
-    wifi_start_scan(1);
+    if(enabled) {
+        wifi_start_scan(1);
+    }
     wifi_update_page();
 }
