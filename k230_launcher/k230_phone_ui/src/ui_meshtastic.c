@@ -51,6 +51,8 @@
 #define MESHTASTIC_UI_CHAT_MAX 8192
 #define MESHTASTIC_UI_NODE_SELECT_MAX 24
 #define MESHTASTIC_UI_NODE_LINE_MAX 768
+#define MESHTASTIC_UI_WAYPOINT_SELECT_MAX 16
+#define MESHTASTIC_UI_WAYPOINT_LINE_MAX 512
 #define MESHTASTIC_UI_CHANNEL_SLOT_MAX 8
 #define MESHTASTIC_CHANNEL_PROFILE_MAX 24
 #define MESHTASTIC_CANNED_MAX 16
@@ -183,6 +185,7 @@ static char mesh_last_chat_text[MESHTASTIC_UI_CHAT_MAX];
 static char mesh_last_ble_state[32] = "offline";
 static char mesh_node_select_ids[MESHTASTIC_UI_NODE_SELECT_MAX][24];
 static char mesh_node_select_lines[MESHTASTIC_UI_NODE_SELECT_MAX][MESHTASTIC_UI_NODE_LINE_MAX];
+static char mesh_waypoint_select_lines[MESHTASTIC_UI_WAYPOINT_SELECT_MAX][MESHTASTIC_UI_WAYPOINT_LINE_MAX];
 static char mesh_node_detail_target_id[24];
 static char mesh_node_detail_status_text[160];
 static char mesh_radio_pause_owner[32];
@@ -243,6 +246,7 @@ static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_nodes_panel;
 static lv_obj_t *mesh_map_overlay;
+static lv_obj_t *mesh_waypoints_overlay;
 static lv_obj_t *mesh_detector_overlay;
 static lv_obj_t *mesh_detector_panel;
 static lv_obj_t *mesh_choice_overlay;
@@ -9741,6 +9745,332 @@ static void mesh_map_add_share_button(lv_obj_t *map, int map_w, int map_h)
     lv_obj_move_foreground(btn);
 }
 
+static void mesh_waypoints_close(void)
+{
+    if(mesh_waypoints_overlay && lv_obj_is_valid(mesh_waypoints_overlay)) {
+        lv_obj_delete(mesh_waypoints_overlay);
+    }
+    mesh_waypoints_overlay = NULL;
+    memset(mesh_waypoint_select_lines, 0, sizeof(mesh_waypoint_select_lines));
+}
+
+static void mesh_waypoints_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_waypoints_close();
+}
+
+static int mesh_waypoints_fetch(char *out, size_t out_len,
+                                char *error_text, size_t error_len)
+{
+    char map_response[MESHTASTIC_MAP_RESPONSE_MAX];
+    char response[4096];
+    char copy[4096];
+    char *saveptr = NULL;
+    char *line;
+    int count = 0;
+
+    if(out && out_len > 0U) {
+        out[0] = '\0';
+    }
+    if(error_text && error_len > 0U) {
+        error_text[0] = '\0';
+    }
+    if(!out || out_len == 0U) {
+        return -1;
+    }
+
+    if(mesh_ipc_command("MAP\n", map_response, sizeof(map_response)) == 0 &&
+       strncmp(map_response, "OK map", 6) == 0) {
+        count = mesh_map_build_legacy_waypoints(map_response, out, out_len);
+        if(count > 0) {
+            return count;
+        }
+        if(count < 0) {
+            out[0] = '\0';
+        }
+    }
+
+    if(mesh_ipc_command("WAYPOINTS\n", response, sizeof(response)) != 0) {
+        if(error_text && error_len > 0U) {
+            snprintf(error_text, error_len, "%s", response);
+            ui_trim_text(error_text);
+        }
+        return -1;
+    }
+
+    snprintf(copy, sizeof(copy), "%s", response);
+    line = strtok_r(copy, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "wp ", 3) == 0) {
+            if(mesh_append_text(out, out_len, "%s\n", line) != 0) {
+                return count > 0 ? count : -1;
+            }
+            count++;
+        } else if(strncmp(line, "WAYPOINT ", 9) == 0) {
+            char legacy[MESHTASTIC_UI_WAYPOINT_LINE_MAX];
+            if(mesh_map_waypoint_to_legacy_line(line, legacy,
+                                                sizeof(legacy)) == 0) {
+                if(mesh_append_text(out, out_len, "%s\n", legacy) != 0) {
+                    return count > 0 ? count : -1;
+                }
+                count++;
+            }
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    return count;
+}
+
+static int mesh_waypoint_parse_position(const char *line, double *lat,
+                                        double *lon)
+{
+    char lat_text[32];
+    char lon_text[32];
+    char *endptr;
+    double parsed_lat;
+    double parsed_lon;
+
+    if(!line ||
+       !mesh_node_line_value(line, "lat=", lat_text, sizeof(lat_text)) ||
+       !mesh_node_line_value(line, "lon=", lon_text, sizeof(lon_text))) {
+        return 0;
+    }
+    parsed_lat = strtod(lat_text, &endptr);
+    if(endptr == lat_text || !isfinite(parsed_lat)) {
+        return 0;
+    }
+    parsed_lon = strtod(lon_text, &endptr);
+    if(endptr == lon_text || !isfinite(parsed_lon)) {
+        return 0;
+    }
+    if(fabs(parsed_lat) < 0.000001 && fabs(parsed_lon) < 0.000001) {
+        return 0;
+    }
+    if(lat) {
+        *lat = parsed_lat;
+    }
+    if(lon) {
+        *lon = parsed_lon;
+    }
+    return 1;
+}
+
+static void mesh_waypoint_center_event_cb(lv_event_t *event)
+{
+    const char *line = (const char *)lv_event_get_user_data(event);
+    double lat = 0.0;
+    double lon = 0.0;
+
+    if(!mesh_waypoint_parse_position(line, &lat, &lon)) {
+        mesh_map_set_notice(ui_tr("Waypoint has no coordinates"), 0xF5A524);
+        mesh_waypoints_close();
+        mesh_map_rebuild();
+        return;
+    }
+
+    mesh_map_center_lat = lat;
+    mesh_map_center_lon = lon;
+    mesh_map_center_valid = 1;
+    mesh_map_drag_active = 0;
+    mesh_map_drag_dirty = 0;
+    mesh_map_drag_total_dx = 0;
+    mesh_map_drag_total_dy = 0;
+    mesh_map_pinch_active = 0;
+    mesh_map_set_notice(ui_tr("Waypoint centered"), 0x38BDF8);
+    mesh_waypoints_close();
+    mesh_map_rebuild();
+}
+
+static void mesh_waypoints_add_card(lv_obj_t *panel, const char *line,
+                                    int x, int y, int w, int h,
+                                    size_t select_index)
+{
+    lv_obj_t *card;
+    lv_obj_t *label;
+    char id[24];
+    char from[24];
+    char age[24];
+    char name[48];
+    char desc[96];
+    char meta[192];
+    double lat = 0.0;
+    double lon = 0.0;
+
+    if(select_index >= MESHTASTIC_UI_WAYPOINT_SELECT_MAX || !line) {
+        return;
+    }
+    snprintf(mesh_waypoint_select_lines[select_index],
+             sizeof(mesh_waypoint_select_lines[select_index]), "%s", line);
+    mesh_node_line_value(line, "id=", id, sizeof(id));
+    mesh_node_line_value(line, "from=", from, sizeof(from));
+    mesh_node_line_value(line, "age=", age, sizeof(age));
+    mesh_node_line_value(line, "name=", name, sizeof(name));
+    mesh_node_line_value(line, "desc=", desc, sizeof(desc));
+    if(mesh_node_text_missing(id)) {
+        snprintf(id, sizeof(id), "-");
+    }
+    if(mesh_node_text_missing(from)) {
+        snprintf(from, sizeof(from), "-");
+    }
+    if(mesh_node_text_missing(age)) {
+        snprintf(age, sizeof(age), "-");
+    }
+    if(mesh_node_text_missing(name)) {
+        snprintf(name, sizeof(name), "%s", ui_tr("Waypoint"));
+    }
+    if(mesh_node_text_missing(desc)) {
+        snprintf(desc, sizeof(desc), "-");
+    }
+    (void)mesh_waypoint_parse_position(line, &lat, &lon);
+
+    card = ui_panel(panel, x, y, w, h);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card, mesh_waypoint_center_event_cb,
+                        LV_EVENT_CLICKED,
+                        mesh_waypoint_select_lines[select_index]);
+
+    label = ui_label(card, name, &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_pos(label, 14, 10);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    snprintf(meta, sizeof(meta), "%.5f, %.5f", lat, lon);
+    label = ui_label(card, meta, &lv_font_montserrat_16, 0x38BDF8);
+    lv_obj_set_pos(label, 14, 42);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    snprintf(meta, sizeof(meta), "%s %s  %s %s  %s %s",
+             ui_tr("From"), from, ui_tr("Age"), age, ui_tr("ID"), id);
+    label = ui_label(card, meta, &lv_font_montserrat_14, 0xCBD5E1);
+    lv_obj_set_pos(label, 14, 70);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card,
+                     strcmp(desc, "-") == 0 ? ui_tr("Tap to center") : desc,
+                     &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(label, 14, 96);
+    lv_obj_set_width(label, w - 28);
+    lv_obj_set_height(label, h - 106);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+}
+
+static void mesh_waypoints_event_cb(lv_event_t *event)
+{
+    char waypoints[4096];
+    char error_text[256];
+    char copy[4096];
+    char *saveptr = NULL;
+    char *line;
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *btn;
+    lv_obj_t *label;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int landscape = ui_is_landscape();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int cols = landscape ? 2 : 1;
+    int gap = 12;
+    int card_w = cols == 2 ? (content_w - gap) / 2 : content_w;
+    int card_h = landscape ? 128 : 136;
+    int y = 94;
+    int count;
+    int shown = 0;
+
+    (void)event;
+    ui_input_hide_inline_active();
+    count = mesh_waypoints_fetch(waypoints, sizeof(waypoints),
+                                 error_text, sizeof(error_text));
+    mesh_waypoints_close();
+
+    mesh_waypoints_overlay = lv_obj_create(lv_screen_active());
+    ui_set_fullscreen(mesh_waypoints_overlay);
+    lv_obj_set_style_bg_color(mesh_waypoints_overlay, lv_color_hex(0x05070A),
+                              0);
+    lv_obj_set_style_bg_opa(mesh_waypoints_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mesh_waypoints_overlay, 0, 0);
+    lv_obj_set_style_border_width(mesh_waypoints_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_waypoints_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_waypoints_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(mesh_waypoints_overlay);
+
+    panel = ui_scroll_panel(mesh_waypoints_overlay, 0, 0, screen_w, screen_h);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    title = ui_label(panel, ui_tr("Waypoints"), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, margin, 22);
+    lv_obj_set_width(title, content_w - 118);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    subtitle = ui_label(panel, ui_tr("Tap a waypoint to center map"),
+                        &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(subtitle, margin, 56);
+    lv_obj_set_width(subtitle, content_w - 118);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"), 0x374151);
+    lv_obj_add_event_cb(btn, mesh_waypoints_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    if(count <= 0 || !waypoints[0]) {
+        label = ui_label(panel,
+                         count < 0 && error_text[0] ? error_text :
+                         ui_tr("No waypoints"),
+                         &lv_font_montserrat_20, 0xCBD5E1);
+        lv_obj_set_pos(label, margin, y);
+        lv_obj_set_width(label, content_w);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        mesh_node_detail_append_spacer(panel, y + 92);
+        return;
+    }
+
+    snprintf(copy, sizeof(copy), "%s", waypoints);
+    line = strtok_r(copy, "\n", &saveptr);
+    while(line && shown < MESHTASTIC_UI_WAYPOINT_SELECT_MAX) {
+        if(strncmp(line, "wp ", 3) == 0) {
+            int col = shown % cols;
+            int row = shown / cols;
+            int card_x = margin + col * (card_w + gap);
+            int card_y = y + row * (card_h + gap);
+            mesh_waypoints_add_card(panel, line, card_x, card_y, card_w,
+                                    card_h, (size_t)shown);
+            shown++;
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    mesh_node_detail_append_spacer(panel,
+                                   y + ((shown + cols - 1) / cols) *
+                                   (card_h + gap) + 48);
+}
+
+static void mesh_map_add_waypoints_button(lv_obj_t *map)
+{
+    lv_obj_t *btn;
+    int btn_w = ui_is_landscape() ? 132 : 116;
+    int btn_h = 44;
+
+    btn = ui_command_button(map, 12, 12, btn_w, ui_tr("Waypoints"),
+                            0x38BDF8);
+    lv_obj_set_height(btn, btn_h);
+    lv_obj_set_ext_click_area(btn, 8);
+    lv_obj_add_event_cb(btn, mesh_waypoints_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    lv_obj_move_foreground(btn);
+}
+
 static void mesh_map_refresh_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -10023,8 +10353,9 @@ static void mesh_map_rebuild(void)
             lv_obj_set_style_bg_color(label, lv_color_hex(0x0B1220), 0);
             lv_obj_set_style_bg_opa(label, LV_OPA_80, 0);
             lv_obj_set_style_pad_all(label, 6, 0);
-            lv_obj_set_pos(label, 10, 10);
+            lv_obj_set_pos(label, 12, 62);
         }
+        mesh_map_add_waypoints_button(map);
         if(has_self_position) {
             mesh_map_add_current_position_overlay(map, lat, lon, self_lat,
                                                   self_lon, mesh_map_zoom,
@@ -10039,6 +10370,7 @@ static void mesh_map_rebuild(void)
     } else {
         mesh_map_draw_position_state(map, map_w, map_h, reason,
                                      position_state);
+        mesh_map_add_waypoints_button(map);
         mesh_map_add_zoom_badge(map, map_w);
         mesh_map_add_notice(map, map_w);
     }
@@ -12841,6 +13173,7 @@ void ui_meshtastic_cleanup(void)
     memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
     mesh_close_nodes_page();
     mesh_detector_close();
+    mesh_waypoints_close();
     mesh_map_close();
     mesh_close_channel_page();
 }
@@ -12905,6 +13238,10 @@ int ui_meshtastic_handle_back(void)
     }
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
         mesh_close_channel_page();
+        return 1;
+    }
+    if(mesh_waypoints_overlay && lv_obj_is_valid(mesh_waypoints_overlay)) {
+        mesh_waypoints_close();
         return 1;
     }
     if(mesh_map_overlay && lv_obj_is_valid(mesh_map_overlay)) {
