@@ -136,6 +136,7 @@
 #define DISPLAY_ORIENTATION_LANDSCAPE "landscape"
 #define DISPLAY_ROTATION_ENV "K230_DISPLAY_ROTATION"
 #define DISPLAY_ORIENTATION_ENV "K230_DISPLAY_ORIENTATION"
+#define DISPLAY_RENDER_MODE_ENV "K230_LVGL_RENDER_MODE"
 #define DISPLAY_ROTATION_PREF_KEY "display.rotation"
 #define DISPLAY_BRIGHTNESS_PREF_KEY "display.brightness"
 #define PAGE_TRANSITION_PREF_KEY "display.page_transition"
@@ -582,6 +583,7 @@ static int display_logical_width(void);
 static int display_logical_height(void);
 static void load_runtime_display_orientation(void);
 static void apply_display_orientation(lv_display_t *disp);
+static void apply_display_render_mode(lv_display_t *disp);
 static void apply_ui_stage_transform(void);
 static void style_fullscreen_root(lv_obj_t *obj);
 static int display_drm_rotation_from_orientation(void);
@@ -1740,13 +1742,16 @@ static void portrait_scroll_refresh_cb(lv_event_t *event)
 {
     static uint64_t last_refresh_us;
     uint64_t now;
+    lv_event_code_t code;
     lv_obj_t *target;
 
     if(display_logical_width() >= display_logical_height()) {
         return;
     }
+    code = lv_event_get_code(event);
     now = monotonic_us();
-    if(last_refresh_us != 0ULL && now - last_refresh_us < 8000ULL) {
+    if(code == LV_EVENT_SCROLL &&
+       last_refresh_us != 0ULL && now - last_refresh_us < 8000ULL) {
         return;
     }
     last_refresh_us = now;
@@ -1767,7 +1772,11 @@ static lv_obj_t *scroll_panel(lv_obj_t *parent, int x, int y, int w, int h)
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_bottom(obj, 48, 0);
     lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
                         LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_END, NULL);
     return obj;
 }
 
@@ -1785,7 +1794,11 @@ static lv_obj_t *scroll_region(lv_obj_t *parent, int x, int y, int w, int h)
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
                         LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_END, NULL);
     return obj;
 }
 
@@ -3318,6 +3331,41 @@ static void apply_display_orientation(lv_display_t *disp)
     if(evdev_indev) {
         apply_touch_transform();
     }
+}
+
+static void apply_display_render_mode(lv_display_t *disp)
+{
+    const char *mode_env;
+    const char *mode_name;
+    int hor;
+    int ver;
+    int use_full;
+
+    if(!disp) {
+        return;
+    }
+
+    hor = (int)lv_display_get_horizontal_resolution(disp);
+    ver = (int)lv_display_get_vertical_resolution(disp);
+    mode_env = getenv(DISPLAY_RENDER_MODE_ENV);
+    use_full = hor < ver;
+
+    if(mode_env && strcmp(mode_env, "full") == 0) {
+        use_full = 1;
+    } else if(mode_env && strcmp(mode_env, "direct") == 0) {
+        use_full = 0;
+    }
+
+    if(use_full) {
+        lv_display_set_render_mode(disp, LV_DISPLAY_RENDER_MODE_FULL);
+        mode_name = "full";
+    } else {
+        lv_display_set_render_mode(disp, LV_DISPLAY_RENDER_MODE_DIRECT);
+        mode_name = "direct";
+    }
+
+    touch_trace_log("DISPLAY_RENDER_MODE mode=%s env=%s logical=%dx%d",
+                    mode_name, mode_env ? mode_env : "auto", hor, ver);
 }
 
 static void request_fast_refresh(void)
@@ -10028,6 +10076,7 @@ int main(void)
     lv_linux_drm_set_rotation(disp, display_drm_rotation_from_orientation());
     lv_linux_drm_set_file(disp, drm_path, -1);
     lv_free(drm_path);
+    apply_display_render_mode(disp);
     main_display = disp;
     apply_display_orientation(disp);
 

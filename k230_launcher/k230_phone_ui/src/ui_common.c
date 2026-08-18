@@ -433,14 +433,17 @@ static void ui_portrait_scroll_refresh_cb(lv_event_t *event)
 {
     static uint64_t last_refresh_us;
     uint64_t now;
+    lv_event_code_t code;
     lv_obj_t *screen;
     lv_obj_t *target;
 
     if(ui_is_landscape()) {
         return;
     }
+    code = lv_event_get_code(event);
     now = ui_monotonic_us();
-    if(last_refresh_us != 0ULL && now - last_refresh_us < 8000ULL) {
+    if(code == LV_EVENT_SCROLL &&
+       last_refresh_us != 0ULL && now - last_refresh_us < 8000ULL) {
         return;
     }
     last_refresh_us = now;
@@ -462,7 +465,11 @@ void ui_make_scrollable(lv_obj_t *obj, int bottom_pad)
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_bottom(obj, bottom_pad, 0);
     lv_obj_add_event_cb(obj, ui_portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(obj, ui_portrait_scroll_refresh_cb,
                         LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(obj, ui_portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_END, NULL);
 }
 
 lv_obj_t *ui_scroll_panel(lv_obj_t *parent, int x, int y, int w, int h)
