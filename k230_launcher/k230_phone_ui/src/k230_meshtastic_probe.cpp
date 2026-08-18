@@ -13639,14 +13639,29 @@ static bool mesh_flrc_voice_restore_lora(chip_type_t chip,
                                          LR2021 *lr2021,
                                          const probe_profile_t *profile)
 {
-    int16_t state = begin_chip(chip, radio, sx1262, lr2021, profile);
+    int16_t state = RADIOLIB_ERR_UNKNOWN;
 
-    if(state != RADIOLIB_ERR_NONE) {
-        daemon_event("FLRC voice restore LoRa failed state=%d %s", state,
-                     error_name(state));
-        return false;
+    for(unsigned attempt = 1U; attempt <= 4U; attempt++) {
+        if(lr2021) {
+            (void)lr2021->clearPacketReceivedAction();
+            (void)lr2021->clearPacketSentAction();
+            (void)lr2021->standby();
+        }
+        usleep(20000U * attempt);
+        state = begin_chip(chip, radio, sx1262, lr2021, profile);
+        if(state == RADIOLIB_ERR_NONE) {
+            if(attempt > 1U) {
+                daemon_event("FLRC voice restore LoRa recovered attempt=%u",
+                             attempt);
+            }
+            return true;
+        }
+        daemon_event("FLRC voice restore LoRa retry=%u state=%d %s",
+                     attempt, state, error_name(state));
     }
-    return true;
+    daemon_event("FLRC voice restore LoRa failed final state=%d %s", state,
+                 error_name(state));
+    return false;
 }
 
 static int16_t mesh_flrc_voice_fast_transmit(LR2021 *lr2021,
@@ -13784,7 +13799,6 @@ static bool mesh_flrc_voice_tx_session(PhysicalLayer *radio, chip_type_t chip,
         daemon_event("FLRC voice TX done stream=0x%08x elapsed_ms=%lu",
                      frame.flrc_voice_stream_id, (unsigned long)elapsed_ms);
     } else {
-        mesh_voice_rx_decode_fail_count++;
         daemon_chat("TX 0x%08x voice FLRC failed stream=0x%08x",
                     frame.from_node, frame.flrc_voice_stream_id);
     }
