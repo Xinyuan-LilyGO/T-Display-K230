@@ -7282,6 +7282,12 @@ static const char *mesh_node_request_state_label(const char *state,
         }
         return "Sent";
     }
+    if(strcmp(state, "replied") == 0) {
+        if(color) {
+            *color = 0x25C281;
+        }
+        return "Replied";
+    }
     if(strcmp(state, "tx-failed") == 0 ||
        strcmp(state, "build-failed") == 0) {
         if(color) {
@@ -7305,6 +7311,7 @@ static int mesh_node_detail_fetch_request_status(const char *target_id,
     char type[40];
     char state[40];
     char age_ms[24];
+    char latency_ms[24];
 
     if(!target_id || !target_id[0] || !out || out_len == 0U) {
         return -1;
@@ -7332,15 +7339,25 @@ static int mesh_node_detail_fetch_request_status(const char *target_id,
     mesh_node_line_value(last_line, "type=", type, sizeof(type));
     mesh_node_line_value(last_line, "state=", state, sizeof(state));
     mesh_node_line_value(last_line, "age_ms=", age_ms, sizeof(age_ms));
+    mesh_node_line_value(last_line, "latency_ms=", latency_ms,
+                         sizeof(latency_ms));
     if(!type[0]) {
         snprintf(type, sizeof(type), "%s", "request");
     }
     if(!age_ms[0]) {
         snprintf(age_ms, sizeof(age_ms), "%s", "-");
     }
-    snprintf(out, out_len, "%s %s: %s, %sms",
-             ui_tr("Request"), type,
-             ui_tr(mesh_node_request_state_label(state, color)), age_ms);
+    if(strcmp(state, "replied") == 0 && latency_ms[0] &&
+       strcmp(latency_ms, "0") != 0) {
+        snprintf(out, out_len, "%s %s: %s, %sms",
+                 ui_tr("Request"), type,
+                 ui_tr(mesh_node_request_state_label(state, color)),
+                 latency_ms);
+    } else {
+        snprintf(out, out_len, "%s %s: %s, %sms",
+                 ui_tr("Request"), type,
+                 ui_tr(mesh_node_request_state_label(state, color)), age_ms);
+    }
     return 0;
 }
 

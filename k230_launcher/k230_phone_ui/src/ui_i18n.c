@@ -846,6 +846,7 @@ static const ui_translation_t ui_translations[] = {
     { "Radio busy", "射频忙", "無線ビジー" },
     { "Sending", "发送中", "送信中" },
     { "Sent", "已发送", "送信済み" },
+    { "Replied", "已收到回复", "返信受信" },
     { "Failed", "失败", "失敗" },
     { "Tap to open. Long press to edit.", "点击打开，长按编辑。", "タップで開く。長押しで編集。" },
     { "Mode", "模式", "モード" },

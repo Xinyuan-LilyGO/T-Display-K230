@@ -1127,9 +1127,11 @@ typedef struct {
     mesh_remote_request_type_t type = MESH_REMOTE_REQ_NODEINFO;
     uint32_t to_node = 0;
     uint32_t request_id = 0;
+    uint32_t mesh_packet_id = 0;
     uint32_t airtime_ms = 0;
     uint64_t queued_us = 0;
     uint64_t updated_us = 0;
+    uint64_t replied_us = 0;
     char state[32] = { 0 };
     char detail[128] = { 0 };
 } mesh_remote_request_status_t;
@@ -12561,7 +12563,8 @@ static mesh_remote_request_status_t *mesh_remote_status_find(uint32_t request_id
 
 static void mesh_remote_status_record(const mesh_remote_request_t &request,
                                       const char *state, const char *detail,
-                                      uint32_t airtime_ms)
+                                      uint32_t airtime_ms,
+                                      uint32_t mesh_packet_id = 0U)
 {
     mesh_remote_request_status_t *entry;
     uint64_t now_us = monotonic_us();
@@ -12583,10 +12586,97 @@ static void mesh_remote_status_record(const mesh_remote_request_t &request,
     }
     entry->updated_us = now_us;
     entry->airtime_ms = airtime_ms;
+    if(mesh_packet_id != 0U) {
+        entry->mesh_packet_id = mesh_packet_id;
+    }
+    if(state && strcmp(state, "replied") == 0) {
+        entry->replied_us = now_us;
+    }
     snprintf(entry->state, sizeof(entry->state), "%s",
              state ? state : "unknown");
     snprintf(entry->detail, sizeof(entry->detail), "%s",
              detail ? detail : "-");
+}
+
+static bool mesh_remote_request_type_matches_port(
+    mesh_remote_request_type_t type, uint32_t portnum)
+{
+    switch(type) {
+    case MESH_REMOTE_REQ_NODEINFO:
+        return portnum == MESHTASTIC_NODEINFO_APP;
+    case MESH_REMOTE_REQ_POSITION:
+        return portnum == MESHTASTIC_POSITION_APP;
+    case MESH_REMOTE_REQ_TELEMETRY_DEVICE:
+    case MESH_REMOTE_REQ_TELEMETRY_ENVIRONMENT:
+        return portnum == MESHTASTIC_TELEMETRY_APP;
+    case MESH_REMOTE_REQ_TRACEROUTE:
+        return portnum == MESHTASTIC_TRACEROUTE_APP;
+    case MESH_REMOTE_REQ_NEIGHBORINFO:
+        return portnum == MESHTASTIC_NEIGHBORINFO_APP;
+    default:
+        return false;
+    }
+}
+
+static bool mesh_remote_status_is_waiting(
+    const mesh_remote_request_status_t &entry)
+{
+    return strcmp(entry.state, "queued") == 0 ||
+           strcmp(entry.state, "held") == 0 ||
+           strcmp(entry.state, "sending") == 0 ||
+           strcmp(entry.state, "sent") == 0;
+}
+
+static void mesh_remote_status_mark_replied(uint32_t from_node,
+                                            uint32_t portnum,
+                                            uint32_t response_request_id,
+                                            const char *detail)
+{
+    uint64_t now_us = monotonic_us();
+    mesh_remote_request_status_t *candidate = nullptr;
+
+    if(from_node == 0U || mesh_remote_status_count == 0U) {
+        return;
+    }
+    for(size_t n = 0; n < mesh_remote_status_count; n++) {
+        size_t idx = (mesh_remote_status_next +
+                      MESHTASTIC_REMOTE_STATUS_HISTORY_MAX - 1U - n) %
+                     MESHTASTIC_REMOTE_STATUS_HISTORY_MAX;
+        mesh_remote_request_status_t *entry = &mesh_remote_status_history[idx];
+
+        if(entry->to_node != from_node ||
+           !mesh_remote_request_type_matches_port(entry->type, portnum)) {
+            continue;
+        }
+        if(mesh_remote_status_is_waiting(*entry) &&
+           response_request_id != 0U && entry->mesh_packet_id != 0U &&
+           response_request_id == entry->mesh_packet_id) {
+            candidate = entry;
+            break;
+        }
+        if(!candidate && mesh_remote_status_is_waiting(*entry) &&
+           entry->queued_us != 0ULL && now_us >= entry->queued_us &&
+           now_us - entry->queued_us < 120000000ULL) {
+            candidate = entry;
+        }
+    }
+    if(candidate) {
+        mesh_remote_request_t request;
+
+        request.type = candidate->type;
+        request.to_node = candidate->to_node;
+        request.request_id = candidate->request_id;
+        mesh_remote_status_record(request, "replied",
+                                  detail && detail[0] ? detail :
+                                  "response_received",
+                                  candidate->airtime_ms,
+                                  candidate->mesh_packet_id);
+        daemon_event("Remote request replied id=%u target=0x%08x type=%s request=0x%08x detail=%s",
+                     candidate->request_id, candidate->to_node,
+                     mesh_remote_request_name(candidate->type),
+                     response_request_id,
+                     detail && detail[0] ? detail : "response_received");
+    }
 }
 
 static size_t mesh_remote_status_pending_count(
@@ -12618,12 +12708,19 @@ static std::string daemon_remote_request_status_response(
         if(entry.updated_us != 0ULL && now_us >= entry.updated_us) {
             age_ms = (now_us - entry.updated_us) / 1000ULL;
         }
+        uint64_t latency_ms = 0ULL;
+
+        if(entry.replied_us != 0ULL && entry.queued_us != 0ULL &&
+           entry.replied_us >= entry.queued_us) {
+            latency_ms = (entry.replied_us - entry.queued_us) / 1000ULL;
+        }
         snprintf(line, sizeof(line),
                  "REQ id=%u target=0x%08x type=%s state=%s age_ms=%llu "
-                 "airtime_ms=%u detail=%s\n",
+                 "airtime_ms=%u packet=0x%08x latency_ms=%llu detail=%s\n",
                  entry.request_id, entry.to_node,
                  mesh_remote_request_name(entry.type), entry.state,
                  (unsigned long long)age_ms, entry.airtime_ms,
+                 entry.mesh_packet_id, (unsigned long long)latency_ms,
                  entry.detail[0] ? entry.detail : "-");
         out += line;
     }
@@ -16271,6 +16368,10 @@ static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
 
             if(position_ok && secure_match) {
                 mesh_node_update_position(header.from, position);
+                mesh_remote_status_mark_replied(header.from,
+                                                decoded.portnum,
+                                                decoded.request_id,
+                                                "position_received");
                 phoneapi_notify_node_update(header.from, "position");
             }
             if(position_ok && position.has_altitude) {
@@ -16331,6 +16432,10 @@ static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
 
             if(secure_match && user_ok) {
                 mesh_node_update_user(header.from, user);
+                mesh_remote_status_mark_replied(header.from,
+                                                decoded.portnum,
+                                                decoded.request_id,
+                                                "nodeinfo_received");
                 phoneapi_notify_node_update(header.from, "user");
             }
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u nodeinfo=%s long=%s short=%s hw=%d%s",
@@ -16350,6 +16455,12 @@ static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
 
             if(telemetry_ok && secure_match) {
                 mesh_node_update_telemetry(header.from, telemetry);
+                mesh_remote_status_mark_replied(header.from,
+                                                decoded.portnum,
+                                                decoded.request_id,
+                                                telemetry.has_environment_metrics ?
+                                                "environment_telemetry_received" :
+                                                "device_telemetry_received");
                 phoneapi_notify_node_update(header.from, "telemetry");
             }
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u telemetry=%s %s%s",
@@ -16366,6 +16477,10 @@ static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
 
             if(route_ok && secure_match) {
                 mesh_node_update_route_info(header.from, route_summary);
+                mesh_remote_status_mark_replied(header.from,
+                                                decoded.portnum,
+                                                decoded.request_id,
+                                                "traceroute_received");
                 phoneapi_notify_node_update(header.from, "traceroute");
             }
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u traceroute=%s request=0x%08x reply=0x%08x %s%s",
@@ -16384,6 +16499,10 @@ static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
 
             if(neighbor_ok && secure_match) {
                 mesh_node_update_neighbor_info(header.from, neighbor_info);
+                mesh_remote_status_mark_replied(header.from,
+                                                decoded.portnum,
+                                                decoded.request_id,
+                                                "neighborinfo_received");
                 phoneapi_notify_node_update(header.from, "neighbor");
             }
             daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u neighbor=%s owner=0x%08x last=0x%08x count=%u list=%s%s",
@@ -20007,7 +20126,8 @@ int main(int argc, char **argv)
                         snprintf(detail, sizeof(detail), "queue_depth=%u",
                                  (unsigned)pending_remote_requests.size());
                         mesh_remote_status_record(request, "sending", detail,
-                                                  airtime_ms);
+                                                  airtime_ms,
+                                                  frame.packet_id);
                     }
                     daemon_event("Remote request dequeue target=0x%08x type=%s depth=%u airtime_ms=%u",
                                  request.to_node,
@@ -20017,7 +20137,8 @@ int main(int argc, char **argv)
                     if(start_tx(radio, frame) == 0) {
                         mesh_remote_status_record(request, "sent",
                                                   "radio_tx_started",
-                                                  airtime_ms);
+                                                  airtime_ms,
+                                                  frame.packet_id);
                         if(frame.want_ack) {
                             (void)mesh_ack_track_frame(frame);
                         }
