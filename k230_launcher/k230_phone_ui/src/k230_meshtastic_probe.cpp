@@ -1400,6 +1400,7 @@ static const meshtastic_region_t meshtastic_regions[] = {
     {"NZ_865", 864.0f, 868.0f, 36, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"TH", 920.0f, 925.0f, 27, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"UA_433", 433.0f, 434.7f, 10, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
+    {"UA_868", 868.0f, 868.6f, 14, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"MY_433", 433.0f, 435.0f, 20, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"MY_919", 919.0f, 924.0f, 27, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
     {"SG_923", 917.0f, 925.0f, 20, false, REGION_PROFILE_STD, "LONG_FAST", OVERRIDE_SLOT_DEFAULT_CHANNEL_HASH},
@@ -3498,6 +3499,9 @@ static float meshtastic_region_duty_cycle_percent(const std::string &region)
     if(name == "EU433" || name == "EU868" || name == "TH" ||
        name == "UA433") {
         return 10.0f;
+    }
+    if(name == "UA868") {
+        return 1.0f;
     }
     return 100.0f;
 }
@@ -6483,6 +6487,7 @@ static bool encode_phoneapi_region_presets(std::vector<uint8_t> *out)
         REGION_TH = 12U,
         REGION_LORA_24 = 13U,
         REGION_UA_433 = 14U,
+        REGION_UA_868 = 15U,
         REGION_MY_433 = 16U,
         REGION_MY_919 = 17U,
         REGION_SG_923 = 18U,
@@ -6522,7 +6527,8 @@ static bool encode_phoneapi_region_presets(std::vector<uint8_t> *out)
         REGION_US,      REGION_EU_433, REGION_CN,     REGION_JP,
         REGION_ANZ,     REGION_KR,     REGION_TW,     REGION_RU,
         REGION_IN,      REGION_NZ_865, REGION_TH,     REGION_LORA_24,
-        REGION_UA_433,  REGION_MY_433, REGION_MY_919, REGION_SG_923,
+        REGION_UA_433,  REGION_UA_868, REGION_MY_433, REGION_MY_919,
+        REGION_SG_923,
         REGION_PH_433,  REGION_PH_868, REGION_PH_915, REGION_ANZ_433,
         REGION_KZ_433,  REGION_KZ_863, REGION_NP_865, REGION_BR_902,
     };
@@ -7958,7 +7964,8 @@ static const char *phoneapi_region_name_from_enum(uint32_t value)
         {4, "CN"}, {5, "JP"}, {6, "ANZ"}, {7, "KR"},
         {8, "TW"}, {9, "RU"}, {10, "IN"}, {11, "NZ_865"},
         {12, "TH"}, {13, "LORA_24"}, {14, "UA_433"},
-        {16, "MY_433"}, {17, "MY_919"}, {18, "SG_923"},
+        {15, "UA_868"}, {16, "MY_433"}, {17, "MY_919"},
+        {18, "SG_923"},
         {19, "PH_433"}, {20, "PH_868"}, {21, "PH_915"},
         {22, "ANZ_433"}, {23, "KZ_433"}, {24, "KZ_863"},
         {25, "NP_865"}, {26, "BR_902"}, {27, "ITU1_2M"},

@@ -427,6 +427,7 @@ static const mesh_region_choice_t mesh_region_choices[] = {
     {"NZ_865", "NZ 865", MESH_PROFILE_STD, "LONG_FAST"},
     {"TH", "Thailand", MESH_PROFILE_STD, "LONG_FAST"},
     {"UA_433", "Ukraine 433", MESH_PROFILE_STD, "LONG_FAST"},
+    {"UA_868", "Ukraine 868", MESH_PROFILE_STD, "LONG_FAST"},
     {"MY_433", "Malaysia 433", MESH_PROFILE_STD, "LONG_FAST"},
     {"MY_919", "Malaysia 919", MESH_PROFILE_STD, "LONG_FAST"},
     {"SG_923", "Singapore 923", MESH_PROFILE_STD, "LONG_FAST"},
