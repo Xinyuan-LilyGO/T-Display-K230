@@ -145,6 +145,16 @@
 #define MESHTASTIC_FLRC_PHOTO_DATA_REPEAT 2U
 #define MESHTASTIC_FLRC_PHOTO_START_REPEAT 4U
 #define MESHTASTIC_FLRC_PHOTO_DONE_REPEAT 5U
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_MAGIC 0x3150464BU
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_TYPE_REQ 1U
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_HDR_LEN 28U
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_MAX_ROUNDS 2U
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_DATA_REPEAT 2U
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_START_DELAY_US 220000ULL
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_WINDOW_US 7000000ULL
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE 4U
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_TTL_US \
+    (5ULL * 60ULL * 1000000ULL)
 #define MESHTASTIC_PHOTO_SOURCE_DIR "/root/photos"
 #define MESHTASTIC_PHOTO_STORE_DIR "/root/meshtastic/photos"
 #define MESHTASTIC_AIRTIME_CHANNEL_PERIODS 6U
@@ -12999,7 +13009,21 @@ typedef struct {
     std::vector<uint8_t> received;
 } mesh_voice_rx_stream_t;
 
+typedef struct {
+    bool active = false;
+    uint32_t from_node = 0;
+    uint32_t stream_id = 0;
+    uint32_t payload_crc = 0;
+    uint16_t total = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+    uint64_t updated_us = 0;
+    std::vector<uint8_t> payload;
+} mesh_photo_tx_cache_entry_t;
+
 static mesh_voice_rx_stream_t mesh_voice_rx_streams[MESHTASTIC_VOICE_RX_STREAMS];
+static mesh_photo_tx_cache_entry_t
+    mesh_photo_tx_cache[MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE];
 static uint64_t mesh_voice_tx_stream_count;
 static uint64_t mesh_voice_tx_chunk_count;
 static uint64_t mesh_voice_rx_chunk_count;
@@ -13010,6 +13034,12 @@ static uint64_t mesh_photo_tx_chunk_count;
 static uint64_t mesh_photo_rx_chunk_count;
 static uint64_t mesh_photo_rx_complete_count;
 static uint64_t mesh_photo_rx_decode_fail_count;
+static uint64_t mesh_photo_repair_req_tx_count;
+static uint64_t mesh_photo_repair_req_rx_count;
+static uint64_t mesh_photo_repair_tx_chunk_count;
+static uint64_t mesh_photo_repair_rx_chunk_count;
+static uint64_t mesh_photo_repair_complete_count;
+static uint64_t mesh_photo_repair_fail_count;
 
 static void mesh_voice_rx_stream_reset(mesh_voice_rx_stream_t *stream)
 {
@@ -13024,6 +13054,89 @@ static void mesh_voice_rx_stream_reset(mesh_voice_rx_stream_t *stream)
     stream->last_us = 0;
     stream->chunks.clear();
     stream->received.clear();
+}
+
+static void mesh_photo_tx_cache_expire(uint64_t now_us)
+{
+    for(size_t i = 0; i < MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE; i++) {
+        mesh_photo_tx_cache_entry_t *entry = &mesh_photo_tx_cache[i];
+
+        if(entry->active &&
+           now_us - entry->updated_us >
+           MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_TTL_US) {
+            entry->active = false;
+            entry->payload.clear();
+        }
+    }
+}
+
+static void mesh_photo_tx_cache_store(const tx_frame_t &frame)
+{
+    uint64_t now_us = monotonic_us();
+    mesh_photo_tx_cache_entry_t *slot = nullptr;
+
+    if(!frame.flrc_photo_after_tx || frame.flrc_photo_payload.empty() ||
+       frame.flrc_photo_stream_id == 0U) {
+        return;
+    }
+    mesh_photo_tx_cache_expire(now_us);
+    for(size_t i = 0; i < MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE; i++) {
+        if(mesh_photo_tx_cache[i].active &&
+           mesh_photo_tx_cache[i].stream_id == frame.flrc_photo_stream_id) {
+            slot = &mesh_photo_tx_cache[i];
+            break;
+        }
+        if(!mesh_photo_tx_cache[i].active && !slot) {
+            slot = &mesh_photo_tx_cache[i];
+        }
+    }
+    if(!slot) {
+        slot = &mesh_photo_tx_cache[0];
+        for(size_t i = 1; i < MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE; i++) {
+            if(mesh_photo_tx_cache[i].updated_us < slot->updated_us) {
+                slot = &mesh_photo_tx_cache[i];
+            }
+        }
+    }
+
+    slot->active = true;
+    slot->from_node = frame.from_node;
+    slot->stream_id = frame.flrc_photo_stream_id;
+    slot->payload_crc = frame.flrc_photo_payload_crc;
+    slot->total = frame.flrc_photo_total_packets;
+    slot->width = frame.flrc_photo_width;
+    slot->height = frame.flrc_photo_height;
+    slot->updated_us = now_us;
+    slot->payload = frame.flrc_photo_payload;
+    daemon_event("FLRC photo TX cache store stream=0x%08x packets=%u bytes=%u",
+                 slot->stream_id, slot->total, (unsigned)slot->payload.size());
+}
+
+static mesh_photo_tx_cache_entry_t *mesh_photo_tx_cache_find(
+    uint32_t stream_id, uint32_t stream_crc, uint16_t total,
+    uint32_t total_size)
+{
+    uint64_t now_us = monotonic_us();
+
+    mesh_photo_tx_cache_expire(now_us);
+    for(size_t i = 0; i < MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE; i++) {
+        mesh_photo_tx_cache_entry_t *entry = &mesh_photo_tx_cache[i];
+
+        if(!entry->active || entry->stream_id != stream_id) {
+            continue;
+        }
+        if(entry->payload_crc != stream_crc || entry->total != total ||
+           entry->payload.size() != total_size) {
+            daemon_event("FLRC photo TX cache mismatch stream=0x%08x want_crc=0x%08x have_crc=0x%08x want_packets=%u have_packets=%u want_bytes=%u have_bytes=%u",
+                         stream_id, stream_crc, entry->payload_crc, total,
+                         entry->total, total_size,
+                         (unsigned)entry->payload.size());
+            return nullptr;
+        }
+        entry->updated_us = now_us;
+        return entry;
+    }
+    return nullptr;
 }
 
 static bool mesh_voice_payload_is_k230(const std::vector<uint8_t> &payload)
@@ -14016,6 +14129,20 @@ typedef struct {
     uint32_t duration_ms = 0;
 } mesh_flrc_voice_header_t;
 
+typedef struct {
+    uint8_t type = 0;
+    uint8_t media_kind = 0;
+    uint16_t total = 0;
+    uint32_t stream_id = 0;
+    uint32_t total_size = 0;
+    uint32_t stream_crc = 0;
+    uint16_t received_count = 0;
+    uint16_t missing_count = 0;
+    uint16_t bitmap_len = 0;
+    uint8_t round = 0;
+    std::vector<uint8_t> missing_bitmap;
+} mesh_flrc_photo_repair_request_t;
+
 static void mesh_flrc_voice_make_packet(uint8_t *packet, unsigned packet_len,
                                         uint8_t type, uint32_t stream_id,
                                         uint16_t seq, uint16_t total,
@@ -14155,6 +14282,120 @@ static std::vector<uint8_t> mesh_flrc_photo_make_invite_payload(
                                 nullptr, 0U, dims,
                                 MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
     return payload;
+}
+
+static uint16_t mesh_flrc_photo_missing_count(
+    const std::vector<uint8_t> &received, uint16_t total)
+{
+    uint16_t missing = 0U;
+
+    for(uint16_t seq = 0U; seq < total && seq < received.size(); seq++) {
+        if(!received[seq]) {
+            missing++;
+        }
+    }
+    return missing;
+}
+
+static std::vector<uint8_t> mesh_flrc_photo_make_repair_request_payload(
+    const mesh_flrc_voice_header_t &invite,
+    const std::vector<uint8_t> &received,
+    uint16_t received_count, uint8_t round)
+{
+    uint16_t total = invite.total;
+    uint16_t bitmap_len = (uint16_t)((total + 7U) / 8U);
+    uint16_t missing = mesh_flrc_photo_missing_count(received, total);
+    std::vector<uint8_t> payload(MESHTASTIC_FLRC_PHOTO_REPAIR_HDR_LEN +
+                                 bitmap_len, 0U);
+
+    put_le32(payload.data() + 0U, MESHTASTIC_FLRC_PHOTO_REPAIR_MAGIC);
+    payload[4] = MESHTASTIC_FLRC_PHOTO_REPAIR_TYPE_REQ;
+    payload[5] = MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG;
+    put_le16(payload.data() + 6U, total);
+    put_le32(payload.data() + 8U, invite.stream_id);
+    put_le32(payload.data() + 12U, invite.total_size);
+    put_le32(payload.data() + 16U, invite.stream_crc);
+    put_le16(payload.data() + 20U, received_count);
+    put_le16(payload.data() + 22U, missing);
+    put_le16(payload.data() + 24U, bitmap_len);
+    payload[26] = round;
+    payload[27] = 0U;
+    for(uint16_t seq = 0U; seq < total && seq < received.size(); seq++) {
+        if(!received[seq]) {
+            payload[MESHTASTIC_FLRC_PHOTO_REPAIR_HDR_LEN + (seq / 8U)] |=
+                (uint8_t)(1U << (seq % 8U));
+        }
+    }
+    return payload;
+}
+
+static bool mesh_flrc_photo_parse_repair_request_payload(
+    const std::vector<uint8_t> &payload,
+    mesh_flrc_photo_repair_request_t *request)
+{
+    uint16_t bitmap_len;
+    uint16_t total;
+
+    if(!request || payload.size() < MESHTASTIC_FLRC_PHOTO_REPAIR_HDR_LEN ||
+       get_le32(payload.data() + 0U) != MESHTASTIC_FLRC_PHOTO_REPAIR_MAGIC ||
+       payload[4] != MESHTASTIC_FLRC_PHOTO_REPAIR_TYPE_REQ ||
+       payload[5] != MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG) {
+        return false;
+    }
+    total = get_le16(payload.data() + 6U);
+    bitmap_len = get_le16(payload.data() + 24U);
+    if(total == 0U || total > MESHTASTIC_FLRC_PHOTO_MAX_PACKETS ||
+       bitmap_len == 0U || bitmap_len != (uint16_t)((total + 7U) / 8U) ||
+       payload.size() != MESHTASTIC_FLRC_PHOTO_REPAIR_HDR_LEN + bitmap_len) {
+        return false;
+    }
+
+    request->type = payload[4];
+    request->media_kind = payload[5];
+    request->total = total;
+    request->stream_id = get_le32(payload.data() + 8U);
+    request->total_size = get_le32(payload.data() + 12U);
+    request->stream_crc = get_le32(payload.data() + 16U);
+    request->received_count = get_le16(payload.data() + 20U);
+    request->missing_count = get_le16(payload.data() + 22U);
+    request->bitmap_len = bitmap_len;
+    request->round = payload[26];
+    if(request->stream_id == 0U || request->total_size == 0U ||
+       request->total_size > MESHTASTIC_FLRC_PHOTO_MAX_BYTES ||
+       request->total_size >
+       request->total * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN ||
+       request->missing_count == 0U ||
+       request->missing_count >
+       request->total - std::min(request->received_count, request->total)) {
+        return false;
+    }
+    request->missing_bitmap.assign(
+        payload.begin() + MESHTASTIC_FLRC_PHOTO_REPAIR_HDR_LEN,
+        payload.end());
+    {
+        uint16_t actual_missing = 0U;
+
+        for(uint16_t seq = 0U; seq < request->total; seq++) {
+            if((request->missing_bitmap[seq / 8U] &
+                (1U << (seq % 8U))) != 0U) {
+                actual_missing++;
+            }
+        }
+        if(actual_missing != request->missing_count) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool mesh_flrc_photo_repair_seq_missing(
+    const mesh_flrc_photo_repair_request_t &request, uint16_t seq)
+{
+    if(seq >= request.total ||
+       seq / 8U >= request.missing_bitmap.size()) {
+        return false;
+    }
+    return (request.missing_bitmap[seq / 8U] & (1U << (seq % 8U))) != 0U;
 }
 
 static int mesh_flrc_voice_should_retry_xtal(int16_t state)
@@ -14306,6 +14547,74 @@ static int16_t mesh_flrc_voice_fast_transmit(LR2021 *lr2021,
         usleep(500);
     }
     return lr2021->finishTransmit();
+}
+
+static bool mesh_lora_sync_transmit(PhysicalLayer *radio,
+                                    const tx_frame_t &frame,
+                                    const char *tag)
+{
+    uint64_t start_us;
+    uint64_t timeout_us;
+    uint32_t airtime_ms;
+    int16_t state;
+    size_t len = frame.bytes.size();
+
+    if(!radio || len == 0U || len > MESHTASTIC_MAX_LORA_PAYLOAD_LEN) {
+        return false;
+    }
+    active_op = OP_IDLE;
+    take_radio_events();
+    state = radio->standby();
+    if(state == RADIOLIB_ERR_NONE && active_lr2021) {
+        int16_t fifo_state = active_lr2021->clearTxFifo();
+        if(fifo_state != RADIOLIB_ERR_NONE) {
+            daemon_event("%s clear TX FIFO failed state=%d %s",
+                         tag ? tag : "LoRa sync TX", fifo_state,
+                         error_name(fifo_state));
+        }
+    }
+    if(state == RADIOLIB_ERR_NONE) {
+        radio->clearPacketReceivedAction();
+        radio->setPacketSentAction(radio_event_isr);
+        state = radio->startTransmit(frame.bytes.data(), len);
+    }
+    if(state != RADIOLIB_ERR_NONE) {
+        daemon_event("%s start failed state=%d %s",
+                     tag ? tag : "LoRa sync TX", state, error_name(state));
+        return false;
+    }
+
+    airtime_ms = mesh_radio_airtime_ms(radio, len);
+    timeout_us = (uint64_t)airtime_ms * 1000ULL * 4ULL + 500000ULL;
+    if(timeout_us < 1500000ULL) {
+        timeout_us = 1500000ULL;
+    }
+    start_us = monotonic_us();
+    while(take_radio_events() == 0U) {
+        if(monotonic_us() - start_us > timeout_us) {
+            (void)radio->finishTransmit();
+            daemon_event("%s timeout len=%u airtime_ms=%u",
+                         tag ? tag : "LoRa sync TX", (unsigned)len,
+                         airtime_ms);
+            return false;
+        }
+        usleep(1000);
+    }
+    state = radio->finishTransmit();
+    if(state != RADIOLIB_ERR_NONE) {
+        daemon_event("%s finish failed state=%d %s",
+                     tag ? tag : "LoRa sync TX", state, error_name(state));
+        return false;
+    }
+    tx_count++;
+    mesh_airtime_log_tx(airtime_ms);
+    mesh_history_remember_tx(frame);
+    daemon_event("%s done id=0x%08x len=%u airtime=%ums ch_util=%.1f air_tx=%.2f",
+                 tag ? tag : "LoRa sync TX", frame.packet_id,
+                 (unsigned)len, airtime_ms,
+                 mesh_airtime_channel_util_percent(),
+                 mesh_airtime_tx_util_percent());
+    return true;
 }
 
 static bool mesh_flrc_voice_tx_session(PhysicalLayer *radio, chip_type_t chip,
@@ -14601,6 +14910,227 @@ static bool mesh_photo_store_dir_ensure(void)
     return true;
 }
 
+static uint16_t mesh_flrc_photo_collect_window(
+    LR2021 *lr2021, const mesh_flrc_voice_header_t &invite,
+    std::vector<std::vector<uint8_t>> *chunks,
+    std::vector<uint8_t> *received, uint16_t *received_count,
+    uint64_t timeout_us, const char *phase, bool repair)
+{
+    uint8_t packet[MESHTASTIC_FLRC_VOICE_PACKET_LEN];
+    uint64_t start_us;
+    uint16_t before;
+    uint16_t added = 0U;
+    const char *tag = phase && phase[0] ? phase : "rx";
+
+    if(!lr2021 || !chunks || !received || !received_count ||
+       chunks->size() < invite.total || received->size() < invite.total) {
+        return 0U;
+    }
+    before = *received_count;
+    start_us = monotonic_us();
+    while(monotonic_us() - start_us < timeout_us &&
+          *received_count < invite.total) {
+        mesh_flrc_voice_header_t hdr;
+        size_t payload_len;
+        int16_t state;
+
+        take_radio_events();
+        lr2021->clearPacketSentAction();
+        lr2021->setPacketReceivedAction(radio_event_isr);
+        state = lr2021->startReceive(RADIOLIB_LR2021_RX_TIMEOUT_INF,
+                                     RADIOLIB_IRQ_RX_DEFAULT_FLAGS,
+                                     RADIOLIB_IRQ_RX_DEFAULT_MASK,
+                                     MESHTASTIC_FLRC_VOICE_PACKET_LEN);
+        if(state != RADIOLIB_ERR_NONE) {
+            daemon_event("FLRC photo %s start failed state=%d %s",
+                         tag, state, error_name(state));
+            break;
+        }
+        while(take_radio_events() == 0U) {
+            if(monotonic_us() - start_us >= timeout_us) {
+                break;
+            }
+            usleep(1000);
+        }
+        if(monotonic_us() - start_us >= timeout_us) {
+            (void)lr2021->standby();
+            break;
+        }
+        state = lr2021->readData(packet, MESHTASTIC_FLRC_VOICE_PACKET_LEN);
+        (void)lr2021->finishReceive();
+        if(state != RADIOLIB_ERR_NONE) {
+            daemon_event("FLRC photo %s read failed state=%d %s",
+                         tag, state, error_name(state));
+            continue;
+        }
+        if(!mesh_flrc_voice_parse_packet(packet,
+                                         MESHTASTIC_FLRC_VOICE_PACKET_LEN,
+                                         &hdr) ||
+           hdr.stream_id != invite.stream_id ||
+           hdr.total != invite.total ||
+           hdr.codec_mode != MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG) {
+            continue;
+        }
+        if(hdr.type == MESHTASTIC_FLRC_VOICE_TYPE_DONE) {
+            daemon_event("FLRC photo %s done marker stream=0x%08x received=%u/%u",
+                         tag, invite.stream_id, *received_count,
+                         invite.total);
+            continue;
+        }
+        if(hdr.type != MESHTASTIC_FLRC_VOICE_TYPE_DATA ||
+           hdr.seq >= invite.total || (*received)[hdr.seq]) {
+            continue;
+        }
+        payload_len = hdr.payload_len;
+        (*chunks)[hdr.seq].assign(
+            packet + MESHTASTIC_FLRC_VOICE_HDR_LEN,
+            packet + MESHTASTIC_FLRC_VOICE_HDR_LEN + payload_len);
+        (*received)[hdr.seq] = 1U;
+        (*received_count)++;
+        if(repair) {
+            mesh_photo_repair_rx_chunk_count++;
+        } else {
+            mesh_photo_rx_chunk_count++;
+        }
+        daemon_event("FLRC photo %s data stream=0x%08x seq=%u/%u len=%u rssi=%.1f",
+                     tag, invite.stream_id, hdr.seq + 1U, invite.total,
+                     (unsigned)payload_len, lr2021->getRSSI());
+    }
+    if(*received_count >= before) {
+        added = (uint16_t)(*received_count - before);
+    }
+    return added;
+}
+
+static int16_t mesh_flrc_photo_transmit_seq(
+    LR2021 *lr2021, const std::vector<uint8_t> &payload,
+    uint32_t stream_id, uint16_t total, uint16_t width, uint16_t height,
+    uint16_t seq)
+{
+    uint8_t packet[MESHTASTIC_FLRC_VOICE_PACKET_LEN];
+    size_t offset;
+    size_t remain;
+    uint16_t payload_len;
+    uint32_t dims = ((uint32_t)width << 16U) | height;
+
+    if(!lr2021 || seq >= total || payload.empty()) {
+        return RADIOLIB_ERR_UNKNOWN;
+    }
+    offset = (size_t)seq * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN;
+    if(offset >= payload.size()) {
+        return RADIOLIB_ERR_PACKET_TOO_LONG;
+    }
+    remain = payload.size() - offset;
+    payload_len = (uint16_t)std::min(
+        remain, (size_t)MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN);
+    mesh_flrc_voice_make_packet(packet, sizeof(packet),
+                                MESHTASTIC_FLRC_VOICE_TYPE_DATA,
+                                stream_id, seq, total, payload,
+                                payload.data() + offset, payload_len, dims,
+                                MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
+    return mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
+}
+
+static bool mesh_flrc_photo_repair_tx_session(
+    PhysicalLayer *radio, chip_type_t chip, SX1262 *sx1262, LR2021 *lr2021,
+    const probe_profile_t *profile, uint32_t requester,
+    const mesh_flrc_photo_repair_request_t &request)
+{
+    uint8_t packet[MESHTASTIC_FLRC_VOICE_PACKET_LEN];
+    mesh_photo_tx_cache_entry_t *cache;
+    uint32_t dims;
+    uint16_t sent = 0U;
+    uint16_t requested = 0U;
+    int16_t state;
+    bool ok = true;
+
+    if(chip != CHIP_LR2021 || !lr2021) {
+        daemon_event("FLRC photo repair ignored requester=0x%08x stream=0x%08x reason=not-lr2021 chip=%s",
+                     requester, request.stream_id, chip_name(chip));
+        return false;
+    }
+    mesh_photo_repair_req_rx_count++;
+    cache = mesh_photo_tx_cache_find(request.stream_id, request.stream_crc,
+                                     request.total, request.total_size);
+    if(!cache) {
+        mesh_photo_repair_fail_count++;
+        daemon_event("FLRC photo repair TX no-cache requester=0x%08x stream=0x%08x missing=%u round=%u",
+                     requester, request.stream_id, request.missing_count,
+                     request.round);
+        return true;
+    }
+    dims = ((uint32_t)cache->width << 16U) | cache->height;
+    active_op = OP_IDLE;
+    usleep(MESHTASTIC_FLRC_PHOTO_REPAIR_START_DELAY_US);
+    state = mesh_flrc_voice_begin(lr2021);
+    if(state != RADIOLIB_ERR_NONE) {
+        mesh_photo_repair_fail_count++;
+        daemon_event("FLRC photo repair TX init failed requester=0x%08x stream=0x%08x state=%d %s",
+                     requester, request.stream_id, state, error_name(state));
+        (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021,
+                                           profile);
+        return true;
+    }
+    daemon_event("FLRC photo repair TX start requester=0x%08x stream=0x%08x missing=%u received=%u/%u round=%u repeat=%u",
+                 requester, request.stream_id, request.missing_count,
+                 request.received_count, request.total, request.round,
+                 MESHTASTIC_FLRC_PHOTO_REPAIR_DATA_REPEAT);
+    for(unsigned pass = 0; ok && pass < MESHTASTIC_FLRC_PHOTO_REPAIR_DATA_REPEAT;
+        pass++) {
+        for(uint16_t seq = 0U; ok && seq < request.total; seq++) {
+            if(!mesh_flrc_photo_repair_seq_missing(request, seq)) {
+                continue;
+            }
+            if(pass == 0U) {
+                requested++;
+            }
+            state = mesh_flrc_photo_transmit_seq(
+                lr2021, cache->payload, cache->stream_id, cache->total,
+                cache->width, cache->height, seq);
+            if(state != RADIOLIB_ERR_NONE) {
+                ok = false;
+                daemon_event("FLRC photo repair TX data pass=%u seq=%u/%u failed state=%d %s",
+                             pass + 1U, seq + 1U, request.total,
+                             state, error_name(state));
+                break;
+            }
+            sent++;
+            mesh_photo_repair_tx_chunk_count++;
+            usleep(MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US);
+        }
+        if(ok && pass + 1U < MESHTASTIC_FLRC_PHOTO_REPAIR_DATA_REPEAT) {
+            usleep(MESHTASTIC_FLRC_PHOTO_ROUND_GAP_US);
+        }
+    }
+    for(unsigned r = 0; ok && r < MESHTASTIC_FLRC_PHOTO_DONE_REPEAT; r++) {
+        mesh_flrc_voice_make_packet(packet, sizeof(packet),
+                                    MESHTASTIC_FLRC_VOICE_TYPE_DONE,
+                                    cache->stream_id,
+                                    cache->total > 0U ? cache->total - 1U : 0U,
+                                    cache->total, cache->payload, nullptr, 0U,
+                                    dims,
+                                    MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
+        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
+        if(state != RADIOLIB_ERR_NONE) {
+            ok = false;
+            daemon_event("FLRC photo repair TX done repeat=%u failed state=%d %s",
+                         r + 1U, state, error_name(state));
+            break;
+        }
+        usleep(MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US);
+    }
+    if(ok) {
+        daemon_event("FLRC photo repair TX done requester=0x%08x stream=0x%08x requested=%u sent=%u",
+                     requester, request.stream_id, requested, sent);
+    } else {
+        mesh_photo_repair_fail_count++;
+        daemon_event("FLRC photo repair TX failed requester=0x%08x stream=0x%08x requested=%u sent=%u",
+                     requester, request.stream_id, requested, sent);
+    }
+    (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021, profile);
+    return true;
+}
+
 static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
                                        SX1262 *sx1262, LR2021 *lr2021,
                                        const probe_profile_t *profile,
@@ -14620,6 +15150,7 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
        !frame.flrc_photo_after_tx || frame.flrc_photo_payload.empty()) {
         return false;
     }
+    mesh_photo_tx_cache_store(frame);
     active_op = OP_IDLE;
     usleep(MESHTASTIC_FLRC_VOICE_TX_START_DELAY_US);
     state = mesh_flrc_voice_begin(lr2021);
@@ -14744,20 +15275,19 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
                                        const probe_profile_t *profile,
                                        const mesh_header_t &mesh_header,
                                        const mesh_flrc_voice_header_t &invite,
-                                       float control_rssi)
+                                       float control_rssi,
+                                       const std::string *channel_psk)
 {
-    uint8_t packet[MESHTASTIC_FLRC_VOICE_PACKET_LEN];
     std::vector<std::vector<uint8_t>> chunks;
     std::vector<uint8_t> received;
     std::vector<uint8_t> stream;
     uint64_t timeout_us;
-    uint64_t start_us;
     uint16_t received_count = 0U;
     uint16_t width = (uint16_t)(invite.duration_ms >> 16U);
     uint16_t height = (uint16_t)(invite.duration_ms & 0xffffU);
     int16_t state;
+    bool repair_attempted = false;
 
-    (void)opts;
     if(chip != CHIP_LR2021 || !lr2021) {
         daemon_event("FLRC photo invite ignored from=0x%08x reason=not-lr2021 chip=%s",
                      mesh_header.from, chip_name(chip));
@@ -14796,74 +15326,64 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
     if(timeout_us > 30000000ULL) {
         timeout_us = 30000000ULL;
     }
-    start_us = monotonic_us();
     daemon_event("FLRC photo RX window from=0x%08x stream=0x%08x packets=%u bytes=%u size=%ux%u timeout_ms=%lu control_rssi=%.1f",
                  mesh_header.from, invite.stream_id, invite.total,
                  invite.total_size, width, height,
                  (unsigned long)(timeout_us / 1000ULL), control_rssi);
-    while(monotonic_us() - start_us < timeout_us &&
-          received_count < invite.total) {
-        mesh_flrc_voice_header_t hdr;
-        size_t payload_len;
-
-        take_radio_events();
-        lr2021->clearPacketSentAction();
-        lr2021->setPacketReceivedAction(radio_event_isr);
-        state = lr2021->startReceive(RADIOLIB_LR2021_RX_TIMEOUT_INF,
-                                     RADIOLIB_IRQ_RX_DEFAULT_FLAGS,
-                                     RADIOLIB_IRQ_RX_DEFAULT_MASK,
-                                     MESHTASTIC_FLRC_VOICE_PACKET_LEN);
-        if(state != RADIOLIB_ERR_NONE) {
-            daemon_event("FLRC photo RX start failed state=%d %s",
-                         state, error_name(state));
-            break;
-        }
-        while(take_radio_events() == 0U) {
-            if(monotonic_us() - start_us >= timeout_us) {
-                break;
-            }
-            usleep(1000);
-        }
-        if(monotonic_us() - start_us >= timeout_us) {
-            (void)lr2021->standby();
-            break;
-        }
-        state = lr2021->readData(packet, MESHTASTIC_FLRC_VOICE_PACKET_LEN);
-        (void)lr2021->finishReceive();
-        if(state != RADIOLIB_ERR_NONE) {
-            daemon_event("FLRC photo RX read failed state=%d %s",
-                         state, error_name(state));
-            continue;
-        }
-        if(!mesh_flrc_voice_parse_packet(packet,
-                                         MESHTASTIC_FLRC_VOICE_PACKET_LEN,
-                                         &hdr) ||
-           hdr.stream_id != invite.stream_id ||
-           hdr.total != invite.total ||
-           hdr.codec_mode != MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG) {
-            continue;
-        }
-        if(hdr.type == MESHTASTIC_FLRC_VOICE_TYPE_DONE) {
-            daemon_event("FLRC photo RX done marker stream=0x%08x received=%u/%u",
-                         invite.stream_id, received_count, invite.total);
-            continue;
-        }
-        if(hdr.type != MESHTASTIC_FLRC_VOICE_TYPE_DATA ||
-           hdr.seq >= invite.total || received[hdr.seq]) {
-            continue;
-        }
-        payload_len = hdr.payload_len;
-        chunks[hdr.seq].assign(packet + MESHTASTIC_FLRC_VOICE_HDR_LEN,
-                               packet + MESHTASTIC_FLRC_VOICE_HDR_LEN +
-                                   payload_len);
-        received[hdr.seq] = 1U;
-        received_count++;
-        mesh_photo_rx_chunk_count++;
-        daemon_event("FLRC photo RX data stream=0x%08x seq=%u/%u len=%u rssi=%.1f",
-                     invite.stream_id, hdr.seq + 1U, invite.total,
-                     (unsigned)payload_len, lr2021->getRSSI());
-    }
+    (void)mesh_flrc_photo_collect_window(
+        lr2021, invite, &chunks, &received, &received_count, timeout_us,
+        "RX", false);
     (void)lr2021->standby();
+    for(uint8_t repair_round = 1U;
+        received_count < invite.total &&
+        repair_round <= MESHTASTIC_FLRC_PHOTO_REPAIR_MAX_ROUNDS;
+        repair_round++) {
+        std::vector<uint8_t> repair_payload;
+        tx_frame_t repair_frame;
+        uint16_t missing =
+            mesh_flrc_photo_missing_count(received, invite.total);
+        uint16_t before = received_count;
+
+        repair_attempted = true;
+        (void)mesh_flrc_voice_restore_lora(chip, radio, sx1262, lr2021,
+                                           profile);
+        repair_payload = mesh_flrc_photo_make_repair_request_payload(
+            invite, received, received_count, repair_round);
+        if(!build_mesh_direct_data_frame(
+               opts, mesh_header.from, mesh_header.channel,
+               MESHTASTIC_PRIVATE_APP, repair_payload, false, 0U, 0U, 0U,
+               false, "photo-repair-req", channel_psk, &repair_frame)) {
+            mesh_photo_repair_fail_count++;
+            daemon_event("FLRC photo repair request build failed to=0x%08x stream=0x%08x missing=%u round=%u",
+                         mesh_header.from, invite.stream_id, missing,
+                         repair_round);
+            break;
+        }
+        daemon_event("FLRC photo repair request TX to=0x%08x stream=0x%08x missing=%u received=%u/%u round=%u",
+                     mesh_header.from, invite.stream_id, missing,
+                     received_count, invite.total, repair_round);
+        if(!mesh_lora_sync_transmit(radio, repair_frame,
+                                    "FLRC photo repair request")) {
+            mesh_photo_repair_fail_count++;
+            break;
+        }
+        mesh_photo_repair_req_tx_count++;
+        state = mesh_flrc_voice_begin(lr2021);
+        if(state != RADIOLIB_ERR_NONE) {
+            mesh_photo_repair_fail_count++;
+            daemon_event("FLRC photo repair RX init failed state=%d %s",
+                         state, error_name(state));
+            break;
+        }
+        (void)mesh_flrc_photo_collect_window(
+            lr2021, invite, &chunks, &received, &received_count,
+            MESHTASTIC_FLRC_PHOTO_REPAIR_WINDOW_US, "repair RX", true);
+        (void)lr2021->standby();
+        daemon_event("FLRC photo repair round done stream=0x%08x round=%u added=%u received=%u/%u",
+                     invite.stream_id, repair_round,
+                     (unsigned)(received_count - before), received_count,
+                     invite.total);
+    }
     if(received_count == invite.total) {
         char path[192];
         char errbuf[128];
@@ -14895,6 +15415,9 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
                                  mesh_header.from, invite.stream_id,
                                  (unsigned)stream.size(), invite.total,
                                  stream_sha256.c_str(), path);
+                    if(repair_attempted) {
+                        mesh_photo_repair_complete_count++;
+                    }
                 } else {
                     mesh_photo_rx_decode_fail_count++;
                     daemon_chat("RX 0x%08x FLRC photo write failed: %s",
@@ -14912,6 +15435,7 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
         }
     } else {
         mesh_photo_rx_decode_fail_count++;
+        mesh_photo_repair_fail_count++;
         daemon_chat("RX 0x%08x FLRC photo incomplete packets=%u/%u",
                     mesh_header.from, received_count, invite.total);
     }
@@ -15221,51 +15745,87 @@ static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
                                 (unsigned)decoded.payload.size());
                 }
             }
-        } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
-                  mesh_flrc_photo_payload_is_invite(decoded.payload,
-                                                    nullptr)) {
-            mesh_flrc_voice_header_t invite;
+        } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP) {
+            mesh_flrc_photo_repair_request_t repair_request;
 
-            if(mesh_flrc_photo_payload_is_invite(decoded.payload, &invite)) {
-                uint16_t width = (uint16_t)(invite.duration_ms >> 16U);
-                uint16_t height = (uint16_t)(invite.duration_ms & 0xffffU);
-
-                daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u flrc_photo_invite stream=0x%08x packets=%u bytes=%u size=%ux%u%s",
+            if(mesh_flrc_photo_parse_repair_request_payload(
+                   decoded.payload, &repair_request)) {
+                daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u photo_repair_req stream=0x%08x missing=%u received=%u/%u round=%u%s",
                              (unsigned long)rx_count, header.from, header.to,
                              header.id, header.channel, hop_limit, hop_start,
-                             rssi, snr, decoded.portnum, invite.stream_id,
-                             invite.total, invite.total_size, width, height,
+                             rssi, snr, decoded.portnum,
+                             repair_request.stream_id,
+                             repair_request.missing_count,
+                             repair_request.received_count,
+                             repair_request.total, repair_request.round,
                              duplicate ? " duplicate" : "");
                 if(!duplicate && secure_match &&
+                   header.to == opts.from_node &&
                    header.from != opts.from_node) {
-                    (void)mesh_flrc_photo_rx_session(
-                        opts, radio, chip, sx1262, lr2021, profile, header,
-                        invite, rssi);
+                    (void)mesh_flrc_photo_repair_tx_session(
+                        radio, chip, sx1262, lr2021, profile, header.from,
+                        repair_request);
+                    return false;
                 }
-            }
-        } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
-                  mesh_flrc_voice_payload_is_invite(decoded.payload,
-                                                    nullptr)) {
-            mesh_flrc_voice_header_t invite;
+            } else if(mesh_flrc_photo_payload_is_invite(decoded.payload,
+                                                        nullptr)) {
+                mesh_flrc_voice_header_t invite;
 
-            if(mesh_flrc_voice_payload_is_invite(decoded.payload, &invite)) {
-                daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u flrc_voice_invite stream=0x%08x packets=%u bytes=%u%s",
+                if(mesh_flrc_photo_payload_is_invite(decoded.payload,
+                                                     &invite)) {
+                    uint16_t width = (uint16_t)(invite.duration_ms >> 16U);
+                    uint16_t height =
+                        (uint16_t)(invite.duration_ms & 0xffffU);
+
+                    daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u flrc_photo_invite stream=0x%08x packets=%u bytes=%u size=%ux%u%s",
+                                 (unsigned long)rx_count, header.from,
+                                 header.to, header.id, header.channel,
+                                 hop_limit, hop_start, rssi, snr,
+                                 decoded.portnum, invite.stream_id,
+                                 invite.total, invite.total_size, width,
+                                 height, duplicate ? " duplicate" : "");
+                    if(!duplicate && secure_match &&
+                       header.from != opts.from_node) {
+                        const std::string *photo_psk =
+                            channel_match ? &channel_info.psk : nullptr;
+
+                        (void)mesh_flrc_photo_rx_session(
+                            opts, radio, chip, sx1262, lr2021, profile,
+                            header, invite, rssi, photo_psk);
+                    }
+                }
+            } else if(mesh_flrc_voice_payload_is_invite(decoded.payload,
+                                                        nullptr)) {
+                mesh_flrc_voice_header_t invite;
+
+                if(mesh_flrc_voice_payload_is_invite(decoded.payload,
+                                                     &invite)) {
+                    daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u flrc_voice_invite stream=0x%08x packets=%u bytes=%u%s",
+                                 (unsigned long)rx_count, header.from,
+                                 header.to, header.id, header.channel,
+                                 hop_limit, hop_start, rssi, snr,
+                                 decoded.portnum, invite.stream_id,
+                                 invite.total, invite.total_size,
+                                 duplicate ? " duplicate" : "");
+                    if(!duplicate && secure_match &&
+                       header.from != opts.from_node) {
+                        (void)mesh_flrc_voice_rx_session(
+                            opts, radio, chip, sx1262, lr2021, profile,
+                            header, invite, rssi);
+                    }
+                }
+            } else if(mesh_voice_payload_is_k230(decoded.payload)) {
+                (void)mesh_voice_handle_rx(opts, header, decoded.payload,
+                                           rssi, snr, duplicate,
+                                           secure_match);
+            } else {
+                daemon_event("RX %lu mesh from=0x%08x to=0x%08x id=0x%08x ch=0x%02x hop=%u/%u rssi=%.1f snr=%.1f port=%u payload_len=%u%s",
                              (unsigned long)rx_count, header.from, header.to,
                              header.id, header.channel, hop_limit, hop_start,
-                             rssi, snr, decoded.portnum, invite.stream_id,
-                             invite.total, invite.total_size,
+                             rssi, snr, decoded.portnum,
+                             (unsigned)decoded.payload.size(),
                              duplicate ? " duplicate" : "");
-                if(!duplicate && secure_match &&
-                   header.from != opts.from_node) {
-                    (void)mesh_flrc_voice_rx_session(
-                        opts, radio, chip, sx1262, lr2021, profile, header,
-                        invite, rssi);
-                }
             }
-        } else if(decoded.portnum == MESHTASTIC_PRIVATE_APP &&
-                  mesh_voice_payload_is_k230(decoded.payload)) {
-            (void)mesh_voice_handle_rx(opts, header, decoded.payload, rssi, snr,
-                                       duplicate, secure_match);
         } else if(decoded.portnum == MESHTASTIC_POSITION_APP) {
             mesh_position_info_t position;
             bool position_request = decoded.want_response &&
@@ -15617,7 +16177,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
                                           chip_type_t chip,
                                           size_t pending_send_count)
 {
-    char buf[3200];
+    char buf[3600];
     char ble_detail[160];
     char ble_pair[16];
     char slot_text[16];
@@ -15680,6 +16240,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "voice_rx_complete=%lu voice_rx_decode_fail=%lu "
              "photo=%s photo_tx_streams=%lu photo_tx_chunks=%lu "
              "photo_rx_chunks=%lu photo_rx_complete=%lu photo_rx_decode_fail=%lu "
+             "photo_repair_req_tx=%lu photo_repair_req_rx=%lu "
+             "photo_repair_tx_chunks=%lu photo_repair_rx_chunks=%lu "
+             "photo_repair_complete=%lu photo_repair_fail=%lu "
              "ch_util=%.1f air_tx=%.2f duty=%.1f air_tx_ms=%lu air_rx_ms=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
              "position=%s fixed=%s nrf9151=%s gps=%s gnss_phase=%s gps_detail=%s "
@@ -15725,6 +16288,12 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_photo_rx_chunk_count,
              (unsigned long)mesh_photo_rx_complete_count,
              (unsigned long)mesh_photo_rx_decode_fail_count,
+             (unsigned long)mesh_photo_repair_req_tx_count,
+             (unsigned long)mesh_photo_repair_req_rx_count,
+             (unsigned long)mesh_photo_repair_tx_chunk_count,
+             (unsigned long)mesh_photo_repair_rx_chunk_count,
+             (unsigned long)mesh_photo_repair_complete_count,
+             (unsigned long)mesh_photo_repair_fail_count,
              channel_util, air_tx, duty_cycle,
              (unsigned long)mesh_airtime_tx_total_ms,
              (unsigned long)mesh_airtime_rx_total_ms,

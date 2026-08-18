@@ -3473,11 +3473,35 @@ static void mesh_refresh_status(void)
                  ack_drop);
         lv_label_set_text(mesh_detail_label, detail);
         if(mesh_airtime_label && lv_obj_is_valid(mesh_airtime_label)) {
-            char airtime[128];
+            char airtime[192];
+            char repair_req_tx[16];
+            char repair_complete[16];
+            char repair_fail[16];
+            unsigned long repair_req_count;
+            unsigned long repair_ok_count;
+            unsigned long repair_fail_count;
 
-            snprintf(airtime, sizeof(airtime),
-                     "ChUtil %.1f%%  TX %.2f/%.1f%%  %s",
-                     ch_value, air_value, duty_value, airtime_state);
+            mesh_status_field(mesh_status_text, "photo_repair_req_tx",
+                              repair_req_tx, sizeof(repair_req_tx), "0");
+            mesh_status_field(mesh_status_text, "photo_repair_complete",
+                              repair_complete, sizeof(repair_complete), "0");
+            mesh_status_field(mesh_status_text, "photo_repair_fail",
+                              repair_fail, sizeof(repair_fail), "0");
+            repair_req_count = strtoul(repair_req_tx, NULL, 10);
+            repair_ok_count = strtoul(repair_complete, NULL, 10);
+            repair_fail_count = strtoul(repair_fail, NULL, 10);
+            if(repair_req_count > 0UL || repair_ok_count > 0UL ||
+               repair_fail_count > 0UL) {
+                snprintf(airtime, sizeof(airtime),
+                         "ChUtil %.1f%%  TX %.2f/%.1f%%  %s  Repair %lu/%lu/%lu",
+                         ch_value, air_value, duty_value, airtime_state,
+                         repair_req_count, repair_ok_count,
+                         repair_fail_count);
+            } else {
+                snprintf(airtime, sizeof(airtime),
+                         "ChUtil %.1f%%  TX %.2f/%.1f%%  %s",
+                         ch_value, air_value, duty_value, airtime_state);
+            }
             lv_label_set_text(mesh_airtime_label, airtime);
             lv_obj_set_style_text_color(mesh_airtime_label,
                                         lv_color_hex(airtime_color), 0);
