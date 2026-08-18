@@ -4752,6 +4752,8 @@ static bool mesh_read_bq27220_device_metrics(mesh_telemetry_info_t *telemetry)
     uint16_t soc = 0;
     uint16_t current = 0;
     uint64_t now_us;
+    int soc_rc;
+    int current_rc;
     bool found = false;
 
     if(!telemetry ||
@@ -4765,22 +4767,39 @@ static bool mesh_read_bq27220_device_metrics(mesh_telemetry_info_t *telemetry)
         }
         return false;
     }
-    if(voltage > 2500U && voltage < 6000U) {
-        telemetry->has_device_voltage = true;
-        telemetry->device_voltage = (float)voltage / 1000.0f;
-        found = true;
+
+    soc_rc = mesh_gpio_i2c_read_word_le(MESHTASTIC_BQ27220_ADDR,
+                                        MESHTASTIC_BQ27220_REG_SOC, &soc);
+    current_rc = mesh_gpio_i2c_read_word_le(MESHTASTIC_BQ27220_ADDR,
+                                            MESHTASTIC_BQ27220_REG_CURRENT,
+                                            &current);
+
+    if(voltage <= 2500U || voltage >= 6000U || soc_rc != 0 || soc > 100U) {
+        now_us = monotonic_us();
+        if(now_us >= mesh_bq27220_next_fail_log_us) {
+            if(current_rc == 0) {
+                daemon_event("Telemetry BQ27220 invalid sample voltage=%umV soc=%u%% current=%dmA",
+                             voltage, soc, (int)(int16_t)current);
+            } else {
+                daemon_event("Telemetry BQ27220 invalid sample voltage=%umV soc=%u%% current=NA",
+                             voltage, soc);
+            }
+            mesh_bq27220_next_fail_log_us = now_us + 60000000ULL;
+        }
+        mesh_bq27220_cache_us = 0ULL;
+        return false;
     }
-    if(mesh_gpio_i2c_read_word_le(MESHTASTIC_BQ27220_ADDR,
-                                  MESHTASTIC_BQ27220_REG_SOC,
-                                  &soc) == 0 &&
-       soc <= 100U) {
+
+    telemetry->has_device_voltage = true;
+    telemetry->device_voltage = (float)voltage / 1000.0f;
+    found = true;
+
+    if(soc <= 100U) {
         telemetry->has_battery_level = true;
         telemetry->battery_level = soc;
         found = true;
     }
-    if(mesh_gpio_i2c_read_word_le(MESHTASTIC_BQ27220_ADDR,
-                                  MESHTASTIC_BQ27220_REG_CURRENT,
-                                  &current) == 0) {
+    if(current_rc == 0) {
         daemon_event("Telemetry BQ27220 voltage=%umV soc=%u%% current=%dmA",
                      voltage, soc, (int)(int16_t)current);
     } else {

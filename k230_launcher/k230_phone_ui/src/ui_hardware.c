@@ -2692,6 +2692,10 @@ static int bq27220_read(bq27220_reading_t *reading)
     if(bq27220_read_word(BQ27220_REG_VOLTAGE, &voltage) != 0) {
         return -1;
     }
+    if(bq27220_read_word(BQ27220_REG_SOC, &soc) != 0 ||
+       voltage <= 2500U || voltage >= 6000U || soc > 100U) {
+        return -1;
+    }
     reading->present = 1;
 
     bq27220_read_word(BQ27220_REG_TEMP, &temp);
@@ -2706,7 +2710,6 @@ static int bq27220_read(bq27220_reading_t *reading)
     bq27220_read_word(BQ27220_REG_AVERAGE_POWER, &avg_power);
     bq27220_read_word(BQ27220_REG_INTERNAL_TEMP, &internal_temp);
     bq27220_read_word(BQ27220_REG_CYCLE_COUNT, &cycle);
-    bq27220_read_word(BQ27220_REG_SOC, &soc);
     bq27220_read_word(BQ27220_REG_SOH, &soh);
     bq27220_read_word(BQ27220_REG_CHARGING_VOLTAGE, &chg_voltage);
     bq27220_read_word(BQ27220_REG_CHARGING_CURRENT, &chg_current);
