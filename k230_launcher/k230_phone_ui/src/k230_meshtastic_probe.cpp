@@ -155,6 +155,7 @@
 #define MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE 4U
 #define MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_TTL_US \
     (5ULL * 60ULL * 1000000ULL)
+#define MESHTASTIC_FLRC_PHOTO_DEBUG_DROP_MAX_SEQ 64U
 #define MESHTASTIC_PHOTO_SOURCE_DIR "/root/photos"
 #define MESHTASTIC_PHOTO_STORE_DIR "/root/meshtastic/photos"
 #define MESHTASTIC_AIRTIME_CHANNEL_PERIODS 6U
@@ -13021,9 +13022,18 @@ typedef struct {
     std::vector<uint8_t> payload;
 } mesh_photo_tx_cache_entry_t;
 
+typedef struct {
+    bool enabled = false;
+    uint8_t rate_percent = 0;
+    uint16_t seq[MESHTASTIC_FLRC_PHOTO_DEBUG_DROP_MAX_SEQ];
+    uint16_t seq_count = 0;
+    uint64_t hit_count = 0;
+} mesh_photo_debug_drop_t;
+
 static mesh_voice_rx_stream_t mesh_voice_rx_streams[MESHTASTIC_VOICE_RX_STREAMS];
 static mesh_photo_tx_cache_entry_t
     mesh_photo_tx_cache[MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE];
+static mesh_photo_debug_drop_t mesh_photo_debug_drop;
 static uint64_t mesh_voice_tx_stream_count;
 static uint64_t mesh_voice_tx_chunk_count;
 static uint64_t mesh_voice_rx_chunk_count;
@@ -14910,6 +14920,180 @@ static bool mesh_photo_store_dir_ensure(void)
     return true;
 }
 
+static void mesh_photo_debug_drop_seq_text(char *buf, size_t buflen)
+{
+    size_t off = 0U;
+
+    if(!buf || buflen == 0U) {
+        return;
+    }
+    buf[0] = '\0';
+    if(mesh_photo_debug_drop.seq_count == 0U) {
+        snprintf(buf, buflen, "%s", "-");
+        return;
+    }
+    for(uint16_t i = 0; i < mesh_photo_debug_drop.seq_count; i++) {
+        int written = snprintf(buf + off, buflen - off, "%s%u",
+                               i == 0U ? "" : ",",
+                               mesh_photo_debug_drop.seq[i]);
+        if(written < 0) {
+            break;
+        }
+        if((size_t)written >= buflen - off) {
+            off = buflen - 1U;
+            break;
+        }
+        off += (size_t)written;
+    }
+}
+
+static std::string mesh_photo_debug_drop_status_response(void)
+{
+    char seq_text[256];
+    char buf[384];
+
+    mesh_photo_debug_drop_seq_text(seq_text, sizeof(seq_text));
+    snprintf(buf, sizeof(buf),
+             "OK photo_drop=%s photo_drop_seq=%s photo_drop_rate=%u "
+             "photo_drop_hits=%lu\n",
+             mesh_photo_debug_drop.enabled ? "on" : "off", seq_text,
+             (unsigned)mesh_photo_debug_drop.rate_percent,
+             (unsigned long)mesh_photo_debug_drop.hit_count);
+    return std::string(buf);
+}
+
+static bool mesh_photo_debug_drop_has_seq(uint16_t display_seq)
+{
+    for(uint16_t i = 0; i < mesh_photo_debug_drop.seq_count; i++) {
+        if(mesh_photo_debug_drop.seq[i] == display_seq) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint32_t mesh_photo_debug_drop_hash(uint32_t stream_id,
+                                           uint16_t display_seq,
+                                           uint16_t total)
+{
+    uint32_t x = stream_id ^ 0x9e3779b9U;
+
+    x ^= (uint32_t)display_seq * 0x85ebca6bU;
+    x ^= (uint32_t)total * 0xc2b2ae35U;
+    x ^= x >> 16U;
+    x *= 0x7feb352dU;
+    x ^= x >> 15U;
+    x *= 0x846ca68bU;
+    x ^= x >> 16U;
+    return x;
+}
+
+static bool mesh_photo_debug_drop_should_drop(uint32_t stream_id,
+                                              uint16_t seq0,
+                                              uint16_t total,
+                                              bool repair)
+{
+    uint16_t display_seq = (uint16_t)(seq0 + 1U);
+    bool drop = false;
+
+    if(repair || !mesh_photo_debug_drop.enabled) {
+        return false;
+    }
+    if(mesh_photo_debug_drop_has_seq(display_seq)) {
+        drop = true;
+    }
+    if(!drop && mesh_photo_debug_drop.rate_percent > 0U) {
+        drop = (mesh_photo_debug_drop_hash(stream_id, display_seq, total) %
+                100U) < mesh_photo_debug_drop.rate_percent;
+    }
+    if(drop) {
+        mesh_photo_debug_drop.hit_count++;
+        daemon_event("FLRC photo debug drop stream=0x%08x seq=%u/%u "
+                     "rate=%u hits=%lu",
+                     stream_id, display_seq, total,
+                     (unsigned)mesh_photo_debug_drop.rate_percent,
+                     (unsigned long)mesh_photo_debug_drop.hit_count);
+    }
+    return drop;
+}
+
+static std::string mesh_photo_debug_drop_clear_response(void)
+{
+    memset(&mesh_photo_debug_drop, 0, sizeof(mesh_photo_debug_drop));
+    return mesh_photo_debug_drop_status_response();
+}
+
+static std::string mesh_photo_debug_drop_set_seq_response(const char *arg)
+{
+    const char *p = arg ? arg : "";
+    uint16_t parsed[MESHTASTIC_FLRC_PHOTO_DEBUG_DROP_MAX_SEQ];
+    uint16_t parsed_count = 0U;
+
+    while(*p) {
+        char *endp = NULL;
+        unsigned long val;
+
+        while(*p && (isspace((unsigned char)*p) || *p == ',')) {
+            p++;
+        }
+        if(!*p) {
+            break;
+        }
+        val = strtoul(p, &endp, 10);
+        if(endp == p || val == 0UL ||
+           val > MESHTASTIC_FLRC_PHOTO_MAX_PACKETS) {
+            return "ERR invalid-photo-drop-seq\n";
+        }
+        if(parsed_count >= MESHTASTIC_FLRC_PHOTO_DEBUG_DROP_MAX_SEQ) {
+            return "ERR too-many-photo-drop-seq\n";
+        }
+        parsed[parsed_count++] = (uint16_t)val;
+        p = endp;
+        while(*p && !isspace((unsigned char)*p) && *p != ',') {
+            return "ERR invalid-photo-drop-seq\n";
+        }
+    }
+    std::sort(parsed, parsed + parsed_count);
+    mesh_photo_debug_drop.seq_count = 0U;
+    for(uint16_t i = 0; i < parsed_count; i++) {
+        if(i > 0U && parsed[i] == parsed[i - 1U]) {
+            continue;
+        }
+        mesh_photo_debug_drop.seq[mesh_photo_debug_drop.seq_count++] =
+            parsed[i];
+    }
+    mesh_photo_debug_drop.enabled =
+        mesh_photo_debug_drop.seq_count > 0U ||
+        mesh_photo_debug_drop.rate_percent > 0U;
+    return mesh_photo_debug_drop_status_response();
+}
+
+static std::string mesh_photo_debug_drop_set_rate_response(const char *arg)
+{
+    const char *p = arg ? arg : "";
+    char *endp = NULL;
+    unsigned long val;
+
+    while(*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    val = strtoul(p, &endp, 10);
+    if(endp == p || val > 100UL) {
+        return "ERR invalid-photo-drop-rate\n";
+    }
+    while(*endp && isspace((unsigned char)*endp)) {
+        endp++;
+    }
+    if(*endp) {
+        return "ERR invalid-photo-drop-rate\n";
+    }
+    mesh_photo_debug_drop.rate_percent = (uint8_t)val;
+    mesh_photo_debug_drop.enabled =
+        mesh_photo_debug_drop.seq_count > 0U ||
+        mesh_photo_debug_drop.rate_percent > 0U;
+    return mesh_photo_debug_drop_status_response();
+}
+
 static uint16_t mesh_flrc_photo_collect_window(
     LR2021 *lr2021, const mesh_flrc_voice_header_t &invite,
     std::vector<std::vector<uint8_t>> *chunks,
@@ -14979,6 +15163,10 @@ static uint16_t mesh_flrc_photo_collect_window(
         }
         if(hdr.type != MESHTASTIC_FLRC_VOICE_TYPE_DATA ||
            hdr.seq >= invite.total || (*received)[hdr.seq]) {
+            continue;
+        }
+        if(mesh_photo_debug_drop_should_drop(invite.stream_id, hdr.seq,
+                                             invite.total, repair)) {
             continue;
         }
         payload_len = hdr.payload_len;
@@ -16177,12 +16365,13 @@ static std::string daemon_status_response(const probe_options_t &opts,
                                           chip_type_t chip,
                                           size_t pending_send_count)
 {
-    char buf[3600];
+    char buf[3800];
     char ble_detail[160];
     char ble_pair[16];
     char slot_text[16];
     char gps_detail[160];
     char gnss_phase[24];
+    char photo_drop_seq[256];
     phoneapi_bridge_state_t ble_state;
     const char *queued = pending_send_count > 0U ? "1" : "0";
     uint64_t now = monotonic_us();
@@ -16196,6 +16385,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
     const char *voice_mode = chip == CHIP_LR2021 ? "flrc" : "disabled";
     const char *photo_mode = chip == CHIP_LR2021 ? "flrc" : "disabled";
 
+    mesh_photo_debug_drop_seq_text(photo_drop_seq, sizeof(photo_drop_seq));
     if(opts.position_enabled &&
        (!mesh_gnss.has_fix || strcmp(mesh_gnss.gps_state, "fix") != 0)) {
         (void)nrf9151_gnss_apply_cache_fix(true);
@@ -16243,6 +16433,7 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "photo_repair_req_tx=%lu photo_repair_req_rx=%lu "
              "photo_repair_tx_chunks=%lu photo_repair_rx_chunks=%lu "
              "photo_repair_complete=%lu photo_repair_fail=%lu "
+             "photo_drop=%s photo_drop_seq=%s photo_drop_rate=%u photo_drop_hits=%lu "
              "ch_util=%.1f air_tx=%.2f duty=%.1f air_tx_ms=%lu air_rx_ms=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
              "position=%s fixed=%s nrf9151=%s gps=%s gnss_phase=%s gps_detail=%s "
@@ -16294,6 +16485,10 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_photo_repair_rx_chunk_count,
              (unsigned long)mesh_photo_repair_complete_count,
              (unsigned long)mesh_photo_repair_fail_count,
+             mesh_photo_debug_drop.enabled ? "on" : "off",
+             photo_drop_seq,
+             (unsigned)mesh_photo_debug_drop.rate_percent,
+             (unsigned long)mesh_photo_debug_drop.hit_count,
              channel_util, air_tx, duty_cycle,
              (unsigned long)mesh_airtime_tx_total_ms,
              (unsigned long)mesh_airtime_rx_total_ms,
@@ -17297,6 +17492,20 @@ static std::string handle_daemon_command(const std::string &line,
             return "ERR empty-channel-url\n";
         }
         return daemon_preview_channel_url_response(message, opts);
+    }
+    if(line == "PHOTO_DROP_STATUS" || line == "photo_drop_status") {
+        return mesh_photo_debug_drop_status_response();
+    }
+    if(line == "PHOTO_DROP_CLEAR" || line == "photo_drop_clear") {
+        return mesh_photo_debug_drop_clear_response();
+    }
+    if(line.compare(0, 15, "PHOTO_DROP_SEQ ") == 0 ||
+       line.compare(0, 15, "photo_drop_seq ") == 0) {
+        return mesh_photo_debug_drop_set_seq_response(line.c_str() + 15);
+    }
+    if(line.compare(0, 16, "PHOTO_DROP_RATE ") == 0 ||
+       line.compare(0, 16, "photo_drop_rate ") == 0) {
+        return mesh_photo_debug_drop_set_rate_response(line.c_str() + 16);
     }
     if(line == "QUIT" || line == "quit") {
         running = 0;
