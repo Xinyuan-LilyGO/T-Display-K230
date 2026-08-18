@@ -1327,7 +1327,7 @@ static void mesh_update_profile_label(void)
                  mesh_slot_is_auto() ? "auto" : mesh_frequency_slot);
     } else {
         snprintf(text, sizeof(text),
-                 "%s / %s / %s",
+                 "%s  %s  CH:%s",
                  mesh_region, mesh_preset,
                  mesh_channel_name[0] ? mesh_channel_name : "default");
     }
@@ -3583,7 +3583,7 @@ static void mesh_layout_main(void)
         return;
     }
 
-    mesh_status_panel_h = landscape ? 112 : 152;
+    mesh_status_panel_h = landscape ? 116 : 166;
     mesh_chat_gap = landscape ? 8 : 10;
 
     body_h = lv_obj_get_height(mesh_body);
@@ -3605,16 +3605,18 @@ static void mesh_layout_main(void)
     }
 
     if(mesh_status_panel && lv_obj_is_valid(mesh_status_panel)) {
+        int panel_pad = 12;
+        int inner_w = content_w - panel_pad * 2;
         int action_gap = landscape ? 8 : 8;
         int action_count = 4;
-        int action_h = landscape ? 48 : 38;
+        int action_h = landscape ? 44 : 40;
         int action_w = landscape ? 64 :
-            (content_w - action_gap * (action_count - 1)) / action_count;
-        int action_y = landscape ? 0 : 108;
+            (inner_w - action_gap * (action_count - 1)) / action_count;
+        int action_y = landscape ? 4 : 114;
         int action_x0 = landscape ?
-            content_w - action_count * action_w -
-            action_gap * (action_count - 1) : 0;
-        int text_w = landscape ? action_x0 - 14 : content_w;
+            panel_pad + inner_w - action_count * action_w -
+            action_gap * (action_count - 1) : panel_pad;
+        int text_w = landscape ? action_x0 - panel_pad - 14 : inner_w;
 
         if(text_w < 160) {
             text_w = 160;
@@ -3622,23 +3624,23 @@ static void mesh_layout_main(void)
         lv_obj_set_pos(mesh_status_panel, x, 0);
         lv_obj_set_size(mesh_status_panel, content_w, mesh_status_panel_h);
         if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
-            lv_obj_set_pos(mesh_status_label, 0, 0);
+            lv_obj_set_pos(mesh_status_label, panel_pad, 0);
             lv_obj_set_width(mesh_status_label, text_w);
         }
         if(mesh_profile_label && lv_obj_is_valid(mesh_profile_label)) {
-            lv_obj_set_pos(mesh_profile_label, 0, landscape ? 28 : 26);
+            lv_obj_set_pos(mesh_profile_label, panel_pad, landscape ? 28 : 26);
             lv_obj_set_width(mesh_profile_label, text_w);
         }
         if(mesh_detail_label && lv_obj_is_valid(mesh_detail_label)) {
-            lv_obj_set_pos(mesh_detail_label, 0, landscape ? 52 : 50);
+            lv_obj_set_pos(mesh_detail_label, panel_pad, landscape ? 52 : 50);
             lv_obj_set_width(mesh_detail_label, text_w);
         }
         if(mesh_airtime_label && lv_obj_is_valid(mesh_airtime_label)) {
-            lv_obj_set_pos(mesh_airtime_label, 0, landscape ? 76 : 74);
+            lv_obj_set_pos(mesh_airtime_label, panel_pad, landscape ? 76 : 74);
             lv_obj_set_width(mesh_airtime_label, text_w);
         }
         if(mesh_chutil_bar && lv_obj_is_valid(mesh_chutil_bar)) {
-            lv_obj_set_pos(mesh_chutil_bar, 0, landscape ? 98 : 96);
+            lv_obj_set_pos(mesh_chutil_bar, panel_pad, landscape ? 100 : 98);
             lv_obj_set_size(mesh_chutil_bar, text_w, 6);
         }
         if(action_w < 54) {
@@ -3757,8 +3759,10 @@ static void mesh_refresh_status(void)
 
     if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
         lv_label_set_text(mesh_status_label,
-                          online ? ui_tr("Daemon online") :
-                          ui_tr("Daemon offline"));
+                          ui_is_landscape() ?
+                          (online ? ui_tr("Daemon online") :
+                           ui_tr("Daemon offline")) :
+                          (online ? ui_tr("Online") : ui_tr("Offline")));
         lv_obj_set_style_text_color(mesh_status_label,
                                     lv_color_hex(online ? 0x25C281 : 0xF5A524),
                                     0);
@@ -3828,10 +3832,9 @@ static void mesh_refresh_status(void)
                      ack_drop);
         } else {
             snprintf(detail, sizeof(detail),
-                     "GPS %s/%s S%s | Q%s ACK %s P%s R%s TO%s",
+                     "GPS %s/%s S%s  Q%s  ACK %s",
                      nrf9151, gps, sats, queued_count,
-                     mesh_ack_enabled ? "on" : "off",
-                     ack_pending, ack_rx, ack_timeout);
+                     mesh_ack_enabled ? "on" : "off");
         }
         lv_label_set_text(mesh_detail_label, detail);
         if(mesh_airtime_label && lv_obj_is_valid(mesh_airtime_label)) {
@@ -3872,18 +3875,14 @@ static void mesh_refresh_status(void)
                 if(repair_req_count > 0UL || repair_ok_count > 0UL ||
                    repair_fail_count > 0UL || photo_drop_count > 0UL) {
                     snprintf(airtime, sizeof(airtime),
-                             "Ch %.1f%%  TX %.1f%%  V:%s P:%s  R %lu/%lu/%lu%s",
+                             "Ch %.1f%%  TX %.1f%%  R %lu/%lu/%lu%s",
                              ch_value, air_value,
-                             mesh_capability_short(voice_mode),
-                             mesh_capability_short(photo_mode),
                              repair_req_count, repair_ok_count,
                              repair_fail_count, drop_suffix);
                 } else {
                     snprintf(airtime, sizeof(airtime),
-                             "Ch %.1f%%  TX %.1f%%  %s  V:%s P:%s",
-                             ch_value, air_value, airtime_state,
-                             mesh_capability_short(voice_mode),
-                             mesh_capability_short(photo_mode));
+                             "Ch %.1f%%  TX %.1f%%  %s",
+                             ch_value, air_value, airtime_state);
                 }
             } else if(repair_req_count > 0UL || repair_ok_count > 0UL ||
                repair_fail_count > 0UL || photo_drop_count > 0UL) {
@@ -11921,14 +11920,14 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_set_scrollbar_mode(mesh_body, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(mesh_body, LV_OBJ_FLAG_SCROLLABLE);
 
-    mesh_status_panel_h = landscape ? 112 : 152;
+    mesh_status_panel_h = landscape ? 116 : 166;
     mesh_chat_gap = landscape ? 8 : 10;
     mesh_keyboard_reserved_h = 0;
 
     mesh_status_panel = ui_panel(mesh_body, x, 0, content_w,
                                  mesh_status_panel_h);
     lv_obj_set_style_bg_color(mesh_status_panel, lv_color_hex(0x0F172A), 0);
-    lv_obj_set_style_pad_all(mesh_status_panel, 12, 0);
+    lv_obj_set_style_pad_all(mesh_status_panel, 0, 0);
 
     mesh_status_label = ui_label(mesh_status_panel, "Daemon offline",
                                  &lv_font_montserrat_20, 0xF5A524);
