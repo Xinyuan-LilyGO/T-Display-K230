@@ -205,7 +205,19 @@ static lv_obj_t *mesh_canned_overlay;
 static lv_obj_t *mesh_canned_delete_overlay;
 static lv_obj_t *mesh_voice_preview_overlay;
 static lv_obj_t *mesh_voice_preview_status_label;
+static lv_obj_t *mesh_voice_record_overlay;
+static lv_obj_t *mesh_voice_record_time_label;
+static lv_obj_t *mesh_voice_record_level_label;
+static lv_timer_t *mesh_voice_record_timer;
 static lv_obj_t *mesh_channel_url_label;
+
+typedef struct {
+    char paths[512];
+    char idle_text[96];
+    unsigned duration_ms;
+    lv_obj_t *bubble;
+    lv_obj_t *label;
+} mesh_voice_bubble_ctx_t;
 
 typedef enum {
     MESH_MAP_POS_READY = 0,
@@ -238,6 +250,12 @@ static pid_t mesh_voice_record_pid = -1;
 static uint64_t mesh_voice_record_start_us;
 static size_t mesh_voice_record_bytes;
 static unsigned mesh_voice_record_duration_ms;
+static pid_t mesh_voice_play_pid = -1;
+static uint64_t mesh_voice_play_start_us;
+static mesh_voice_bubble_ctx_t *mesh_voice_playing_ctx;
+static lv_timer_t *mesh_voice_playing_timer;
+static unsigned mesh_voice_playing_phase;
+static unsigned mesh_voice_record_phase;
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
 static lv_timer_t *mesh_channel_scan_timer;
@@ -1676,62 +1694,242 @@ static int mesh_chat_parse_voice_group_item(const char *line, int *sent,
     return 1;
 }
 
-static void mesh_voice_play_one_pcm_file(const char *path)
+static int mesh_voice_path_is_safe(const char *path)
 {
-    char command[320];
-    int rc;
-
-    if(!path || !path[0]) {
-        return;
-    }
-    if(strncmp(path, "/tmp/k230_mesh_voice_", 20) != 0 ||
-       strchr(path, '\'') || strchr(path, ';')) {
-        mesh_append_log("voice playback rejected path=%s", path);
-        return;
-    }
-    snprintf(command, sizeof(command),
-             "aplay -q -f S16_LE -c 1 -r %u '%s' >/dev/null 2>&1 &",
-             MESHTASTIC_VOICE_SAMPLE_RATE, path);
-    rc = system(command);
-    if(rc != 0) {
-        mesh_append_log("voice playback failed rc=%d", rc);
-    }
+    return path && strncmp(path, "/tmp/k230_mesh_voice_", 20) == 0 &&
+           !strchr(path, '\'') && !strchr(path, ';') &&
+           !strchr(path, '\n') && !strchr(path, '\r');
 }
 
-static void mesh_voice_play_pcm_file(const char *path)
+static int mesh_voice_paths_have_safe_item(const char *paths)
 {
     char copy[512];
     char *item;
     char *save = NULL;
 
-    if(!path || !path[0]) {
-        return;
+    if(!paths || !paths[0]) {
+        return 0;
     }
-    snprintf(copy, sizeof(copy), "%s", path);
+    snprintf(copy, sizeof(copy), "%s", paths);
     item = strtok_r(copy, ";", &save);
     while(item) {
         ui_trim_text(item);
-        if(item[0]) {
-            mesh_voice_play_one_pcm_file(item);
+        if(mesh_voice_path_is_safe(item)) {
+            return 1;
         }
         item = strtok_r(NULL, ";", &save);
     }
+    return 0;
+}
+
+static unsigned mesh_voice_duration_text_ms(const char *duration)
+{
+    double seconds;
+
+    if(!duration || !duration[0]) {
+        return 0;
+    }
+    seconds = atof(duration);
+    if(seconds <= 0.0) {
+        return 0;
+    }
+    if(seconds > 60.0) {
+        seconds = 60.0;
+    }
+    return (unsigned)(seconds * 1000.0 + 0.5);
+}
+
+static int mesh_voice_playback_poll(void)
+{
+    int status = 0;
+    pid_t rc;
+
+    if(mesh_voice_play_pid <= 0) {
+        return 0;
+    }
+    rc = waitpid(mesh_voice_play_pid, &status, WNOHANG);
+    if(rc == 0) {
+        return 1;
+    }
+    if(rc == mesh_voice_play_pid || (rc < 0 && errno == ECHILD)) {
+        mesh_voice_play_pid = -1;
+        return 0;
+    }
+    return 1;
+}
+
+static void mesh_voice_playing_timer_stop(void)
+{
+    if(mesh_voice_playing_timer) {
+        lv_timer_delete(mesh_voice_playing_timer);
+        mesh_voice_playing_timer = NULL;
+    }
+}
+
+static void mesh_voice_playing_visual_stop(void)
+{
+    mesh_voice_bubble_ctx_t *ctx = mesh_voice_playing_ctx;
+
+    mesh_voice_playing_timer_stop();
+    if(ctx && ctx->label && lv_obj_is_valid(ctx->label)) {
+        lv_label_set_text(ctx->label, ctx->idle_text);
+    }
+    if(ctx && ctx->bubble && lv_obj_is_valid(ctx->bubble)) {
+        lv_obj_set_style_border_width(ctx->bubble, 0, 0);
+    }
+    mesh_voice_playing_ctx = NULL;
+    mesh_voice_playing_phase = 0;
+    app_request_fast_refresh();
+}
+
+static void mesh_voice_stop_playback(int clear_visual)
+{
+    if(mesh_voice_play_pid > 0) {
+        int status = 0;
+
+        if(waitpid(mesh_voice_play_pid, &status, WNOHANG) == 0) {
+            kill(-mesh_voice_play_pid, SIGTERM);
+            usleep(30000);
+            if(waitpid(mesh_voice_play_pid, &status, WNOHANG) == 0) {
+                kill(-mesh_voice_play_pid, SIGKILL);
+                waitpid(mesh_voice_play_pid, &status, 0);
+            }
+        }
+        mesh_voice_play_pid = -1;
+    }
+    if(clear_visual) {
+        mesh_voice_playing_visual_stop();
+    }
+}
+
+static void mesh_voice_playback_child(const char *paths)
+{
+    char copy[512];
+    char rate[16];
+    char *item;
+    char *save = NULL;
+
+    snprintf(copy, sizeof(copy), "%s", paths ? paths : "");
+    snprintf(rate, sizeof(rate), "%u", MESHTASTIC_VOICE_SAMPLE_RATE);
+    item = strtok_r(copy, ";", &save);
+    while(item) {
+        pid_t pid;
+        int status = 0;
+
+        ui_trim_text(item);
+        if(!mesh_voice_path_is_safe(item)) {
+            item = strtok_r(NULL, ";", &save);
+            continue;
+        }
+        pid = fork();
+        if(pid == 0) {
+            execlp("aplay", "aplay", "-q", "-D", "default", "-t", "raw",
+                   "-f", "S16_LE", "-c", "1", "-r", rate, item,
+                   (char *)NULL);
+            _exit(127);
+        }
+        if(pid > 0) {
+            waitpid(pid, &status, 0);
+        }
+        item = strtok_r(NULL, ";", &save);
+    }
+    _exit(0);
+}
+
+static int mesh_voice_play_pcm_file(const char *path)
+{
+    pid_t pid;
+
+    if(!mesh_voice_paths_have_safe_item(path)) {
+        mesh_append_log("voice playback rejected path=%s",
+                        path ? path : "(null)");
+        return -1;
+    }
+    mesh_voice_stop_playback(1);
+    pid = fork();
+    if(pid < 0) {
+        mesh_append_log("voice playback fork failed: %s", strerror(errno));
+        return -1;
+    }
+    if(pid == 0) {
+        setpgid(0, 0);
+        mesh_voice_playback_child(path);
+    }
+    setpgid(pid, pid);
+    mesh_voice_play_pid = pid;
+    mesh_voice_play_start_us = ui_monotonic_us();
+    return 0;
+}
+
+static void mesh_voice_playing_timer_cb(lv_timer_t *timer)
+{
+    mesh_voice_bubble_ctx_t *ctx = mesh_voice_playing_ctx;
+    const char *waves[] = { ">    ", ">>   ", ">>>  ", ">>>> " };
+    char text[128];
+    uint64_t elapsed_ms;
+    int running;
+
+    (void)timer;
+    if(!ctx || !ctx->label || !lv_obj_is_valid(ctx->label)) {
+        mesh_voice_playing_visual_stop();
+        return;
+    }
+    running = mesh_voice_playback_poll();
+    elapsed_ms = (ui_monotonic_us() - mesh_voice_play_start_us) / 1000ULL;
+    if(!running ||
+       (ctx->duration_ms > 0U && elapsed_ms > ctx->duration_ms + 2000U)) {
+        mesh_voice_stop_playback(0);
+        mesh_voice_playing_visual_stop();
+        return;
+    }
+    snprintf(text, sizeof(text), "%s %s",
+             waves[mesh_voice_playing_phase %
+                   (sizeof(waves) / sizeof(waves[0]))],
+             ctx->idle_text);
+    mesh_voice_playing_phase++;
+    lv_label_set_text(ctx->label, text);
+    app_request_fast_refresh();
+}
+
+static void mesh_voice_bubble_play(mesh_voice_bubble_ctx_t *ctx)
+{
+    if(!ctx || !ctx->paths[0]) {
+        return;
+    }
+    if(mesh_voice_play_pcm_file(ctx->paths) != 0) {
+        return;
+    }
+    mesh_voice_playing_ctx = ctx;
+    mesh_voice_playing_phase = 0;
+    if(ctx->bubble && lv_obj_is_valid(ctx->bubble)) {
+        lv_obj_set_style_border_color(ctx->bubble, lv_color_hex(0xBBF7D0), 0);
+        lv_obj_set_style_border_width(ctx->bubble, 2, 0);
+    }
+    mesh_voice_playing_timer =
+        lv_timer_create(mesh_voice_playing_timer_cb, 160, ctx);
+    mesh_voice_playing_timer_cb(mesh_voice_playing_timer);
 }
 
 static void mesh_voice_bubble_event_cb(lv_event_t *event)
 {
     lv_event_code_t code = lv_event_get_code(event);
-    char *path = (char *)lv_event_get_user_data(event);
+    mesh_voice_bubble_ctx_t *ctx =
+        (mesh_voice_bubble_ctx_t *)lv_event_get_user_data(event);
 
     if(code == LV_EVENT_CLICKED) {
-        if(path && path[0]) {
-            mesh_voice_play_pcm_file(path);
-            mesh_append_log("voice playback: %s", path);
+        if(ctx && ctx->paths[0]) {
+            mesh_voice_bubble_play(ctx);
+            mesh_append_log("voice playback: %s", ctx->paths);
         }
         return;
     }
     if(code == LV_EVENT_DELETE) {
-        free(path);
+        if(ctx == mesh_voice_playing_ctx) {
+            mesh_voice_stop_playback(0);
+            mesh_voice_playing_ctx = NULL;
+            mesh_voice_playing_timer_stop();
+        }
+        free(ctx);
     }
 }
 
@@ -1918,7 +2116,7 @@ static void mesh_chat_add_bubble(const char *line)
     int sent = 0;
     char meta[96];
     char body[256];
-    char voice_path[160] = "";
+    char voice_path[512] = "";
     char voice_duration[24] = "";
     char status[24];
     lv_obj_t *row;
@@ -1927,6 +2125,7 @@ static void mesh_chat_add_bubble(const char *line)
     lv_obj_t *footer;
     int page_w;
     int bubble_w;
+    int is_voice = 0;
     uint32_t footer_color = 0x94A3B8;
 
     if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll) ||
@@ -1940,6 +2139,7 @@ static void mesh_chat_add_bubble(const char *line)
         char voice_node[32] = "";
         int voice_sent = 0;
 
+        is_voice = 1;
         snprintf(body, sizeof(body), "%s%s%s",
                  ui_tr("Voice message"),
                  voice_duration[0] ? " " : "",
@@ -1991,7 +2191,8 @@ static void mesh_chat_add_bubble(const char *line)
     lv_obj_set_width(bubble, bubble_w);
     lv_obj_set_height(bubble, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(bubble,
-                              lv_color_hex(sent ? 0x16A34A : 0x232B35), 0);
+                              lv_color_hex(is_voice ? 0x16A34A :
+                                           (sent ? 0x16A34A : 0x232B35)), 0);
     lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bubble, 0, 0);
     lv_obj_set_style_radius(bubble, 8, 0);
@@ -1999,21 +2200,25 @@ static void mesh_chat_add_bubble(const char *line)
     lv_obj_set_style_pad_row(bubble, 5, 0);
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
-    if(voice_path[0]) {
-        char *play_path = strdup(voice_path);
-
-        if(play_path) {
-            lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_event_cb(bubble, mesh_voice_bubble_event_cb,
-                                LV_EVENT_CLICKED, play_path);
-            lv_obj_add_event_cb(bubble, mesh_voice_bubble_event_cb,
-                                LV_EVENT_DELETE, play_path);
-        }
-    }
 
     text = ui_label(bubble, body, &lv_font_montserrat_18, 0xFFFFFF);
     lv_obj_set_width(text, bubble_w - 20);
     lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+    if(voice_path[0]) {
+        mesh_voice_bubble_ctx_t *ctx =
+            (mesh_voice_bubble_ctx_t *)calloc(1, sizeof(*ctx));
+
+        if(ctx) {
+            snprintf(ctx->paths, sizeof(ctx->paths), "%s", voice_path);
+            snprintf(ctx->idle_text, sizeof(ctx->idle_text), "%s", body);
+            ctx->duration_ms = mesh_voice_duration_text_ms(voice_duration);
+            ctx->bubble = bubble;
+            ctx->label = text;
+            lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(bubble, mesh_voice_bubble_event_cb,
+                                LV_EVENT_ALL, ctx);
+        }
+    }
 
     footer = ui_label(bubble, meta[0] ? meta : (sent ? "TX" : "RX"),
                       &lv_font_montserrat_14,
@@ -2177,6 +2382,10 @@ static int mesh_chat_append_lines(const char *lines, int auto_scroll)
     char *line;
     char *save = NULL;
     int appended = 0;
+    int voice_group_active = 0;
+    char voice_group_node[32] = "";
+    char voice_group_paths[512] = "";
+    double voice_group_duration = 0.0;
 
     if(!mesh_chat_scroll || !lv_obj_is_valid(mesh_chat_scroll) ||
        !lines || !lines[0]) {
@@ -2188,10 +2397,65 @@ static int mesh_chat_append_lines(const char *lines, int auto_scroll)
     while(line) {
         ui_trim_text(line);
         if(line[0] && strcmp(line, "No mesh messages yet") != 0) {
+            int voice_sent = 0;
+            char voice_node[32] = "";
+            char voice_path[160] = "";
+            double voice_duration = 0.0;
+
+            if(mesh_chat_parse_voice_group_item(line, &voice_sent,
+                                                voice_node,
+                                                sizeof(voice_node),
+                                                voice_path,
+                                                sizeof(voice_path),
+                                                &voice_duration) &&
+               !voice_sent && voice_path[0]) {
+                if(voice_group_active &&
+                   strcmp(voice_group_node, voice_node) == 0 &&
+                   strlen(voice_group_paths) + strlen(voice_path) + 2U <
+                       sizeof(voice_group_paths)) {
+                    strncat(voice_group_paths, ";",
+                            sizeof(voice_group_paths) -
+                            strlen(voice_group_paths) - 1U);
+                    strncat(voice_group_paths, voice_path,
+                            sizeof(voice_group_paths) -
+                            strlen(voice_group_paths) - 1U);
+                    voice_group_duration += voice_duration;
+                } else {
+                    if(voice_group_active) {
+                        mesh_chat_add_voice_group(voice_group_node,
+                                                  voice_group_duration,
+                                                  voice_group_paths);
+                        appended++;
+                    }
+                    voice_group_active = 1;
+                    snprintf(voice_group_node, sizeof(voice_group_node),
+                             "%s", voice_node);
+                    snprintf(voice_group_paths, sizeof(voice_group_paths),
+                             "%s", voice_path);
+                    voice_group_duration = voice_duration;
+                }
+                line = strtok_r(NULL, "\n", &save);
+                continue;
+            }
+            if(voice_group_active) {
+                mesh_chat_add_voice_group(voice_group_node,
+                                          voice_group_duration,
+                                          voice_group_paths);
+                voice_group_active = 0;
+                voice_group_node[0] = '\0';
+                voice_group_paths[0] = '\0';
+                voice_group_duration = 0.0;
+                appended++;
+            }
             mesh_chat_add_bubble(line);
             appended++;
         }
         line = strtok_r(NULL, "\n", &save);
+    }
+    if(voice_group_active) {
+        mesh_chat_add_voice_group(voice_group_node, voice_group_duration,
+                                  voice_group_paths);
+        appended++;
     }
 
     if(appended > 0 && auto_scroll) {
@@ -2717,6 +2981,7 @@ static void mesh_overlay_auto_refresh_tick(void)
 static void mesh_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+    (void)mesh_voice_playback_poll();
     mesh_refresh_status();
     mesh_overlay_auto_refresh_tick();
 }
@@ -2727,6 +2992,7 @@ static void mesh_background_timer_cb(lv_timer_t *timer)
     if(app_current_page_is(PAGE_MESHTASTIC)) {
         return;
     }
+    (void)mesh_voice_playback_poll();
     mesh_refresh_status();
 }
 
@@ -8387,6 +8653,137 @@ static void mesh_voice_set_button_text(const char *text)
     }
 }
 
+static void mesh_voice_record_overlay_close(void)
+{
+    if(mesh_voice_record_timer) {
+        lv_timer_delete(mesh_voice_record_timer);
+        mesh_voice_record_timer = NULL;
+    }
+    if(mesh_voice_record_overlay && lv_obj_is_valid(mesh_voice_record_overlay)) {
+        lv_obj_delete(mesh_voice_record_overlay);
+    }
+    mesh_voice_record_overlay = NULL;
+    mesh_voice_record_time_label = NULL;
+    mesh_voice_record_level_label = NULL;
+    mesh_voice_record_phase = 0;
+}
+
+static void mesh_voice_record_overlay_timer_cb(lv_timer_t *timer)
+{
+    const char *levels[] = { "|    ", "|||  ", "|||||", " ||| ", "  |  " };
+    char text[80];
+    uint64_t elapsed_ms;
+
+    (void)timer;
+    if(!mesh_voice_record_overlay ||
+       !lv_obj_is_valid(mesh_voice_record_overlay)) {
+        mesh_voice_record_overlay_close();
+        return;
+    }
+    elapsed_ms = (ui_monotonic_us() - mesh_voice_record_start_us) / 1000ULL;
+    if(mesh_voice_record_time_label &&
+       lv_obj_is_valid(mesh_voice_record_time_label)) {
+        snprintf(text, sizeof(text), "%s  %llu.%01llus",
+                 ui_tr("Recording"),
+                 (unsigned long long)(elapsed_ms / 1000ULL),
+                 (unsigned long long)((elapsed_ms / 100ULL) % 10ULL));
+        lv_label_set_text(mesh_voice_record_time_label, text);
+    }
+    if(mesh_voice_record_level_label &&
+       lv_obj_is_valid(mesh_voice_record_level_label)) {
+        lv_label_set_text(mesh_voice_record_level_label,
+                          levels[mesh_voice_record_phase %
+                                 (sizeof(levels) / sizeof(levels[0]))]);
+    }
+    mesh_voice_record_phase++;
+    app_request_fast_refresh();
+}
+
+static void mesh_voice_record_overlay_open(const char *source)
+{
+    lv_obj_t *card;
+    lv_obj_t *spinner;
+    lv_obj_t *mic;
+    lv_obj_t *hint;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 310 : 286;
+    int card_h = ui_is_landscape() ? 224 : 252;
+    int spinner_size = ui_is_landscape() ? 102 : 112;
+
+    (void)source;
+    mesh_voice_record_overlay_close();
+    if(card_w > screen_w - 40) {
+        card_w = screen_w - 40;
+    }
+    if(card_h > screen_h - 40) {
+        card_h = screen_h - 40;
+    }
+
+    mesh_voice_record_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_voice_record_overlay);
+    lv_obj_set_style_bg_color(mesh_voice_record_overlay, lv_color_hex(0x000000),
+                              0);
+    lv_obj_set_style_bg_opa(mesh_voice_record_overlay, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(mesh_voice_record_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_voice_record_overlay, 0, 0);
+    lv_obj_add_flag(mesh_voice_record_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(mesh_voice_record_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    card = ui_panel(mesh_voice_record_overlay, 0, 0, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x1F3B2E), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    spinner = lv_spinner_create(card);
+    lv_obj_set_size(spinner, spinner_size, spinner_size);
+    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_set_style_arc_width(spinner, 8, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(spinner, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x1F3B2E),
+                               LV_PART_MAIN);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x25C281),
+                               LV_PART_INDICATOR);
+
+    mic = ui_label(card, LV_SYMBOL_AUDIO, &lv_font_montserrat_32, 0x25C281);
+    lv_obj_set_width(mic, spinner_size);
+    lv_obj_set_style_text_align(mic, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(mic, LV_ALIGN_TOP_MID, 0, 20 + (spinner_size - 34) / 2);
+
+    mesh_voice_record_time_label =
+        ui_label(card, ui_tr("Recording"), &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_width(mesh_voice_record_time_label, card_w - 36);
+    lv_obj_set_style_text_align(mesh_voice_record_time_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(mesh_voice_record_time_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(mesh_voice_record_time_label, LV_ALIGN_TOP_MID, 0,
+                 34 + spinner_size);
+
+    mesh_voice_record_level_label =
+        ui_label(card, "|||||", &lv_font_montserrat_24, 0x25C281);
+    lv_obj_set_width(mesh_voice_record_level_label, card_w - 36);
+    lv_obj_set_style_text_align(mesh_voice_record_level_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(mesh_voice_record_level_label, LV_ALIGN_TOP_MID, 0,
+                 64 + spinner_size);
+
+    hint = ui_label(card, ui_tr("Release to preview"),
+                    &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_width(hint, card_w - 36);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -16);
+
+    mesh_voice_record_timer =
+        lv_timer_create(mesh_voice_record_overlay_timer_cb, 120, NULL);
+    mesh_voice_record_overlay_timer_cb(mesh_voice_record_timer);
+    app_request_fast_refresh();
+}
+
 static void mesh_voice_preview_close(void)
 {
     if(mesh_voice_preview_overlay && lv_obj_is_valid(mesh_voice_preview_overlay)) {
@@ -8615,6 +9012,7 @@ static int mesh_voice_record_start(const char *source)
     setpgid(pid, pid);
     mesh_voice_record_pid = pid;
     mesh_voice_set_button_text("Recording");
+    mesh_voice_record_overlay_open(source);
     app_request_fast_refresh();
     return 0;
 }
@@ -8643,6 +9041,7 @@ static int mesh_voice_record_stop(int open_preview, const char *source)
         }
     }
     ui_audio_input_route_leave("meshtastic_voice");
+    mesh_voice_record_overlay_close();
     mesh_voice_set_button_text("Mic");
     mesh_ui_trace("VOICE_%s record_stop status=%d",
                   source ? source : "unknown", status);
@@ -9236,7 +9635,7 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_set_scrollbar_mode(mesh_body, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(mesh_body, LV_OBJ_FLAG_SCROLLABLE);
 
-    mesh_status_panel_h = landscape ? 90 : 98;
+    mesh_status_panel_h = landscape ? 112 : 108;
     mesh_chat_gap = landscape ? 8 : 10;
     mesh_keyboard_reserved_h = 0;
     if(status_text_w < 120) {
@@ -9262,19 +9661,19 @@ void ui_meshtastic_create(lv_obj_t *scr)
 
     mesh_detail_label = ui_label(mesh_status_panel, "",
                                  &lv_font_montserrat_14, 0x94A3B8);
-    lv_obj_set_pos(mesh_detail_label, 0, 50);
+    lv_obj_set_pos(mesh_detail_label, 0, 52);
     lv_obj_set_width(mesh_detail_label, status_text_w);
     lv_label_set_long_mode(mesh_detail_label, LV_LABEL_LONG_DOT);
 
     mesh_airtime_label = ui_label(mesh_status_panel, "ChUtil 0.0%",
                                   &lv_font_montserrat_12, 0x25C281);
-    lv_obj_set_pos(mesh_airtime_label, 0, 66);
+    lv_obj_set_pos(mesh_airtime_label, 0, 76);
     lv_obj_set_width(mesh_airtime_label, status_text_w);
     lv_label_set_long_mode(mesh_airtime_label, LV_LABEL_LONG_DOT);
 
     mesh_chutil_bar = lv_bar_create(mesh_status_panel);
-    lv_obj_set_pos(mesh_chutil_bar, 0, 82);
-    lv_obj_set_size(mesh_chutil_bar, status_text_w, 5);
+    lv_obj_set_pos(mesh_chutil_bar, 0, 96);
+    lv_obj_set_size(mesh_chutil_bar, status_text_w, 6);
     lv_bar_set_range(mesh_chutil_bar, 0, 40);
     lv_bar_set_value(mesh_chutil_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(mesh_chutil_bar, lv_color_hex(0x263241),
@@ -9380,6 +9779,8 @@ void ui_meshtastic_cleanup(void)
     if(mesh_voice_record_pid > 0) {
         (void)mesh_voice_record_stop(0, "CLEANUP");
     }
+    mesh_voice_stop_playback(1);
+    mesh_voice_record_overlay_close();
     mesh_voice_preview_close();
     if(mesh_timer) {
         lv_timer_delete(mesh_timer);

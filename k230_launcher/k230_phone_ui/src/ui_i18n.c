@@ -78,6 +78,7 @@ static const ui_translation_t ui_translations[] = {
     { "Voice is too long or radio is busy", "语音太长或无线链路忙", "音声が長すぎるか無線が混雑しています" },
     { "Channel is busy, try later", "信道占用较高，请稍后重试", "チャネルが混雑しています。後で再試行してください" },
     { "Radio duty limit, try later", "无线占空比受限，请稍后重试", "無線 duty 制限中です。後で再試行してください" },
+    { "Release to preview", "松开后试听", "離すとプレビュー" },
     { "Play", "播放", "再生" },
     { "Map", "地图", "地図" },
     { "Mesh Map", "Mesh 地图", "Mesh 地図" },
