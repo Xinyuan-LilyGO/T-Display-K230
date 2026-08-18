@@ -224,6 +224,7 @@ static lv_obj_t *mesh_voice_preview_status_label;
 static lv_obj_t *mesh_photo_picker_overlay;
 static lv_obj_t *mesh_photo_preview_overlay;
 static lv_obj_t *mesh_photo_status_label;
+static lv_timer_t *mesh_photo_picker_close_timer;
 static uint8_t *mesh_photo_preview_pixels;
 static lv_image_dsc_t mesh_photo_preview_dsc;
 static lv_obj_t *mesh_voice_record_overlay;
@@ -292,6 +293,7 @@ static mesh_voice_bubble_ctx_t *mesh_voice_playing_ctx;
 static lv_timer_t *mesh_voice_playing_timer;
 static unsigned mesh_voice_playing_phase;
 static unsigned mesh_voice_record_phase;
+static int mesh_photo_send_inflight;
 static mesh_photo_item_t mesh_photo_items[MESHTASTIC_PHOTO_MAX_ITEMS];
 static int mesh_photo_item_count;
 static uint8_t mesh_photo_thumb_buf[MESHTASTIC_PHOTO_MAX_ITEMS]
@@ -1576,6 +1578,9 @@ static const char *mesh_chat_status_text(const char *status)
     if(strcmp(status, "sent") == 0) {
         return ui_tr("Sent");
     }
+    if(strcmp(status, "queued") == 0) {
+        return ui_tr("Queued");
+    }
     if(strcmp(status, "pending") == 0) {
         return ui_tr("Waiting ACK");
     }
@@ -1600,6 +1605,10 @@ static const char *mesh_chat_status_text(const char *status)
     if(strcmp(status, "tx-failed") == 0) {
         return ui_tr("TX failed");
     }
+    if(strcmp(status, "failed") == 0 ||
+       strcmp(status, "init-failed") == 0) {
+        return ui_tr("Failed");
+    }
     return status;
 }
 
@@ -1616,10 +1625,18 @@ static uint32_t mesh_chat_status_color(const char *status, int sent)
        strcmp(status, "sent") == 0) {
         return 0xDDFCE8;
     }
+    if(strcmp(status, "queued") == 0 ||
+       strcmp(status, "air") == 0 ||
+       strcmp(status, "pending") == 0 ||
+       strncmp(status, "retry", 5) == 0) {
+        return 0xFDE68A;
+    }
     if(strcmp(status, "timeout") == 0 ||
        strcmp(status, "nak") == 0 ||
        strcmp(status, "dropped") == 0 ||
-       strcmp(status, "tx-failed") == 0) {
+       strcmp(status, "tx-failed") == 0 ||
+       strcmp(status, "failed") == 0 ||
+       strcmp(status, "init-failed") == 0) {
         return 0xFCA5A5;
     }
     return 0xFDE68A;
@@ -1993,6 +2010,54 @@ static int mesh_chat_parse_photo_line(const char *line, int *sent,
         }
     }
     return 1;
+}
+
+static void mesh_photo_format_footer(const char *line, int sent,
+                                     const char *node, char *footer,
+                                     size_t footer_len,
+                                     uint32_t *footer_color)
+{
+    char state[24] = "";
+    char packets[16] = "";
+    char elapsed[24] = "";
+    char sha[72] = "";
+    char hash_text[20] = "";
+    char packet_text[32] = "";
+    char elapsed_text[40] = "";
+    const char *state_text = NULL;
+    uint32_t color;
+
+    if(!footer || footer_len == 0U) {
+        return;
+    }
+    mesh_chat_extract_meta_field(line, "state=", state, sizeof(state));
+    mesh_chat_extract_meta_field(line, "packets=", packets, sizeof(packets));
+    mesh_chat_extract_meta_field(line, "elapsed=", elapsed, sizeof(elapsed));
+    mesh_chat_extract_meta_field(line, "sha256=", sha, sizeof(sha));
+    if(sha[0]) {
+        snprintf(hash_text, sizeof(hash_text), " hash %.8s", sha);
+    }
+    if(packets[0]) {
+        snprintf(packet_text, sizeof(packet_text), " %spkt", packets);
+    }
+    if(elapsed[0]) {
+        snprintf(elapsed_text, sizeof(elapsed_text), " %s", elapsed);
+    }
+    state_text = state[0] ? mesh_chat_status_text(state) :
+                 (sent ? ui_tr("Sent") : ui_tr("Received"));
+    snprintf(footer, footer_len, "%s %s - %s%s%s%s",
+             sent ? "TX" : "RX",
+             node && node[0] ? node : "photo",
+             state_text, packet_text, elapsed_text, hash_text);
+    color = state[0] ? mesh_chat_status_color(state, sent) : 0xDDFCE8;
+    if(footer_color) {
+        *footer_color = color;
+    }
+}
+
+static const char *mesh_capability_short(const char *value)
+{
+    return value && strcmp(value, "flrc") == 0 ? "FLRC" : "-";
 }
 
 static int mesh_chat_parse_voice_group_item(const char *line, int *sent,
@@ -2605,6 +2670,7 @@ static void mesh_chat_add_bubble(const char *line)
     char photo_lvgl_path[200] = "";
     char photo_dims[32] = "";
     char photo_node[32] = "";
+    char photo_footer[128] = "";
     char status[24];
     lv_obj_t *row;
     lv_obj_t *bubble;
@@ -2677,8 +2743,11 @@ static void mesh_chat_add_bubble(const char *line)
             snprintf(photo_lvgl_path, sizeof(photo_lvgl_path), "%s",
                      photo_path);
         }
-        snprintf(meta, sizeof(meta), "%s %s",
-                 sent ? "TX" : "RX", photo_node[0] ? photo_node : "photo");
+        mesh_photo_format_footer(line, sent, photo_node, photo_footer,
+                                 sizeof(photo_footer), &footer_color);
+        snprintf(meta, sizeof(meta), "%s",
+                 photo_footer[0] ? photo_footer :
+                 (sent ? "TX photo" : "RX photo"));
     }
     ui_trim_text(body);
     ui_trim_text(meta);
@@ -3477,9 +3546,14 @@ static void mesh_refresh_status(void)
             char repair_req_tx[16];
             char repair_complete[16];
             char repair_fail[16];
+            char photo_drop_hits[16];
+            char voice_mode[24];
+            char photo_mode[24];
+            char drop_suffix[32] = "";
             unsigned long repair_req_count;
             unsigned long repair_ok_count;
             unsigned long repair_fail_count;
+            unsigned long photo_drop_count;
 
             mesh_status_field(mesh_status_text, "photo_repair_req_tx",
                               repair_req_tx, sizeof(repair_req_tx), "0");
@@ -3487,20 +3561,38 @@ static void mesh_refresh_status(void)
                               repair_complete, sizeof(repair_complete), "0");
             mesh_status_field(mesh_status_text, "photo_repair_fail",
                               repair_fail, sizeof(repair_fail), "0");
+            mesh_status_field(mesh_status_text, "photo_drop_hits",
+                              photo_drop_hits, sizeof(photo_drop_hits), "0");
+            mesh_status_field(mesh_status_text, "voice", voice_mode,
+                              sizeof(voice_mode), "disabled");
+            mesh_status_field(mesh_status_text, "photo", photo_mode,
+                              sizeof(photo_mode), "disabled");
             repair_req_count = strtoul(repair_req_tx, NULL, 10);
             repair_ok_count = strtoul(repair_complete, NULL, 10);
             repair_fail_count = strtoul(repair_fail, NULL, 10);
+            photo_drop_count = strtoul(photo_drop_hits, NULL, 10);
+            if(photo_drop_count > 0UL) {
+                snprintf(drop_suffix, sizeof(drop_suffix), "  %s %lu",
+                         ui_tr("Drop"), photo_drop_count);
+            }
             if(repair_req_count > 0UL || repair_ok_count > 0UL ||
-               repair_fail_count > 0UL) {
+               repair_fail_count > 0UL || photo_drop_count > 0UL) {
                 snprintf(airtime, sizeof(airtime),
-                         "ChUtil %.1f%%  TX %.2f/%.1f%%  %s  Repair %lu/%lu/%lu",
+                         "Ch %.1f%%  TX %.2f/%.1f%%  %s  %s V:%s P:%s  %s %lu/%lu/%lu%s",
                          ch_value, air_value, duty_value, airtime_state,
+                         ui_tr("Media"),
+                         mesh_capability_short(voice_mode),
+                         mesh_capability_short(photo_mode),
+                         ui_tr("Repair"),
                          repair_req_count, repair_ok_count,
-                         repair_fail_count);
+                         repair_fail_count, drop_suffix);
             } else {
                 snprintf(airtime, sizeof(airtime),
-                         "ChUtil %.1f%%  TX %.2f/%.1f%%  %s",
-                         ch_value, air_value, duty_value, airtime_state);
+                         "Ch %.1f%%  TX %.2f/%.1f%%  %s  %s V:%s P:%s",
+                         ch_value, air_value, duty_value, airtime_state,
+                         ui_tr("Media"),
+                         mesh_capability_short(voice_mode),
+                         mesh_capability_short(photo_mode));
             }
             lv_label_set_text(mesh_airtime_label, airtime);
             lv_obj_set_style_text_color(mesh_airtime_label,
@@ -9733,12 +9825,27 @@ static int mesh_photo_picker_scan(void)
 
 static void mesh_photo_picker_close(void)
 {
+    if(mesh_photo_picker_close_timer) {
+        lv_timer_delete(mesh_photo_picker_close_timer);
+        mesh_photo_picker_close_timer = NULL;
+    }
     if(mesh_photo_picker_overlay &&
        lv_obj_is_valid(mesh_photo_picker_overlay)) {
         lv_obj_delete(mesh_photo_picker_overlay);
     }
     mesh_photo_picker_overlay = NULL;
     mesh_photo_status_label = NULL;
+    mesh_photo_send_inflight = 0;
+}
+
+static void mesh_photo_picker_close_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    mesh_photo_picker_close_timer = NULL;
+    mesh_photo_picker_close();
+    mesh_refresh_status();
+    mesh_refresh_chat_common(1, 0);
+    app_request_fast_refresh();
 }
 
 static void mesh_photo_picker_close_event_cb(lv_event_t *event)
@@ -9758,6 +9865,17 @@ static void mesh_photo_send_path(const char *path)
     if(!path || !path[0]) {
         return;
     }
+    if(mesh_photo_send_inflight) {
+        if(mesh_photo_status_label && lv_obj_is_valid(mesh_photo_status_label)) {
+            lv_label_set_text(mesh_photo_status_label,
+                              ui_tr("Photo already queued"));
+            lv_obj_set_style_text_color(mesh_photo_status_label,
+                                        lv_color_hex(0xF5A524), 0);
+        }
+        app_request_fast_refresh();
+        return;
+    }
+    mesh_photo_send_inflight = 1;
     snprintf(command, sizeof(command), "SEND_PHOTO_FILE %s\n", path);
     if(mesh_photo_status_label && lv_obj_is_valid(mesh_photo_status_label)) {
         lv_label_set_text(mesh_photo_status_label, ui_tr("Sending photo"));
@@ -9768,7 +9886,18 @@ static void mesh_photo_send_path(const char *path)
     ui_trim_text(response);
     if(ret == 0) {
         mesh_append_log("photo send: %s", response);
-        mesh_photo_picker_close();
+        if(mesh_photo_status_label &&
+           lv_obj_is_valid(mesh_photo_status_label)) {
+            lv_label_set_text(mesh_photo_status_label, ui_tr("Photo queued"));
+            lv_obj_set_style_text_color(mesh_photo_status_label,
+                                        lv_color_hex(0x25C281), 0);
+        }
+        if(mesh_photo_picker_close_timer) {
+            lv_timer_delete(mesh_photo_picker_close_timer);
+        }
+        mesh_photo_picker_close_timer =
+            lv_timer_create(mesh_photo_picker_close_timer_cb, 700, NULL);
+        lv_timer_set_repeat_count(mesh_photo_picker_close_timer, 1);
         mesh_refresh_status();
         mesh_refresh_chat_common(1, 0);
     } else {
@@ -9790,6 +9919,7 @@ static void mesh_photo_send_path(const char *path)
             lv_obj_set_style_text_color(mesh_photo_status_label,
                                         lv_color_hex(0xEF4D5A), 0);
         }
+        mesh_photo_send_inflight = 0;
     }
     app_request_fast_refresh();
 }
