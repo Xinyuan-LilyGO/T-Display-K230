@@ -7400,7 +7400,7 @@ static void mesh_node_append_line(char *out, size_t out_len,
         return;
     }
     snprintf(out + used, out_len - used, "%s%s: %s",
-             used > 0U ? "\n" : "", name, value);
+             used > 0U ? "\n" : "", ui_tr(name), value);
 }
 
 static void mesh_node_append_value_from_key(char *out, size_t out_len,
@@ -7493,6 +7493,106 @@ static void mesh_node_format_optional(const char *raw, const char *empty_text,
     } else {
         snprintf(out, out_len, "%s", raw);
     }
+}
+
+static int mesh_node_text_line_count(const char *text, int width)
+{
+    int lines = 1;
+    int chars_per_line = (width - 36) / 9;
+    int current = 0;
+
+    if(!text || !text[0]) {
+        return 1;
+    }
+    if(chars_per_line < 18) {
+        chars_per_line = 18;
+    }
+    for(const char *p = text; *p; p++) {
+        if(*p == '\n') {
+            lines++;
+            current = 0;
+            continue;
+        }
+        current++;
+        if(current >= chars_per_line) {
+            lines++;
+            current = 0;
+        }
+    }
+    return lines;
+}
+
+static void mesh_node_detail_move_after_columns(int *y_left, int *y_right)
+{
+    int y;
+
+    if(!y_left || !y_right) {
+        return;
+    }
+    y = *y_left > *y_right ? *y_left : *y_right;
+    *y_left = y;
+    *y_right = y;
+}
+
+static void mesh_node_detail_append_spacer(lv_obj_t *parent, int y)
+{
+    lv_obj_t *spacer;
+
+    if(!parent) {
+        return;
+    }
+    spacer = lv_obj_create(parent);
+    lv_obj_set_pos(spacer, 0, y);
+    lv_obj_set_size(spacer, 1, 1);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(spacer, 0, 0);
+    lv_obj_clear_flag(spacer, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+static int mesh_node_detail_card(lv_obj_t *parent, int x, int y, int w,
+                                 const char *title, const char *body,
+                                 uint32_t accent)
+{
+    lv_obj_t *card;
+    lv_obj_t *label;
+    int lines = mesh_node_text_line_count(body, w);
+    int body_h = lines * 25;
+    int h = 72 + body_h;
+
+    if(h < 124) {
+        h = 124;
+    }
+    card = ui_panel(parent, x, y, w, h);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101822), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x263244), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+
+    label = ui_label(card, ui_tr(title), &lv_font_montserrat_18, accent);
+    lv_obj_set_pos(label, 14, 12);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card, body && body[0] ? body : "-", &lv_font_montserrat_16,
+                     0xD7DEE8);
+    lv_obj_set_pos(label, 14, 44);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    return h;
+}
+
+static int mesh_node_detail_add_card(lv_obj_t *parent, int x, int *y,
+                                     int w, const char *title,
+                                     const char *body, uint32_t accent)
+{
+    int h;
+
+    if(!y) {
+        return 0;
+    }
+    h = mesh_node_detail_card(parent, x, *y, w, title, body, accent);
+    *y += h + 14;
+    return h;
 }
 
 static void mesh_select_node_target_event_cb(lv_event_t *event)
@@ -9138,8 +9238,6 @@ static void mesh_node_detail_open(const char *line)
     lv_obj_t *panel;
     lv_obj_t *title;
     lv_obj_t *subtitle;
-    lv_obj_t *section;
-    lv_obj_t *label;
     lv_obj_t *btn;
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
@@ -9157,10 +9255,14 @@ static void mesh_node_detail_open(const char *line)
     int request_w = (request_area_w - request_gap * (request_cols - 1)) /
                     request_cols;
     int y;
+    int y_left;
+    int y_right;
+    int bottom_y;
     char node_id[24];
     char name[64];
     char short_name[24];
     char hw[16];
+    char key[16];
     char rx[16];
     char age[24];
     char rssi[24];
@@ -9169,7 +9271,8 @@ static void mesh_node_detail_open(const char *line)
     char tel[160];
     char trace[192];
     char nbr[192];
-    char summary[320];
+    char identity_detail[320];
+    char link_detail[320];
     char position_detail[320];
     char telemetry_detail[320];
     char trace_detail[224];
@@ -9183,6 +9286,7 @@ static void mesh_node_detail_open(const char *line)
     mesh_node_line_segment(line, "name=", " short=", name, sizeof(name));
     mesh_node_line_value(line, "short=", short_name, sizeof(short_name));
     mesh_node_line_value(line, "hw=", hw, sizeof(hw));
+    mesh_node_line_value(line, "key=", key, sizeof(key));
     mesh_node_line_value(line, "rx=", rx, sizeof(rx));
     mesh_node_line_value(line, "age=", age, sizeof(age));
     mesh_node_line_value(line, "rssi=", rssi, sizeof(rssi));
@@ -9201,6 +9305,23 @@ static void mesh_node_detail_open(const char *line)
     if(strcmp(name, "-") == 0 && strcmp(short_name, "-") != 0) {
         snprintf(name, sizeof(name), "%s", short_name);
     }
+    identity_detail[0] = '\0';
+    mesh_node_append_line(identity_detail, sizeof(identity_detail),
+                          "Node ID", node_id);
+    mesh_node_append_line(identity_detail, sizeof(identity_detail),
+                          "Short name", short_name);
+    mesh_node_append_line(identity_detail, sizeof(identity_detail),
+                          "Hardware", hw);
+    mesh_node_append_line(identity_detail, sizeof(identity_detail),
+                          "Public key",
+                          (strcmp(key, "yes") == 0 ||
+                           strcmp(key, "1") == 0) ?
+                          ui_tr("Available") : ui_tr("Missing"));
+    link_detail[0] = '\0';
+    mesh_node_append_line(link_detail, sizeof(link_detail), "RSSI", rssi);
+    mesh_node_append_line(link_detail, sizeof(link_detail), "SNR", snr);
+    mesh_node_append_line(link_detail, sizeof(link_detail), "Packets", rx);
+    mesh_node_append_line(link_detail, sizeof(link_detail), "Last seen", age);
     snprintf(mesh_node_detail_target_id, sizeof(mesh_node_detail_target_id),
              "%s", node_id);
 
@@ -9278,104 +9399,43 @@ static void mesh_node_detail_open(const char *line)
                            LV_LABEL_LONG_DOT);
 
     y += 34;
-    snprintf(summary, sizeof(summary),
-             "RSSI %s\nSNR %s\nPackets %s\nLast seen %s\nHardware %s",
-             rssi, snr, rx, age, hw);
-
-    section = ui_label(panel, "Signal", &lv_font_montserrat_20, 0xF2F5F8);
-    lv_obj_set_pos(section, margin, y);
-    label = ui_label(panel, summary, &lv_font_montserrat_18, 0xCBD5E1);
-    lv_obj_set_pos(label, margin, y + 36);
-    lv_obj_set_width(label, left_w);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-
+    y_left = y;
+    y_right = y;
     if(landscape) {
-        section = ui_label(panel, "Position", &lv_font_montserrat_20,
-                           0xF2F5F8);
-        lv_obj_set_pos(section, right_x, y);
-        label = ui_label(panel, position_detail, &lv_font_montserrat_16,
-                         0xCBD5E1);
-        lv_obj_set_pos(label, right_x, y + 36);
-        lv_obj_set_width(label, right_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-
-        y += 190;
-        section = ui_label(panel, "Telemetry", &lv_font_montserrat_20,
-                           0xF2F5F8);
-        lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, telemetry_detail, &lv_font_montserrat_16,
-                         0xCBD5E1);
-        lv_obj_set_pos(label, margin, y + 36);
-        lv_obj_set_width(label, left_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-
-        section = ui_label(panel, "Neighbors", &lv_font_montserrat_20,
-                           0xF2F5F8);
-        lv_obj_set_pos(section, right_x, y);
-        label = ui_label(panel, neighbor_detail, &lv_font_montserrat_16,
-                         0xCBD5E1);
-        lv_obj_set_pos(label, right_x, y + 36);
-        lv_obj_set_width(label, right_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-
-        y += 218;
-        section = ui_label(panel, "Trace", &lv_font_montserrat_20,
-                           0xF2F5F8);
-        lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, trace_detail, &lv_font_montserrat_16,
-                         0xCBD5E1);
-        lv_obj_set_pos(label, margin, y + 36);
-        lv_obj_set_width(label, content_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        mesh_node_detail_add_card(panel, margin, &y_left, left_w, "Identity",
+                                  identity_detail, 0x25C281);
+        mesh_node_detail_add_card(panel, right_x, &y_right, right_w, "Signal",
+                                  link_detail, 0x3DA5FF);
+        mesh_node_detail_add_card(panel, margin, &y_left, left_w, "Telemetry",
+                                  telemetry_detail, 0xA78BFA);
+        mesh_node_detail_add_card(panel, right_x, &y_right, right_w,
+                                  "Position", position_detail, 0xF59E0B);
+        mesh_node_detail_add_card(panel, margin, &y_left, left_w, "Trace",
+                                  trace_detail, 0xF97316);
+        mesh_node_detail_add_card(panel, right_x, &y_right, right_w,
+                                  "Neighbors", neighbor_detail, 0x14B8A6);
+        mesh_node_detail_move_after_columns(&y_left, &y_right);
+        mesh_node_detail_add_card(panel, margin, &y_left, content_w, "Raw",
+                                  line, 0x64748B);
+        bottom_y = y_left;
     } else {
-        y += 172;
-        section = ui_label(panel, "Position", &lv_font_montserrat_20,
-                           0xF2F5F8);
-        lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, position_detail, &lv_font_montserrat_16,
-                         0xCBD5E1);
-        lv_obj_set_pos(label, margin, y + 36);
-        lv_obj_set_width(label, content_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-
-        y += 210;
-        section = ui_label(panel, "Telemetry", &lv_font_montserrat_20,
-                           0xF2F5F8);
-        lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, telemetry_detail, &lv_font_montserrat_16,
-                         0xCBD5E1);
-        lv_obj_set_pos(label, margin, y + 36);
-        lv_obj_set_width(label, content_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-
-        y += 230;
-        section = ui_label(panel, "Trace", &lv_font_montserrat_20,
-                           0xF2F5F8);
-        lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, trace_detail, &lv_font_montserrat_16,
-                         0xCBD5E1);
-        lv_obj_set_pos(label, margin, y + 36);
-        lv_obj_set_width(label, content_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-
-        y += 160;
-        section = ui_label(panel, "Neighbors", &lv_font_montserrat_20,
-                           0xF2F5F8);
-        lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, neighbor_detail, &lv_font_montserrat_16,
-                         0xCBD5E1);
-        lv_obj_set_pos(label, margin, y + 36);
-        lv_obj_set_width(label, content_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-
-        y += 156;
-        section = ui_label(panel, "Raw", &lv_font_montserrat_20, 0xF2F5F8);
-        lv_obj_set_pos(section, margin, y);
-        label = ui_label(panel, line, &lv_font_montserrat_14, 0x94A3B8);
-        lv_obj_set_pos(label, margin, y + 36);
-        lv_obj_set_width(label, content_w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        mesh_node_detail_add_card(panel, margin, &y_left, content_w,
+                                  "Identity", identity_detail, 0x25C281);
+        mesh_node_detail_add_card(panel, margin, &y_left, content_w,
+                                  "Signal", link_detail, 0x3DA5FF);
+        mesh_node_detail_add_card(panel, margin, &y_left, content_w,
+                                  "Position", position_detail, 0xF59E0B);
+        mesh_node_detail_add_card(panel, margin, &y_left, content_w,
+                                  "Telemetry", telemetry_detail, 0xA78BFA);
+        mesh_node_detail_add_card(panel, margin, &y_left, content_w, "Trace",
+                                  trace_detail, 0xF97316);
+        mesh_node_detail_add_card(panel, margin, &y_left, content_w,
+                                  "Neighbors", neighbor_detail, 0x14B8A6);
+        mesh_node_detail_add_card(panel, margin, &y_left, content_w, "Raw",
+                                  line, 0x64748B);
+        bottom_y = y_left;
     }
+    mesh_node_detail_append_spacer(panel, bottom_y + 48);
 }
 
 static void mesh_node_detail_event_cb(lv_event_t *event)
