@@ -243,6 +243,9 @@ static uint32_t mesh_map_notice_color = 0x25C281;
 static lv_obj_t *mesh_map_view_obj;
 static lv_obj_t *mesh_map_layer_obj;
 static lv_obj_t *mesh_settings_overlay;
+static lv_obj_t *mesh_settings_status_card;
+static lv_obj_t *mesh_settings_status_labels[3];
+static lv_obj_t *mesh_log_overlay;
 static lv_obj_t *mesh_nodes_overlay;
 static lv_obj_t *mesh_nodes_panel;
 static lv_obj_t *mesh_map_overlay;
@@ -604,6 +607,11 @@ static const mesh_choice_t mesh_photo_cache_ttl_choices[] = {
 };
 
 static void mesh_settings_refresh(void);
+static void mesh_settings_status_summary(const char *status, char *line1,
+                                         size_t line1_len, char *line2,
+                                         size_t line2_len, char *line3,
+                                         size_t line3_len);
+static void mesh_log_close(void);
 static mesh_choice_profile_t mesh_current_profile(void);
 static const char *mesh_default_preset_for_region(const char *region_value);
 static int mesh_profile_supports_ui_preset(mesh_choice_profile_t profile,
@@ -4416,6 +4424,9 @@ static void mesh_refresh_event_cb(lv_event_t *event)
     (void)event;
     mesh_refresh_status();
     mesh_append_log("refresh: %s", mesh_status_text);
+    if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
+        mesh_settings_refresh();
+    }
 }
 
 static void mesh_restart_daemon_if_online(void)
@@ -5429,6 +5440,32 @@ static const char *mesh_setting_value(mesh_setting_field_t field,
 
 static void mesh_settings_refresh(void)
 {
+    if(mesh_settings_status_card && lv_obj_is_valid(mesh_settings_status_card)) {
+        char line1[160];
+        char line2[160];
+        char line3[240];
+        uint32_t accent = mesh_status_is_online(mesh_status_text) ? 0x25C281 :
+                          0xF5A524;
+        mesh_settings_status_summary(mesh_status_text, line1, sizeof(line1),
+                                     line2, sizeof(line2), line3,
+                                     sizeof(line3));
+        lv_obj_set_style_border_color(mesh_settings_status_card,
+                                      lv_color_hex(accent), 0);
+        if(mesh_settings_status_labels[0] &&
+           lv_obj_is_valid(mesh_settings_status_labels[0])) {
+            lv_label_set_text(mesh_settings_status_labels[0], line1);
+            lv_obj_set_style_text_color(mesh_settings_status_labels[0],
+                                        lv_color_hex(accent), 0);
+        }
+        if(mesh_settings_status_labels[1] &&
+           lv_obj_is_valid(mesh_settings_status_labels[1])) {
+            lv_label_set_text(mesh_settings_status_labels[1], line2);
+        }
+        if(mesh_settings_status_labels[2] &&
+           lv_obj_is_valid(mesh_settings_status_labels[2])) {
+            lv_label_set_text(mesh_settings_status_labels[2], line3);
+        }
+    }
     for(int i = 0; i < (int)MESH_FIELD_COUNT; i++) {
         char buf[32];
         if(mesh_settings_value_labels[i] &&
@@ -6060,10 +6097,13 @@ static void mesh_close_settings_page(void)
     mesh_choice_close();
     mesh_channel_profiles_close();
     mesh_close_pairing_notice();
+    mesh_log_close();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
         lv_obj_delete(mesh_settings_overlay);
     }
     mesh_settings_overlay = NULL;
+    mesh_settings_status_card = NULL;
+    memset(mesh_settings_status_labels, 0, sizeof(mesh_settings_status_labels));
     mesh_log_label = NULL;
     mesh_publish_status_label = NULL;
     memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
@@ -11221,27 +11261,214 @@ static void mesh_detector_event_cb(lv_event_t *event)
     mesh_overlay_restore_scroll(mesh_detector_panel, old_scroll_y);
 }
 
+static void mesh_settings_status_summary(const char *status, char *line1,
+                                         size_t line1_len, char *line2,
+                                         size_t line2_len, char *line3,
+                                         size_t line3_len)
+{
+    char chip[24];
+    char op[24];
+    char region[24];
+    char preset[32];
+    char freq[24];
+    char channel[64];
+    char tx[16];
+    char rx[16];
+    char queued[16];
+    char nodes[16];
+    char ble[24];
+    char gnss[24];
+    char sats[16];
+    float ch_value;
+    int online = mesh_status_is_online(status);
+
+    if(line1 && line1_len > 0U) {
+        line1[0] = '\0';
+    }
+    if(line2 && line2_len > 0U) {
+        line2[0] = '\0';
+    }
+    if(line3 && line3_len > 0U) {
+        line3[0] = '\0';
+    }
+    if(!online) {
+        if(line1 && line1_len > 0U) {
+            snprintf(line1, line1_len, "%s", ui_tr("Daemon offline"));
+        }
+        if(line2 && line2_len > 0U) {
+            snprintf(line2, line2_len, "%s", ui_tr("Tap Start to run Mesh"));
+        }
+        if(line3 && line3_len > 0U) {
+            snprintf(line3, line3_len, "%s", status && status[0] ? status : "-");
+        }
+        return;
+    }
+
+    mesh_status_field(status, "chip", chip, sizeof(chip), "-");
+    mesh_status_field(status, "op", op, sizeof(op), "-");
+    mesh_status_field(status, "region", region, sizeof(region), "-");
+    mesh_status_field(status, "preset", preset, sizeof(preset), "-");
+    mesh_status_field(status, "freq", freq, sizeof(freq), "-");
+    mesh_status_field(status, "channel", channel, sizeof(channel), "-");
+    mesh_status_field(status, "tx", tx, sizeof(tx), "0");
+    mesh_status_field(status, "rx", rx, sizeof(rx), "0");
+    mesh_status_field(status, "queued_count", queued, sizeof(queued), "0");
+    mesh_status_field(status, "nodedb", nodes, sizeof(nodes), "0");
+    mesh_status_field(status, "ble", ble, sizeof(ble), "-");
+    mesh_status_field(status, "gps", gnss, sizeof(gnss), "-");
+    mesh_status_field(status, "sats", sats, sizeof(sats), "0");
+    ch_value = mesh_status_float_field(status, "ch_util", 0.0f);
+
+    if(line1 && line1_len > 0U) {
+        snprintf(line1, line1_len, "%s  %s / %s / %s MHz",
+                 ui_tr("Daemon online"), chip, op, freq);
+    }
+    if(line2 && line2_len > 0U) {
+        snprintf(line2, line2_len, "%s / %s  %s",
+                 region, preset, channel);
+    }
+    if(line3 && line3_len > 0U) {
+        snprintf(line3, line3_len,
+                 "TX %s  RX %s  Q %s  Nodes %s  BLE %s  GNSS %s S%s  Ch %.1f%%",
+                 tx, rx, queued, nodes, ble, gnss, sats, ch_value);
+    }
+}
+
+static void mesh_settings_add_status_card(lv_obj_t *parent, int x, int y,
+                                          int w, int h)
+{
+    lv_obj_t *card;
+    lv_obj_t *label;
+    char line1[160];
+    char line2[160];
+    char line3[240];
+    uint32_t accent = mesh_status_is_online(mesh_status_text) ? 0x25C281 :
+                      0xF5A524;
+
+    mesh_settings_status_summary(mesh_status_text, line1, sizeof(line1),
+                                 line2, sizeof(line2), line3,
+                                 sizeof(line3));
+    card = ui_panel(parent, x, y, w, h);
+    mesh_settings_status_card = card;
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(accent), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    label = ui_label(card, line1, &lv_font_montserrat_18, accent);
+    mesh_settings_status_labels[0] = label;
+    lv_obj_set_pos(label, 14, 12);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card, line2, &lv_font_montserrat_14, 0xCBD5E1);
+    mesh_settings_status_labels[1] = label;
+    lv_obj_set_pos(label, 14, 40);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card, line3, &lv_font_montserrat_14, 0x94A3B8);
+    mesh_settings_status_labels[2] = label;
+    lv_obj_set_pos(label, 14, 64);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+}
+
+static void mesh_log_close(void)
+{
+    if(mesh_log_overlay && lv_obj_is_valid(mesh_log_overlay)) {
+        lv_obj_delete(mesh_log_overlay);
+    }
+    mesh_log_overlay = NULL;
+    mesh_log_label = NULL;
+}
+
+static void mesh_log_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_log_close();
+}
+
+static void mesh_log_refresh_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_refresh_daemon_log();
+}
+
+static void mesh_log_event_cb(lv_event_t *event)
+{
+    lv_obj_t *panel;
+    lv_obj_t *title;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+
+    (void)event;
+    mesh_log_close();
+    mesh_log_overlay = lv_obj_create(lv_screen_active());
+    ui_set_fullscreen(mesh_log_overlay);
+    lv_obj_set_style_bg_color(mesh_log_overlay, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_log_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mesh_log_overlay, 0, 0);
+    lv_obj_set_style_border_width(mesh_log_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_log_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_log_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(mesh_log_overlay);
+
+    panel = ui_scroll_panel(mesh_log_overlay, 0, 0, screen_w, screen_h);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    title = ui_label(panel, ui_tr("Event log"), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, margin, 22);
+    lv_obj_set_width(title, content_w - 216);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 206, 18, 100,
+                            ui_tr("Refresh"), 0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_log_refresh_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
+                            ui_tr("Close"), 0x374151);
+    lv_obj_add_event_cb(btn, mesh_log_close_event_cb, LV_EVENT_CLICKED, NULL);
+
+    mesh_log_label = ui_label(panel,
+                              mesh_log_text[0] ? mesh_log_text : ui_tr("Ready"),
+                              &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_set_pos(mesh_log_label, margin, 92);
+    lv_obj_set_width(mesh_log_label, content_w);
+    lv_label_set_long_mode(mesh_log_label, LV_LABEL_LONG_WRAP);
+    mesh_refresh_daemon_log();
+}
+
 static void mesh_profile_event_cb(lv_event_t *event)
 {
     lv_obj_t *panel;
     lv_obj_t *title;
     lv_obj_t *subtitle;
     lv_obj_t *section;
-    lv_obj_t *status;
-    lv_obj_t *log_title;
     lv_obj_t *btn;
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
     int margin = ui_page_side_margin();
     int content_w = screen_w - margin * 2;
     int row_h = 62;
-    int value_x = ui_is_landscape() ? 190 : 138;
-    int edit_w = 92;
+    int value_x = ui_is_landscape() ? 230 : 176;
+    int edit_w = ui_is_landscape() ? 92 : 86;
     int value_w = content_w - value_x - edit_w - 18;
     int button_w;
     int button_gap = 10;
-    int button_cols = ui_is_landscape() ? 7 : 3;
-    int button_row_h = 56;
+    int button_cols = ui_is_landscape() ? 4 : 2;
+    int button_row_h = 50;
+    int button_rows = 4;
+    int status_h = ui_is_landscape() ? 96 : 104;
     int publish_w;
     int y = 0;
 
@@ -11251,6 +11478,8 @@ static void mesh_profile_event_cb(lv_event_t *event)
         lv_obj_delete(mesh_settings_overlay);
     }
     memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
+    mesh_settings_status_card = NULL;
+    memset(mesh_settings_status_labels, 0, sizeof(mesh_settings_status_labels));
 
     mesh_settings_overlay = lv_obj_create(lv_screen_active());
     ui_set_fullscreen(mesh_settings_overlay);
@@ -11284,39 +11513,38 @@ static void mesh_profile_event_cb(lv_event_t *event)
                         NULL);
 
     y = 98;
+    mesh_settings_add_status_card(panel, margin, y, content_w, status_h);
+    y += status_h + 16;
+
     section = ui_label(panel, ui_tr("Mesh control"), &lv_font_montserrat_18,
                        0xF2F5F8);
     lv_obj_set_pos(section, margin, y);
-    y += 34;
+    y += 32;
     button_w = (content_w - button_gap * (button_cols - 1)) / button_cols;
     if(button_w < 86) {
         button_w = 86;
     }
+    button_rows = (8 + button_cols - 1) / button_cols;
 #define MESH_CONN_BUTTON(index, label, color, cb) \
     do { \
         int bx = margin + ((index) % button_cols) * (button_w + button_gap); \
         int by = y + ((index) / button_cols) * button_row_h; \
         btn = ui_command_button(panel, bx, by, button_w, label, color); \
+        lv_obj_set_height(btn, button_row_h - 6); \
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL); \
     } while(0)
 
     MESH_CONN_BUTTON(0, ui_tr("Start"), 0x25C281, mesh_start_event_cb);
     MESH_CONN_BUTTON(1, ui_tr("Stop"), 0xEF4D5A, mesh_stop_event_cb);
     MESH_CONN_BUTTON(2, ui_tr("Refresh"), 0x3DA5FF, mesh_refresh_event_cb);
-    MESH_CONN_BUTTON(3, ui_tr("Detector"), 0xF59E0B, mesh_detector_event_cb);
-    MESH_CONN_BUTTON(4, ui_tr("Channel"), 0xA78BFA, mesh_channel_event_cb);
-    MESH_CONN_BUTTON(5, ui_tr("Profiles"), 0xF59E0B, mesh_channel_profiles_event_cb);
-    MESH_CONN_BUTTON(6, ui_tr("Slots"), 0xEC4899, mesh_channels_event_cb);
+    MESH_CONN_BUTTON(3, ui_tr("Log"), 0x64748B, mesh_log_event_cb);
+    MESH_CONN_BUTTON(4, ui_tr("Detector"), 0xF59E0B, mesh_detector_event_cb);
+    MESH_CONN_BUTTON(5, ui_tr("Channel"), 0xA78BFA, mesh_channel_event_cb);
+    MESH_CONN_BUTTON(6, ui_tr("Profiles"), 0xF59E0B, mesh_channel_profiles_event_cb);
+    MESH_CONN_BUTTON(7, ui_tr("Slots"), 0xEC4899, mesh_channels_event_cb);
 #undef MESH_CONN_BUTTON
 
-    y += (ui_is_landscape() ? button_row_h : button_row_h * 3) + 22;
-    status = ui_label(panel, mesh_status_text, &lv_font_montserrat_14,
-                      0xCBD5E1);
-    lv_obj_set_pos(status, margin, y);
-    lv_obj_set_width(status, content_w);
-    lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
-
-    y += ui_is_landscape() ? 70 : 104;
+    y += button_rows * button_row_h + 18;
     section = ui_label(panel, ui_tr("Publish now"), &lv_font_montserrat_18,
                        0xF2F5F8);
     lv_obj_set_pos(section, margin, y);
@@ -11383,20 +11611,9 @@ static void mesh_profile_event_cb(lv_event_t *event)
         y += row_h;
     }
 
-    y += 12;
-    log_title = ui_label(panel, ui_tr("Event log"), &lv_font_montserrat_18,
-                         0xF2F5F8);
-    lv_obj_set_pos(log_title, margin, y);
-    y += 36;
-    mesh_log_label = ui_label(panel,
-                              mesh_log_text[0] ? mesh_log_text : ui_tr("Ready"),
-                              &lv_font_montserrat_14, 0x94A3B8);
-    lv_obj_set_pos(mesh_log_label, margin, y);
-    lv_obj_set_width(mesh_log_label, content_w);
-    lv_label_set_long_mode(mesh_log_label, LV_LABEL_LONG_WRAP);
+    mesh_node_detail_append_spacer(panel, y + 48);
 
     mesh_settings_refresh();
-    mesh_refresh_daemon_log();
 }
 
 static void mesh_nodes_event_cb(lv_event_t *event)
@@ -13166,10 +13383,13 @@ void ui_meshtastic_cleanup(void)
     mesh_channel_edit_close();
     mesh_channel_profiles_close();
     mesh_channels_close();
+    mesh_log_close();
     if(mesh_settings_overlay && lv_obj_is_valid(mesh_settings_overlay)) {
         lv_obj_delete(mesh_settings_overlay);
     }
     mesh_settings_overlay = NULL;
+    mesh_settings_status_card = NULL;
+    memset(mesh_settings_status_labels, 0, sizeof(mesh_settings_status_labels));
     memset(mesh_settings_value_labels, 0, sizeof(mesh_settings_value_labels));
     mesh_close_nodes_page();
     mesh_detector_close();
@@ -13194,6 +13414,10 @@ int ui_meshtastic_handle_back(void)
     }
     if(mesh_pairing_overlay && lv_obj_is_valid(mesh_pairing_overlay)) {
         mesh_pairing_notice_close_cb(NULL);
+        return 1;
+    }
+    if(mesh_log_overlay && lv_obj_is_valid(mesh_log_overlay)) {
+        mesh_log_close();
         return 1;
     }
     if(mesh_choice_overlay && lv_obj_is_valid(mesh_choice_overlay)) {
