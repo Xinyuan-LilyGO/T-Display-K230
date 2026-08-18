@@ -899,6 +899,7 @@ typedef struct {
     bool client_nodes = false;
     bool client_map = false;
     bool client_waypoints = false;
+    bool client_channels = false;
     bool client_channel_url = false;
     bool client_quit = false;
     bool client_publish_nodeinfo = false;
@@ -16954,6 +16955,75 @@ static std::string daemon_channel_url_response(const probe_options_t &opts)
     return std::string("OK channel_url=") + url + "\n";
 }
 
+static const char *daemon_channel_role_name(uint32_t role)
+{
+    switch(role) {
+    case MESHTASTIC_CHANNEL_ROLE_PRIMARY:
+        return "primary";
+    case MESHTASTIC_CHANNEL_ROLE_SECONDARY:
+        return "secondary";
+    case MESHTASTIC_CHANNEL_ROLE_DISABLED:
+    default:
+        return "disabled";
+    }
+}
+
+static std::string daemon_channel_token(const std::string &text,
+                                        const char *fallback)
+{
+    std::string out;
+
+    for(char c : text) {
+        if(out.size() >= 48U) {
+            break;
+        }
+        if(c == '=' || isspace((unsigned char)c)) {
+            out.push_back('_');
+        } else if(isprint((unsigned char)c)) {
+            out.push_back(c);
+        }
+    }
+    if(out.empty()) {
+        out = fallback ? fallback : "-";
+    }
+    return out;
+}
+
+static std::string daemon_channels_response(const probe_options_t &opts)
+{
+    char line[256];
+    std::string response;
+
+    snprintf(line, sizeof(line), "OK channels primary=%u\n",
+             opts.primary_channel_index);
+    response += line;
+    for(uint32_t i = 0U; i < MESHTASTIC_PHONEAPI_MAX_CHANNELS; i++) {
+        uint32_t role = mesh_channel_slot_role(opts, i);
+        std::string name = mesh_channel_slot_name(opts, i);
+        std::string psk = mesh_channel_slot_psk(opts, i);
+        std::vector<uint8_t> key;
+        uint8_t hash = 0U;
+        bool psk_ok = parse_psk(psk, &key);
+
+        if(psk_ok) {
+            hash = mesh_channel_hash(name, key);
+        }
+        snprintf(line, sizeof(line),
+                 "CH index=%u primary=%s role=%s name=%s hash=0x%02x psk=%s uplink=%s downlink=%s muted=%s configured=%s\n",
+                 i, i == opts.primary_channel_index ? "yes" : "no",
+                 daemon_channel_role_name(role),
+                 daemon_channel_token(name, "default").c_str(), hash,
+                 psk_ok ? (psk == "default" ? "default" : "custom") :
+                 "invalid",
+                 opts.channels[i].uplink_enabled ? "yes" : "no",
+                 opts.channels[i].downlink_enabled ? "yes" : "no",
+                 opts.channels[i].is_muted ? "yes" : "no",
+                 opts.channels[i].configured ? "yes" : "no");
+        response += line;
+    }
+    return response;
+}
+
 static int base64url_value(char c)
 {
     if(c >= 'A' && c <= 'Z') {
@@ -17845,6 +17915,9 @@ static std::string handle_daemon_command(const std::string &line,
     if(line == "WAYPOINTS" || line == "waypoints") {
         return daemon_waypoints_response();
     }
+    if(line == "CHANNELS" || line == "channels") {
+        return daemon_channels_response(opts);
+    }
     if(line.compare(0, 14, "SEND_WAYPOINT ") == 0 ||
        line.compare(0, 14, "send_waypoint ") == 0) {
         mesh_waypoint_info_t waypoint;
@@ -18498,6 +18571,8 @@ static int run_daemon_client(const probe_options_t &opts)
         command = "REQUEST_STATUS\n";
     } else if(opts.client_waypoints) {
         command = "WAYPOINTS\n";
+    } else if(opts.client_channels) {
+        command = "CHANNELS\n";
     } else if(opts.client_send_waypoint_requested) {
         if(opts.client_send_waypoint_text.empty()) {
             fprintf(stderr, "--cmd-send-waypoint value is empty\n");
@@ -18611,7 +18686,7 @@ static void print_usage(const char *argv0)
             "  %s --send \"hello\" [profile options]\n"
             "  %s --auto --message \"ping\" --interval 1000 [profile options]\n"
             "  %s --daemon [profile options]\n"
-            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-map|--cmd-request-status|--cmd-waypoints|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
+            "  %s --cmd-status|--cmd-log|--cmd-chat|--cmd-nodes|--cmd-map|--cmd-request-status|--cmd-waypoints|--cmd-channels|--cmd-channel-url|--cmd-publish-nodeinfo|--cmd-publish-position|--cmd-publish-telemetry|--cmd-request-nodeinfo NODE|--cmd-request-position NODE|--cmd-request-telemetry NODE|--cmd-request-traceroute NODE|--cmd-request-neighborinfo NODE|--cmd-import-node-key NODE KEY|--cmd-send \"hello\"|--cmd-send-to NODE \"hello\"|--cmd-send-to-ack NODE \"hello\"|--cmd-send-voice FILE|--cmd-send-waypoint \"lat,lon,name\"|--cmd-quit [--socket PATH]\n\n"
             "Daemon options:\n"
             "  --daemon        Run as local Meshtastic socket daemon, implies --mesh\n"
             "  --socket PATH   Default " MESHTASTIC_DEFAULT_SOCKET_PATH "\n"
@@ -18622,6 +18697,7 @@ static void print_usage(const char *argv0)
             "  --cmd-map       Query machine-readable map/node data and exit\n"
             "  --cmd-request-status Query recent remote request state and exit\n"
             "  --cmd-waypoints Query recently received mesh waypoints and exit\n"
+            "  --cmd-channels  Query local Meshtastic channel slots and exit\n"
             "  --cmd-channel-url Query Meshtastic channel sharing URL and exit\n"
             "  --cmd-publish-nodeinfo  Ask daemon to publish this node info now\n"
             "  --cmd-publish-position  Ask daemon to publish current GNSS position now\n"
@@ -18951,6 +19027,8 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_request_status = true;
         } else if(strcmp(arg, "--cmd-waypoints") == 0) {
             opts->client_waypoints = true;
+        } else if(strcmp(arg, "--cmd-channels") == 0) {
+            opts->client_channels = true;
         } else if(strcmp(arg, "--cmd-channel-url") == 0) {
             opts->client_channel_url = true;
         } else if(strcmp(arg, "--cmd-publish-nodeinfo") == 0) {
@@ -19672,6 +19750,7 @@ int main(int argc, char **argv)
                               (opts.client_map ? 1 : 0) +
                               (opts.client_request_status ? 1 : 0) +
                               (opts.client_waypoints ? 1 : 0) +
+                              (opts.client_channels ? 1 : 0) +
                               (opts.client_channel_url ? 1 : 0) +
                               (opts.client_publish_nodeinfo ? 1 : 0) +
                               (opts.client_publish_position ? 1 : 0) +
