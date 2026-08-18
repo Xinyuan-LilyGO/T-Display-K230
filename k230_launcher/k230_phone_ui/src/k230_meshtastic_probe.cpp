@@ -155,6 +155,10 @@
 #define MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE 4U
 #define MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_TTL_US \
     (5ULL * 60ULL * 1000000ULL)
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_WINDOW_MS \
+    (MESHTASTIC_FLRC_PHOTO_REPAIR_WINDOW_US / 1000ULL)
+#define MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_TTL_SEC \
+    (MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_TTL_US / 1000000ULL)
 #define MESHTASTIC_FLRC_PHOTO_DEBUG_DROP_MAX_SEQ 64U
 #define MESHTASTIC_PHOTO_SOURCE_DIR "/root/photos"
 #define MESHTASTIC_PHOTO_STORE_DIR "/root/meshtastic/photos"
@@ -13030,10 +13034,22 @@ typedef struct {
     uint64_t hit_count = 0;
 } mesh_photo_debug_drop_t;
 
+typedef struct {
+    uint8_t photo_data_repeat = MESHTASTIC_FLRC_PHOTO_DATA_REPEAT;
+    uint8_t photo_repair_rounds = MESHTASTIC_FLRC_PHOTO_REPAIR_MAX_ROUNDS;
+    uint8_t photo_repair_repeat =
+        MESHTASTIC_FLRC_PHOTO_REPAIR_DATA_REPEAT;
+    uint32_t photo_repair_window_ms =
+        (uint32_t)MESHTASTIC_FLRC_PHOTO_REPAIR_WINDOW_MS;
+    uint32_t photo_tx_cache_ttl_sec =
+        (uint32_t)MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_TTL_SEC;
+} mesh_media_config_t;
+
 static mesh_voice_rx_stream_t mesh_voice_rx_streams[MESHTASTIC_VOICE_RX_STREAMS];
 static mesh_photo_tx_cache_entry_t
     mesh_photo_tx_cache[MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE];
 static mesh_photo_debug_drop_t mesh_photo_debug_drop;
+static mesh_media_config_t mesh_media_cfg;
 static uint64_t mesh_voice_tx_stream_count;
 static uint64_t mesh_voice_tx_chunk_count;
 static uint64_t mesh_voice_rx_chunk_count;
@@ -13068,12 +13084,14 @@ static void mesh_voice_rx_stream_reset(mesh_voice_rx_stream_t *stream)
 
 static void mesh_photo_tx_cache_expire(uint64_t now_us)
 {
+    uint64_t ttl_us =
+        (uint64_t)mesh_media_cfg.photo_tx_cache_ttl_sec * 1000000ULL;
+
     for(size_t i = 0; i < MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_SIZE; i++) {
         mesh_photo_tx_cache_entry_t *entry = &mesh_photo_tx_cache[i];
 
         if(entry->active &&
-           now_us - entry->updated_us >
-           MESHTASTIC_FLRC_PHOTO_REPAIR_TX_CACHE_TTL_US) {
+           now_us - entry->updated_us > ttl_us) {
             entry->active = false;
             entry->payload.clear();
         }
@@ -15094,6 +15112,111 @@ static std::string mesh_photo_debug_drop_set_rate_response(const char *arg)
     return mesh_photo_debug_drop_status_response();
 }
 
+static void mesh_media_config_clamp(void)
+{
+    if(mesh_media_cfg.photo_data_repeat < 1U) {
+        mesh_media_cfg.photo_data_repeat = 1U;
+    } else if(mesh_media_cfg.photo_data_repeat > 3U) {
+        mesh_media_cfg.photo_data_repeat = 3U;
+    }
+    if(mesh_media_cfg.photo_repair_rounds > 4U) {
+        mesh_media_cfg.photo_repair_rounds = 4U;
+    }
+    if(mesh_media_cfg.photo_repair_repeat < 1U) {
+        mesh_media_cfg.photo_repair_repeat = 1U;
+    } else if(mesh_media_cfg.photo_repair_repeat > 3U) {
+        mesh_media_cfg.photo_repair_repeat = 3U;
+    }
+    if(mesh_media_cfg.photo_repair_window_ms < 3000U) {
+        mesh_media_cfg.photo_repair_window_ms = 3000U;
+    } else if(mesh_media_cfg.photo_repair_window_ms > 20000U) {
+        mesh_media_cfg.photo_repair_window_ms = 20000U;
+    }
+    if(mesh_media_cfg.photo_tx_cache_ttl_sec < 60U) {
+        mesh_media_cfg.photo_tx_cache_ttl_sec = 60U;
+    } else if(mesh_media_cfg.photo_tx_cache_ttl_sec > 900U) {
+        mesh_media_cfg.photo_tx_cache_ttl_sec = 900U;
+    }
+}
+
+static std::string mesh_media_config_status_response(void)
+{
+    char buf[240];
+
+    mesh_media_config_clamp();
+    snprintf(buf, sizeof(buf),
+             "OK photo_repeat=%u repair_rounds=%u repair_repeat=%u "
+             "repair_window_ms=%u cache_ttl_sec=%u\n",
+             (unsigned)mesh_media_cfg.photo_data_repeat,
+             (unsigned)mesh_media_cfg.photo_repair_rounds,
+             (unsigned)mesh_media_cfg.photo_repair_repeat,
+             (unsigned)mesh_media_cfg.photo_repair_window_ms,
+             (unsigned)mesh_media_cfg.photo_tx_cache_ttl_sec);
+    return std::string(buf);
+}
+
+static bool mesh_media_config_apply_field(const char *key, const char *value)
+{
+    uint32_t parsed;
+
+    if(!key || !value || !mesh_parse_u32_text(value, &parsed)) {
+        return false;
+    }
+    if(strcmp(key, "photo_repeat") == 0) {
+        mesh_media_cfg.photo_data_repeat = (uint8_t)parsed;
+    } else if(strcmp(key, "repair_rounds") == 0) {
+        mesh_media_cfg.photo_repair_rounds = (uint8_t)parsed;
+    } else if(strcmp(key, "repair_repeat") == 0) {
+        mesh_media_cfg.photo_repair_repeat = (uint8_t)parsed;
+    } else if(strcmp(key, "repair_window_ms") == 0) {
+        mesh_media_cfg.photo_repair_window_ms = parsed;
+    } else if(strcmp(key, "cache_ttl_sec") == 0) {
+        mesh_media_cfg.photo_tx_cache_ttl_sec = parsed;
+    } else {
+        return false;
+    }
+    mesh_media_config_clamp();
+    return true;
+}
+
+static std::string mesh_media_config_set_response(const char *arg)
+{
+    char copy[256];
+    char *save = NULL;
+    char *token;
+
+    if(!arg) {
+        return mesh_media_config_status_response();
+    }
+    while(*arg && isspace((unsigned char)*arg)) {
+        arg++;
+    }
+    if(!*arg) {
+        return mesh_media_config_status_response();
+    }
+    snprintf(copy, sizeof(copy), "%s", arg);
+    token = strtok_r(copy, " \t\r\n", &save);
+    while(token) {
+        char *eq = strchr(token, '=');
+
+        if(!eq || eq == token || !eq[1]) {
+            return "ERR invalid-media-config\n";
+        }
+        *eq = '\0';
+        if(!mesh_media_config_apply_field(token, eq + 1)) {
+            return "ERR invalid-media-config\n";
+        }
+        token = strtok_r(NULL, " \t\r\n", &save);
+    }
+    daemon_event("Media config updated photo_repeat=%u repair_rounds=%u repair_repeat=%u repair_window_ms=%u cache_ttl_sec=%u",
+                 (unsigned)mesh_media_cfg.photo_data_repeat,
+                 (unsigned)mesh_media_cfg.photo_repair_rounds,
+                 (unsigned)mesh_media_cfg.photo_repair_repeat,
+                 (unsigned)mesh_media_cfg.photo_repair_window_ms,
+                 (unsigned)mesh_media_cfg.photo_tx_cache_ttl_sec);
+    return mesh_media_config_status_response();
+}
+
 static uint16_t mesh_flrc_photo_collect_window(
     LR2021 *lr2021, const mesh_flrc_voice_header_t &invite,
     std::vector<std::vector<uint8_t>> *chunks,
@@ -15249,6 +15372,7 @@ static bool mesh_flrc_photo_repair_tx_session(
     }
     dims = ((uint32_t)cache->width << 16U) | cache->height;
     active_op = OP_IDLE;
+    mesh_media_config_clamp();
     usleep(MESHTASTIC_FLRC_PHOTO_REPAIR_START_DELAY_US);
     state = mesh_flrc_voice_begin(lr2021);
     if(state != RADIOLIB_ERR_NONE) {
@@ -15262,8 +15386,8 @@ static bool mesh_flrc_photo_repair_tx_session(
     daemon_event("FLRC photo repair TX start requester=0x%08x stream=0x%08x missing=%u received=%u/%u round=%u repeat=%u",
                  requester, request.stream_id, request.missing_count,
                  request.received_count, request.total, request.round,
-                 MESHTASTIC_FLRC_PHOTO_REPAIR_DATA_REPEAT);
-    for(unsigned pass = 0; ok && pass < MESHTASTIC_FLRC_PHOTO_REPAIR_DATA_REPEAT;
+                 (unsigned)mesh_media_cfg.photo_repair_repeat);
+    for(unsigned pass = 0; ok && pass < mesh_media_cfg.photo_repair_repeat;
         pass++) {
         for(uint16_t seq = 0U; ok && seq < request.total; seq++) {
             if(!mesh_flrc_photo_repair_seq_missing(request, seq)) {
@@ -15286,7 +15410,7 @@ static bool mesh_flrc_photo_repair_tx_session(
             mesh_photo_repair_tx_chunk_count++;
             usleep(MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US);
         }
-        if(ok && pass + 1U < MESHTASTIC_FLRC_PHOTO_REPAIR_DATA_REPEAT) {
+        if(ok && pass + 1U < mesh_media_cfg.photo_repair_repeat) {
             usleep(MESHTASTIC_FLRC_PHOTO_ROUND_GAP_US);
         }
     }
@@ -15360,6 +15484,7 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
                  MESHTASTIC_FLRC_VOICE_BR_KBPS,
                  MESHTASTIC_FLRC_VOICE_POWER_DBM);
     start_us = monotonic_us();
+    mesh_media_config_clamp();
     for(unsigned r = 0; r < MESHTASTIC_FLRC_PHOTO_START_REPEAT; r++) {
         mesh_flrc_voice_make_packet(packet, sizeof(packet),
                                     MESHTASTIC_FLRC_VOICE_TYPE_INVITE,
@@ -15376,7 +15501,7 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
         }
         usleep(MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US);
     }
-    for(unsigned pass = 0; ok && pass < MESHTASTIC_FLRC_PHOTO_DATA_REPEAT;
+    for(unsigned pass = 0; ok && pass < mesh_media_cfg.photo_data_repeat;
         pass++) {
         for(uint16_t seq = 0U; ok && seq < total; seq++) {
             size_t offset = (size_t)seq * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN;
@@ -15402,9 +15527,10 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
             }
             usleep(MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US);
         }
-        if(ok && pass + 1U < MESHTASTIC_FLRC_PHOTO_DATA_REPEAT) {
+        if(ok && pass + 1U < mesh_media_cfg.photo_data_repeat) {
             daemon_event("FLRC photo TX repeat pass=%u/%u stream=0x%08x",
-                         pass + 1U, MESHTASTIC_FLRC_PHOTO_DATA_REPEAT,
+                         pass + 1U,
+                         (unsigned)mesh_media_cfg.photo_data_repeat,
                          frame.flrc_photo_stream_id);
             usleep(MESHTASTIC_FLRC_PHOTO_ROUND_GAP_US);
         }
@@ -15429,14 +15555,14 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
         uint64_t elapsed_ms = (monotonic_us() - start_us) / 1000ULL;
         mesh_photo_tx_stream_count++;
         mesh_photo_tx_chunk_count +=
-            (uint64_t)total * MESHTASTIC_FLRC_PHOTO_DATA_REPEAT;
+            (uint64_t)total * mesh_media_cfg.photo_data_repeat;
         if(!daemon_chat_update_photo_stream_status(frame.flrc_photo_stream_id,
                                                    "sent",
                                                    (unsigned long)elapsed_ms)) {
             daemon_chat("TX 0x%08x photo %ux%u jpg packets=%u repeat=%u stream=0x%08x state=sent elapsed=%lums sha256=%s",
                         frame.from_node, frame.flrc_photo_width,
                         frame.flrc_photo_height, total,
-                        MESHTASTIC_FLRC_PHOTO_DATA_REPEAT,
+                        (unsigned)mesh_media_cfg.photo_data_repeat,
                         frame.flrc_photo_stream_id,
                         (unsigned long)elapsed_ms,
                         stream_sha256.c_str());
@@ -15496,6 +15622,7 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
         width = MESHTASTIC_FLRC_PHOTO_MAX_W;
         height = MESHTASTIC_FLRC_PHOTO_MAX_H;
     }
+    mesh_media_config_clamp();
     active_op = OP_IDLE;
     state = mesh_flrc_voice_begin(lr2021);
     if(state != RADIOLIB_ERR_NONE) {
@@ -15524,7 +15651,7 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
     (void)lr2021->standby();
     for(uint8_t repair_round = 1U;
         received_count < invite.total &&
-        repair_round <= MESHTASTIC_FLRC_PHOTO_REPAIR_MAX_ROUNDS;
+        repair_round <= mesh_media_cfg.photo_repair_rounds;
         repair_round++) {
         std::vector<uint8_t> repair_payload;
         tx_frame_t repair_frame;
@@ -15565,7 +15692,8 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
         }
         (void)mesh_flrc_photo_collect_window(
             lr2021, invite, &chunks, &received, &received_count,
-            MESHTASTIC_FLRC_PHOTO_REPAIR_WINDOW_US, "repair RX", true);
+            (uint64_t)mesh_media_cfg.photo_repair_window_ms * 1000ULL,
+            "repair RX", true);
         (void)lr2021->standby();
         daemon_event("FLRC photo repair round done stream=0x%08x round=%u added=%u received=%u/%u",
                      invite.stream_id, repair_round,
@@ -16433,6 +16561,9 @@ static std::string daemon_status_response(const probe_options_t &opts,
              "photo_repair_req_tx=%lu photo_repair_req_rx=%lu "
              "photo_repair_tx_chunks=%lu photo_repair_rx_chunks=%lu "
              "photo_repair_complete=%lu photo_repair_fail=%lu "
+             "photo_repeat=%u photo_repair_rounds=%u "
+             "photo_repair_repeat=%u photo_repair_window_ms=%u "
+             "photo_cache_ttl_sec=%u "
              "photo_drop=%s photo_drop_seq=%s photo_drop_rate=%u photo_drop_hits=%lu "
              "ch_util=%.1f air_tx=%.2f duty=%.1f air_tx_ms=%lu air_rx_ms=%lu "
              "nodeinfo_tx=%lu nodeinfo_drop=%lu next_nodeinfo_ms=%u "
@@ -16485,6 +16616,11 @@ static std::string daemon_status_response(const probe_options_t &opts,
              (unsigned long)mesh_photo_repair_rx_chunk_count,
              (unsigned long)mesh_photo_repair_complete_count,
              (unsigned long)mesh_photo_repair_fail_count,
+             (unsigned)mesh_media_cfg.photo_data_repeat,
+             (unsigned)mesh_media_cfg.photo_repair_rounds,
+             (unsigned)mesh_media_cfg.photo_repair_repeat,
+             (unsigned)mesh_media_cfg.photo_repair_window_ms,
+             (unsigned)mesh_media_cfg.photo_tx_cache_ttl_sec,
              mesh_photo_debug_drop.enabled ? "on" : "off",
              photo_drop_seq,
              (unsigned)mesh_photo_debug_drop.rate_percent,
@@ -17496,6 +17632,13 @@ static std::string handle_daemon_command(const std::string &line,
     if(line == "PHOTO_DROP_STATUS" || line == "photo_drop_status") {
         return mesh_photo_debug_drop_status_response();
     }
+    if(line == "MEDIA_CONFIG" || line == "media_config") {
+        return mesh_media_config_status_response();
+    }
+    if(line.compare(0, 13, "MEDIA_CONFIG ") == 0 ||
+       line.compare(0, 13, "media_config ") == 0) {
+        return mesh_media_config_set_response(line.c_str() + 13);
+    }
     if(line == "PHOTO_DROP_CLEAR" || line == "photo_drop_clear") {
         return mesh_photo_debug_drop_clear_response();
     }
@@ -18057,6 +18200,12 @@ static void print_usage(const char *argv0)
             "  --cmd-send-voice FILE  Ask daemon to encode and transmit 8 kHz S16_LE mono PCM\n"
             "  --cmd-send-waypoint LAT,LON,NAME  Ask daemon to broadcast a waypoint\n"
             "  --cmd-quit      Ask running daemon to exit\n\n"
+            "Media options:\n"
+            "  --photo-repeat N         FLRC photo data repeat count, 1-3, default 2\n"
+            "  --photo-repair-rounds N  FLRC photo repair rounds, 0-4, default 2\n"
+            "  --photo-repair-repeat N  FLRC repair data repeat count, 1-3, default 2\n"
+            "  --photo-repair-window-ms N  FLRC repair RX window, 3000-20000, default 7000\n"
+            "  --photo-cache-ttl-sec N  FLRC photo TX cache TTL, 60-900, default 300\n\n"
             "Profile options:\n"
             "  --region NAME    Meshtastic region, default US when --mesh is used\n"
             "  --preset NAME    Meshtastic preset, default region preset\n"
@@ -18408,6 +18557,26 @@ static bool parse_options(int argc, char **argv, probe_options_t *opts)
             opts->client_send_waypoint_text = argv[++i];
         } else if(strcmp(arg, "--cmd-quit") == 0) {
             opts->client_quit = true;
+        } else if(strcmp(arg, "--photo-repeat") == 0 && i + 1 < argc &&
+                  parse_u32(argv[++i], &tmp, 10)) {
+            mesh_media_cfg.photo_data_repeat = (uint8_t)tmp;
+            mesh_media_config_clamp();
+        } else if(strcmp(arg, "--photo-repair-rounds") == 0 &&
+                  i + 1 < argc && parse_u32(argv[++i], &tmp, 10)) {
+            mesh_media_cfg.photo_repair_rounds = (uint8_t)tmp;
+            mesh_media_config_clamp();
+        } else if(strcmp(arg, "--photo-repair-repeat") == 0 &&
+                  i + 1 < argc && parse_u32(argv[++i], &tmp, 10)) {
+            mesh_media_cfg.photo_repair_repeat = (uint8_t)tmp;
+            mesh_media_config_clamp();
+        } else if(strcmp(arg, "--photo-repair-window-ms") == 0 &&
+                  i + 1 < argc && parse_u32(argv[++i], &tmp, 10)) {
+            mesh_media_cfg.photo_repair_window_ms = tmp;
+            mesh_media_config_clamp();
+        } else if(strcmp(arg, "--photo-cache-ttl-sec") == 0 &&
+                  i + 1 < argc && parse_u32(argv[++i], &tmp, 10)) {
+            mesh_media_cfg.photo_tx_cache_ttl_sec = tmp;
+            mesh_media_config_clamp();
         } else if(strcmp(arg, "--cmd-send") == 0 && i + 1 < argc) {
             opts->client_send = argv[++i];
             opts->client_send_requested = true;

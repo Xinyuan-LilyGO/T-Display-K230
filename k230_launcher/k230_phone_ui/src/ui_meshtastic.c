@@ -97,6 +97,11 @@
 #define MESHTASTIC_PREF_TELEMETRY_ENV "meshtastic.telemetry_env"
 #define MESHTASTIC_PREF_TELEMETRY_DEVICE_INTERVAL "meshtastic.telemetry_device_interval"
 #define MESHTASTIC_PREF_TELEMETRY_ENV_INTERVAL "meshtastic.telemetry_env_interval"
+#define MESHTASTIC_PREF_PHOTO_REPEAT "meshtastic.photo_repeat"
+#define MESHTASTIC_PREF_PHOTO_REPAIR_ROUNDS "meshtastic.photo_repair_rounds"
+#define MESHTASTIC_PREF_PHOTO_REPAIR_REPEAT "meshtastic.photo_repair_repeat"
+#define MESHTASTIC_PREF_PHOTO_REPAIR_WINDOW_MS "meshtastic.photo_repair_window_ms"
+#define MESHTASTIC_PREF_PHOTO_CACHE_TTL_SEC "meshtastic.photo_cache_ttl_sec"
 #define MESHTASTIC_DEFAULT_UI_REGION "EU_868"
 #define MESHTASTIC_DEFAULT_UI_PRESET "LONG_FAST"
 #define MESHTASTIC_QR_PREVIEW_FILE "/tmp/k230_mesh_qr_preview.rgb565"
@@ -179,6 +184,11 @@ static char mesh_fixed_longitude_i[16] = "0";
 static char mesh_fixed_altitude_m[12] = "0";
 static char mesh_telemetry_device_interval[8] = "300";
 static char mesh_telemetry_environment_interval[8] = "300";
+static char mesh_photo_repeat[8] = "2";
+static char mesh_photo_repair_rounds[8] = "2";
+static char mesh_photo_repair_repeat[8] = "2";
+static char mesh_photo_repair_window_ms[8] = "7000";
+static char mesh_photo_cache_ttl_sec[8] = "300";
 static int mesh_ack_enabled = 0;
 static int mesh_rebroadcast_enabled = 0;
 static int mesh_position_enabled = 1;
@@ -347,6 +357,11 @@ typedef enum {
     MESH_FIELD_TELEMETRY_INTERVAL,
     MESH_FIELD_ENV_TELEMETRY,
     MESH_FIELD_ENV_TELEMETRY_INTERVAL,
+    MESH_FIELD_PHOTO_REPEAT,
+    MESH_FIELD_PHOTO_REPAIR_ROUNDS,
+    MESH_FIELD_PHOTO_REPAIR_REPEAT,
+    MESH_FIELD_PHOTO_REPAIR_WINDOW,
+    MESH_FIELD_PHOTO_CACHE_TTL,
     MESH_FIELD_COUNT,
 } mesh_setting_field_t;
 
@@ -510,6 +525,39 @@ static const mesh_choice_t mesh_position_interval_choices[] = {
     {"900", "15 min"},
     {"1800", "30 min"},
     {"3600", "60 min"},
+};
+
+static const mesh_choice_t mesh_photo_repeat_choices[] = {
+    {"1", "Fast (1x)"},
+    {"2", "Balanced (2x)"},
+    {"3", "Robust (3x)"},
+};
+
+static const mesh_choice_t mesh_photo_repair_round_choices[] = {
+    {"0", "Off"},
+    {"1", "1 round"},
+    {"2", "Balanced (2 rounds)"},
+    {"3", "Robust (3 rounds)"},
+    {"4", "Max (4 rounds)"},
+};
+
+static const mesh_choice_t mesh_photo_repair_repeat_choices[] = {
+    {"1", "Fast (1x)"},
+    {"2", "Balanced (2x)"},
+    {"3", "Robust (3x)"},
+};
+
+static const mesh_choice_t mesh_photo_repair_window_choices[] = {
+    {"3000", "3 sec"},
+    {"7000", "7 sec"},
+    {"12000", "12 sec"},
+    {"20000", "20 sec"},
+};
+
+static const mesh_choice_t mesh_photo_cache_ttl_choices[] = {
+    {"60", "1 min"},
+    {"300", "5 min"},
+    {"900", "15 min"},
 };
 
 static void mesh_settings_refresh(void);
@@ -1104,6 +1152,40 @@ static void mesh_normalize_power(void)
     snprintf(mesh_tx_power, sizeof(mesh_tx_power), "%ld", power);
 }
 
+static void mesh_normalize_u32_text(char *value_text, size_t len,
+                                    unsigned long min_value,
+                                    unsigned long max_value,
+                                    const char *fallback)
+{
+    unsigned long value;
+
+    if(!value_text || len == 0U ||
+       mesh_parse_u32_text(value_text, &value) != 0 ||
+       value < min_value || value > max_value) {
+        snprintf(value_text, len, "%s", fallback ? fallback : "");
+        return;
+    }
+    snprintf(value_text, len, "%lu", value);
+}
+
+static void mesh_normalize_media_config(void)
+{
+    mesh_normalize_u32_text(mesh_photo_repeat, sizeof(mesh_photo_repeat),
+                            1, 3, "2");
+    mesh_normalize_u32_text(mesh_photo_repair_rounds,
+                            sizeof(mesh_photo_repair_rounds),
+                            0, 4, "2");
+    mesh_normalize_u32_text(mesh_photo_repair_repeat,
+                            sizeof(mesh_photo_repair_repeat),
+                            1, 3, "2");
+    mesh_normalize_u32_text(mesh_photo_repair_window_ms,
+                            sizeof(mesh_photo_repair_window_ms),
+                            3000, 20000, "7000");
+    mesh_normalize_u32_text(mesh_photo_cache_ttl_sec,
+                            sizeof(mesh_photo_cache_ttl_sec),
+                            60, 900, "300");
+}
+
 static int mesh_from_text_is_auto(const char *text)
 {
     return !text || !text[0] || strcasecmp(text, "auto") == 0 ||
@@ -1290,11 +1372,26 @@ static void mesh_load_profile_prefs(void)
     ui_prefs_get(MESHTASTIC_PREF_TELEMETRY_ENV_INTERVAL,
                  mesh_telemetry_environment_interval,
                  sizeof(mesh_telemetry_environment_interval), "300");
+    ui_prefs_get(MESHTASTIC_PREF_PHOTO_REPEAT, mesh_photo_repeat,
+                 sizeof(mesh_photo_repeat), "2");
+    ui_prefs_get(MESHTASTIC_PREF_PHOTO_REPAIR_ROUNDS,
+                 mesh_photo_repair_rounds,
+                 sizeof(mesh_photo_repair_rounds), "2");
+    ui_prefs_get(MESHTASTIC_PREF_PHOTO_REPAIR_REPEAT,
+                 mesh_photo_repair_repeat,
+                 sizeof(mesh_photo_repair_repeat), "2");
+    ui_prefs_get(MESHTASTIC_PREF_PHOTO_REPAIR_WINDOW_MS,
+                 mesh_photo_repair_window_ms,
+                 sizeof(mesh_photo_repair_window_ms), "7000");
+    ui_prefs_get(MESHTASTIC_PREF_PHOTO_CACHE_TTL_SEC,
+                 mesh_photo_cache_ttl_sec,
+                 sizeof(mesh_photo_cache_ttl_sec), "300");
     mesh_normalize_power();
     mesh_normalize_from_node();
     mesh_normalize_hop();
     mesh_normalize_slot();
     mesh_normalize_target_ack();
+    mesh_normalize_media_config();
 }
 
 static void mesh_save_profile_prefs(void)
@@ -1331,6 +1428,40 @@ static void mesh_save_profile_prefs(void)
                  mesh_telemetry_device_interval);
     ui_prefs_set(MESHTASTIC_PREF_TELEMETRY_ENV_INTERVAL,
                  mesh_telemetry_environment_interval);
+    mesh_normalize_media_config();
+    ui_prefs_set(MESHTASTIC_PREF_PHOTO_REPEAT, mesh_photo_repeat);
+    ui_prefs_set(MESHTASTIC_PREF_PHOTO_REPAIR_ROUNDS,
+                 mesh_photo_repair_rounds);
+    ui_prefs_set(MESHTASTIC_PREF_PHOTO_REPAIR_REPEAT,
+                 mesh_photo_repair_repeat);
+    ui_prefs_set(MESHTASTIC_PREF_PHOTO_REPAIR_WINDOW_MS,
+                 mesh_photo_repair_window_ms);
+    ui_prefs_set(MESHTASTIC_PREF_PHOTO_CACHE_TTL_SEC,
+                 mesh_photo_cache_ttl_sec);
+}
+
+static int mesh_apply_media_runtime_config(void)
+{
+    char command[256];
+    char response[256];
+    int ret;
+
+    mesh_normalize_media_config();
+    snprintf(command, sizeof(command),
+             "MEDIA_CONFIG photo_repeat=%s repair_rounds=%s "
+             "repair_repeat=%s repair_window_ms=%s cache_ttl_sec=%s\n",
+             mesh_photo_repeat, mesh_photo_repair_rounds,
+             mesh_photo_repair_repeat, mesh_photo_repair_window_ms,
+             mesh_photo_cache_ttl_sec);
+    ret = mesh_ipc_command(command, response, sizeof(response));
+    ui_trim_text(response);
+    if(ret == 0) {
+        mesh_append_log("media config applied: %s", response);
+    } else {
+        mesh_append_log("media config pending: %s",
+                        response[0] ? response : "daemon offline");
+    }
+    return ret;
 }
 
 int ui_meshtastic_autostart_enabled(void)
@@ -1514,6 +1645,30 @@ static void mesh_sync_profile_from_status(const char *status, int online)
             }
         }
     }
+    mesh_status_field(status, "photo_repeat", value, sizeof(value), "");
+    changed |= mesh_status_copy_if_changed(mesh_photo_repeat,
+                                           sizeof(mesh_photo_repeat), value);
+    mesh_status_field(status, "photo_repair_rounds", value, sizeof(value),
+                      "");
+    changed |= mesh_status_copy_if_changed(mesh_photo_repair_rounds,
+                                           sizeof(mesh_photo_repair_rounds),
+                                           value);
+    mesh_status_field(status, "photo_repair_repeat", value, sizeof(value),
+                      "");
+    changed |= mesh_status_copy_if_changed(mesh_photo_repair_repeat,
+                                           sizeof(mesh_photo_repair_repeat),
+                                           value);
+    mesh_status_field(status, "photo_repair_window_ms", value, sizeof(value),
+                      "");
+    changed |= mesh_status_copy_if_changed(mesh_photo_repair_window_ms,
+                                           sizeof(mesh_photo_repair_window_ms),
+                                           value);
+    mesh_status_field(status, "photo_cache_ttl_sec", value, sizeof(value),
+                      "");
+    changed |= mesh_status_copy_if_changed(mesh_photo_cache_ttl_sec,
+                                           sizeof(mesh_photo_cache_ttl_sec),
+                                           value);
+    mesh_normalize_media_config();
 
     if(changed) {
         mesh_save_profile_prefs();
@@ -3740,7 +3895,8 @@ static void mesh_start_event_cb(lv_event_t *event)
     char telemetry_option[160];
     char telemetry_device_interval_arg[16];
     char telemetry_environment_interval_arg[16];
-    char command[1536];
+    char media_option[192];
+    char command[1792];
     int rc;
 
     (void)event;
@@ -3825,26 +3981,36 @@ static void mesh_start_event_cb(lv_event_t *event)
              mesh_environment_telemetry_enabled ? "--env-telemetry" :
                                                   "--no-env-telemetry",
              telemetry_environment_interval_arg);
+    mesh_normalize_media_config();
+    snprintf(media_option, sizeof(media_option),
+             "--photo-repeat %s --photo-repair-rounds %s "
+             "--photo-repair-repeat %s --photo-repair-window-ms %s "
+             "--photo-cache-ttl-sec %s ",
+             mesh_photo_repeat, mesh_photo_repair_rounds,
+             mesh_photo_repair_repeat, mesh_photo_repair_window_ms,
+             mesh_photo_cache_ttl_sec);
     if(mesh_channel_name[0]) {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s"
+                 "--channel-name %s %s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, channel_arg, slot_option, psk_arg,
                  power_option, node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
-                 position_option, fixed_position_option, telemetry_option);
+                 position_option, fixed_position_option, telemetry_option,
+                 media_option);
     } else {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
                  "(" MESHTASTIC_PROBE_PATH " --daemon --region %s --preset %s "
-                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s"
+                 "%s--psk %s %s--node %s --from %s --to %s --hop-limit %s %s %s%s%s%s%s"
                  "> " MESHTASTIC_DAEMON_LOG " 2>&1) &",
                  region_arg, preset_arg, slot_option, psk_arg, power_option,
                  node_arg, from_arg, to_arg, hop_arg,
                  mesh_ack_enabled ? "--ack" : "--no-ack", relay_option,
-                 position_option, fixed_position_option, telemetry_option);
+                 position_option, fixed_position_option, telemetry_option,
+                 media_option);
     }
     rc = system(command);
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
@@ -4754,6 +4920,16 @@ static const char *mesh_setting_name(mesh_setting_field_t field)
         return "Environment telemetry";
     case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
         return "Environment telemetry interval";
+    case MESH_FIELD_PHOTO_REPEAT:
+        return "Photo repeat";
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+        return "Photo repair rounds";
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+        return "Photo repair repeat";
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+        return "Photo repair window";
+    case MESH_FIELD_PHOTO_CACHE_TTL:
+        return "Photo cache TTL";
     default:
         return "Setting";
     }
@@ -4775,10 +4951,34 @@ static int mesh_setting_uses_choice(mesh_setting_field_t field)
     case MESH_FIELD_TELEMETRY_INTERVAL:
     case MESH_FIELD_ENV_TELEMETRY:
     case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
+    case MESH_FIELD_PHOTO_REPEAT:
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+    case MESH_FIELD_PHOTO_CACHE_TTL:
         return 1;
     default:
         return 0;
     }
+}
+
+static const char *mesh_choice_label_for_value(const mesh_choice_t *choices,
+                                               size_t count,
+                                               const char *value,
+                                               char *buf, size_t len)
+{
+    if(choices && value) {
+        for(size_t i = 0; i < count; i++) {
+            if(strcmp(choices[i].value, value) == 0) {
+                return choices[i].label;
+            }
+        }
+    }
+    if(buf && len > 0U) {
+        snprintf(buf, len, "%s", value && value[0] ? value : "-");
+        return buf;
+    }
+    return "-";
 }
 
 static const char *mesh_setting_value(mesh_setting_field_t field,
@@ -4871,6 +5071,36 @@ static const char *mesh_setting_value(mesh_setting_field_t field,
             snprintf(buf, len, "5 min");
         }
         return buf;
+    case MESH_FIELD_PHOTO_REPEAT:
+        return mesh_choice_label_for_value(
+            mesh_photo_repeat_choices,
+            sizeof(mesh_photo_repeat_choices) /
+                sizeof(mesh_photo_repeat_choices[0]),
+            mesh_photo_repeat, buf, len);
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+        return mesh_choice_label_for_value(
+            mesh_photo_repair_round_choices,
+            sizeof(mesh_photo_repair_round_choices) /
+                sizeof(mesh_photo_repair_round_choices[0]),
+            mesh_photo_repair_rounds, buf, len);
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+        return mesh_choice_label_for_value(
+            mesh_photo_repair_repeat_choices,
+            sizeof(mesh_photo_repair_repeat_choices) /
+                sizeof(mesh_photo_repair_repeat_choices[0]),
+            mesh_photo_repair_repeat, buf, len);
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+        return mesh_choice_label_for_value(
+            mesh_photo_repair_window_choices,
+            sizeof(mesh_photo_repair_window_choices) /
+                sizeof(mesh_photo_repair_window_choices[0]),
+            mesh_photo_repair_window_ms, buf, len);
+    case MESH_FIELD_PHOTO_CACHE_TTL:
+        return mesh_choice_label_for_value(
+            mesh_photo_cache_ttl_choices,
+            sizeof(mesh_photo_cache_ttl_choices) /
+                sizeof(mesh_photo_cache_ttl_choices[0]),
+            mesh_photo_cache_ttl_sec, buf, len);
     default:
         return "";
     }
@@ -5034,6 +5264,16 @@ static int mesh_choice_is_selected(mesh_setting_field_t field,
                (strcmp(value, "0") != 0);
     case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
         return strcmp(mesh_telemetry_environment_interval, value) == 0;
+    case MESH_FIELD_PHOTO_REPEAT:
+        return strcmp(mesh_photo_repeat, value) == 0;
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+        return strcmp(mesh_photo_repair_rounds, value) == 0;
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+        return strcmp(mesh_photo_repair_repeat, value) == 0;
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+        return strcmp(mesh_photo_repair_window_ms, value) == 0;
+    case MESH_FIELD_PHOTO_CACHE_TTL:
+        return strcmp(mesh_photo_cache_ttl_sec, value) == 0;
     default:
         return 0;
     }
@@ -5088,6 +5328,39 @@ static const char *mesh_choice_value_at(mesh_setting_field_t field, int index)
         if(index >= 0 && index < (int)(sizeof(mesh_position_interval_choices) /
            sizeof(mesh_position_interval_choices[0]))) {
             return mesh_position_interval_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_PHOTO_REPEAT:
+        if(index >= 0 && index < (int)(sizeof(mesh_photo_repeat_choices) /
+           sizeof(mesh_photo_repeat_choices[0]))) {
+            return mesh_photo_repeat_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+        if(index >= 0 &&
+           index < (int)(sizeof(mesh_photo_repair_round_choices) /
+           sizeof(mesh_photo_repair_round_choices[0]))) {
+            return mesh_photo_repair_round_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+        if(index >= 0 &&
+           index < (int)(sizeof(mesh_photo_repair_repeat_choices) /
+           sizeof(mesh_photo_repair_repeat_choices[0]))) {
+            return mesh_photo_repair_repeat_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+        if(index >= 0 &&
+           index < (int)(sizeof(mesh_photo_repair_window_choices) /
+           sizeof(mesh_photo_repair_window_choices[0]))) {
+            return mesh_photo_repair_window_choices[index].value;
+        }
+        break;
+    case MESH_FIELD_PHOTO_CACHE_TTL:
+        if(index >= 0 && index < (int)(sizeof(mesh_photo_cache_ttl_choices) /
+           sizeof(mesh_photo_cache_ttl_choices[0]))) {
+            return mesh_photo_cache_ttl_choices[index].value;
         }
         break;
     default:
@@ -5167,10 +5440,43 @@ static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
                              sizeof(mesh_telemetry_environment_interval),
                              value, "300");
         break;
+    case MESH_FIELD_PHOTO_REPEAT:
+        mesh_safe_or_default(mesh_photo_repeat, sizeof(mesh_photo_repeat),
+                             value, "2");
+        mesh_normalize_media_config();
+        break;
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+        mesh_safe_or_default(mesh_photo_repair_rounds,
+                             sizeof(mesh_photo_repair_rounds), value, "2");
+        mesh_normalize_media_config();
+        break;
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+        mesh_safe_or_default(mesh_photo_repair_repeat,
+                             sizeof(mesh_photo_repair_repeat), value, "2");
+        mesh_normalize_media_config();
+        break;
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+        mesh_safe_or_default(mesh_photo_repair_window_ms,
+                             sizeof(mesh_photo_repair_window_ms), value,
+                             "7000");
+        mesh_normalize_media_config();
+        break;
+    case MESH_FIELD_PHOTO_CACHE_TTL:
+        mesh_safe_or_default(mesh_photo_cache_ttl_sec,
+                             sizeof(mesh_photo_cache_ttl_sec), value, "300");
+        mesh_normalize_media_config();
+        break;
     default:
         return;
     }
     mesh_save_profile_prefs();
+    if(field == MESH_FIELD_PHOTO_REPEAT ||
+       field == MESH_FIELD_PHOTO_REPAIR_ROUNDS ||
+       field == MESH_FIELD_PHOTO_REPAIR_REPEAT ||
+       field == MESH_FIELD_PHOTO_REPAIR_WINDOW ||
+       field == MESH_FIELD_PHOTO_CACHE_TTL) {
+        (void)mesh_apply_media_runtime_config();
+    }
     mesh_settings_refresh();
     mesh_append_log("settings saved: %s=%s", mesh_setting_name(field),
                     mesh_setting_value(field, log_value, sizeof(log_value)));
@@ -5246,6 +5552,16 @@ static const char *mesh_choice_label_at(mesh_setting_field_t field, int index)
     case MESH_FIELD_TELEMETRY_INTERVAL:
     case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
         return mesh_position_interval_choices[index].label;
+    case MESH_FIELD_PHOTO_REPEAT:
+        return mesh_photo_repeat_choices[index].label;
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+        return mesh_photo_repair_round_choices[index].label;
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+        return mesh_photo_repair_repeat_choices[index].label;
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+        return mesh_photo_repair_window_choices[index].label;
+    case MESH_FIELD_PHOTO_CACHE_TTL:
+        return mesh_photo_cache_ttl_choices[index].label;
     default:
         return "";
     }
@@ -5275,6 +5591,21 @@ static int mesh_choice_count(mesh_setting_field_t field)
     case MESH_FIELD_ENV_TELEMETRY_INTERVAL:
         return (int)(sizeof(mesh_position_interval_choices) /
                      sizeof(mesh_position_interval_choices[0]));
+    case MESH_FIELD_PHOTO_REPEAT:
+        return (int)(sizeof(mesh_photo_repeat_choices) /
+                     sizeof(mesh_photo_repeat_choices[0]));
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+        return (int)(sizeof(mesh_photo_repair_round_choices) /
+                     sizeof(mesh_photo_repair_round_choices[0]));
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+        return (int)(sizeof(mesh_photo_repair_repeat_choices) /
+                     sizeof(mesh_photo_repair_repeat_choices[0]));
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+        return (int)(sizeof(mesh_photo_repair_window_choices) /
+                     sizeof(mesh_photo_repair_window_choices[0]));
+    case MESH_FIELD_PHOTO_CACHE_TTL:
+        return (int)(sizeof(mesh_photo_cache_ttl_choices) /
+                     sizeof(mesh_photo_cache_ttl_choices[0]));
     default:
         return 0;
     }
