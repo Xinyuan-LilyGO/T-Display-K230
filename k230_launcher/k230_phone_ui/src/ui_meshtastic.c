@@ -154,6 +154,10 @@ static lv_obj_t *mesh_send_button;
 static lv_obj_t *mesh_canned_button;
 static lv_obj_t *mesh_voice_button;
 static lv_obj_t *mesh_photo_button;
+static lv_obj_t *mesh_detect_button;
+static lv_obj_t *mesh_map_button;
+static lv_obj_t *mesh_nodes_button;
+static lv_obj_t *mesh_settings_button;
 static lv_obj_t *mesh_body;
 static lv_obj_t *mesh_status_panel;
 static lv_obj_t *mesh_input_panel;
@@ -1313,11 +1317,18 @@ static void mesh_update_profile_label(void)
 {
     char text[180];
 
-    snprintf(text, sizeof(text),
-             "%s  %s  %s  slot:%s",
-             mesh_region, mesh_preset,
-             mesh_channel_name[0] ? mesh_channel_name : "default",
-             mesh_slot_is_auto() ? "auto" : mesh_frequency_slot);
+    if(ui_is_landscape()) {
+        snprintf(text, sizeof(text),
+                 "%s  %s  %s  slot:%s",
+                 mesh_region, mesh_preset,
+                 mesh_channel_name[0] ? mesh_channel_name : "default",
+                 mesh_slot_is_auto() ? "auto" : mesh_frequency_slot);
+    } else {
+        snprintf(text, sizeof(text),
+                 "%s / %s / %s",
+                 mesh_region, mesh_preset,
+                 mesh_channel_name[0] ? mesh_channel_name : "default");
+    }
     if(mesh_profile_label && lv_obj_is_valid(mesh_profile_label)) {
         lv_label_set_text(mesh_profile_label, text);
     }
@@ -3517,6 +3528,7 @@ static void mesh_layout_main(void)
     int body_h;
     int x;
     int content_w;
+    int landscape = ui_is_landscape();
     int input_h = ui_is_landscape() ? 58 : 66;
     int bottom_pad = ui_is_landscape() ? 8 : 12;
     int available_h;
@@ -3536,6 +3548,9 @@ static void mesh_layout_main(void)
         return;
     }
 
+    mesh_status_panel_h = landscape ? 112 : 152;
+    mesh_chat_gap = landscape ? 8 : 10;
+
     body_h = lv_obj_get_height(mesh_body);
     if(body_h <= 0) {
         body_h = ui_body_height(ui_is_landscape() ? 64 : 124);
@@ -3554,8 +3569,64 @@ static void mesh_layout_main(void)
     }
 
     if(mesh_status_panel && lv_obj_is_valid(mesh_status_panel)) {
+        int action_gap = landscape ? 8 : 8;
+        int action_count = 4;
+        int action_h = landscape ? 48 : 38;
+        int action_w = landscape ? 64 :
+            (content_w - action_gap * (action_count - 1)) / action_count;
+        int action_y = landscape ? 0 : 108;
+        int action_x0 = landscape ?
+            content_w - action_count * action_w -
+            action_gap * (action_count - 1) : 0;
+        int text_w = landscape ? action_x0 - 14 : content_w;
+
+        if(text_w < 160) {
+            text_w = 160;
+        }
         lv_obj_set_pos(mesh_status_panel, x, 0);
         lv_obj_set_size(mesh_status_panel, content_w, mesh_status_panel_h);
+        if(mesh_status_label && lv_obj_is_valid(mesh_status_label)) {
+            lv_obj_set_pos(mesh_status_label, 0, 0);
+            lv_obj_set_width(mesh_status_label, text_w);
+        }
+        if(mesh_profile_label && lv_obj_is_valid(mesh_profile_label)) {
+            lv_obj_set_pos(mesh_profile_label, 0, landscape ? 28 : 26);
+            lv_obj_set_width(mesh_profile_label, text_w);
+        }
+        if(mesh_detail_label && lv_obj_is_valid(mesh_detail_label)) {
+            lv_obj_set_pos(mesh_detail_label, 0, landscape ? 52 : 50);
+            lv_obj_set_width(mesh_detail_label, text_w);
+        }
+        if(mesh_airtime_label && lv_obj_is_valid(mesh_airtime_label)) {
+            lv_obj_set_pos(mesh_airtime_label, 0, landscape ? 76 : 74);
+            lv_obj_set_width(mesh_airtime_label, text_w);
+        }
+        if(mesh_chutil_bar && lv_obj_is_valid(mesh_chutil_bar)) {
+            lv_obj_set_pos(mesh_chutil_bar, 0, landscape ? 98 : 96);
+            lv_obj_set_size(mesh_chutil_bar, text_w, 6);
+        }
+        if(action_w < 54) {
+            action_w = 54;
+        }
+        if(mesh_detect_button && lv_obj_is_valid(mesh_detect_button)) {
+            lv_obj_set_pos(mesh_detect_button, action_x0, action_y);
+            lv_obj_set_size(mesh_detect_button, action_w, action_h);
+        }
+        if(mesh_map_button && lv_obj_is_valid(mesh_map_button)) {
+            lv_obj_set_pos(mesh_map_button,
+                           action_x0 + (action_w + action_gap), action_y);
+            lv_obj_set_size(mesh_map_button, action_w, action_h);
+        }
+        if(mesh_nodes_button && lv_obj_is_valid(mesh_nodes_button)) {
+            lv_obj_set_pos(mesh_nodes_button,
+                           action_x0 + (action_w + action_gap) * 2, action_y);
+            lv_obj_set_size(mesh_nodes_button, action_w, action_h);
+        }
+        if(mesh_settings_button && lv_obj_is_valid(mesh_settings_button)) {
+            lv_obj_set_pos(mesh_settings_button,
+                           action_x0 + (action_w + action_gap) * 3, action_y);
+            lv_obj_set_size(mesh_settings_button, action_w, action_h);
+        }
     }
     if(mesh_chat_scroll && lv_obj_is_valid(mesh_chat_scroll)) {
         lv_obj_set_pos(mesh_chat_scroll, x, chat_y);
@@ -3713,13 +3784,22 @@ static void mesh_refresh_status(void)
             lv_obj_set_style_text_color(mesh_detail_label,
                                         lv_color_hex(0xF5A524), 0);
         }
-        snprintf(detail, sizeof(detail),
-                 "%s  |  GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
-                 target,
-                 nrf9151, gps, sats, position_tx,
-                 telemetry_tx, queued_count, mesh_ack_enabled ? "on" : "off",
-                 ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
-                 ack_drop);
+        if(ui_is_landscape()) {
+            snprintf(detail, sizeof(detail),
+                     "%s  |  GPS %s/%s S%s TX%s  TEL%s  Q%s ACK %s P%s/R%s/N%s/RT%s/TO%s/D%s",
+                     target,
+                     nrf9151, gps, sats, position_tx,
+                     telemetry_tx, queued_count,
+                     mesh_ack_enabled ? "on" : "off",
+                     ack_pending, ack_rx, nak_rx, ack_retry, ack_timeout,
+                     ack_drop);
+        } else {
+            snprintf(detail, sizeof(detail),
+                     "%s | GPS %s/%s S%s | Q%s ACK %s P%s R%s TO%s",
+                     target, nrf9151, gps, sats, queued_count,
+                     mesh_ack_enabled ? "on" : "off",
+                     ack_pending, ack_rx, ack_timeout);
+        }
         lv_label_set_text(mesh_detail_label, detail);
         if(mesh_airtime_label && lv_obj_is_valid(mesh_airtime_label)) {
             char airtime[192];
@@ -3755,7 +3835,24 @@ static void mesh_refresh_status(void)
                 snprintf(drop_suffix, sizeof(drop_suffix), "  %s %lu",
                          ui_tr("Drop"), photo_drop_count);
             }
-            if(repair_req_count > 0UL || repair_ok_count > 0UL ||
+            if(!ui_is_landscape()) {
+                if(repair_req_count > 0UL || repair_ok_count > 0UL ||
+                   repair_fail_count > 0UL || photo_drop_count > 0UL) {
+                    snprintf(airtime, sizeof(airtime),
+                             "Ch %.1f%%  TX %.1f%%  V:%s P:%s  R %lu/%lu/%lu%s",
+                             ch_value, air_value,
+                             mesh_capability_short(voice_mode),
+                             mesh_capability_short(photo_mode),
+                             repair_req_count, repair_ok_count,
+                             repair_fail_count, drop_suffix);
+                } else {
+                    snprintf(airtime, sizeof(airtime),
+                             "Ch %.1f%%  TX %.1f%%  %s  V:%s P:%s",
+                             ch_value, air_value, airtime_state,
+                             mesh_capability_short(voice_mode),
+                             mesh_capability_short(photo_mode));
+                }
+            } else if(repair_req_count > 0UL || repair_ok_count > 0UL ||
                repair_fail_count > 0UL || photo_drop_count > 0UL) {
                 snprintf(airtime, sizeof(airtime),
                          "Ch %.1f%%  TX %.2f/%.1f%%  %s  %s V:%s P:%s  %s %lu/%lu/%lu%s",
@@ -11779,8 +11876,6 @@ void ui_meshtastic_create(lv_obj_t *scr)
     int content_w = ui_page_panel_width();
     int landscape = ui_is_landscape();
     int send_w = landscape ? 90 : 82;
-    int status_action_w = 288;
-    int status_text_w = content_w - status_action_w - 12;
 
     mesh_load_profile_prefs();
     ui_create_header(scr, "Meshtastic");
@@ -11788,12 +11883,9 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_set_scrollbar_mode(mesh_body, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(mesh_body, LV_OBJ_FLAG_SCROLLABLE);
 
-    mesh_status_panel_h = landscape ? 112 : 108;
+    mesh_status_panel_h = landscape ? 112 : 152;
     mesh_chat_gap = landscape ? 8 : 10;
     mesh_keyboard_reserved_h = 0;
-    if(status_text_w < 120) {
-        status_text_w = 120;
-    }
 
     mesh_status_panel = ui_panel(mesh_body, x, 0, content_w,
                                  mesh_status_panel_h);
@@ -11803,30 +11895,30 @@ void ui_meshtastic_create(lv_obj_t *scr)
     mesh_status_label = ui_label(mesh_status_panel, "Daemon offline",
                                  &lv_font_montserrat_20, 0xF5A524);
     lv_obj_set_pos(mesh_status_label, 0, 0);
-    lv_obj_set_width(mesh_status_label, status_text_w);
+    lv_obj_set_width(mesh_status_label, content_w);
     lv_label_set_long_mode(mesh_status_label, LV_LABEL_LONG_DOT);
 
     mesh_profile_label = ui_label(mesh_status_panel, "", &lv_font_montserrat_14,
                                   0xCBD5E1);
     lv_obj_set_pos(mesh_profile_label, 0, 28);
-    lv_obj_set_width(mesh_profile_label, status_text_w);
+    lv_obj_set_width(mesh_profile_label, content_w);
     lv_label_set_long_mode(mesh_profile_label, LV_LABEL_LONG_DOT);
 
     mesh_detail_label = ui_label(mesh_status_panel, "",
                                  &lv_font_montserrat_14, 0x94A3B8);
     lv_obj_set_pos(mesh_detail_label, 0, 52);
-    lv_obj_set_width(mesh_detail_label, status_text_w);
+    lv_obj_set_width(mesh_detail_label, content_w);
     lv_label_set_long_mode(mesh_detail_label, LV_LABEL_LONG_DOT);
 
     mesh_airtime_label = ui_label(mesh_status_panel, "ChUtil 0.0%",
                                   &lv_font_montserrat_12, 0x25C281);
     lv_obj_set_pos(mesh_airtime_label, 0, 76);
-    lv_obj_set_width(mesh_airtime_label, status_text_w);
+    lv_obj_set_width(mesh_airtime_label, content_w);
     lv_label_set_long_mode(mesh_airtime_label, LV_LABEL_LONG_DOT);
 
     mesh_chutil_bar = lv_bar_create(mesh_status_panel);
     lv_obj_set_pos(mesh_chutil_bar, 0, 96);
-    lv_obj_set_size(mesh_chutil_bar, status_text_w, 6);
+    lv_obj_set_size(mesh_chutil_bar, content_w, 6);
     lv_bar_set_range(mesh_chutil_bar, 0, 40);
     lv_bar_set_value(mesh_chutil_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(mesh_chutil_bar, lv_color_hex(0x263241),
@@ -11836,22 +11928,22 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_set_style_radius(mesh_chutil_bar, 3, LV_PART_MAIN);
     lv_obj_set_style_radius(mesh_chutil_bar, 3, LV_PART_INDICATOR);
 
-    btn = ui_command_button(mesh_status_panel, content_w - 288, 0, 60,
-                            ui_tr("Detect"), 0xF59E0B);
-    lv_obj_add_event_cb(btn, mesh_detector_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_height(btn, 54);
-    btn = ui_command_button(mesh_status_panel, content_w - 216, 0, 60,
-                            ui_tr("Map"), 0x3DA5FF);
-    lv_obj_add_event_cb(btn, mesh_map_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_height(btn, 54);
-    btn = ui_command_button(mesh_status_panel, content_w - 144, 0, 60,
-                            LV_SYMBOL_LIST, 0x25C281);
-    lv_obj_add_event_cb(btn, mesh_nodes_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_height(btn, 54);
-    btn = ui_command_button(mesh_status_panel, content_w - 72, 0, 60,
-                            LV_SYMBOL_SETTINGS, 0xA78BFA);
-    lv_obj_add_event_cb(btn, mesh_profile_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_height(btn, 54);
+    mesh_detect_button = ui_command_button(mesh_status_panel, 0, 0, 60,
+                                           ui_tr("Detect"), 0xF59E0B);
+    lv_obj_add_event_cb(mesh_detect_button, mesh_detector_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    mesh_map_button = ui_command_button(mesh_status_panel, 0, 0, 60,
+                                        ui_tr("Map"), 0x3DA5FF);
+    lv_obj_add_event_cb(mesh_map_button, mesh_map_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    mesh_nodes_button = ui_command_button(mesh_status_panel, 0, 0, 60,
+                                          LV_SYMBOL_LIST, 0x25C281);
+    lv_obj_add_event_cb(mesh_nodes_button, mesh_nodes_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    mesh_settings_button = ui_command_button(mesh_status_panel, 0, 0, 60,
+                                             LV_SYMBOL_SETTINGS, 0xA78BFA);
+    lv_obj_add_event_cb(mesh_settings_button, mesh_profile_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 
     mesh_chat_scroll = ui_panel(mesh_body, x, 0, content_w, 300);
     lv_obj_set_style_bg_color(mesh_chat_scroll, lv_color_hex(0x101820), 0);
@@ -11969,6 +12061,10 @@ void ui_meshtastic_cleanup(void)
     mesh_canned_button = NULL;
     mesh_voice_button = NULL;
     mesh_photo_button = NULL;
+    mesh_detect_button = NULL;
+    mesh_map_button = NULL;
+    mesh_nodes_button = NULL;
+    mesh_settings_button = NULL;
     mesh_choice_close();
     mesh_canned_delete_confirm_close();
     mesh_canned_close();
