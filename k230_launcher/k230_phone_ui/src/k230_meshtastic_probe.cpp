@@ -140,6 +140,11 @@
 #define MESHTASTIC_FLRC_PHOTO_MAX_PACKETS 512U
 #define MESHTASTIC_FLRC_PHOTO_MAX_BYTES \
     (MESHTASTIC_FLRC_PHOTO_MAX_PACKETS * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN)
+#define MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US 5000U
+#define MESHTASTIC_FLRC_PHOTO_ROUND_GAP_US 25000U
+#define MESHTASTIC_FLRC_PHOTO_DATA_REPEAT 2U
+#define MESHTASTIC_FLRC_PHOTO_START_REPEAT 4U
+#define MESHTASTIC_FLRC_PHOTO_DONE_REPEAT 5U
 #define MESHTASTIC_PHOTO_SOURCE_DIR "/root/photos"
 #define MESHTASTIC_PHOTO_STORE_DIR "/root/meshtastic/photos"
 #define MESHTASTIC_AIRTIME_CHANNEL_PERIODS 6U
@@ -2579,6 +2584,23 @@ static std::string mesh_hex_encode_bytes(const uint8_t *data, size_t len)
         out.push_back(mesh_hex_digit(data[i]));
     }
     return out.empty() ? "-" : out;
+}
+
+static std::string mesh_sha256_hex_bytes(const uint8_t *data, size_t len)
+{
+    uint8_t digest[SHA256_DIGEST_LENGTH];
+
+    if(!data || len == 0U) {
+        return "-";
+    }
+    SHA256(data, len, digest);
+    return mesh_hex_encode_bytes(digest, sizeof(digest));
+}
+
+static std::string mesh_sha256_hex_vector(const std::vector<uint8_t> &data)
+{
+    return data.empty() ? "-" :
+           mesh_sha256_hex_bytes(data.data(), data.size());
 }
 
 static bool mesh_hex_decode_bytes(const char *hex, uint8_t *out, size_t len)
@@ -14589,6 +14611,8 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
     uint16_t total = frame.flrc_photo_total_packets;
     uint32_t dims = ((uint32_t)frame.flrc_photo_width << 16U) |
                     frame.flrc_photo_height;
+    std::string stream_sha256 =
+        mesh_sha256_hex_vector(frame.flrc_photo_payload);
     int16_t state;
     bool ok = true;
 
@@ -14617,7 +14641,7 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
                  MESHTASTIC_FLRC_VOICE_BR_KBPS,
                  MESHTASTIC_FLRC_VOICE_POWER_DBM);
     start_us = monotonic_us();
-    for(unsigned r = 0; r < MESHTASTIC_FLRC_VOICE_START_REPEAT; r++) {
+    for(unsigned r = 0; r < MESHTASTIC_FLRC_PHOTO_START_REPEAT; r++) {
         mesh_flrc_voice_make_packet(packet, sizeof(packet),
                                     MESHTASTIC_FLRC_VOICE_TYPE_INVITE,
                                     frame.flrc_photo_stream_id, 0U, total,
@@ -14631,32 +14655,42 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
                          r + 1U, state, error_name(state));
             break;
         }
-        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+        usleep(MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US);
     }
-    for(uint16_t seq = 0U; ok && seq < total; seq++) {
-        size_t offset = (size_t)seq * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN;
-        size_t remain = frame.flrc_photo_payload.size() - offset;
-        uint16_t payload_len =
-            (uint16_t)std::min(remain,
-                               (size_t)MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN);
+    for(unsigned pass = 0; ok && pass < MESHTASTIC_FLRC_PHOTO_DATA_REPEAT;
+        pass++) {
+        for(uint16_t seq = 0U; ok && seq < total; seq++) {
+            size_t offset = (size_t)seq * MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN;
+            size_t remain = frame.flrc_photo_payload.size() - offset;
+            uint16_t payload_len =
+                (uint16_t)std::min(remain,
+                                   (size_t)MESHTASTIC_FLRC_VOICE_PAYLOAD_LEN);
 
-        mesh_flrc_voice_make_packet(packet, sizeof(packet),
-                                    MESHTASTIC_FLRC_VOICE_TYPE_DATA,
-                                    frame.flrc_photo_stream_id, seq, total,
-                                    frame.flrc_photo_payload,
-                                    frame.flrc_photo_payload.data() + offset,
-                                    payload_len, dims,
-                                    MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
-        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
-        if(state != RADIOLIB_ERR_NONE) {
-            ok = false;
-            daemon_event("FLRC photo TX data seq=%u/%u failed state=%d %s",
-                         seq + 1U, total, state, error_name(state));
-            break;
+            mesh_flrc_voice_make_packet(
+                packet, sizeof(packet), MESHTASTIC_FLRC_VOICE_TYPE_DATA,
+                frame.flrc_photo_stream_id, seq, total,
+                frame.flrc_photo_payload,
+                frame.flrc_photo_payload.data() + offset,
+                payload_len, dims, MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG);
+            state = mesh_flrc_voice_fast_transmit(lr2021, packet,
+                                                  sizeof(packet));
+            if(state != RADIOLIB_ERR_NONE) {
+                ok = false;
+                daemon_event("FLRC photo TX data pass=%u seq=%u/%u failed state=%d %s",
+                             pass + 1U, seq + 1U, total, state,
+                             error_name(state));
+                break;
+            }
+            usleep(MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US);
         }
-        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+        if(ok && pass + 1U < MESHTASTIC_FLRC_PHOTO_DATA_REPEAT) {
+            daemon_event("FLRC photo TX repeat pass=%u/%u stream=0x%08x",
+                         pass + 1U, MESHTASTIC_FLRC_PHOTO_DATA_REPEAT,
+                         frame.flrc_photo_stream_id);
+            usleep(MESHTASTIC_FLRC_PHOTO_ROUND_GAP_US);
+        }
     }
-    for(unsigned r = 0; ok && r < MESHTASTIC_FLRC_VOICE_DONE_REPEAT; r++) {
+    for(unsigned r = 0; ok && r < MESHTASTIC_FLRC_PHOTO_DONE_REPEAT; r++) {
         mesh_flrc_voice_make_packet(packet, sizeof(packet),
                                     MESHTASTIC_FLRC_VOICE_TYPE_DONE,
                                     frame.flrc_photo_stream_id, total - 1U,
@@ -14670,23 +14704,28 @@ static bool mesh_flrc_photo_tx_session(PhysicalLayer *radio, chip_type_t chip,
                          r + 1U, state, error_name(state));
             break;
         }
-        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
+        usleep(MESHTASTIC_FLRC_PHOTO_PACKET_GAP_US);
     }
     if(ok) {
         uint64_t elapsed_ms = (monotonic_us() - start_us) / 1000ULL;
         mesh_photo_tx_stream_count++;
-        mesh_photo_tx_chunk_count += total;
+        mesh_photo_tx_chunk_count +=
+            (uint64_t)total * MESHTASTIC_FLRC_PHOTO_DATA_REPEAT;
         if(!daemon_chat_update_photo_stream_status(frame.flrc_photo_stream_id,
                                                    "sent",
                                                    (unsigned long)elapsed_ms)) {
-            daemon_chat("TX 0x%08x photo %ux%u jpg packets=%u stream=0x%08x state=sent elapsed=%lums",
+            daemon_chat("TX 0x%08x photo %ux%u jpg packets=%u repeat=%u stream=0x%08x state=sent elapsed=%lums sha256=%s",
                         frame.from_node, frame.flrc_photo_width,
                         frame.flrc_photo_height, total,
+                        MESHTASTIC_FLRC_PHOTO_DATA_REPEAT,
                         frame.flrc_photo_stream_id,
-                        (unsigned long)elapsed_ms);
+                        (unsigned long)elapsed_ms,
+                        stream_sha256.c_str());
         }
-        daemon_event("FLRC photo TX done stream=0x%08x elapsed_ms=%lu",
-                     frame.flrc_photo_stream_id, (unsigned long)elapsed_ms);
+        daemon_event("FLRC photo TX done stream=0x%08x packets=%u repeat=%u elapsed_ms=%lu sha256=%s",
+                     frame.flrc_photo_stream_id, total,
+                     MESHTASTIC_FLRC_PHOTO_DATA_REPEAT,
+                     (unsigned long)elapsed_ms, stream_sha256.c_str());
     } else {
         if(!daemon_chat_update_photo_stream_status(frame.flrc_photo_stream_id,
                                                    "failed", 0UL)) {
@@ -14828,6 +14867,7 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
     if(received_count == invite.total) {
         char path[192];
         char errbuf[128];
+        std::string stream_sha256;
 
         stream.reserve(invite.total_size);
         for(uint16_t seq = 0U; seq < invite.total; seq++) {
@@ -14838,6 +14878,7 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
         }
         if((uint32_t)stream.size() == invite.total_size &&
            crc32_update(0, stream.data(), stream.size()) == invite.stream_crc) {
+            stream_sha256 = mesh_sha256_hex_vector(stream);
             if(mesh_photo_store_dir_ensure()) {
                 snprintf(path, sizeof(path),
                          MESHTASTIC_PHOTO_STORE_DIR
@@ -14846,10 +14887,14 @@ static bool mesh_flrc_photo_rx_session(const probe_options_t &opts,
                 if(mesh_photo_write_file(path, stream, errbuf,
                                          sizeof(errbuf))) {
                     mesh_photo_rx_complete_count++;
-                    daemon_chat("RX 0x%08x photo %ux%u jpg packets=%u rssi=%ddBm stream=0x%08x file=%s",
+                    daemon_chat("RX 0x%08x photo %ux%u jpg packets=%u rssi=%ddBm stream=0x%08x sha256=%s file=%s",
                                 mesh_header.from, width, height,
                                 invite.total, (int)roundf(control_rssi),
-                                invite.stream_id, path);
+                                invite.stream_id, stream_sha256.c_str(), path);
+                    daemon_event("FLRC photo RX saved from=0x%08x stream=0x%08x bytes=%u packets=%u sha256=%s file=%s",
+                                 mesh_header.from, invite.stream_id,
+                                 (unsigned)stream.size(), invite.total,
+                                 stream_sha256.c_str(), path);
                 } else {
                     mesh_photo_rx_decode_fail_count++;
                     daemon_chat("RX 0x%08x FLRC photo write failed: %s",
@@ -16699,6 +16744,7 @@ static std::string handle_daemon_command(const std::string &line,
         uint32_t stream_crc;
         uint16_t photo_w = MESHTASTIC_FLRC_PHOTO_MAX_W;
         uint16_t photo_h = MESHTASTIC_FLRC_PHOTO_MAX_H;
+        std::string stream_sha256;
         const char *path_arg = line.c_str() + 16;
         std::string path = trim_ipc_line(path_arg);
         std::string chat_path;
@@ -16751,6 +16797,7 @@ static std::string handle_daemon_command(const std::string &line,
             return "ERR queue-full\n";
         }
         stream_crc = crc32_update(0, jpeg_stream.data(), jpeg_stream.size());
+        stream_sha256 = mesh_sha256_hex_vector(jpeg_stream);
         invite_payload = mesh_flrc_photo_make_invite_payload(
             stream_id, jpeg_stream, photo_w, photo_h, total_packets);
         request.raw_payload = true;
@@ -16767,18 +16814,19 @@ static std::string handle_daemon_command(const std::string &line,
         request.flrc_photo_width = photo_w;
         request.flrc_photo_height = photo_h;
         send_queue->push_back(request);
-        daemon_chat("TX 0x%08x photo %ux%u jpg packets=%u stream=0x%08x state=queued file=%s",
+        daemon_chat("TX 0x%08x photo %ux%u jpg packets=%u stream=0x%08x state=queued sha256=%s file=%s",
                     opts.from_node, photo_w, photo_h, total_packets,
-                    stream_id, chat_path.empty() ? path.c_str() :
+                    stream_id, stream_sha256.c_str(),
+                    chat_path.empty() ? path.c_str() :
                     chat_path.c_str());
-        daemon_event("Daemon SEND_PHOTO queued stream=0x%08x control=mesh-private packets=%u bytes=%u crc=0x%08x depth=%u op=%s",
+        daemon_event("Daemon SEND_PHOTO queued stream=0x%08x control=mesh-private packets=%u bytes=%u crc=0x%08x sha256=%s depth=%u op=%s",
                      stream_id, total_packets, (unsigned)jpeg_stream.size(),
-                     stream_crc, (unsigned)send_queue->size(),
-                     op_name(active_op));
+                     stream_crc, stream_sha256.c_str(),
+                     (unsigned)send_queue->size(), op_name(active_op));
         snprintf(buf, sizeof(buf),
-                 "OK photo queued stream=0x%08x packets=%u bytes=%u depth=%u\n",
+                 "OK photo queued stream=0x%08x packets=%u bytes=%u sha256=%s depth=%u\n",
                  stream_id, total_packets, (unsigned)jpeg_stream.size(),
-                 (unsigned)send_queue->size());
+                 stream_sha256.c_str(), (unsigned)send_queue->size());
         return std::string(buf);
     }
     if(line.compare(0, 16, "SEND_VOICE_FILE ") == 0 ||

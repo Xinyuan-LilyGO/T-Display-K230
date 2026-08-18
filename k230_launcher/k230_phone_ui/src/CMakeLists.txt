@@ -235,6 +235,7 @@ target_link_libraries(${ui_target} PRIVATE
     avcodec
     avutil
     swscale
+    jpeg
     m
     pthread
 )

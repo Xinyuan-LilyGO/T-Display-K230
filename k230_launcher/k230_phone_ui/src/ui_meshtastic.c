@@ -16,6 +16,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <setjmp.h>
+#include <jpeglib.h>
 #include <string.h>
 #include <strings.h>
 #include <pthread.h>
@@ -128,6 +130,7 @@ static void mesh_nodes_event_cb(lv_event_t *event);
 static void mesh_detector_event_cb(lv_event_t *event);
 static void mesh_overlay_auto_refresh_tick(void);
 static void mesh_layout_main(void);
+static uint16_t mesh_rgb565(uint32_t rgb);
 
 static lv_obj_t *mesh_status_label;
 static lv_obj_t *mesh_detail_label;
@@ -221,6 +224,8 @@ static lv_obj_t *mesh_voice_preview_status_label;
 static lv_obj_t *mesh_photo_picker_overlay;
 static lv_obj_t *mesh_photo_preview_overlay;
 static lv_obj_t *mesh_photo_status_label;
+static uint8_t *mesh_photo_preview_pixels;
+static lv_image_dsc_t mesh_photo_preview_dsc;
 static lv_obj_t *mesh_voice_record_overlay;
 static lv_obj_t *mesh_voice_record_time_label;
 static lv_obj_t *mesh_voice_record_level_label;
@@ -246,6 +251,8 @@ typedef struct {
     char title[96];
     unsigned width;
     unsigned height;
+    uint8_t *thumb_pixels;
+    lv_image_dsc_t thumb_dsc;
 } mesh_photo_bubble_ctx_t;
 
 typedef enum {
@@ -1703,6 +1710,214 @@ static int mesh_photo_chat_path_allowed(const char *path)
     return 1;
 }
 
+static const char *mesh_photo_linux_path(const char *path)
+{
+    if(!path) {
+        return "";
+    }
+    if(strncmp(path, "A:", 2) == 0) {
+        return path + 2;
+    }
+    return path;
+}
+
+static int mesh_photo_file_readable(const char *path)
+{
+    const char *linux_path = mesh_photo_linux_path(path);
+
+    return linux_path[0] && access(linux_path, R_OK) == 0;
+}
+
+typedef struct {
+    struct jpeg_error_mgr pub;
+    jmp_buf setjmp_buffer;
+} mesh_photo_jpeg_error_mgr_t;
+
+static void mesh_photo_jpeg_error_exit(j_common_ptr cinfo)
+{
+    mesh_photo_jpeg_error_mgr_t *err =
+        (mesh_photo_jpeg_error_mgr_t *)cinfo->err;
+
+    longjmp(err->setjmp_buffer, 1);
+}
+
+static void mesh_photo_scale_rgb_to_rgb565(const uint8_t *src,
+                                           unsigned src_w, unsigned src_h,
+                                           uint8_t *dst,
+                                           unsigned dst_w, unsigned dst_h)
+{
+    unsigned draw_w = dst_w;
+    unsigned draw_h = dst_h;
+    unsigned off_x;
+    unsigned off_y;
+    uint16_t bg = mesh_rgb565(0x05070A);
+
+    if(!dst || dst_w == 0U || dst_h == 0U) {
+        return;
+    }
+    for(unsigned y = 0U; y < dst_h; y++) {
+        for(unsigned x = 0U; x < dst_w; x++) {
+            size_t off = ((size_t)y * dst_w + x) * 2U;
+            dst[off + 0U] = (uint8_t)(bg & 0xffU);
+            dst[off + 1U] = (uint8_t)(bg >> 8U);
+        }
+    }
+    if(!src || src_w == 0U || src_h == 0U) {
+        return;
+    }
+    if((uint64_t)src_w * dst_h > (uint64_t)src_h * dst_w) {
+        draw_h = (unsigned)(((uint64_t)src_h * dst_w) / src_w);
+        if(draw_h == 0U) {
+            draw_h = 1U;
+        }
+    } else {
+        draw_w = (unsigned)(((uint64_t)src_w * dst_h) / src_h);
+        if(draw_w == 0U) {
+            draw_w = 1U;
+        }
+    }
+    off_x = (dst_w - draw_w) / 2U;
+    off_y = (dst_h - draw_h) / 2U;
+    for(unsigned y = 0U; y < draw_h; y++) {
+        unsigned sy = (unsigned)(((uint64_t)y * src_h) / draw_h);
+
+        if(sy >= src_h) {
+            sy = src_h - 1U;
+        }
+        for(unsigned x = 0U; x < draw_w; x++) {
+            unsigned sx = (unsigned)(((uint64_t)x * src_w) / draw_w);
+            size_t src_off;
+            size_t dst_off;
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+            uint16_t color;
+
+            if(sx >= src_w) {
+                sx = src_w - 1U;
+            }
+            src_off = ((size_t)sy * src_w + sx) * 3U;
+            dst_off = ((size_t)(off_y + y) * dst_w + (off_x + x)) * 2U;
+            r = src[src_off + 0U];
+            g = src[src_off + 1U];
+            b = src[src_off + 2U];
+            color = (uint16_t)(((uint16_t)(r & 0xf8U) << 8U) |
+                               ((uint16_t)(g & 0xfcU) << 3U) |
+                               ((uint16_t)b >> 3U));
+            dst[dst_off + 0U] = (uint8_t)(color & 0xffU);
+            dst[dst_off + 1U] = (uint8_t)(color >> 8U);
+        }
+    }
+}
+
+static int mesh_photo_load_jpeg_rgb565(const char *path, unsigned view_w,
+                                       unsigned view_h, uint8_t **pixels,
+                                       lv_image_dsc_t *dsc,
+                                       unsigned *src_w_out,
+                                       unsigned *src_h_out)
+{
+    FILE *fp = NULL;
+    struct jpeg_decompress_struct cinfo;
+    mesh_photo_jpeg_error_mgr_t jerr;
+    uint8_t *src_rgb = NULL;
+    uint8_t *dst = NULL;
+    size_t src_stride;
+    size_t src_size;
+    size_t dst_size;
+    int ok = -1;
+
+    if(pixels) {
+        *pixels = NULL;
+    }
+    if(src_w_out) {
+        *src_w_out = 0U;
+    }
+    if(src_h_out) {
+        *src_h_out = 0U;
+    }
+    if(!path || !path[0] || !pixels || !dsc ||
+       view_w == 0U || view_h == 0U) {
+        return -1;
+    }
+
+    fp = fopen(mesh_photo_linux_path(path), "rb");
+    if(!fp) {
+        return -1;
+    }
+
+    memset(&cinfo, 0, sizeof(cinfo));
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = mesh_photo_jpeg_error_exit;
+    if(setjmp(jerr.setjmp_buffer)) {
+        jpeg_destroy_decompress(&cinfo);
+        free(src_rgb);
+        free(dst);
+        fclose(fp);
+        return -1;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    jpeg_stdio_src(&cinfo, fp);
+    jpeg_read_header(&cinfo, TRUE);
+    cinfo.out_color_space = JCS_RGB;
+    jpeg_start_decompress(&cinfo);
+    if(cinfo.output_width == 0U || cinfo.output_height == 0U ||
+       cinfo.output_components != 3U) {
+        jpeg_finish_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        fclose(fp);
+        return -1;
+    }
+
+    src_stride = (size_t)cinfo.output_width * 3U;
+    src_size = src_stride * cinfo.output_height;
+    dst_size = (size_t)view_w * view_h * 2U;
+    src_rgb = (uint8_t *)malloc(src_size);
+    dst = (uint8_t *)malloc(dst_size);
+    if(!src_rgb || !dst) {
+        jpeg_finish_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        free(src_rgb);
+        free(dst);
+        fclose(fp);
+        return -1;
+    }
+
+    while(cinfo.output_scanline < cinfo.output_height) {
+        JSAMPROW row[1];
+        row[0] = src_rgb + (size_t)cinfo.output_scanline * src_stride;
+        jpeg_read_scanlines(&cinfo, row, 1);
+    }
+    mesh_photo_scale_rgb_to_rgb565(src_rgb, cinfo.output_width,
+                                   cinfo.output_height, dst, view_w,
+                                   view_h);
+    if(src_w_out) {
+        *src_w_out = cinfo.output_width;
+    }
+    if(src_h_out) {
+        *src_h_out = cinfo.output_height;
+    }
+
+    memset(dsc, 0, sizeof(*dsc));
+    dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
+    dsc->header.cf = LV_COLOR_FORMAT_RGB565;
+    dsc->header.w = view_w;
+    dsc->header.h = view_h;
+    dsc->header.stride = view_w * 2U;
+    dsc->data_size = dst_size;
+    dsc->data = dst;
+    *pixels = dst;
+    dst = NULL;
+    ok = 0;
+
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    free(src_rgb);
+    free(dst);
+    fclose(fp);
+    return ok;
+}
+
 static int mesh_chat_parse_photo_line(const char *line, int *sent,
                                       char *node, size_t node_len,
                                       char *path, size_t path_len,
@@ -2095,6 +2310,9 @@ static void mesh_photo_preview_close(void)
         lv_obj_delete(mesh_photo_preview_overlay);
     }
     mesh_photo_preview_overlay = NULL;
+    free(mesh_photo_preview_pixels);
+    mesh_photo_preview_pixels = NULL;
+    memset(&mesh_photo_preview_dsc, 0, sizeof(mesh_photo_preview_dsc));
 }
 
 static void mesh_photo_preview_close_event_cb(lv_event_t *event)
@@ -2118,7 +2336,8 @@ static void mesh_photo_preview_open(const mesh_photo_bubble_ctx_t *ctx)
     int panel_h = screen_h - margin * 2;
     int img_w;
     int img_h;
-    int scale = 256;
+    int avail_w;
+    int avail_h;
 
     if(!ctx || !ctx->path[0]) {
         return;
@@ -2153,28 +2372,26 @@ static void mesh_photo_preview_open(const mesh_photo_bubble_ctx_t *ctx)
     lv_obj_add_event_cb(btn, mesh_photo_preview_close_event_cb,
                         LV_EVENT_CLICKED, NULL);
 
-    img = lv_image_create(panel);
-    lv_image_set_src(img, ctx->path);
-    if(ctx->width > 0U && ctx->height > 0U) {
-        int avail_w = panel_w;
-        int avail_h = panel_h - 58;
-        int scale_w = (avail_w * 256) / (int)ctx->width;
-        int scale_h = (avail_h * 256) / (int)ctx->height;
-
-        scale = scale_w < scale_h ? scale_w : scale_h;
-        if(scale < 1) {
-            scale = 1;
-        }
-        if(scale > 512) {
-            scale = 512;
-        }
+    avail_w = panel_w;
+    avail_h = panel_h - 58;
+    img_w = avail_w;
+    img_h = avail_h;
+    if(mesh_photo_load_jpeg_rgb565(ctx->path, (unsigned)avail_w,
+                                   (unsigned)avail_h,
+                                   &mesh_photo_preview_pixels,
+                                   &mesh_photo_preview_dsc, NULL,
+                                   NULL) == 0) {
+        img = lv_image_create(panel);
+        lv_image_set_src(img, &mesh_photo_preview_dsc);
+        lv_obj_set_size(img, img_w, img_h);
+        lv_obj_set_pos(img, 0, 54);
+    } else {
+        lv_obj_t *error = ui_label(panel, ui_tr("Photo unavailable"),
+                                   &lv_font_montserrat_20, 0xF5A524);
+        lv_obj_set_width(error, panel_w);
+        lv_obj_set_style_text_align(error, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(error, 0, 54 + (avail_h - 28) / 2);
     }
-    lv_image_set_scale(img, scale);
-    img_w = ctx->width > 0U ? ((int)ctx->width * scale) / 256 : panel_w;
-    img_h = ctx->height > 0U ? ((int)ctx->height * scale) / 256 :
-            panel_h - 58;
-    lv_obj_set_pos(img, (panel_w - img_w) / 2,
-                   54 + (panel_h - 58 - img_h) / 2);
     app_request_fast_refresh();
 }
 
@@ -2192,6 +2409,9 @@ static void mesh_photo_bubble_event_cb(lv_event_t *event)
         return;
     }
     if(code == LV_EVENT_DELETE) {
+        if(ctx) {
+            free(ctx->thumb_pixels);
+        }
         free(ctx);
     }
 }
@@ -2382,6 +2602,7 @@ static void mesh_chat_add_bubble(const char *line)
     char voice_path[512] = "";
     char voice_duration[24] = "";
     char photo_path[192] = "";
+    char photo_lvgl_path[200] = "";
     char photo_dims[32] = "";
     char photo_node[32] = "";
     char status[24];
@@ -2393,6 +2614,7 @@ static void mesh_chat_add_bubble(const char *line)
     int bubble_w;
     int is_voice = 0;
     int is_photo = 0;
+    int photo_failed = 0;
     unsigned photo_w = 680U;
     unsigned photo_h = 480U;
     uint32_t footer_color = 0x94A3B8;
@@ -2428,15 +2650,33 @@ static void mesh_chat_add_bubble(const char *line)
                                          sizeof(photo_path), photo_dims,
                                          sizeof(photo_dims))) {
         is_photo = 1;
-        if(sscanf(photo_dims, "%ux%u", &photo_w, &photo_h) != 2 ||
+        if(strstr(line, "incomplete")) {
+            photo_failed = 1;
+            photo_path[0] = '\0';
+            snprintf(body, sizeof(body), "%s",
+                     ui_tr("Photo receive incomplete"));
+        } else if(strstr(line, "failed") || strstr(line, "unavailable") ||
+                  strstr(line, "crc")) {
+            photo_failed = 1;
+            photo_path[0] = '\0';
+            snprintf(body, sizeof(body), "%s", ui_tr("Photo transfer failed"));
+        } else if(photo_path[0] && !mesh_photo_file_readable(photo_path)) {
+            photo_failed = 1;
+            photo_path[0] = '\0';
+            snprintf(body, sizeof(body), "%s", ui_tr("Photo unavailable"));
+        } else if(sscanf(photo_dims, "%ux%u", &photo_w, &photo_h) != 2 ||
            photo_w == 0U || photo_h == 0U) {
             photo_w = 680U;
             photo_h = 480U;
         }
-        snprintf(body, sizeof(body), "%s%s%s",
-                 ui_tr("Photo message"),
-                 photo_dims[0] ? " " : "",
-                 photo_dims);
+        if(!photo_failed) {
+            snprintf(body, sizeof(body), "%s%s%s",
+                     ui_tr("Photo message"),
+                     photo_dims[0] ? " " : "",
+                     photo_dims);
+            snprintf(photo_lvgl_path, sizeof(photo_lvgl_path), "%s",
+                     photo_path);
+        }
         snprintf(meta, sizeof(meta), "%s %s",
                  sent ? "TX" : "RX", photo_node[0] ? photo_node : "photo");
     }
@@ -2486,37 +2726,50 @@ static void mesh_chat_add_bubble(const char *line)
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
 
-    if(photo_path[0]) {
+    if(photo_lvgl_path[0]) {
         mesh_photo_bubble_ctx_t *ctx =
             (mesh_photo_bubble_ctx_t *)calloc(1, sizeof(*ctx));
-        lv_obj_t *img = lv_image_create(bubble);
         int max_img_w = bubble_w - 20;
         int max_img_h = ui_is_landscape() ? 160 : 220;
-        int scale_w = (max_img_w * 256) / (int)photo_w;
-        int scale_h = (max_img_h * 256) / (int)photo_h;
-        int scale = scale_w < scale_h ? scale_w : scale_h;
+        int img_w = max_img_w;
+        int img_h = photo_w > 0U ?
+            (int)(((uint64_t)photo_h * (uint64_t)img_w) / photo_w) :
+            max_img_h;
 
-        if(scale < 1) {
-            scale = 1;
+        if(img_h < 1) {
+            img_h = 1;
         }
-        if(scale > 256) {
-            scale = 256;
+        if(img_h > max_img_h) {
+            img_h = max_img_h;
+            img_w = photo_h > 0U ?
+                (int)(((uint64_t)photo_w * (uint64_t)img_h) / photo_h) :
+                max_img_w;
+            if(img_w < 1) {
+                img_w = 1;
+            }
         }
-        lv_image_set_src(img, photo_path);
-        lv_image_set_scale(img, scale);
-        lv_obj_set_width(img, max_img_w);
-        lv_obj_set_style_radius(img, 6, 0);
-        lv_obj_set_style_clip_corner(img, true, 0);
-        lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE |
-                        LV_OBJ_FLAG_EVENT_BUBBLE);
-        if(ctx) {
-            snprintf(ctx->path, sizeof(ctx->path), "%s", photo_path);
+        if(ctx &&
+           mesh_photo_load_jpeg_rgb565(photo_lvgl_path, (unsigned)img_w,
+                                       (unsigned)img_h, &ctx->thumb_pixels,
+                                       &ctx->thumb_dsc, &ctx->width,
+                                       &ctx->height) == 0) {
+            lv_obj_t *img = lv_image_create(bubble);
+
+            lv_image_set_src(img, &ctx->thumb_dsc);
+            lv_obj_set_size(img, img_w, img_h);
+            lv_obj_set_style_radius(img, 6, 0);
+            lv_obj_set_style_clip_corner(img, true, 0);
+            lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE |
+                            LV_OBJ_FLAG_EVENT_BUBBLE);
+            snprintf(ctx->path, sizeof(ctx->path), "%s", photo_lvgl_path);
             snprintf(ctx->title, sizeof(ctx->title), "%s", body);
-            ctx->width = photo_w;
-            ctx->height = photo_h;
             lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(bubble, mesh_photo_bubble_event_cb,
                                 LV_EVENT_ALL, ctx);
+        } else {
+            free(ctx);
+            snprintf(body, sizeof(body), "%s", ui_tr("Photo unavailable"));
+            mesh_append_log("photo decode failed: %s", photo_lvgl_path);
         }
     }
 
