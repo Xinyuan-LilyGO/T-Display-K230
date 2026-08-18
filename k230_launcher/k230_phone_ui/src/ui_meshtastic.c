@@ -120,6 +120,7 @@
 #define MESHTASTIC_MAP_PINCH_OUT_RATIO 0.76
 #define MESHTASTIC_MAP_FAKE_LAT 23.1291
 #define MESHTASTIC_MAP_FAKE_LON 113.2644
+#define MESHTASTIC_MAP_RESPONSE_MAX 32768
 #define MESHTASTIC_PREF_MAP_FAKE_GPS "meshtastic.map.fake_gps"
 #define MESHTASTIC_PREF_MAP_ZOOM "meshtastic.map.zoom"
 #define MESHTASTIC_NODE_RECENT_WINDOW_S 900
@@ -6776,6 +6777,391 @@ static int mesh_node_text_missing(const char *text)
     return !text || !text[0] || strcmp(text, "-") == 0;
 }
 
+static long mesh_line_long_value(const char *line, const char *key,
+                                 long fallback)
+{
+    char text[32];
+    char *endptr;
+    long value;
+
+    if(!mesh_node_line_value(line, key, text, sizeof(text)) ||
+       mesh_node_text_missing(text)) {
+        return fallback;
+    }
+    value = strtol(text, &endptr, 10);
+    if(endptr == text) {
+        return fallback;
+    }
+    return value;
+}
+
+static double mesh_line_double_value(const char *line, const char *key,
+                                     double fallback)
+{
+    char text[40];
+    char *endptr;
+    double value;
+
+    if(!mesh_node_line_value(line, key, text, sizeof(text)) ||
+       mesh_node_text_missing(text)) {
+        return fallback;
+    }
+    value = strtod(text, &endptr);
+    if(endptr == text || !isfinite(value)) {
+        return fallback;
+    }
+    return value;
+}
+
+static int mesh_line_bool_value(const char *line, const char *key)
+{
+    char text[16];
+
+    if(!mesh_node_line_value(line, key, text, sizeof(text))) {
+        return 0;
+    }
+    return strcmp(text, "1") == 0 || strcmp(text, "yes") == 0 ||
+           strcmp(text, "true") == 0;
+}
+
+static int mesh_append_text(char *out, size_t out_len, const char *fmt, ...)
+{
+    va_list ap;
+    size_t used;
+    int rc;
+
+    if(!out || out_len == 0U || !fmt) {
+        return -1;
+    }
+    used = strlen(out);
+    if(used >= out_len) {
+        return -1;
+    }
+    va_start(ap, fmt);
+    rc = vsnprintf(out + used, out_len - used, fmt, ap);
+    va_end(ap);
+    if(rc < 0 || (size_t)rc >= out_len - used) {
+        out[out_len - 1U] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+static int mesh_map_extract_first_line(const char *map_text, char *out,
+                                       size_t out_len)
+{
+    const char *end;
+    size_t n;
+
+    if(!map_text || !out || out_len == 0U) {
+        return -1;
+    }
+    end = strchr(map_text, '\n');
+    n = end ? (size_t)(end - map_text) : strlen(map_text);
+    if(n >= out_len) {
+        n = out_len - 1U;
+    }
+    memcpy(out, map_text, n);
+    out[n] = '\0';
+    return out[0] ? 0 : -1;
+}
+
+static int mesh_map_node_has_visible_identity(const char *line)
+{
+    char name[64];
+    char short_name[24];
+    long hw;
+    long rx;
+    long age_s;
+    int has_name;
+    int has_short;
+    int key_ok;
+    int has_pos;
+
+    mesh_node_line_value(line, "name=", name, sizeof(name));
+    mesh_node_line_value(line, "short=", short_name, sizeof(short_name));
+    hw = mesh_line_long_value(line, "hw=", -1);
+    rx = mesh_line_long_value(line, "rx=", 0);
+    age_s = mesh_line_long_value(line, "age_s=", 999999);
+    has_name = !mesh_node_text_missing(name);
+    has_short = !mesh_node_text_missing(short_name);
+    key_ok = mesh_line_bool_value(line, "key=");
+    has_pos = mesh_line_bool_value(line, "has_pos=");
+
+    if(!has_name && !has_short && !has_pos && !key_ok && hw < 0 && rx <= 1) {
+        return 0;
+    }
+    if(age_s > 24L * 3600L && !has_pos) {
+        return 0;
+    }
+    return 1;
+}
+
+static int mesh_map_node_to_legacy_line(const char *line, char *out,
+                                        size_t out_len)
+{
+    char id[24];
+    char name[64];
+    char short_name[24];
+    char key[8];
+    char tel[160];
+    char pos[160];
+    long hw;
+    long age_s;
+    long rx;
+    long rssi;
+    double snr;
+    double lat;
+    double lon;
+    long alt;
+    long sats;
+    long precision;
+    long ts;
+    long battery;
+    double voltage;
+    double ch_util;
+    double air_tx;
+    int has_pos;
+    int has_tel = 0;
+
+    if(!line || strncmp(line, "NODE ", 5) != 0 || !out || out_len == 0U) {
+        return -1;
+    }
+    if(!mesh_node_line_value(line, "id=", id, sizeof(id)) ||
+       mesh_node_text_missing(id)) {
+        return -1;
+    }
+    mesh_node_line_value(line, "name=", name, sizeof(name));
+    mesh_node_line_value(line, "short=", short_name, sizeof(short_name));
+    if(mesh_node_text_missing(name) && !mesh_node_text_missing(short_name)) {
+        snprintf(name, sizeof(name), "%s", short_name);
+    }
+    if(mesh_node_text_missing(name)) {
+        snprintf(name, sizeof(name), "-");
+    }
+    if(mesh_node_text_missing(short_name)) {
+        snprintf(short_name, sizeof(short_name), "-");
+    }
+    hw = mesh_line_long_value(line, "hw=", -1);
+    rx = mesh_line_long_value(line, "rx=", 0);
+    age_s = mesh_line_long_value(line, "age_s=", 999999);
+    rssi = mesh_line_long_value(line, "rssi=", -999);
+    snr = mesh_line_double_value(line, "snr=", 0.0);
+    has_pos = mesh_line_bool_value(line, "has_pos=");
+    lat = mesh_line_double_value(line, "lat=", 0.0);
+    lon = mesh_line_double_value(line, "lon=", 0.0);
+    alt = mesh_line_long_value(line, "alt=", 0);
+    sats = mesh_line_long_value(line, "sats=", 0);
+    precision = mesh_line_long_value(line, "precision=", 0);
+    ts = mesh_line_long_value(line, "ts=", 0);
+    battery = mesh_line_long_value(line, "battery=", -1);
+    voltage = mesh_line_double_value(line, "voltage=", 0.0);
+    ch_util = mesh_line_double_value(line, "ch_util=", -1.0);
+    air_tx = mesh_line_double_value(line, "air_tx=", -1.0);
+    snprintf(key, sizeof(key), "%s",
+             mesh_line_bool_value(line, "key=") ? "yes" : "no");
+
+    tel[0] = '\0';
+    if(battery >= 0) {
+        mesh_append_text(tel, sizeof(tel), "bat=%ld", battery);
+        has_tel = 1;
+    }
+    if(voltage > 0.0) {
+        mesh_append_text(tel, sizeof(tel), "%sv=%.2f",
+                         has_tel ? " " : "", voltage);
+        has_tel = 1;
+    }
+    if(ch_util >= 0.0) {
+        mesh_append_text(tel, sizeof(tel), "%sch=%.1f",
+                         has_tel ? " " : "", ch_util);
+        has_tel = 1;
+    }
+    if(air_tx >= 0.0) {
+        mesh_append_text(tel, sizeof(tel), "%sair=%.2f",
+                         has_tel ? " " : "", air_tx);
+        has_tel = 1;
+    }
+    if(!has_tel) {
+        snprintf(tel, sizeof(tel), "-");
+    }
+
+    if(has_pos && (fabs(lat) >= 0.000001 || fabs(lon) >= 0.000001)) {
+        snprintf(pos, sizeof(pos),
+                 "%.7f,%.7f alt=%ldm speed=- track=- sats=%ld "
+                 "precision=%ld time=%ld",
+                 lat, lon, alt, sats, precision, ts);
+    } else {
+        snprintf(pos, sizeof(pos), "-");
+    }
+
+    snprintf(out, out_len,
+             "%s name=%s short=%s hw=%ld key=%s rx=%ld age=%lds "
+             "rssi=%lddBm snr=%.1f pos=%s tel=%s trace=- nbr=-",
+             id, name, short_name, hw, key, rx, age_s, rssi, snr, pos, tel);
+    return 0;
+}
+
+static int mesh_map_waypoint_to_legacy_line(const char *line, char *out,
+                                            size_t out_len)
+{
+    char id[24];
+    char from[24];
+    char age[24];
+    char lat[32];
+    char lon[32];
+    char expire[24];
+    char locked[24];
+    char icon[24];
+    char name[48];
+    char desc[96];
+    double lat_value;
+    double lon_value;
+
+    if(!line || strncmp(line, "WAYPOINT ", 9) != 0 || !out ||
+       out_len == 0U) {
+        return -1;
+    }
+    if(!mesh_node_line_value(line, "lat=", lat, sizeof(lat)) ||
+       !mesh_node_line_value(line, "lon=", lon, sizeof(lon))) {
+        return -1;
+    }
+    lat_value = mesh_line_double_value(line, "lat=", 0.0);
+    lon_value = mesh_line_double_value(line, "lon=", 0.0);
+    if(fabs(lat_value) < 0.000001 && fabs(lon_value) < 0.000001) {
+        return -1;
+    }
+    mesh_node_line_value(line, "id=", id, sizeof(id));
+    mesh_node_line_value(line, "from=", from, sizeof(from));
+    mesh_node_line_value(line, "age_s=", age, sizeof(age));
+    mesh_node_line_value(line, "expire=", expire, sizeof(expire));
+    mesh_node_line_value(line, "locked=", locked, sizeof(locked));
+    mesh_node_line_value(line, "icon=", icon, sizeof(icon));
+    mesh_node_line_value(line, "name=", name, sizeof(name));
+    mesh_node_line_value(line, "desc=", desc, sizeof(desc));
+    if(mesh_node_text_missing(id)) {
+        snprintf(id, sizeof(id), "0x00000000");
+    }
+    if(mesh_node_text_missing(from)) {
+        snprintf(from, sizeof(from), "0x00000000");
+    }
+    if(mesh_node_text_missing(age)) {
+        snprintf(age, sizeof(age), "0");
+    }
+    if(mesh_node_text_missing(expire)) {
+        snprintf(expire, sizeof(expire), "0");
+    }
+    if(mesh_node_text_missing(locked)) {
+        snprintf(locked, sizeof(locked), "0x00000000");
+    }
+    if(mesh_node_text_missing(icon)) {
+        snprintf(icon, sizeof(icon), "0x00000000");
+    }
+    if(mesh_node_text_missing(name)) {
+        snprintf(name, sizeof(name), "%s", ui_tr("Waypoint"));
+    }
+    if(mesh_node_text_missing(desc)) {
+        snprintf(desc, sizeof(desc), "-");
+    }
+    snprintf(out, out_len,
+             "wp id=%s from=%s age=%ss lat=%s lon=%s expire=%s "
+             "locked=%s icon=%s name=%s desc=%s",
+             id, from, age, lat, lon, expire, locked, icon, name, desc);
+    return 0;
+}
+
+static int mesh_map_build_legacy_nodes(const char *map_text, char *out,
+                                       size_t out_len)
+{
+    char copy[MESHTASTIC_MAP_RESPONSE_MAX];
+    char legacy[MESHTASTIC_UI_NODE_LINE_MAX];
+    char *saveptr = NULL;
+    char *line;
+    int count = 0;
+
+    if(!map_text || strncmp(map_text, "OK map", 6) != 0 || !out ||
+       out_len == 0U) {
+        return -1;
+    }
+    out[0] = '\0';
+    snprintf(copy, sizeof(copy), "%s", map_text);
+    line = strtok_r(copy, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "NODE ", 5) == 0 &&
+           mesh_map_node_has_visible_identity(line) &&
+           mesh_map_node_to_legacy_line(line, legacy, sizeof(legacy)) == 0) {
+            if(mesh_append_text(out, out_len, "%s\n", legacy) != 0) {
+                return count > 0 ? count : -1;
+            }
+            count++;
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    return count;
+}
+
+static int mesh_map_build_legacy_waypoints(const char *map_text, char *out,
+                                           size_t out_len)
+{
+    char copy[MESHTASTIC_MAP_RESPONSE_MAX];
+    char legacy[512];
+    char *saveptr = NULL;
+    char *line;
+    int count = 0;
+
+    if(!map_text || strncmp(map_text, "OK map", 6) != 0 || !out ||
+       out_len == 0U) {
+        return -1;
+    }
+    out[0] = '\0';
+    snprintf(copy, sizeof(copy), "%s", map_text);
+    line = strtok_r(copy, "\n", &saveptr);
+    while(line) {
+        if(strncmp(line, "WAYPOINT ", 9) == 0 &&
+           mesh_map_waypoint_to_legacy_line(line, legacy,
+                                            sizeof(legacy)) == 0) {
+            if(mesh_append_text(out, out_len, "%s\n", legacy) != 0) {
+                return count > 0 ? count : -1;
+            }
+            count++;
+        }
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    return count;
+}
+
+static int mesh_fetch_legacy_nodes(char *nodes_text, size_t nodes_len,
+                                   char *error_text, size_t error_len)
+{
+    char map_response[MESHTASTIC_MAP_RESPONSE_MAX];
+    char response[8192];
+
+    if(nodes_text && nodes_len > 0U) {
+        nodes_text[0] = '\0';
+    }
+    if(error_text && error_len > 0U) {
+        error_text[0] = '\0';
+    }
+    if(!nodes_text || nodes_len == 0U) {
+        return -1;
+    }
+    if(mesh_ipc_command("MAP\n", map_response, sizeof(map_response)) == 0 &&
+       strncmp(map_response, "OK map", 6) == 0 &&
+       mesh_map_build_legacy_nodes(map_response, nodes_text, nodes_len) >= 0) {
+        return 0;
+    }
+    if(mesh_ipc_command("NODES\n", response, sizeof(response)) != 0) {
+        if(error_text && error_len > 0U) {
+            snprintf(error_text, error_len, "%s", response);
+        }
+        return -1;
+    }
+    snprintf(nodes_text, nodes_len, "%s", response);
+    if(strncmp(nodes_text, "OK nodes\n", 9) == 0) {
+        memmove(nodes_text, nodes_text + 9, strlen(nodes_text + 9) + 1U);
+    }
+    return 0;
+}
+
 static void mesh_node_append_line(char *out, size_t out_len,
                                   const char *name, const char *value)
 {
@@ -7082,6 +7468,9 @@ static void mesh_map_status_stats_line(const char *status, char *out,
     }
     mesh_status_field(status, "nmea_rx", rx, sizeof(rx), "0");
     mesh_status_field(status, "gnss_sats_seen", sats, sizeof(sats), "0");
+    if(strcmp(sats, "0") == 0) {
+        mesh_status_field(status, "sats", sats, sizeof(sats), "0");
+    }
     mesh_status_field(status, "ttff_ms", ttff, sizeof(ttff), "0");
     mesh_status_field(status, "ttff_valid", ttff_valid, sizeof(ttff_valid),
                       "0");
@@ -7137,6 +7526,9 @@ static int mesh_map_status_position(const char *status, double *lat,
 
     mesh_status_field(status, "nrf9151", nrf9151, sizeof(nrf9151), "missing");
     mesh_status_field(status, "gnss_phase", phase, sizeof(phase), "-");
+    if(strcmp(phase, "-") == 0) {
+        mesh_status_field(status, "phase", phase, sizeof(phase), "-");
+    }
     mesh_map_status_stats_line(status, stats, sizeof(stats));
     if(strcmp(nrf9151, "present") != 0) {
         if(reason && reason_len > 0U) {
@@ -8276,6 +8668,7 @@ static void mesh_map_rebuild(void)
     char status[4096];
     char nodes[8192];
     char waypoints[4096];
+    char map_response[MESHTASTIC_MAP_RESPONSE_MAX];
     char reason[128];
     char info[256];
     double lat = 0.0;
@@ -8330,20 +8723,35 @@ static void mesh_map_rebuild(void)
     mesh_map_pinch_active = 0;
     lv_obj_clean(mesh_map_overlay);
 
-    if(mesh_ipc_command("STATUS\n", status, sizeof(status)) != 0) {
-        snprintf(status, sizeof(status), "%s", mesh_status_text);
-    }
     nodes[0] = '\0';
-    if(mesh_ipc_command("NODES\n", nodes, sizeof(nodes)) != 0) {
-        nodes[0] = '\0';
-    } else if(strncmp(nodes, "OK nodes\n", 9) == 0) {
-        memmove(nodes, nodes + 9, strlen(nodes + 9) + 1U);
-    }
     waypoints[0] = '\0';
-    if(mesh_ipc_command("WAYPOINTS\n", waypoints, sizeof(waypoints)) != 0) {
-        waypoints[0] = '\0';
-    } else if(strncmp(waypoints, "OK waypoints\n", 13) == 0) {
-        memmove(waypoints, waypoints + 13, strlen(waypoints + 13) + 1U);
+    map_response[0] = '\0';
+    if(mesh_ipc_command("MAP\n", map_response, sizeof(map_response)) == 0 &&
+       strncmp(map_response, "OK map", 6) == 0) {
+        if(mesh_map_extract_first_line(map_response, status,
+                                       sizeof(status)) != 0) {
+            snprintf(status, sizeof(status), "%s", mesh_status_text);
+        }
+        (void)mesh_map_build_legacy_nodes(map_response, nodes,
+                                          sizeof(nodes));
+        (void)mesh_map_build_legacy_waypoints(map_response, waypoints,
+                                              sizeof(waypoints));
+    } else {
+        if(mesh_ipc_command("STATUS\n", status, sizeof(status)) != 0) {
+            snprintf(status, sizeof(status), "%s", mesh_status_text);
+        }
+        if(mesh_ipc_command("NODES\n", nodes, sizeof(nodes)) != 0) {
+            nodes[0] = '\0';
+        } else if(strncmp(nodes, "OK nodes\n", 9) == 0) {
+            memmove(nodes, nodes + 9, strlen(nodes + 9) + 1U);
+        }
+        if(mesh_ipc_command("WAYPOINTS\n", waypoints,
+                            sizeof(waypoints)) != 0) {
+            waypoints[0] = '\0';
+        } else if(strncmp(waypoints, "OK waypoints\n", 13) == 0) {
+            memmove(waypoints, waypoints + 13,
+                    strlen(waypoints + 13) + 1U);
+        }
     }
     has_position = mesh_map_current_position(status, &lat, &lon, reason,
                                              sizeof(reason), &position_state);
@@ -9131,15 +9539,11 @@ static void mesh_detector_event_cb(lv_event_t *event)
         mesh_append_log("detector status failed: %s", status);
         snprintf(status, sizeof(status), "%s", "ERR offline");
     }
-    if(mesh_ipc_command("NODES\n", nodes_response,
-                        sizeof(nodes_response)) != 0) {
+    if(mesh_fetch_legacy_nodes(nodes_text, sizeof(nodes_text),
+                               nodes_response, sizeof(nodes_response)) != 0) {
         ui_trim_text(nodes_response);
         mesh_append_log("detector nodes failed: %s", nodes_response);
-        snprintf(nodes_response, sizeof(nodes_response), "%s", "");
-    }
-    snprintf(nodes_text, sizeof(nodes_text), "%s", nodes_response);
-    if(strncmp(nodes_text, "OK nodes\n", 9) == 0) {
-        memmove(nodes_text, nodes_text + 9, strlen(nodes_text + 9) + 1U);
+        nodes_text[0] = '\0';
     }
 
     mesh_status_field(status, "region", region, sizeof(region), "-");
@@ -9539,14 +9943,11 @@ static void mesh_nodes_event_cb(lv_event_t *event)
 
     (void)event;
     ui_input_hide_inline_active();
-    if(mesh_ipc_command("NODES\n", response, sizeof(response)) != 0) {
+    if(mesh_fetch_legacy_nodes(nodes_text, sizeof(nodes_text),
+                               response, sizeof(response)) != 0) {
         ui_trim_text(response);
         mesh_append_log("nodes failed: %s", response);
         return;
-    }
-    snprintf(nodes_text, sizeof(nodes_text), "%s", response);
-    if(strncmp(response, "OK nodes\n", 9) == 0) {
-        snprintf(nodes_text, sizeof(nodes_text), "%s", response + 9);
     }
 
     line = strtok_r(nodes_text, "\n", &saveptr);

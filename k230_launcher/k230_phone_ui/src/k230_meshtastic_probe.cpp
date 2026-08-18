@@ -17128,6 +17128,7 @@ static std::string daemon_map_response(const probe_options_t &opts,
     snprintf(line, sizeof(line),
              "OK map version=1 chip=%s nodes=%u positioned=%u waypoints=%u "
              "nrf9151=%s gps=%s phase=%s lat=%.7f lon=%.7f sats=%u "
+             "gnss_sats_seen=%u "
              "nmea_rx=%lu nmea_valid=%lu nmea_nofix=%lu last_nmea_ms=%lu "
              "ttff_ms=%lu ttff_valid=%s\n",
              chip_name(chip), (unsigned)mesh_node_count,
@@ -17135,7 +17136,8 @@ static std::string daemon_map_response(const probe_options_t &opts,
              mesh_gnss.modem_state, mesh_gnss.gps_state,
              nrf9151_gnss_phase(), self_has_pos ? self_lat : 0.0,
              self_has_pos ? self_lon : 0.0,
-             mesh_gnss.has_fix ? mesh_gnss.position.sats_in_view : 0U,
+             mesh_gnss.position.sats_in_view,
+             mesh_gnss.position.sats_in_view,
              (unsigned long)mesh_gnss.nmea_rx_count,
              (unsigned long)mesh_gnss.nmea_valid_count,
              (unsigned long)mesh_gnss.nmea_nofix_count,
