@@ -627,6 +627,7 @@ static const ui_translation_t ui_translations[] = {
     { "Scan QR", "扫描二维码", "QR スキャン" },
     { "Scan channel QR", "扫描频道二维码", "チャンネル QR をスキャン" },
     { "Point camera at Meshtastic QR", "将摄像头对准 Meshtastic 二维码", "カメラを Meshtastic QR に向けてください" },
+    { "Keep QR inside the frame", "将二维码保持在取景框内", "QR を枠内に入れてください" },
     { "Scanning channel QR...", "正在扫描频道二维码...", "チャンネル QR スキャン中..." },
     { "Scanned channel", "已扫描到频道", "チャンネルをスキャン済み" },
     { "Import channel?", "导入频道？", "チャンネルをインポートしますか？" },

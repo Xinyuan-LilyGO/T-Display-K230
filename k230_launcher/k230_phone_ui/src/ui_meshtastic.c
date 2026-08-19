@@ -111,8 +111,10 @@
 #define MESHTASTIC_DEFAULT_UI_PRESET "LONG_FAST"
 #define MESHTASTIC_QR_PREVIEW_FILE "/tmp/k230_mesh_qr_preview.rgb565"
 #define MESHTASTIC_QR_PREVIEW_TMP MESHTASTIC_QR_PREVIEW_FILE ".tmp"
-#define MESHTASTIC_QR_PREVIEW_W 384
-#define MESHTASTIC_QR_PREVIEW_H 216
+#define MESHTASTIC_QR_CAPTURE_W 1280
+#define MESHTASTIC_QR_CAPTURE_H 720
+#define MESHTASTIC_QR_PREVIEW_W 512
+#define MESHTASTIC_QR_PREVIEW_H 288
 #define MESHTASTIC_QR_PREVIEW_BYTES (MESHTASTIC_QR_PREVIEW_W * MESHTASTIC_QR_PREVIEW_H * 2)
 #define MESHTASTIC_MAP_ROOT "/root/maps"
 #define MESHTASTIC_MAP_STYLE "openstreetmap"
@@ -360,6 +362,7 @@ static lv_obj_t *mesh_channel_scan_overlay;
 static lv_obj_t *mesh_channel_scan_preview_image;
 static lv_obj_t *mesh_channel_scan_preview_placeholder;
 static lv_obj_t *mesh_channel_scan_preview_status_label;
+static lv_obj_t *mesh_channel_scan_guide_box;
 static int mesh_channel_scan_preview_panel_w;
 static int mesh_channel_scan_preview_panel_h;
 static uint8_t *mesh_channel_scan_preview_pixels;
@@ -6142,6 +6145,7 @@ static void mesh_channel_scan_overlay_close(void)
     mesh_channel_scan_preview_image = NULL;
     mesh_channel_scan_preview_placeholder = NULL;
     mesh_channel_scan_preview_status_label = NULL;
+    mesh_channel_scan_guide_box = NULL;
     mesh_channel_scan_preview_panel_w = 0;
     mesh_channel_scan_preview_panel_h = 0;
 }
@@ -6257,6 +6261,7 @@ static void mesh_channel_scan_overlay_show(void)
     lv_obj_t *preview;
     lv_obj_t *title;
     lv_obj_t *btn;
+    lv_obj_t *guide_hint;
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
     int margin = ui_page_side_margin();
@@ -6265,6 +6270,7 @@ static void mesh_channel_scan_overlay_show(void)
     int preview_y = ui_is_landscape() ? 72 : 92;
     int status_y;
     int preview_h = screen_h - preview_y - 112;
+    int guide_size;
 
     if(preview_h < 220) {
         preview_h = 220;
@@ -6317,6 +6323,31 @@ static void mesh_channel_scan_overlay_show(void)
     lv_label_set_long_mode(mesh_channel_scan_preview_placeholder,
                            LV_LABEL_LONG_WRAP);
     lv_obj_center(mesh_channel_scan_preview_placeholder);
+
+    guide_size = mesh_channel_scan_preview_panel_w <
+                 mesh_channel_scan_preview_panel_h ?
+                 mesh_channel_scan_preview_panel_w :
+                 mesh_channel_scan_preview_panel_h;
+    guide_size = (guide_size * 70) / 100;
+    if(guide_size < 160) {
+        guide_size = 160;
+    }
+    mesh_channel_scan_guide_box = lv_obj_create(preview);
+    lv_obj_set_size(mesh_channel_scan_guide_box, guide_size, guide_size);
+    lv_obj_center(mesh_channel_scan_guide_box);
+    lv_obj_set_style_bg_opa(mesh_channel_scan_guide_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(mesh_channel_scan_guide_box, 3, 0);
+    lv_obj_set_style_border_color(mesh_channel_scan_guide_box,
+                                  lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_radius(mesh_channel_scan_guide_box, 16, 0);
+    lv_obj_clear_flag(mesh_channel_scan_guide_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    guide_hint = ui_label(preview, ui_tr("Keep QR inside the frame"),
+                          &lv_font_montserrat_14, 0xD1FAE5);
+    lv_obj_set_width(guide_hint, content_w - 48);
+    lv_obj_align(guide_hint, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lv_obj_set_style_text_align(guide_hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(guide_hint, LV_LABEL_LONG_DOT);
 
     status_y = preview_y + preview_h + 16;
     if(status_y > screen_h - 40) {
@@ -6787,9 +6818,11 @@ static void *mesh_channel_scan_worker(void *arg)
 
     snprintf(command, sizeof(command),
              MESHTASTIC_QR_SCAN_PATH
+             " -w %d -h %d --skip 2"
              " --timeout-sec 18 --preview-file " MESHTASTIC_QR_PREVIEW_FILE
              " --preview-width %d --preview-height %d "
-             "--preview-interval-ms 100 2>/tmp/k230_qr_scan.log",
+             "--preview-interval-ms 100 --verbose 2>/tmp/k230_qr_scan.log",
+             MESHTASTIC_QR_CAPTURE_W, MESHTASTIC_QR_CAPTURE_H,
              MESHTASTIC_QR_PREVIEW_W, MESHTASTIC_QR_PREVIEW_H);
     fp = popen(command, "r");
     if(fp) {
