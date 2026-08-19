@@ -148,6 +148,8 @@ static void mesh_node_detail_open(const char *line);
 static void mesh_layout_main(void);
 static void mesh_update_target_button(void);
 static void mesh_save_profile_prefs(void);
+static void mesh_channel_import_confirm_show(const char *url,
+                                             const char *preview_response);
 static int mesh_parse_u32_text(const char *text, unsigned long *value);
 static uint16_t mesh_rgb565(uint32_t rgb);
 static int mesh_node_line_value(const char *line, const char *key,
@@ -1473,6 +1475,9 @@ static void mesh_update_target_button(void)
     char text[96];
     uint32_t color;
 
+    if(!app_current_page_is(PAGE_MESHTASTIC)) {
+        return;
+    }
     if(!mesh_target_label || !lv_obj_is_valid(mesh_target_label)) {
         return;
     }
@@ -6599,6 +6604,74 @@ static void mesh_channel_import_cancel_event_cb(lv_event_t *event)
     mesh_channel_import_confirm_close();
 }
 
+static void mesh_channel_import_url_submit_cb(const char *text,
+                                              void *user_data)
+{
+    char url[1024];
+    char command[1200];
+    char response[1280];
+    int ok = 0;
+
+    (void)user_data;
+    snprintf(url, sizeof(url), "%s", text ? text : "");
+    ui_trim_text(url);
+    if(!url[0]) {
+        mesh_channel_set_status("No channel URL to import", 0xF5A524);
+        return;
+    }
+
+    snprintf(command, sizeof(command), "PREVIEW_CHANNEL_URL %s\n", url);
+    response[0] = '\0';
+    if(mesh_ipc_command(command, response, sizeof(response)) == 0) {
+        ui_trim_text(response);
+        ok = strncmp(response, "OK preview", 10) == 0;
+    } else {
+        ui_trim_text(response);
+    }
+
+    if(!ok) {
+        mesh_channel_set_status(response[0] ? response : "Invalid Meshtastic URL",
+                                0xEF4D5A);
+        mesh_append_log("channel URL preview failed: %s",
+                        response[0] ? response : url);
+        return;
+    }
+
+    mesh_channel_import_confirm_show(url, response);
+    mesh_channel_set_status("Channel URL ready", 0x25C281);
+    mesh_append_log("channel URL preview: %s", response);
+}
+
+static void mesh_channel_import_url_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    memset(&config, 0, sizeof(config));
+    config.title = ui_tr("Import URL");
+    config.placeholder = "https://meshtastic.org/e/#...";
+    config.initial_text = "";
+    config.max_length = sizeof(mesh_channel_import_pending_url) - 1;
+    config.submit_cb = mesh_channel_import_url_submit_cb;
+    config.submit_text = ui_tr("Preview");
+    config.cancel_text = ui_tr("Cancel");
+    ui_input_dialog_open(&config);
+}
+
+static void mesh_channel_save_profile_event_cb(lv_event_t *event)
+{
+    if(event) {
+        lv_event_stop_processing(event);
+    }
+    if(mesh_channel_profile_write_current() == 0) {
+        mesh_channel_set_status("Channel profile saved", 0x25C281);
+    } else {
+        mesh_channel_set_status("Save failed", 0xEF4D5A);
+    }
+}
+
 static void mesh_channel_import_confirm_show(const char *url,
                                              const char *preview_response)
 {
@@ -7040,22 +7113,66 @@ static void mesh_channel_event_cb(lv_event_t *event)
     lv_label_set_long_mode(mesh_channel_status_label, LV_LABEL_LONG_DOT);
 
     y += 42;
-    button_w = (content_w - 24) / 3;
-    if(button_w < 112) {
-        button_w = 112;
+    {
+        int cols = landscape ? 6 : 2;
+        int gap = 10;
+        int button_h = 46;
+        int button_x;
+        int button_y;
+
+        button_w = (content_w - gap * (cols - 1)) / cols;
+        if(button_w < 104) {
+            button_w = 104;
+        }
+
+        button_x = margin;
+        button_y = y;
+        btn = ui_command_button(panel, button_x, button_y, button_w,
+                                ui_tr("Save profile"), 0x25C281);
+        lv_obj_set_height(btn, button_h);
+        lv_obj_add_event_cb(btn, mesh_channel_save_profile_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+
+        button_x = margin + (button_w + gap) * (1 % cols);
+        button_y = y + (1 / cols) * (button_h + gap);
+        btn = ui_command_button(panel, button_x, button_y, button_w,
+                                ui_tr("Channel profiles"), 0xF59E0B);
+        lv_obj_set_height(btn, button_h);
+        lv_obj_add_event_cb(btn, mesh_channel_profiles_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+
+        button_x = margin + (button_w + gap) * (2 % cols);
+        button_y = y + (2 / cols) * (button_h + gap);
+        btn = ui_command_button(panel, button_x, button_y, button_w,
+                                ui_tr("Import URL"), 0x8B5CF6);
+        lv_obj_set_height(btn, button_h);
+        lv_obj_add_event_cb(btn, mesh_channel_import_url_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+
+        button_x = margin + (button_w + gap) * (3 % cols);
+        button_y = y + (3 / cols) * (button_h + gap);
+        btn = ui_command_button(panel, button_x, button_y, button_w,
+                                ui_tr("Save URL"), 0x3DA5FF);
+        lv_obj_set_height(btn, button_h);
+        lv_obj_add_event_cb(btn, mesh_channel_save_event_cb, LV_EVENT_CLICKED,
+                            NULL);
+
+        button_x = margin + (button_w + gap) * (4 % cols);
+        button_y = y + (4 / cols) * (button_h + gap);
+        btn = ui_command_button(panel, button_x, button_y, button_w,
+                                ui_tr("Refresh"), 0x64748B);
+        lv_obj_set_height(btn, button_h);
+        lv_obj_add_event_cb(btn, mesh_channel_refresh_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+
+        button_x = margin + (button_w + gap) * (5 % cols);
+        button_y = y + (5 / cols) * (button_h + gap);
+        btn = ui_command_button(panel, button_x, button_y, button_w,
+                                ui_tr("Scan QR"), 0xEC4899);
+        lv_obj_set_height(btn, button_h);
+        lv_obj_add_event_cb(btn, mesh_channel_scan_event_cb, LV_EVENT_CLICKED,
+                            NULL);
     }
-    btn = ui_command_button(panel, margin, y, button_w, ui_tr("Save URL"),
-                            0x25C281);
-    lv_obj_add_event_cb(btn, mesh_channel_save_event_cb, LV_EVENT_CLICKED,
-                        NULL);
-    btn = ui_command_button(panel, margin + button_w + 12, y, button_w,
-                            ui_tr("Refresh"), 0x3DA5FF);
-    lv_obj_add_event_cb(btn, mesh_channel_refresh_event_cb, LV_EVENT_CLICKED,
-                        NULL);
-    btn = ui_command_button(panel, margin + (button_w + 12) * 2, y,
-                            button_w, ui_tr("Scan QR"), 0x8B5CF6);
-    lv_obj_add_event_cb(btn, mesh_channel_scan_event_cb, LV_EVENT_CLICKED,
-                        NULL);
 }
 
 static void mesh_settings_close_event_cb(lv_event_t *event)
@@ -13344,6 +13461,9 @@ void ui_meshtastic_cleanup(void)
     if(mesh_voice_record_pid > 0) {
         (void)mesh_voice_record_stop(0, "CLEANUP");
     }
+    if(mesh_body && lv_obj_is_valid(mesh_body)) {
+        lv_obj_add_flag(mesh_body, LV_OBJ_FLAG_HIDDEN);
+    }
     mesh_voice_stop_playback(1);
     mesh_voice_record_overlay_close();
     mesh_voice_preview_close();
@@ -13368,6 +13488,8 @@ void ui_meshtastic_cleanup(void)
     mesh_chutil_bar = NULL;
     mesh_chat_scroll = NULL;
     mesh_log_label = NULL;
+    mesh_target_button = NULL;
+    mesh_target_label = NULL;
     mesh_send_button = NULL;
     mesh_canned_button = NULL;
     mesh_voice_button = NULL;
@@ -13377,6 +13499,7 @@ void ui_meshtastic_cleanup(void)
     mesh_map_button = NULL;
     mesh_nodes_button = NULL;
     mesh_settings_button = NULL;
+    mesh_keyboard_reserved_h = 0;
     mesh_choice_close();
     mesh_canned_delete_confirm_close();
     mesh_canned_close();

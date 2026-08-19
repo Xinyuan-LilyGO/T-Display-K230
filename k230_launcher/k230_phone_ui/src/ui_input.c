@@ -347,7 +347,7 @@ static void ui_input_align_dialog(ui_input_dialog_state_t *state)
 
 static void ui_input_submit(ui_input_dialog_state_t *state)
 {
-    char text[512];
+    char text[2048];
     const char *src;
     size_t len;
 
