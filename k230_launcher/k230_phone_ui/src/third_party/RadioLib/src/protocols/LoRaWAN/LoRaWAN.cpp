@@ -1,4 +1,10 @@
 #include "LoRaWAN.h"
+#if !RADIOLIB_EXCLUDE_SX126X
+#include "../../modules/SX126x/SX126x.h"
+#endif
+#if !RADIOLIB_EXCLUDE_LR2021
+#include "../../modules/LR2021/LR2021.h"
+#endif
 #include <string.h>
 #if defined(ESP_PLATFORM)
 #include "esp_attr.h"
@@ -25,6 +31,22 @@ constexpr LoRaWANMacCommand_t MacTable[RADIOLIB_LORAWAN_NUM_MAC_COMMANDS] = {
   { RADIOLIB_LORAWAN_MAC_DEVICE_MODE,         1, 1, true,  false },
   { RADIOLIB_LORAWAN_MAC_PROPRIETARY,         5, 0, false, true  },
 };
+
+static int16_t LoRaWANSetLoRaCrc(PhysicalLayer* phyLayer, bool enable) {
+#if !RADIOLIB_EXCLUDE_SX126X
+  if(SX126x* radio = dynamic_cast<SX126x*>(phyLayer)) {
+    return(radio->setCRC(enable ? 2 : 0));
+  }
+#endif
+#if !RADIOLIB_EXCLUDE_LR2021
+  if(LR2021* radio = dynamic_cast<LR2021*>(phyLayer)) {
+    return(radio->setCRC(enable ? 2 : 0));
+  }
+#endif
+  (void)phyLayer;
+  (void)enable;
+  return(RADIOLIB_ERR_UNSUPPORTED);
+}
 
 LoRaWANNode::LoRaWANNode(PhysicalLayer* phy, const LoRaWANBand_t* band, uint8_t subBand) {
   this->phyLayer = phy;
@@ -1637,6 +1659,14 @@ int16_t LoRaWANNode::receiveClassA(uint8_t dir, const LoRaWANChannel_t* dlChanne
   // use a small additional delay in case the RxTimeout interrupt is slow to fire
   RADIOLIB_DEBUG_PROTOCOL_PRINTLN("Rx%d window closing", window);
   while(!downlinkAction && mod->hal->millis() - tOpen <= timeoutUs / 1000 + this->scanGuard) {
+    int16_t rxDone = this->phyLayer->checkIrq(RADIOLIB_IRQ_RX_DONE);
+    if(rxDone == RADIOLIB_ERR_UNSUPPORTED) {
+      return(rxDone);
+    }
+    if(rxDone) {
+      downlinkAction = true;
+      break;
+    }
     mod->hal->yield();
   }
 
@@ -1660,6 +1690,14 @@ int16_t LoRaWANNode::receiveClassA(uint8_t dir, const LoRaWANChannel_t* dlChanne
   // if the IRQ bit for RxTimeout is not set, something is being received, 
   // so keep listening for maximum ToA waiting for the DIO to fire
   while(!downlinkAction && mod->hal->millis() - tOpen < toaMaxMs + this->scanGuard) {
+    int16_t rxDone = this->phyLayer->checkIrq(RADIOLIB_IRQ_RX_DONE);
+    if(rxDone == RADIOLIB_ERR_UNSUPPORTED) {
+      return(rxDone);
+    }
+    if(rxDone) {
+      downlinkAction = true;
+      break;
+    }
     mod->hal->yield();
   }
   
@@ -1673,6 +1711,9 @@ int16_t LoRaWANNode::receiveClassA(uint8_t dir, const LoRaWANChannel_t* dlChanne
       RADIOLIB_DEBUG_PROTOCOL_PRINTLN("Timeout without IRQ!");
       break;
     }
+  }
+  if(this->phyLayer->checkIrq(RADIOLIB_IRQ_RX_DONE)) {
+    downlinkAction = true;
   }
 
   // update time of downlink reception
@@ -3413,6 +3454,11 @@ int16_t LoRaWANNode::setPhyProperties(const LoRaWANChannel_t* chnl, uint8_t dir,
       RADIOLIB_ASSERT(state);
       state = this->phyLayer->setPreambleLength(pre ? pre : RADIOLIB_LORAWAN_LORA_PREAMBLE_LEN);
       RADIOLIB_ASSERT(state);
+      state = LoRaWANSetLoRaCrc(this->phyLayer,
+                                 dir != RADIOLIB_LORAWAN_DOWNLINK);
+      if(state != RADIOLIB_ERR_UNSUPPORTED) {
+        RADIOLIB_ASSERT(state);
+      }
 
       syncWord[0] = RADIOLIB_LORAWAN_LORA_SYNC_WORD;
       syncWordLen = 1;

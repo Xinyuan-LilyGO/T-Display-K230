@@ -289,6 +289,38 @@ static void read_binary(const char *path, uint8_t *data, size_t len)
     fclose(fp);
 }
 
+static uint16_t lorawan_test_checksum16(const uint8_t *data, size_t len)
+{
+    uint16_t checksum = 0;
+
+    for(size_t i = 0; i < len; i += 2) {
+        uint16_t word = (uint16_t)data[i] << 8;
+        if(i + 1 < len) {
+            word |= data[i + 1];
+        }
+        checksum ^= word;
+    }
+    return checksum;
+}
+
+static void lorawan_test_put_u16(uint8_t *data, size_t pos, uint16_t value)
+{
+    data[pos] = (uint8_t)(value & 0xFF);
+    data[pos + 1] = (uint8_t)((value >> 8) & 0xFF);
+}
+
+static void lorawan_test_set_devnonce(uint8_t *data, uint16_t dev_nonce)
+{
+    uint16_t signature;
+
+    lorawan_test_put_u16(data, RADIOLIB_LORAWAN_NONCES_DEV_NONCE,
+                         dev_nonce);
+    signature = lorawan_test_checksum16(
+        data, RADIOLIB_LORAWAN_NONCES_BUF_SIZE - 2);
+    lorawan_test_put_u16(data, RADIOLIB_LORAWAN_NONCES_SIGNATURE,
+                         signature);
+}
+
 static void write_binary(const char *path, const uint8_t *data, size_t len)
 {
     FILE *fp = fopen(path, "wb");
@@ -309,6 +341,18 @@ static const char *state_name(int16_t state)
         return "CHIP_NOT_FOUND";
     case RADIOLIB_ERR_NETWORK_NOT_JOINED:
         return "NOT_JOINED";
+    case RADIOLIB_ERR_TX_TIMEOUT:
+        return "TX_TIMEOUT";
+    case RADIOLIB_ERR_NO_CHANNEL_AVAILABLE:
+        return "NO_CHANNEL_AVAILABLE";
+    case RADIOLIB_ERR_DWELL_TIME_EXCEEDED:
+        return "DWELL_TIME_EXCEEDED";
+    case RADIOLIB_ERR_CHECKSUM_MISMATCH:
+        return "CHECKSUM_MISMATCH";
+    case RADIOLIB_ERR_NONCES_DISCARDED:
+        return "NONCES_DISCARDED";
+    case RADIOLIB_ERR_SESSION_DISCARDED:
+        return "SESSION_DISCARDED";
     case RADIOLIB_ERR_NO_JOIN_ACCEPT:
         return "NO_JOIN_ACCEPT";
     case RADIOLIB_ERR_UPLINK_UNAVAILABLE:
@@ -339,7 +383,7 @@ static int begin_sx1262(K230BenchHal *hal, const lorawan_test_config_t *cfg,
     state = sx->begin(cfg->region->freq_mhz, 125.0f, 7, 5, 0x34,
                       cfg->has_tx_power ? cfg->tx_power : 14, 8, 3.3f, false);
     if(state == RADIOLIB_ERR_NONE) {
-        state = sx->setCRC(0);
+        state = sx->setCRC(2);
     }
     if(state != RADIOLIB_ERR_NONE) {
         delete sx;
@@ -375,7 +419,7 @@ static int begin_lr2021(K230BenchHal *hal, const lorawan_test_config_t *cfg,
         state = lr->setOutputPower(cfg->has_tx_power ? cfg->tx_power : 14);
     }
     if(state == RADIOLIB_ERR_NONE) {
-        state = lr->setCRC(0);
+        state = lr->setCRC(2);
     }
     if(state != RADIOLIB_ERR_NONE) {
         delete lr;
@@ -405,12 +449,22 @@ int main(int argc, char **argv)
     size_t downlink_len = 0;
     int16_t state;
     int rc = 1;
+    int join_only = 0;
+    long devnonce_start = -1;
 
     for(int i = 1; i < argc; i++) {
         if(strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_path = argv[++i];
+        } else if(strcmp(argv[i], "--join-only") == 0) {
+            join_only = 1;
+        } else if(strcmp(argv[i], "--devnonce-start") == 0 && i + 1 < argc) {
+            devnonce_start = strtol(argv[++i], NULL, 0);
+            if(devnonce_start < 0 || devnonce_start > 65535) {
+                fprintf(stderr, "DevNonce start must be 0..65535\n");
+                return 2;
+            }
         } else {
-            fprintf(stderr, "Usage: %s [--config /root/lorawan/otaa.conf]\n",
+            fprintf(stderr, "Usage: %s [--config /root/lorawan/otaa.conf] [--join-only] [--devnonce-start N]\n",
                     argv[0]);
             return 2;
         }
@@ -458,18 +512,22 @@ int main(int argc, char **argv)
             printf("OTAA_INIT state=%d %s\n", state, state_name(state));
             goto out_standby;
         }
-        read_binary(LORAWAN_TEST_NONCES_PATH, nonces, sizeof(nonces));
-        (void)node.setBufferNonces(nonces);
-        read_binary(LORAWAN_TEST_SESSION_PATH, session, sizeof(session));
-        (void)node.setBufferSession(session);
-        node.setADR(cfg.adr != 0);
-        node.setDatarate(cfg.datarate);
-        node.setDutyCycle(cfg.duty_cycle != 0, cfg.duty_cycle_ms_per_hour);
-        node.setDwellTime(cfg.dwell_time != 0, cfg.dwell_time_ms);
-        if(cfg.has_tx_power) {
-            node.setTxPower(cfg.tx_power);
+        if(devnonce_start >= 0) {
+            memcpy(nonces, node.getBufferNonces(), sizeof(nonces));
+            lorawan_test_set_devnonce(nonces, (uint16_t)devnonce_start);
+            state = node.setBufferNonces(nonces);
+            if(state != RADIOLIB_ERR_NONE) {
+                printf("NONCES_INIT state=%d %s\n", state, state_name(state));
+                goto out_standby;
+            }
+            write_binary(LORAWAN_TEST_NONCES_PATH, nonces, sizeof(nonces));
+            printf("DEVNONCE_START value=%ld\n", devnonce_start);
+        } else {
+            read_binary(LORAWAN_TEST_NONCES_PATH, nonces, sizeof(nonces));
+            (void)node.setBufferNonces(nonces);
+            read_binary(LORAWAN_TEST_SESSION_PATH, session, sizeof(session));
+            (void)node.setBufferSession(session);
         }
-
         printf("JOIN begin\n");
         fflush(stdout);
         state = node.activateOTAA();
@@ -482,6 +540,17 @@ int main(int argc, char **argv)
         }
         write_binary(LORAWAN_TEST_SESSION_PATH, node.getBufferSession(),
                      RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+        if(join_only) {
+            rc = 0;
+            goto out_standby;
+        }
+        node.setADR(cfg.adr != 0);
+        node.setDatarate(cfg.datarate);
+        node.setDutyCycle(cfg.duty_cycle != 0, cfg.duty_cycle_ms_per_hour);
+        node.setDwellTime(cfg.dwell_time != 0, cfg.dwell_time_ms);
+        if(cfg.has_tx_power) {
+            node.setTxPower(cfg.tx_power);
+        }
 
         memset(payload, 0, sizeof(payload));
         payload[0] = 1;

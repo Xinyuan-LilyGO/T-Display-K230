@@ -4297,6 +4297,18 @@ static const char *lorawan_state_name(int16_t state)
         return "CHIP_NOT_FOUND";
     case RADIOLIB_ERR_NETWORK_NOT_JOINED:
         return "NOT_JOINED";
+    case RADIOLIB_ERR_TX_TIMEOUT:
+        return "TX_TIMEOUT";
+    case RADIOLIB_ERR_NO_CHANNEL_AVAILABLE:
+        return "NO_CHANNEL_AVAILABLE";
+    case RADIOLIB_ERR_DWELL_TIME_EXCEEDED:
+        return "DWELL_TIME_EXCEEDED";
+    case RADIOLIB_ERR_CHECKSUM_MISMATCH:
+        return "CHECKSUM_MISMATCH";
+    case RADIOLIB_ERR_NONCES_DISCARDED:
+        return "NONCES_DISCARDED";
+    case RADIOLIB_ERR_SESSION_DISCARDED:
+        return "SESSION_DISCARDED";
     case RADIOLIB_ERR_NO_JOIN_ACCEPT:
         return "NO_JOIN_ACCEPT";
     case RADIOLIB_ERR_UPLINK_UNAVAILABLE:
@@ -4310,9 +4322,34 @@ static const char *lorawan_state_name(int16_t state)
     }
 }
 
+static int lorawan_enable_phy_crc(void)
+{
+    int16_t state = RADIOLIB_ERR_CHIP_NOT_FOUND;
+
+    switch(lora_chip_type) {
+    case LORA_CHIP_SX1262:
+        if(lora_sx1262) {
+            state = lora_sx1262->setCRC(2);
+        }
+        break;
+    case LORA_CHIP_LR2021:
+        if(lora_lr2021) {
+            state = lora_lr2021->setCRC(2);
+        }
+        break;
+    case LORA_CHIP_NONE:
+    default:
+        break;
+    }
+    lora_log("LoRaWAN set PHY CRC on state=%d %s",
+             state, lora_error_name(state));
+    return state == RADIOLIB_ERR_NONE ? 0 : -1;
+}
+
 static int lorawan_prepare_radio(void)
 {
     lora_profile_t probe;
+    int16_t state;
 
     if(!lorawan_config.region) {
         return -1;
@@ -4335,14 +4372,18 @@ static int lorawan_prepare_radio(void)
     probe.counter_payload = 1;
 
     if(lora_radio) {
-        int16_t state = lora_begin_active_chip(&probe);
+        state = lora_begin_active_chip(&probe);
         if(state == RADIOLIB_ERR_NONE) {
-            return 0;
+            return lorawan_enable_phy_crc();
         }
         lora_log("LoRaWAN active chip re-init failed: %d %s",
                  state, lora_error_name(state));
     }
-    return lora_detect_radio(&probe);
+    state = lora_detect_radio(&probe);
+    if(state != RADIOLIB_ERR_NONE) {
+        return -1;
+    }
+    return lorawan_enable_phy_crc();
 }
 
 static void lorawan_update_region_buttons(void)
