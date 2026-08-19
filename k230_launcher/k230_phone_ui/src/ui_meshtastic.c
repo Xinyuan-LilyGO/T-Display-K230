@@ -56,7 +56,7 @@
 #define MESHTASTIC_UI_CHANNEL_SLOT_MAX 8
 #define MESHTASTIC_CHANNEL_PROFILE_MAX 24
 #define MESHTASTIC_CANNED_MAX 16
-#define MESHTASTIC_CHANNEL_QR_MAX 280
+#define MESHTASTIC_CHANNEL_QR_MAX 420
 #define MESHTASTIC_CHANNEL_QR_BORDER 4
 #define MESHTASTIC_VOICE_RAW_PATH "/tmp/k230_mesh_voice_tx.raw"
 #define MESHTASTIC_VOICE_RECORD_LOG "/tmp/k230_mesh_voice_record.log"
@@ -7030,12 +7030,12 @@ static void mesh_channel_event_cb(lv_event_t *event)
     int margin = ui_page_side_margin();
     int content_w = screen_w - margin * 2;
     int landscape = ui_is_landscape();
-    int card_y = landscape ? 88 : 104;
-    int card_h = landscape ? screen_h - card_y - 104 : 392;
+    int card_y = landscape ? 76 : 104;
+    int card_h;
+    int card_max_h = screen_h - card_y - (landscape ? 96 : 150);
     int qr_px;
-    int text_x;
-    int text_y;
-    int text_w;
+    int qr_x;
+    int qr_y;
     int button_w;
     int y;
 
@@ -7050,21 +7050,22 @@ static void mesh_channel_event_cb(lv_event_t *event)
                                  sizeof(mesh_channel_url_text),
                                  status, sizeof(status));
 
-    if(card_h < 220) {
-        card_h = 220;
+    if(card_max_h < 220) {
+        card_max_h = 220;
     }
-    if(!landscape && card_h > screen_h - card_y - 126) {
-        card_h = screen_h - card_y - 126;
+    qr_px = content_w - 32;
+    if(qr_px > card_max_h - 32) {
+        qr_px = card_max_h - 32;
     }
-    if(card_h < 220) {
-        card_h = 220;
-    }
-    qr_px = landscape ? card_h - 32 : content_w - 96;
     if(qr_px > MESHTASTIC_CHANNEL_QR_MAX) {
         qr_px = MESHTASTIC_CHANNEL_QR_MAX;
     }
     if(qr_px < 180) {
         qr_px = 180;
+    }
+    card_h = qr_px + 32;
+    if(landscape && card_h < card_max_h) {
+        card_h = card_max_h;
     }
 
     mesh_channel_overlay = lv_obj_create(lv_screen_active());
@@ -7107,24 +7108,20 @@ static void mesh_channel_event_cb(lv_event_t *event)
     lv_obj_set_style_pad_all(card, 16, 0);
 
     mesh_channel_qr_canvas = lv_canvas_create(card);
-    lv_obj_set_pos(mesh_channel_qr_canvas,
-                   landscape ? 16 : (content_w - qr_px) / 2, 16);
-    mesh_channel_qr_render(mesh_channel_url_text, qr_px);
-
-    text_x = landscape ? qr_px + 32 : 16;
-    text_y = landscape ? 18 : qr_px + 34;
-    text_w = landscape ? content_w - text_x - 32 : content_w - 32;
-    if(text_w < 160) {
-        text_w = content_w - 32;
-        text_x = 16;
-        text_y = qr_px + 34;
+    qr_x = (content_w - qr_px) / 2;
+    qr_y = (card_h - qr_px) / 2;
+    if(qr_x < 16) {
+        qr_x = 16;
     }
+    if(qr_y < 16) {
+        qr_y = 16;
+    }
+    lv_obj_set_pos(mesh_channel_qr_canvas, qr_x, qr_y);
+    mesh_channel_qr_render(mesh_channel_url_text, qr_px);
 
     label = ui_label(card, ui_tr("Show this QR to Meshtastic app"),
                      &lv_font_montserrat_16, 0x94A3B8);
-    lv_obj_set_pos(label, text_x, text_y);
-    lv_obj_set_width(label, text_w);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
 
     mesh_channel_url_label =
         ui_label(card,
@@ -7132,9 +7129,7 @@ static void mesh_channel_event_cb(lv_event_t *event)
                  ui_tr("Channel URL unavailable"),
                  &lv_font_montserrat_16,
                  mesh_channel_url_text[0] ? 0xD7DEE8 : 0xF5A524);
-    lv_obj_set_pos(mesh_channel_url_label, text_x, text_y + 34);
-    lv_obj_set_width(mesh_channel_url_label, text_w);
-    lv_label_set_long_mode(mesh_channel_url_label, LV_LABEL_LONG_WRAP);
+    lv_obj_add_flag(mesh_channel_url_label, LV_OBJ_FLAG_HIDDEN);
 
     y = card_y + card_h + 16;
     mesh_channel_status_label = ui_label(panel, status[0] ? status : "Ready",
