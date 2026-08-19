@@ -625,6 +625,7 @@ static const ui_translation_t ui_translations[] = {
     { "Import URL", "导入链接", "URL インポート" },
     { "Preview", "预览", "プレビュー" },
     { "Scan QR", "扫描二维码", "QR スキャン" },
+    { "Full QR", "全屏二维码", "全画面 QR" },
     { "Scan channel QR", "扫描频道二维码", "チャンネル QR をスキャン" },
     { "Point camera at Meshtastic QR", "将摄像头对准 Meshtastic 二维码", "カメラを Meshtastic QR に向けてください" },
     { "Keep QR inside the frame", "将二维码保持在取景框内", "QR を枠内に入れてください" },

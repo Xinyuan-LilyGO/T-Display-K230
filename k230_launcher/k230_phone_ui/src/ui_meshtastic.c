@@ -56,7 +56,7 @@
 #define MESHTASTIC_UI_CHANNEL_SLOT_MAX 8
 #define MESHTASTIC_CHANNEL_PROFILE_MAX 24
 #define MESHTASTIC_CANNED_MAX 16
-#define MESHTASTIC_CHANNEL_QR_MAX 420
+#define MESHTASTIC_CHANNEL_QR_MAX 640
 #define MESHTASTIC_CHANNEL_QR_BORDER 4
 #define MESHTASTIC_VOICE_RAW_PATH "/tmp/k230_mesh_voice_tx.raw"
 #define MESHTASTIC_VOICE_RECORD_LOG "/tmp/k230_mesh_voice_record.log"
@@ -317,6 +317,8 @@ typedef enum {
 } mesh_map_position_state_t;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
+static lv_obj_t *mesh_channel_qr_fullscreen_overlay;
+static lv_obj_t *mesh_channel_qr_fullscreen_canvas;
 static lv_obj_t *mesh_publish_status_label;
 static lv_obj_t *mesh_node_request_status_label;
 static lv_obj_t *mesh_pairing_overlay;
@@ -357,6 +359,7 @@ static uint8_t mesh_photo_thumb_buf[MESHTASTIC_PHOTO_MAX_ITEMS]
 static uint8_t mesh_photo_stored_thumb_buf[MESHTASTIC_PHOTO_STORED_THUMB_BYTES];
 static uint16_t mesh_channel_qr_buf[MESHTASTIC_CHANNEL_QR_MAX *
                                     MESHTASTIC_CHANNEL_QR_MAX];
+static uint16_t *mesh_channel_qr_fullscreen_buf;
 static lv_timer_t *mesh_channel_scan_timer;
 static lv_obj_t *mesh_channel_scan_overlay;
 static lv_obj_t *mesh_channel_scan_preview_image;
@@ -6160,6 +6163,26 @@ static void mesh_channel_import_confirm_close(void)
     mesh_channel_import_status_label = NULL;
 }
 
+static void mesh_channel_qr_fullscreen_close(void)
+{
+    if(mesh_channel_qr_fullscreen_overlay &&
+       lv_obj_is_valid(mesh_channel_qr_fullscreen_overlay)) {
+        lv_obj_delete(mesh_channel_qr_fullscreen_overlay);
+    }
+    mesh_channel_qr_fullscreen_overlay = NULL;
+    mesh_channel_qr_fullscreen_canvas = NULL;
+    if(mesh_channel_qr_fullscreen_buf) {
+        free(mesh_channel_qr_fullscreen_buf);
+        mesh_channel_qr_fullscreen_buf = NULL;
+    }
+}
+
+static void mesh_channel_qr_fullscreen_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_channel_qr_fullscreen_close();
+}
+
 static void mesh_close_channel_page(void)
 {
     if(mesh_channel_scan_timer) {
@@ -6168,6 +6191,7 @@ static void mesh_close_channel_page(void)
     }
     mesh_channel_scan_overlay_close();
     mesh_channel_import_confirm_close();
+    mesh_channel_qr_fullscreen_close();
     if(mesh_channel_overlay && lv_obj_is_valid(mesh_channel_overlay)) {
         lv_obj_delete(mesh_channel_overlay);
     }
@@ -6416,7 +6440,8 @@ static uint16_t mesh_rgb565(uint32_t rgb)
                       ((uint16_t)b >> 3U));
 }
 
-static void mesh_channel_qr_render(const char *url, int px)
+static void mesh_channel_qr_render_into(lv_obj_t *canvas, uint16_t *buf,
+                                        const char *url, int px)
 {
     uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
     uint8_t tmp[qrcodegen_BUFFER_LEN_MAX];
@@ -6429,7 +6454,7 @@ static void mesh_channel_qr_render(const char *url, int px)
     int offset;
     bool ok = false;
 
-    if(!mesh_channel_qr_canvas || !lv_obj_is_valid(mesh_channel_qr_canvas)) {
+    if(!canvas || !lv_obj_is_valid(canvas) || !buf) {
         return;
     }
     if(px < 64) {
@@ -6440,7 +6465,7 @@ static void mesh_channel_qr_render(const char *url, int px)
     }
 
     for(int i = 0; i < px * px; i++) {
-        mesh_channel_qr_buf[i] = empty;
+        buf[i] = empty;
     }
     if(url && url[0]) {
         ok = qrcodegen_encodeText(url, tmp, qr, qrcodegen_Ecc_MEDIUM,
@@ -6471,14 +6496,19 @@ static void mesh_channel_qr_render(const char *url, int px)
                        mx < qr_size && my < qr_size) {
                         module = qrcodegen_getModule(qr, mx, my);
                     }
-                    mesh_channel_qr_buf[y * px + x] = module ? black : white;
+                    buf[y * px + x] = module ? black : white;
                 }
             }
         }
     }
-    lv_canvas_set_buffer(mesh_channel_qr_canvas, mesh_channel_qr_buf,
-                         px, px, LV_COLOR_FORMAT_RGB565);
-    lv_obj_invalidate(mesh_channel_qr_canvas);
+    lv_canvas_set_buffer(canvas, buf, px, px, LV_COLOR_FORMAT_RGB565);
+    lv_obj_invalidate(canvas);
+}
+
+static void mesh_channel_qr_render(const char *url, int px)
+{
+    mesh_channel_qr_render_into(mesh_channel_qr_canvas, mesh_channel_qr_buf,
+                                url, px);
 }
 
 static void mesh_channel_set_status(const char *text, uint32_t color)
@@ -6505,6 +6535,73 @@ static void mesh_channel_refresh_view(int ok, const char *status, int qr_px)
     mesh_channel_set_status(status && status[0] ? status : "Ready",
                             ok ? 0x25C281 : 0xF5A524);
     mesh_channel_qr_render(mesh_channel_url_text, qr_px);
+}
+
+static void mesh_channel_qr_fullscreen_show(void)
+{
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int safe = ui_is_landscape() ? 42 : 32;
+    int qr_px = screen_w < screen_h ? screen_w : screen_h;
+    int qr_x;
+    int qr_y;
+
+    if(mesh_channel_qr_fullscreen_overlay &&
+       lv_obj_is_valid(mesh_channel_qr_fullscreen_overlay)) {
+        mesh_channel_qr_fullscreen_close();
+    }
+    qr_px -= safe * 2;
+    if(qr_px > MESHTASTIC_CHANNEL_QR_MAX) {
+        qr_px = MESHTASTIC_CHANNEL_QR_MAX;
+    }
+    if(qr_px < 180) {
+        qr_px = 180;
+    }
+    mesh_channel_qr_fullscreen_buf =
+        malloc((size_t)MESHTASTIC_CHANNEL_QR_MAX *
+               MESHTASTIC_CHANNEL_QR_MAX * sizeof(uint16_t));
+    if(!mesh_channel_qr_fullscreen_buf) {
+        mesh_channel_set_status("QR scan failed", 0xEF4D5A);
+        return;
+    }
+
+    mesh_channel_qr_fullscreen_overlay = lv_obj_create(lv_screen_active());
+    ui_set_fullscreen(mesh_channel_qr_fullscreen_overlay);
+    lv_obj_set_style_bg_color(mesh_channel_qr_fullscreen_overlay,
+                              lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(mesh_channel_qr_fullscreen_overlay,
+                            LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mesh_channel_qr_fullscreen_overlay, 0, 0);
+    lv_obj_set_style_border_width(mesh_channel_qr_fullscreen_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_channel_qr_fullscreen_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_channel_qr_fullscreen_overlay,
+                      LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(mesh_channel_qr_fullscreen_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(mesh_channel_qr_fullscreen_overlay,
+                        mesh_channel_qr_fullscreen_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    mesh_channel_qr_fullscreen_canvas =
+        lv_canvas_create(mesh_channel_qr_fullscreen_overlay);
+    qr_x = (screen_w - qr_px) / 2;
+    qr_y = (screen_h - qr_px) / 2;
+    if(qr_x < safe) {
+        qr_x = safe;
+    }
+    if(qr_y < safe) {
+        qr_y = safe;
+    }
+    lv_obj_set_pos(mesh_channel_qr_fullscreen_canvas, qr_x, qr_y);
+    mesh_channel_qr_render_into(mesh_channel_qr_fullscreen_canvas,
+                                mesh_channel_qr_fullscreen_buf,
+                                mesh_channel_url_text, qr_px);
+    lv_obj_move_foreground(mesh_channel_qr_fullscreen_overlay);
+}
+
+static void mesh_channel_qr_fullscreen_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_channel_qr_fullscreen_show();
 }
 
 static void mesh_channel_preview_value(const char *text, const char *key,
@@ -7087,14 +7184,20 @@ static void mesh_channel_event_cb(lv_event_t *event)
     title = ui_label(panel, ui_tr("Channel share"), &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_pos(title, margin, 22);
-    lv_obj_set_width(title, content_w - 120);
+    lv_obj_set_width(title, content_w - 236);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
 
     subtitle = ui_label(panel, ui_tr("Meshtastic official channel URL"),
                         &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_pos(subtitle, margin, 56);
-    lv_obj_set_width(subtitle, content_w - 120);
+    lv_obj_set_width(subtitle, content_w - 236);
     lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(panel, screen_w - margin - 210, 18, 104,
+                            ui_tr("Full QR"),
+                            0x3DA5FF);
+    lv_obj_add_event_cb(btn, mesh_channel_qr_fullscreen_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 
     btn = ui_command_button(panel, screen_w - margin - 96, 18, 96,
                             ui_tr("Close"),
