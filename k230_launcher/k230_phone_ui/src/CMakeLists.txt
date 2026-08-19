@@ -126,6 +126,7 @@ add_executable(k230_lorawan_test lorawan_test.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_halow_udp_stream halow_udp_stream.c)
 add_executable(k230_meshtastic_probe
     k230_meshtastic_probe.cpp
+    ui_nrf9151_manager.c
     ${RADIOLIB_REQUIRED_SOURCES}
 )
 add_executable(k230_qr_scan

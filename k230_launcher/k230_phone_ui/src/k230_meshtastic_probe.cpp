@@ -42,6 +42,7 @@
 
 #include "modules/LR2021/LR2021.h"
 #include "modules/SX126x/SX1262.h"
+#include "ui_nrf9151_manager.h"
 
 #define PROBE_VERSION "0.31"
 #define LORA_SPI_DEV "/dev/spidev0.0"
@@ -188,10 +189,8 @@
 #define MESHTASTIC_TELEMETRY_RETRY_US (60ULL * 1000000ULL)
 #define MESHTASTIC_PHONEAPI_UART_DEV "/dev/ttyS1"
 #define MESHTASTIC_PHONEAPI_FROM_SEND_GAP_US 120000U
-#define MESHTASTIC_NRF9151_UART_DEV "/dev/ttyS3"
+#define MESHTASTIC_NRF9151_UART_DEV K230_NRF9151_UART_DEV
 #define MESHTASTIC_NRF9151_UART_BAUD B115200
-#define MESHTASTIC_NRF9151_FIX_CACHE "/tmp/k230_nrf9151_gnss_fix.cache"
-#define MESHTASTIC_NRF9151_FIX_CACHE_TMP "/tmp/k230_nrf9151_gnss_fix.cache.tmp"
 #define MESHTASTIC_NRF9151_FIX_CACHE_MAX_AGE_SEC (60 * 60)
 #define MESHTASTIC_NRF9151_PROBE_TIMEOUT_US 500000ULL
 #define MESHTASTIC_NRF9151_CMD_TIMEOUT_US 1800000ULL
@@ -1243,6 +1242,7 @@ typedef struct {
     bool has_fix = false;
     bool first_fix_reported = false;
     int fd = -1;
+    int lock_fd = -1;
     size_t line_used = 0;
     uint64_t next_probe_us = 0;
     uint64_t last_rx_us = 0;
@@ -5035,43 +5035,11 @@ static void nrf9151_gnss_write_cache(double lat, double lon, bool has_alt,
                                      double alt_m, uint32_t sats,
                                      const char *source)
 {
-    FILE *fp;
-    time_t now = time(nullptr);
-
-    if(!isfinite(lat) || !isfinite(lon) || lat < -90.0 || lat > 90.0 ||
-       lon < -180.0 || lon > 180.0 ||
-       (fabs(lat) < 0.000001 && fabs(lon) < 0.000001)) {
-        return;
-    }
-    fp = fopen(MESHTASTIC_NRF9151_FIX_CACHE_TMP, "w");
-    if(!fp) {
-        daemon_event("nRF9151 GNSS cache write open failed: %s",
-                     strerror(errno));
-        return;
-    }
-    fprintf(fp,
-            "version=1\n"
-            "epoch=%ld\n"
-            "lat=%.7f\n"
-            "lon=%.7f\n"
-            "has_alt=%d\n"
-            "alt=%.2f\n"
-            "sats=%u\n"
-            "source=%s\n",
-            (long)now, lat, lon, has_alt ? 1 : 0,
-            has_alt && isfinite(alt_m) ? alt_m : 0.0, sats,
-            source && source[0] ? source : "meshtastic");
-    if(fclose(fp) != 0) {
-        daemon_event("nRF9151 GNSS cache write close failed: %s",
-                     strerror(errno));
-        unlink(MESHTASTIC_NRF9151_FIX_CACHE_TMP);
-        return;
-    }
-    if(rename(MESHTASTIC_NRF9151_FIX_CACHE_TMP,
-              MESHTASTIC_NRF9151_FIX_CACHE) != 0) {
-        daemon_event("nRF9151 GNSS cache rename failed: %s",
-                     strerror(errno));
-        unlink(MESHTASTIC_NRF9151_FIX_CACHE_TMP);
+    if(k230_nrf9151_write_gnss_fix(lat, lon, has_alt ? 1 : 0, alt_m,
+                                   (int)sats,
+                                   source && source[0] ? source :
+                                   "meshtastic") != 0) {
+        daemon_event("nRF9151 GNSS cache write failed: %s", strerror(errno));
     }
 }
 
@@ -5131,90 +5099,36 @@ static void nrf9151_gnss_apply_fix(double lat, double lon, bool has_alt,
 
 static bool nrf9151_gnss_apply_cache_fix(bool quiet)
 {
-    struct stat st;
-    FILE *fp;
-    char line[192];
-    double lat = 0.0;
-    double lon = 0.0;
-    double alt = 0.0;
-    int has_alt = 0;
-    int sats = 0;
-    time_t epoch = 0;
     time_t now = time(nullptr);
-    char source[48] = "cache";
+    k230_nrf9151_gnss_fix_t fix;
 
-    if(stat(MESHTASTIC_NRF9151_FIX_CACHE, &st) != 0) {
+    if(k230_nrf9151_read_gnss_fix(&fix,
+                                  MESHTASTIC_NRF9151_FIX_CACHE_MAX_AGE_SEC) != 0) {
         return false;
     }
-    if(now > 0 && st.st_mtime > 0 &&
-       now >= st.st_mtime &&
-       now - st.st_mtime > MESHTASTIC_NRF9151_FIX_CACHE_MAX_AGE_SEC) {
-        return false;
-    }
-
-    fp = fopen(MESHTASTIC_NRF9151_FIX_CACHE, "r");
-    if(!fp) {
-        return false;
-    }
-    while(fgets(line, sizeof(line), fp)) {
-        char *eq;
-
-        nrf9151_trim_in_place(line);
-        eq = strchr(line, '=');
-        if(!eq) {
-            continue;
-        }
-        *eq++ = '\0';
-        if(strcmp(line, "epoch") == 0) {
-            epoch = (time_t)strtol(eq, nullptr, 10);
-        } else if(strcmp(line, "lat") == 0) {
-            lat = strtod(eq, nullptr);
-        } else if(strcmp(line, "lon") == 0) {
-            lon = strtod(eq, nullptr);
-        } else if(strcmp(line, "has_alt") == 0) {
-            has_alt = atoi(eq) != 0;
-        } else if(strcmp(line, "alt") == 0) {
-            alt = strtod(eq, nullptr);
-        } else if(strcmp(line, "sats") == 0) {
-            sats = atoi(eq);
-        } else if(strcmp(line, "source") == 0) {
-            snprintf(source, sizeof(source), "%s", eq);
-        }
-    }
-    fclose(fp);
-
-    if(epoch <= 0) {
-        epoch = st.st_mtime;
-    }
-    if(now > 0 && epoch > 0 && now >= epoch &&
-       now - epoch > MESHTASTIC_NRF9151_FIX_CACHE_MAX_AGE_SEC) {
-        return false;
-    }
-    if(!isfinite(lat) || !isfinite(lon) || lat < -90.0 || lat > 90.0 ||
-       lon < -180.0 || lon > 180.0 ||
-       (fabs(lat) < 0.000001 && fabs(lon) < 0.000001)) {
-        return false;
-    }
-    if(mesh_gnss.cache_epoch == epoch && mesh_gnss.has_fix &&
+    if(mesh_gnss.cache_epoch == fix.epoch && mesh_gnss.has_fix &&
        strcmp(mesh_gnss.gps_state, "fix") == 0) {
         return true;
     }
 
-    nrf9151_gnss_apply_fix(lat, lon, has_alt != 0, alt, false, 0.0, false,
-                           0.0, sats > 0 ? (uint32_t)sats : 0U, false,
+    nrf9151_gnss_apply_fix(fix.latitude, fix.longitude,
+                           fix.has_altitude != 0, fix.altitude_m, false,
+                           0.0, false, 0.0,
+                           fix.satellites > 0 ? (uint32_t)fix.satellites : 0U,
+                           false,
                            "lte-cache");
-    if(epoch > 0) {
-        mesh_gnss.position.timestamp = (uint32_t)epoch;
+    if(fix.epoch > 0) {
+        mesh_gnss.position.timestamp = (uint32_t)fix.epoch;
     }
-    mesh_gnss.cache_epoch = epoch;
+    mesh_gnss.cache_epoch = fix.epoch;
     mesh_gnss.used_cache_fix = true;
     mesh_gnss.ttff_valid = false;
     nrf9151_gnss_set_state("present", "fix", "GNSS fix from LTE cache");
     if(!quiet) {
-        long age = (now > 0 && epoch > 0 && now >= epoch) ?
-                   (long)(now - epoch) : 0L;
+        long age = (now > 0 && fix.epoch > 0 && now >= fix.epoch) ?
+                   (long)(now - fix.epoch) : fix.age_seconds;
         daemon_event("nRF9151 GNSS cache applied source=%s lat=%.7f lon=%.7f age=%lds",
-                     source, lat, lon, age);
+                     fix.source, fix.latitude, fix.longitude, age);
     }
     return true;
 }
@@ -5607,6 +5521,18 @@ static int nrf9151_exchange(int fd, const char *cmd, char *resp,
     return -1;
 }
 
+static void nrf9151_gnss_close_uart(void)
+{
+    if(mesh_gnss.fd >= 0) {
+        close(mesh_gnss.fd);
+        mesh_gnss.fd = -1;
+    }
+    if(mesh_gnss.lock_fd >= 0) {
+        k230_nrf9151_release_uart(mesh_gnss.lock_fd);
+        mesh_gnss.lock_fd = -1;
+    }
+}
+
 static void nrf9151_gnss_read_available(void)
 {
     for(;;) {
@@ -5622,8 +5548,7 @@ static void nrf9151_gnss_read_available(void)
                 return;
             }
             daemon_event("nRF9151 GNSS read failed: %s", strerror(errno));
-            close(mesh_gnss.fd);
-            mesh_gnss.fd = -1;
+            nrf9151_gnss_close_uart();
             mesh_gnss.present = false;
             mesh_gnss.configured = false;
             nrf9151_gnss_set_state("error", "unavailable", "UART read error");
@@ -5920,10 +5845,7 @@ static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
     int rc;
 
     if(!opts.position_enabled) {
-        if(mesh_gnss.fd >= 0) {
-            close(mesh_gnss.fd);
-            mesh_gnss.fd = -1;
-        }
+        nrf9151_gnss_close_uart();
         mesh_gnss.enabled = false;
         nrf9151_gnss_set_state("off", "off", "Position disabled");
         return;
@@ -5937,8 +5859,18 @@ static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
         mesh_gnss.probed = true;
         nrf9151_gnss_set_state("probing", "unavailable", "Opening UART");
         (void)nrf9151_configure_uart3_iomux();
+        mesh_gnss.lock_fd = k230_nrf9151_acquire_uart("meshtastic-gnss",
+                                                      0);
+        if(mesh_gnss.lock_fd < 0) {
+            mesh_gnss.present = false;
+            nrf9151_gnss_set_state("busy", "unavailable", "nRF9151 busy");
+            daemon_event("nRF9151 GNSS UART busy path=%s err=%s",
+                         opts.gps_uart_path.c_str(), strerror(errno));
+            return;
+        }
         mesh_gnss.fd = nrf9151_open_uart(opts.gps_uart_path);
         if(mesh_gnss.fd < 0) {
+            nrf9151_gnss_close_uart();
             mesh_gnss.present = false;
             nrf9151_gnss_set_state("missing", "unavailable", strerror(errno));
             daemon_event("nRF9151 GNSS UART open failed path=%s err=%s",
@@ -5949,8 +5881,7 @@ static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
                               MESHTASTIC_NRF9151_PROBE_TIMEOUT_US);
         nrf9151_gnss_process_response(resp);
         if(rc != 0) {
-            close(mesh_gnss.fd);
-            mesh_gnss.fd = -1;
+            nrf9151_gnss_close_uart();
             mesh_gnss.present = false;
             mesh_gnss.configured = false;
             nrf9151_gnss_set_state("missing", "unavailable",
@@ -5980,10 +5911,7 @@ static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
 
 static void nrf9151_gnss_close(void)
 {
-    if(mesh_gnss.fd >= 0) {
-        close(mesh_gnss.fd);
-        mesh_gnss.fd = -1;
-    }
+    nrf9151_gnss_close_uart();
     mesh_gnss.configured = false;
 }
 

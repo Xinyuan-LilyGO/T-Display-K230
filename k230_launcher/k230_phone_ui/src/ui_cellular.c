@@ -1,6 +1,7 @@
 #include "ui_cellular.h"
 
 #include "ui_i18n.h"
+#include "ui_nrf9151_manager.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -19,7 +20,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define NRF9151_UART_DEV "/dev/ttyS3"
+#define NRF9151_UART_DEV K230_NRF9151_UART_DEV
 #define NRF9151_UART_BAUD B115200
 #define NRF9151_EN_GPIO 2U
 #define NRF9151_EN_CONTROL_ENABLED 1
@@ -43,8 +44,6 @@
 #define NRF9151_LOG_MAX 4096
 #define NRF9151_LOG_VIEW_MAX 4096
 #define NRF9151_TEST_LOG "/tmp/k230_nrf9151_test.log"
-#define NRF9151_GNSS_FIX_CACHE "/tmp/k230_nrf9151_gnss_fix.cache"
-#define NRF9151_GNSS_FIX_CACHE_TMP "/tmp/k230_nrf9151_gnss_fix.cache.tmp"
 #define NRF9151_CMD_TIMEOUT_US 1800000ULL
 #define NRF9151_NMEA_READ_SECONDS 15U
 #define NRF9151_FULL_TEST_NMEA_SECONDS 20U
@@ -182,6 +181,7 @@ static cellular_cn0_bar_t cellular_cn0_bars[NRF9151_CN0_BAR_MAX];
 static lv_timer_t *cellular_timer;
 
 static pthread_mutex_t cellular_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t cellular_uart_owner_lock = PTHREAD_MUTEX_INITIALIZER;
 static int cellular_worker_active;
 static int cellular_cno_monitor_active;
 static int cellular_cno_monitor_stop;
@@ -216,6 +216,7 @@ static pthread_mutex_t cellular_gpio_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct gpiod_chip *cellular_en_gpio_chip;
 static struct gpiod_line_request *cellular_en_gpio_request;
 static unsigned int cellular_en_gpio_offset;
+static int cellular_uart_lock_fd = -1;
 
 static int cellular_response_gnss_active(const char *resp);
 static const char *cellular_skip_spaces(const char *s);
@@ -613,35 +614,9 @@ static void cellular_gnss_write_fix_cache(double lat, double lon, int has_alt,
                                           double alt_m, int sats,
                                           const char *source)
 {
-    FILE *fp;
-
-    if(!isfinite(lat) || !isfinite(lon) || lat < -90.0 || lat > 90.0 ||
-       lon < -180.0 || lon > 180.0 ||
-       (lat > -0.000001 && lat < 0.000001 &&
-        lon > -0.000001 && lon < 0.000001)) {
-        return;
-    }
-    fp = fopen(NRF9151_GNSS_FIX_CACHE_TMP, "w");
-    if(!fp) {
-        cellular_log_append("GNSS fix cache open failed: %s", strerror(errno));
-        return;
-    }
-    fprintf(fp, "version=1\n");
-    fprintf(fp, "epoch=%ld\n", (long)time(NULL));
-    fprintf(fp, "lat=%.7f\n", lat);
-    fprintf(fp, "lon=%.7f\n", lon);
-    fprintf(fp, "has_alt=%d\n", has_alt ? 1 : 0);
-    fprintf(fp, "alt=%.2f\n", has_alt ? alt_m : 0.0);
-    fprintf(fp, "sats=%d\n", sats > 0 ? sats : 0);
-    fprintf(fp, "source=%s\n", source && source[0] ? source : "lte");
-    if(fclose(fp) != 0) {
-        cellular_log_append("GNSS fix cache close failed: %s", strerror(errno));
-        unlink(NRF9151_GNSS_FIX_CACHE_TMP);
-        return;
-    }
-    if(rename(NRF9151_GNSS_FIX_CACHE_TMP, NRF9151_GNSS_FIX_CACHE) != 0) {
-        cellular_log_append("GNSS fix cache rename failed: %s", strerror(errno));
-        unlink(NRF9151_GNSS_FIX_CACHE_TMP);
+    if(k230_nrf9151_write_gnss_fix(lat, lon, has_alt, alt_m, sats,
+                                   source && source[0] ? source : "lte") != 0) {
+        cellular_log_append("GNSS fix cache write failed: %s", strerror(errno));
     }
 }
 
@@ -889,7 +864,7 @@ static void cellular_status_refresh(void)
     int gnss_fix_valid;
     int active;
     int monitor_active;
-    int exists = ui_path_exists(NRF9151_UART_DEV);
+    int exists = k230_nrf9151_uart_present();
 
     pthread_mutex_lock(&cellular_lock);
     snprintf(status, sizeof(status), "%s", cellular_status);
@@ -977,7 +952,7 @@ int ui_cellular_lte_signal_level(void)
     char ip[sizeof(cellular_ip_status)];
     int level = 0;
 
-    if(access(NRF9151_UART_DEV, F_OK) != 0) {
+    if(!k230_nrf9151_uart_present()) {
         return 0;
     }
 
@@ -1008,11 +983,25 @@ int ui_cellular_lte_signal_level(void)
 static int cellular_open_uart(void)
 {
     struct termios tio;
+    int lock_fd;
     int fd;
 
+    pthread_mutex_lock(&cellular_uart_owner_lock);
+    if(cellular_uart_lock_fd >= 0) {
+        pthread_mutex_unlock(&cellular_uart_owner_lock);
+        errno = EBUSY;
+        return -1;
+    }
+    pthread_mutex_unlock(&cellular_uart_owner_lock);
+
+    lock_fd = k230_nrf9151_acquire_uart("lte", 250);
+    if(lock_fd < 0) {
+        return -1;
+    }
     cellular_configure_uart3_iomux();
     fd = open(NRF9151_UART_DEV, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if(fd < 0) {
+        k230_nrf9151_release_uart(lock_fd);
         return -1;
     }
     memset(&tio, 0, sizeof(tio));
@@ -1027,7 +1016,28 @@ static int cellular_open_uart(void)
         tcsetattr(fd, TCSANOW, &tio);
     }
     tcflush(fd, TCIOFLUSH);
+    pthread_mutex_lock(&cellular_uart_owner_lock);
+    cellular_uart_lock_fd = lock_fd;
+    pthread_mutex_unlock(&cellular_uart_owner_lock);
     return fd;
+}
+
+static void cellular_close_uart(int fd)
+{
+    int lock_fd;
+
+    if(fd >= 0) {
+        close(fd);
+    }
+
+    pthread_mutex_lock(&cellular_uart_owner_lock);
+    lock_fd = cellular_uart_lock_fd;
+    cellular_uart_lock_fd = -1;
+    pthread_mutex_unlock(&cellular_uart_owner_lock);
+
+    if(lock_fd >= 0) {
+        k230_nrf9151_release_uart(lock_fd);
+    }
 }
 
 static void cellular_response_clean(const char *src, char *dst, size_t dst_len)
@@ -2847,7 +2857,7 @@ static void *cellular_cno_monitor_main(void *arg)
     }
     cellular_log_append("=== GNSS monitor stop ===");
     cellular_set_status("GNSS stopped");
-    close(fd);
+    cellular_close_uart(fd);
 
 out:
     pthread_mutex_lock(&cellular_lock);
@@ -3035,7 +3045,7 @@ static void *cellular_worker_main(void *arg)
         }
     }
 
-    close(fd);
+    cellular_close_uart(fd);
     cellular_set_status("%s done", title);
 
 out:

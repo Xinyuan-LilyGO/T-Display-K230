@@ -34,6 +34,8 @@
 #endif
 #include <v4l2-drm.h>
 
+#include "ui_nrf9151_manager.h"
+
 #ifndef LV_SYMBOL_WIFI
 #define LV_SYMBOL_WIFI "WiFi"
 #endif
@@ -121,8 +123,6 @@
 #define STATUS_BAR_LTE_W 40
 #define STATUS_BAR_BATTERY_W 62
 #define STATUS_BATTERY_REFRESH_US 10000000ULL
-#define STATUS_GNSS_FIX_CACHE "/tmp/k230_nrf9151_gnss_fix.cache"
-#define STATUS_NRF9151_UART_DEV "/dev/ttyS3"
 #define NET_MAX_APS 6
 #define NET_SSID_MAX 64
 #define NET_PASS_MAX 64
@@ -4180,7 +4180,7 @@ static int status_gnss_has_recent_fix(void)
     struct stat st;
     time_t now;
 
-    if(stat(STATUS_GNSS_FIX_CACHE, &st) != 0) {
+    if(stat(k230_nrf9151_gnss_cache_path(), &st) != 0) {
         return 0;
     }
     now = time(NULL);
@@ -4418,7 +4418,7 @@ static void status_bar_update(lv_timer_t *timer)
     status_set_label_color(status_wifi_label,
                            status_wifi_color(wifi_present, wifi_has_ip));
 
-    modem_present = path_exists(STATUS_NRF9151_UART_DEV);
+    modem_present = k230_nrf9151_uart_present();
     lte_level = modem_present ? ui_cellular_lte_signal_level() : 0;
     status_set_lte_bars(lte_level,
                         lte_level > 0 ? 0x25C281 :

@@ -11,6 +11,7 @@ extern "C" {
 #define K230_NRF9151_UART_DEV "/dev/ttyS3"
 #define K230_NRF9151_UART_LOCK "/tmp/k230_nrf9151_uart.lock"
 #define K230_NRF9151_GNSS_FIX_CACHE "/tmp/k230_nrf9151_gnss_fix.cache"
+#define K230_NRF9151_GNSS_FIX_CACHE_TMP "/tmp/k230_nrf9151_gnss_fix.cache.tmp"
 
 typedef struct {
     int valid;
@@ -26,9 +27,13 @@ typedef struct {
 
 const char *k230_nrf9151_uart_dev(void);
 const char *k230_nrf9151_gnss_cache_path(void);
+const char *k230_nrf9151_gnss_cache_tmp_path(void);
 int k230_nrf9151_uart_present(void);
 int k230_nrf9151_read_gnss_fix(k230_nrf9151_gnss_fix_t *fix,
                                int max_age_seconds);
+int k230_nrf9151_write_gnss_fix(double latitude, double longitude,
+                                int has_altitude, double altitude_m,
+                                int satellites, const char *source);
 int k230_nrf9151_acquire_uart(const char *owner, int wait_ms);
 void k230_nrf9151_release_uart(int lock_fd);
 

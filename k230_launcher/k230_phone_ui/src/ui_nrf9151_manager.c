@@ -1,7 +1,6 @@
 #include "ui_nrf9151_manager.h"
 
-#include "ui_common.h"
-
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -14,6 +13,37 @@
 #include <time.h>
 #include <unistd.h>
 
+static uint64_t nrf9151_manager_monotonic_us(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL +
+           (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+static void nrf9151_manager_trim_text(char *text)
+{
+    char *start;
+    size_t len;
+
+    if(!text) {
+        return;
+    }
+    start = text;
+    while(*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+    if(start != text) {
+        memmove(text, start, strlen(start) + 1U);
+    }
+
+    len = strlen(text);
+    while(len > 0 && isspace((unsigned char)text[len - 1U])) {
+        text[--len] = '\0';
+    }
+}
+
 const char *k230_nrf9151_uart_dev(void)
 {
     return K230_NRF9151_UART_DEV;
@@ -24,9 +54,58 @@ const char *k230_nrf9151_gnss_cache_path(void)
     return K230_NRF9151_GNSS_FIX_CACHE;
 }
 
+const char *k230_nrf9151_gnss_cache_tmp_path(void)
+{
+    return K230_NRF9151_GNSS_FIX_CACHE_TMP;
+}
+
 int k230_nrf9151_uart_present(void)
 {
     return access(K230_NRF9151_UART_DEV, R_OK | W_OK) == 0;
+}
+
+int k230_nrf9151_write_gnss_fix(double latitude, double longitude,
+                                int has_altitude, double altitude_m,
+                                int satellites, const char *source)
+{
+    FILE *fp;
+
+    if(!isfinite(latitude) || !isfinite(longitude) ||
+       latitude < -90.0 || latitude > 90.0 ||
+       longitude < -180.0 || longitude > 180.0 ||
+       (fabs(latitude) < 0.000001 && fabs(longitude) < 0.000001)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    fp = fopen(K230_NRF9151_GNSS_FIX_CACHE_TMP, "w");
+    if(!fp) {
+        return -1;
+    }
+    fprintf(fp, "version=1\n");
+    fprintf(fp, "epoch=%ld\n", (long)time(NULL));
+    fprintf(fp, "lat=%.7f\n", latitude);
+    fprintf(fp, "lon=%.7f\n", longitude);
+    fprintf(fp, "has_alt=%d\n", has_altitude ? 1 : 0);
+    fprintf(fp, "alt=%.2f\n", has_altitude ? altitude_m : 0.0);
+    fprintf(fp, "sats=%d\n", satellites > 0 ? satellites : 0);
+    fprintf(fp, "source=%s\n", source && source[0] ? source : "nrf9151");
+    if(fclose(fp) != 0) {
+        int saved_errno = errno;
+
+        unlink(K230_NRF9151_GNSS_FIX_CACHE_TMP);
+        errno = saved_errno;
+        return -1;
+    }
+    if(rename(K230_NRF9151_GNSS_FIX_CACHE_TMP,
+              K230_NRF9151_GNSS_FIX_CACHE) != 0) {
+        int saved_errno = errno;
+
+        unlink(K230_NRF9151_GNSS_FIX_CACHE_TMP);
+        errno = saved_errno;
+        return -1;
+    }
+    return 0;
 }
 
 int k230_nrf9151_read_gnss_fix(k230_nrf9151_gnss_fix_t *fix,
@@ -59,7 +138,7 @@ int k230_nrf9151_read_gnss_fix(k230_nrf9151_gnss_fix_t *fix,
     while(fgets(line, sizeof(line), fp)) {
         char *eq;
 
-        ui_trim_text(line);
+        nrf9151_manager_trim_text(line);
         eq = strchr(line, '=');
         if(!eq) {
             continue;
@@ -122,7 +201,7 @@ int k230_nrf9151_acquire_uart(const char *owner, int wait_ms)
     if(fd < 0) {
         return -1;
     }
-    start_us = ui_monotonic_us();
+    start_us = nrf9151_manager_monotonic_us();
     for(;;) {
         if(flock(fd, LOCK_EX | LOCK_NB) == 0) {
             if(ftruncate(fd, 0) != 0) {
@@ -143,7 +222,8 @@ int k230_nrf9151_acquire_uart(const char *owner, int wait_ms)
             return -1;
         }
         usleep(20000);
-        waited_ms = (int)((ui_monotonic_us() - start_us) / 1000ULL);
+        waited_ms = (int)((nrf9151_manager_monotonic_us() - start_us) /
+                          1000ULL);
     }
 }
 
