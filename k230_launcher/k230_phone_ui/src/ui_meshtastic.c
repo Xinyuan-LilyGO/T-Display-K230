@@ -4430,6 +4430,22 @@ void ui_meshtastic_resume_after_radio_owner(void)
     mesh_background_monitor_start();
 }
 
+void ui_meshtastic_release_radio_owner_foreground(void)
+{
+    char owner[sizeof(mesh_radio_pause_owner)];
+
+    if(!mesh_radio_pause_active) {
+        return;
+    }
+
+    snprintf(owner, sizeof(owner), "%s",
+             mesh_radio_pause_owner[0] ? mesh_radio_pause_owner : "LoRa");
+    mesh_radio_pause_active = 0;
+    mesh_radio_pause_owner[0] = '\0';
+    mesh_append_log("resume after %s handled by Meshtastic foreground",
+                    owner);
+}
+
 static void mesh_refresh_event_cb(lv_event_t *event)
 {
     (void)event;

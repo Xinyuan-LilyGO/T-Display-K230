@@ -1330,6 +1330,21 @@ static void lora_delete_radio_objects(void)
     lora_update_chip_label();
 }
 
+static void lora_release_radio_hal(void)
+{
+    lora_rx_running = 0;
+    lora_tx_pending = 0;
+    lora_continuous_tx = 0;
+    lora_active_op = LORA_OP_IDLE;
+    lora_take_radio_events();
+    lora_delete_radio_objects();
+    if(lora_hal) {
+        delete lora_hal;
+        lora_hal = NULL;
+    }
+    lora_initialized = 0;
+}
+
 static int lora_hw_prepare(void)
 {
     if(lora_initialized && lora_hal && lora_hal->spi_ready()) {
@@ -5357,7 +5372,7 @@ void ui_lorawan_create(lv_obj_t *scr)
 void ui_lorawan_cleanup(void)
 {
     lorawan_reset_node();
-    lora_delete_radio_objects();
+    lora_release_radio_hal();
     lorawan_status_label = NULL;
     lorawan_radio_label = NULL;
     lorawan_config_label = NULL;
@@ -5394,20 +5409,10 @@ void ui_lora_cleanup(void)
         lora_startup_timer = NULL;
     }
 
-    lora_delete_radio_objects();
-    if(lora_hal) {
-        delete lora_hal;
-        lora_hal = NULL;
-    }
-
-    lora_initialized = 0;
-    lora_rx_running = 0;
-    lora_tx_pending = 0;
+    lora_release_radio_hal();
     lora_auto_tx = 0;
     lora_session_mode = LORA_SESSION_LISTEN;
-    lora_active_op = LORA_OP_IDLE;
     lora_message_count = 0;
-    lora_take_radio_events();
     lora_chip_label = NULL;
     lora_status_label = NULL;
     lora_profile_label = NULL;
@@ -6081,12 +6086,7 @@ static void lora_flrc_video_stop(void)
 static void lora_flrc_release_app_radio(void)
 {
     lora_flrc_stop_wait();
-    lora_delete_radio_objects();
-    if(lora_hal) {
-        delete lora_hal;
-        lora_hal = NULL;
-    }
-    lora_initialized = 0;
+    lora_release_radio_hal();
 }
 
 static void lora_flrc_video_start(const char *role)
@@ -7029,12 +7029,7 @@ void ui_lora_flrc_cleanup(void)
     lora_flrc_video_stop();
     lora_flrc_stop_wait();
     lora_flrc_settings_close();
-    lora_delete_radio_objects();
-    if(lora_hal) {
-        delete lora_hal;
-        lora_hal = NULL;
-    }
-    lora_initialized = 0;
+    lora_release_radio_hal();
     lora_flrc_status_label = NULL;
     lora_flrc_config_label = NULL;
     lora_flrc_stats_label = NULL;
