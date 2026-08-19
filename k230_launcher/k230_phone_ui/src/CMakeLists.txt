@@ -121,6 +121,7 @@ add_executable(k230_camera_capture camera_capture.c)
 add_executable(k230_lora_flrc_bench lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_lora_flrc_video lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_lora_flrc_tile_stream lora_flrc_bench.cpp ${RADIOLIB_REQUIRED_SOURCES})
+add_executable(k230_lorawan_test lorawan_test.cpp ${RADIOLIB_REQUIRED_SOURCES})
 add_executable(k230_halow_udp_stream halow_udp_stream.c)
 add_executable(k230_meshtastic_probe
     k230_meshtastic_probe.cpp
@@ -183,6 +184,11 @@ target_include_directories(k230_lora_flrc_video PRIVATE
 )
 
 target_include_directories(k230_lora_flrc_tile_stream PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${RADIOLIB_DIR}
+)
+
+target_include_directories(k230_lorawan_test PRIVATE
     ${CMAKE_SYSROOT}/usr/include
     ${RADIOLIB_DIR}
 )
@@ -311,6 +317,12 @@ target_link_libraries(k230_lora_flrc_tile_stream PRIVATE
     pthread
 )
 
+target_link_libraries(k230_lorawan_test PRIVATE
+    gpiod
+    m
+    pthread
+)
+
 target_include_directories(k230_halow_udp_stream PRIVATE
     ${CMAKE_SYSROOT}/usr/include
 )
@@ -348,7 +360,7 @@ target_link_libraries(k230_qr_scan PRIVATE
     m
 )
 
-install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_halow_udp_stream k230_meshtastic_probe k230_qr_scan k230_pcm_volume k230_nrf52840_dfu drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
+install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_lorawan_test k230_halow_udp_stream k230_meshtastic_probe k230_qr_scan k230_pcm_volume k230_nrf52840_dfu drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
 install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
         ${CMAKE_CURRENT_SOURCE_DIR}/k230_halow_camera_stream.sh
         DESTINATION /root/app/k230_phone_ui)
