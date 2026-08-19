@@ -76,6 +76,8 @@
 #define LORAWAN_PROFILE_MAX 20
 #define LORAWAN_FILE_MAX 96
 #define LORAWAN_PATH_MAX 192
+#define LORAWAN_JOIN_RETRY_DELAY_MS 60000ULL
+#define LORAWAN_JOIN_POLL_MS 250
 #define LORA_FLRC_LOG_PATH "/tmp/k230_lora_flrc.log"
 #define LORA_FLRC_VIDEO_BIN "/root/app/k230_phone_ui/k230_lora_flrc_video"
 #define LORA_FLRC_CAMERA_STREAM_BIN "/root/app/k230_phone_ui/k230_flrc_camera_stream.sh"
@@ -3407,9 +3409,28 @@ static char lorawan_selected_file[LORAWAN_FILE_MAX];
 static char lorawan_selected_path[LORAWAN_PATH_MAX];
 static char lorawan_profile_files[LORAWAN_PROFILE_MAX][LORAWAN_FILE_MAX];
 static int lorawan_profile_count;
+static pthread_mutex_t lorawan_join_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t lorawan_join_thread;
+static int lorawan_join_thread_active;
+static int lorawan_join_cancel_requested;
+static int lorawan_join_done;
+static int lorawan_join_success;
+static int lorawan_join_cancelled;
+static int lorawan_join_attempt;
+static int16_t lorawan_join_last_state = RADIOLIB_ERR_NONE;
+static uint64_t lorawan_join_next_retry_us;
+static char lorawan_join_message[192];
+static lv_timer_t *lorawan_join_timer;
+static lv_obj_t *lorawan_join_overlay;
+static lv_obj_t *lorawan_join_overlay_label;
+static lv_obj_t *lorawan_join_overlay_detail;
 
 static void lorawan_reset_node(void);
+static void lorawan_apply_node_settings(void);
 static void lorawan_update_labels(void);
+static int lorawan_join_is_active(void);
+static void lorawan_join_overlay_update(void);
+static void lorawan_join_stop_worker(int wait);
 
 static int lorawan_hex_value(char c)
 {
@@ -4240,11 +4261,16 @@ static void lorawan_read_binary(const char *path, uint8_t *data, size_t len)
     FILE *fp = fopen(path, "rb");
     size_t got;
 
+    if(!data || len == 0) {
+        return;
+    }
     if(!fp) {
         return;
     }
     got = fread(data, 1, len, fp);
-    (void)got;
+    if(got < len) {
+        memset(data + got, 0, len - got);
+    }
     fclose(fp);
 }
 
@@ -4798,6 +4824,7 @@ static lv_obj_t *lorawan_switch_row(lv_obj_t *parent, int y,
 
 static void lorawan_reset_node(void)
 {
+    lorawan_join_stop_worker(1);
     if(lorawan_node) {
         delete lorawan_node;
         lorawan_node = NULL;
@@ -4819,6 +4846,460 @@ static void lorawan_apply_node_settings(void)
     if(lorawan_config.has_tx_power) {
         lorawan_node->setTxPower(lorawan_config.tx_power);
     }
+}
+
+static void lorawan_join_append_log(const char *fmt, ...)
+{
+    FILE *fp;
+    va_list ap;
+
+    fp = fopen(LORA_LOG_PATH, "a");
+    if(!fp) {
+        return;
+    }
+    fprintf(fp, "%llu LoRaWAN ",
+            (unsigned long long)ui_monotonic_us());
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fprintf(fp, "\n");
+    fclose(fp);
+}
+
+static int lorawan_join_is_active(void)
+{
+    int active;
+
+    pthread_mutex_lock(&lorawan_join_lock);
+    active = lorawan_join_thread_active;
+    pthread_mutex_unlock(&lorawan_join_lock);
+    return active;
+}
+
+static int lorawan_join_cancel_requested_now(void)
+{
+    int cancel;
+
+    pthread_mutex_lock(&lorawan_join_lock);
+    cancel = lorawan_join_cancel_requested;
+    pthread_mutex_unlock(&lorawan_join_lock);
+    return cancel;
+}
+
+static void lorawan_join_set_message(int16_t state, int attempt,
+                                     uint64_t next_retry_us,
+                                     const char *fmt, ...)
+{
+    va_list ap;
+    char text[sizeof(lorawan_join_message)];
+
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+
+    pthread_mutex_lock(&lorawan_join_lock);
+    lorawan_join_last_state = state;
+    lorawan_join_attempt = attempt;
+    lorawan_join_next_retry_us = next_retry_us;
+    snprintf(lorawan_join_message, sizeof(lorawan_join_message), "%s", text);
+    pthread_mutex_unlock(&lorawan_join_lock);
+}
+
+static void lorawan_join_cancel_event(lv_event_t *event)
+{
+    (void)event;
+    pthread_mutex_lock(&lorawan_join_lock);
+    lorawan_join_cancel_requested = 1;
+    snprintf(lorawan_join_message, sizeof(lorawan_join_message),
+             "Cancelling after current join attempt...");
+    lorawan_join_next_retry_us = 0;
+    pthread_mutex_unlock(&lorawan_join_lock);
+    lorawan_join_overlay_update();
+}
+
+static void lorawan_join_overlay_close(void)
+{
+    if(lorawan_join_overlay && lv_obj_is_valid(lorawan_join_overlay)) {
+        lv_obj_delete(lorawan_join_overlay);
+    }
+    lorawan_join_overlay = NULL;
+    lorawan_join_overlay_label = NULL;
+    lorawan_join_overlay_detail = NULL;
+}
+
+static void lorawan_join_overlay_open(void)
+{
+    lv_obj_t *card;
+    lv_obj_t *spinner;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 390 : 318;
+    int card_h = ui_is_landscape() ? 228 : 246;
+
+    if(lorawan_join_overlay && lv_obj_is_valid(lorawan_join_overlay)) {
+        lorawan_join_overlay_update();
+        return;
+    }
+    if(card_w > screen_w - 36) {
+        card_w = screen_w - 36;
+    }
+    if(card_h > screen_h - 36) {
+        card_h = screen_h - 36;
+    }
+
+    lorawan_join_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(lorawan_join_overlay);
+    lv_obj_set_style_bg_color(lorawan_join_overlay, lv_color_hex(0x000000),
+                              0);
+    lv_obj_set_style_bg_opa(lorawan_join_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(lorawan_join_overlay, 0, 0);
+    lv_obj_set_style_pad_all(lorawan_join_overlay, 0, 0);
+    lv_obj_add_flag(lorawan_join_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(lorawan_join_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    card = ui_panel(lorawan_join_overlay, 0, 0, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x244261), 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    spinner = lv_spinner_create(card);
+    lv_obj_set_size(spinner, 68, 68);
+    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_set_style_arc_width(spinner, 7, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(spinner, 7, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x1B3348),
+                               LV_PART_MAIN);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x3DA5FF),
+                               LV_PART_INDICATOR);
+
+    lorawan_join_overlay_label =
+        ui_label(card, "Joining LoRaWAN", &lv_font_montserrat_20,
+                 0xF2F5F8);
+    lv_obj_set_width(lorawan_join_overlay_label, card_w - 36);
+    lv_label_set_long_mode(lorawan_join_overlay_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(lorawan_join_overlay_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lorawan_join_overlay_label, LV_ALIGN_TOP_MID, 0, 96);
+
+    lorawan_join_overlay_detail =
+        ui_label(card, "Waiting for join accept",
+                 &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_width(lorawan_join_overlay_detail, card_w - 36);
+    lv_label_set_long_mode(lorawan_join_overlay_detail, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lorawan_join_overlay_detail,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lorawan_join_overlay_detail, LV_ALIGN_TOP_MID, 0, 126);
+
+    btn = lora_button(card, (card_w - 130) / 2, card_h - 50, 130, 38,
+                      "Cancel", 0xF2F5F8);
+    lv_obj_add_event_cb(btn, lorawan_join_cancel_event, LV_EVENT_CLICKED,
+                        NULL);
+    lorawan_join_overlay_update();
+}
+
+static void lorawan_join_overlay_update(void)
+{
+    char message[sizeof(lorawan_join_message)];
+    char title[96];
+    char detail[192];
+    int active;
+    int done;
+    int success;
+    int cancelled;
+    int attempt;
+    int16_t state;
+    uint64_t next_retry_us;
+    uint64_t now_us;
+
+    pthread_mutex_lock(&lorawan_join_lock);
+    active = lorawan_join_thread_active;
+    done = lorawan_join_done;
+    success = lorawan_join_success;
+    cancelled = lorawan_join_cancelled;
+    attempt = lorawan_join_attempt;
+    state = lorawan_join_last_state;
+    next_retry_us = lorawan_join_next_retry_us;
+    snprintf(message, sizeof(message), "%s", lorawan_join_message);
+    pthread_mutex_unlock(&lorawan_join_lock);
+
+    if(lorawan_join_label && lv_obj_is_valid(lorawan_join_label) && active) {
+        lv_label_set_text(lorawan_join_label, done ?
+                          (success ? "Joined" :
+                           (cancelled ? "Cancelled" : "Failed")) :
+                          "Joining");
+    }
+    if(lorawan_status_label && lv_obj_is_valid(lorawan_status_label) &&
+       active && !done) {
+        lv_label_set_text(lorawan_status_label, message[0] ? message :
+                          "Joining LoRaWAN...");
+    }
+
+    if(!lorawan_join_overlay || !lv_obj_is_valid(lorawan_join_overlay)) {
+        return;
+    }
+    if(success) {
+        snprintf(title, sizeof(title), "LoRaWAN joined");
+    } else if(cancelled) {
+        snprintf(title, sizeof(title), "LoRaWAN join cancelled");
+    } else {
+        snprintf(title, sizeof(title), "Joining LoRaWAN");
+    }
+
+    now_us = ui_monotonic_us();
+    if(next_retry_us > now_us && !done) {
+        uint64_t remain_s = (next_retry_us - now_us + 999999ULL) /
+                            1000000ULL;
+        snprintf(detail, sizeof(detail),
+                 "Attempt %d: %s (%d)\nRetry in %llus",
+                 attempt, lorawan_state_name(state), state,
+                 (unsigned long long)remain_s);
+    } else if(message[0]) {
+        snprintf(detail, sizeof(detail), "%s", message);
+    } else {
+        snprintf(detail, sizeof(detail), "Attempt %d", attempt);
+    }
+
+    if(lorawan_join_overlay_label &&
+       lv_obj_is_valid(lorawan_join_overlay_label)) {
+        lv_label_set_text(lorawan_join_overlay_label, title);
+    }
+    if(lorawan_join_overlay_detail &&
+       lv_obj_is_valid(lorawan_join_overlay_detail)) {
+        lv_label_set_text(lorawan_join_overlay_detail, detail);
+    }
+    app_request_fast_refresh();
+}
+
+static void *lorawan_join_thread_entry(void *arg)
+{
+    int attempt = 0;
+
+    (void)arg;
+    for(;;) {
+        int16_t state;
+
+        if(lorawan_join_cancel_requested_now()) {
+            pthread_mutex_lock(&lorawan_join_lock);
+            lorawan_join_cancelled = 1;
+            lorawan_join_done = 1;
+            snprintf(lorawan_join_message, sizeof(lorawan_join_message),
+                     "Join cancelled");
+            pthread_mutex_unlock(&lorawan_join_lock);
+            lorawan_join_append_log("join cancelled before attempt");
+            return NULL;
+        }
+
+        attempt++;
+        lorawan_join_set_message(RADIOLIB_ERR_NONE, attempt, 0,
+                                 "Attempt %d: waiting for join accept",
+                                 attempt);
+        lorawan_join_append_log("join attempt %d begin", attempt);
+
+        if(!lorawan_node) {
+            lorawan_join_set_message(RADIOLIB_ERR_CHIP_NOT_FOUND, attempt, 0,
+                                     "Radio node is not available");
+            pthread_mutex_lock(&lorawan_join_lock);
+            lorawan_join_done = 1;
+            lorawan_join_success = 0;
+            pthread_mutex_unlock(&lorawan_join_lock);
+            lorawan_join_append_log("join attempt %d failed: no node",
+                                    attempt);
+            return NULL;
+        }
+
+        state = lorawan_node->activateOTAA();
+        if(lorawan_node) {
+            lorawan_write_binary(LORAWAN_NONCES_PATH,
+                                 lorawan_node->getBufferNonces(),
+                                 RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+        }
+
+        if(lorawan_join_cancel_requested_now()) {
+            pthread_mutex_lock(&lorawan_join_lock);
+            lorawan_join_last_state = state;
+            lorawan_join_attempt = attempt;
+            lorawan_join_cancelled = 1;
+            lorawan_join_done = 1;
+            snprintf(lorawan_join_message, sizeof(lorawan_join_message),
+                     "Join cancelled");
+            pthread_mutex_unlock(&lorawan_join_lock);
+            lorawan_join_append_log("join attempt %d cancelled state=%d %s",
+                                    attempt, state, lorawan_state_name(state));
+            return NULL;
+        }
+
+        if(state == RADIOLIB_LORAWAN_SESSION_RESTORED ||
+           state == RADIOLIB_LORAWAN_NEW_SESSION) {
+            lorawan_join_set_message(state, attempt, 0,
+                                     "Joined on attempt %d: %s",
+                                     attempt, lorawan_state_name(state));
+            pthread_mutex_lock(&lorawan_join_lock);
+            lorawan_join_done = 1;
+            lorawan_join_success = 1;
+            pthread_mutex_unlock(&lorawan_join_lock);
+            lorawan_join_append_log("join attempt %d success state=%d %s",
+                                    attempt, state, lorawan_state_name(state));
+            return NULL;
+        }
+
+        {
+            uint64_t next_retry_us =
+                ui_monotonic_us() + LORAWAN_JOIN_RETRY_DELAY_MS * 1000ULL;
+            lorawan_join_set_message(state, attempt, next_retry_us,
+                                     "Attempt %d failed: %s (%d)",
+                                     attempt, lorawan_state_name(state),
+                                     state);
+            lorawan_join_append_log("join attempt %d failed state=%d %s",
+                                    attempt, state, lorawan_state_name(state));
+            while(ui_monotonic_us() < next_retry_us) {
+                if(lorawan_join_cancel_requested_now()) {
+                    pthread_mutex_lock(&lorawan_join_lock);
+                    lorawan_join_last_state = state;
+                    lorawan_join_attempt = attempt;
+                    lorawan_join_cancelled = 1;
+                    lorawan_join_done = 1;
+                    lorawan_join_next_retry_us = 0;
+                    snprintf(lorawan_join_message,
+                             sizeof(lorawan_join_message),
+                             "Join cancelled");
+                    pthread_mutex_unlock(&lorawan_join_lock);
+                    lorawan_join_append_log(
+                        "join retry wait cancelled after attempt %d",
+                        attempt);
+                    return NULL;
+                }
+                usleep(100000);
+            }
+        }
+    }
+}
+
+static void lorawan_join_timer_cb(lv_timer_t *timer)
+{
+    int done;
+    int success;
+    int cancelled;
+    int active;
+    int16_t state;
+
+    lorawan_join_overlay_update();
+
+    pthread_mutex_lock(&lorawan_join_lock);
+    done = lorawan_join_done;
+    success = lorawan_join_success;
+    cancelled = lorawan_join_cancelled;
+    active = lorawan_join_thread_active;
+    state = lorawan_join_last_state;
+    pthread_mutex_unlock(&lorawan_join_lock);
+    if(!done) {
+        return;
+    }
+
+    if(active) {
+        pthread_join(lorawan_join_thread, NULL);
+        pthread_mutex_lock(&lorawan_join_lock);
+        lorawan_join_thread_active = 0;
+        pthread_mutex_unlock(&lorawan_join_lock);
+    }
+
+    if(success) {
+        lorawan_joined = 1;
+        lorawan_apply_node_settings();
+        if(lorawan_node) {
+            lorawan_write_binary(LORAWAN_SESSION_PATH,
+                                 lorawan_node->getBufferSession(),
+                                 RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+        }
+        lorawan_set_status("Joined: %s", lorawan_state_name(state));
+    } else if(cancelled) {
+        lorawan_joined = 0;
+        lorawan_set_status("Join cancelled");
+    } else {
+        lorawan_joined = 0;
+        lorawan_set_status("Join stopped: %s (%d)",
+                           lorawan_state_name(state), state);
+    }
+
+    lorawan_update_labels();
+    lorawan_join_overlay_close();
+    if(timer && timer == lorawan_join_timer) {
+        lorawan_join_timer = NULL;
+        lv_timer_delete(timer);
+    }
+}
+
+static int lorawan_join_start_worker(void)
+{
+    pthread_mutex_lock(&lorawan_join_lock);
+    if(lorawan_join_thread_active) {
+        pthread_mutex_unlock(&lorawan_join_lock);
+        return 1;
+    }
+    lorawan_join_cancel_requested = 0;
+    lorawan_join_done = 0;
+    lorawan_join_success = 0;
+    lorawan_join_cancelled = 0;
+    lorawan_join_attempt = 0;
+    lorawan_join_last_state = RADIOLIB_ERR_NONE;
+    lorawan_join_next_retry_us = 0;
+    snprintf(lorawan_join_message, sizeof(lorawan_join_message),
+             "Joining LoRaWAN...");
+    pthread_mutex_unlock(&lorawan_join_lock);
+
+    if(pthread_create(&lorawan_join_thread, NULL, lorawan_join_thread_entry,
+                      NULL) != 0) {
+        pthread_mutex_lock(&lorawan_join_lock);
+        lorawan_join_done = 1;
+        lorawan_join_success = 0;
+        lorawan_join_last_state = RADIOLIB_ERR_NONE;
+        snprintf(lorawan_join_message, sizeof(lorawan_join_message),
+                 "Join worker failed to start");
+        pthread_mutex_unlock(&lorawan_join_lock);
+        return 0;
+    }
+
+    pthread_mutex_lock(&lorawan_join_lock);
+    lorawan_join_thread_active = 1;
+    pthread_mutex_unlock(&lorawan_join_lock);
+
+    if(!lorawan_join_timer) {
+        lorawan_join_timer =
+            lv_timer_create(lorawan_join_timer_cb, LORAWAN_JOIN_POLL_MS,
+                            NULL);
+    }
+    return 1;
+}
+
+static void lorawan_join_stop_worker(int wait)
+{
+    int active;
+
+    pthread_mutex_lock(&lorawan_join_lock);
+    active = lorawan_join_thread_active;
+    if(active) {
+        lorawan_join_cancel_requested = 1;
+        snprintf(lorawan_join_message, sizeof(lorawan_join_message),
+                 "Cancelling join...");
+    }
+    pthread_mutex_unlock(&lorawan_join_lock);
+
+    if(wait && active) {
+        pthread_join(lorawan_join_thread, NULL);
+        pthread_mutex_lock(&lorawan_join_lock);
+        lorawan_join_thread_active = 0;
+        lorawan_join_done = 1;
+        lorawan_join_cancelled = 1;
+        pthread_mutex_unlock(&lorawan_join_lock);
+    }
+    if(lorawan_join_timer) {
+        lv_timer_delete(lorawan_join_timer);
+        lorawan_join_timer = NULL;
+    }
+    lorawan_join_overlay_close();
 }
 
 static void lorawan_refresh_view(lorawan_view_t view)
@@ -4960,6 +5441,10 @@ static void lorawan_join_event(lv_event_t *event)
     uint8_t session[RADIOLIB_LORAWAN_SESSION_BUF_SIZE] = {0};
 
     (void)event;
+    if(lorawan_join_is_active()) {
+        lorawan_join_overlay_open();
+        return;
+    }
     if(!lorawan_config_loaded) {
         (void)lorawan_autoload_config();
     }
@@ -5005,27 +5490,15 @@ static void lorawan_join_event(lv_event_t *event)
     lorawan_read_binary(LORAWAN_SESSION_PATH, session, sizeof(session));
     (void)lorawan_node->setBufferSession(session);
 
-    lorawan_set_status("Joining...");
-    lv_refr_now(NULL);
-    state = lorawan_node->activateOTAA();
-    lorawan_write_binary(LORAWAN_NONCES_PATH, lorawan_node->getBufferNonces(),
-                         RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
-
-    if(state != RADIOLIB_LORAWAN_SESSION_RESTORED &&
-       state != RADIOLIB_LORAWAN_NEW_SESSION) {
-        lorawan_joined = 0;
-        lorawan_set_status("Join failed: %s (%d)",
-                           lorawan_state_name(state), state);
+    lorawan_joined = 0;
+    if(!lorawan_join_start_worker()) {
+        lorawan_set_status("Join worker failed");
         lorawan_update_labels();
         return;
     }
-
-    lorawan_joined = 1;
-    lorawan_apply_node_settings();
-    lorawan_write_binary(LORAWAN_SESSION_PATH, lorawan_node->getBufferSession(),
-                         RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
-    lorawan_set_status("Joined: %s", lorawan_state_name(state));
+    lorawan_set_status("Joining LoRaWAN...");
     lorawan_update_labels();
+    lorawan_join_overlay_open();
 }
 
 static void lorawan_send_event(lv_event_t *event)
@@ -5039,6 +5512,11 @@ static void lorawan_send_event(lv_event_t *event)
     int temp_deci_c = 0;
 
     (void)event;
+    if(lorawan_join_is_active()) {
+        lorawan_set_status("Join in progress");
+        lorawan_join_overlay_open();
+        return;
+    }
     if(!lorawan_joined || !lorawan_node) {
         lorawan_set_status("Join first");
         return;
@@ -5362,15 +5840,23 @@ void ui_lorawan_create(lv_obj_t *scr)
         break;
     }
     if(lorawan_status_label && lv_obj_is_valid(lorawan_status_label)) {
-        lv_label_set_text(lorawan_status_label,
-                          lorawan_config_valid ? "Ready" :
-                          "Create or load a profile");
+        if(lorawan_join_is_active()) {
+            lv_label_set_text(lorawan_status_label, "Joining LoRaWAN...");
+        } else {
+            lv_label_set_text(lorawan_status_label,
+                              lorawan_config_valid ? "Ready" :
+                              "Create or load a profile");
+        }
     }
     lorawan_update_labels();
+    if(lorawan_join_is_active()) {
+        lorawan_join_overlay_open();
+    }
 }
 
 void ui_lorawan_cleanup(void)
 {
+    lorawan_join_stop_worker(1);
     lorawan_reset_node();
     lora_release_radio_hal();
     lorawan_status_label = NULL;
