@@ -1,7 +1,9 @@
 #include "ui_lora.h"
 
 #include "ui_i18n.h"
+#include "ui_hardware.h"
 #include "ui_input.h"
+#include "ui_nrf9151_manager.h"
 
 #include <lvgl/src/misc/cache/instance/lv_image_cache.h>
 
@@ -10,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <gpiod.h>
+#include <math.h>
 #include <linux/spi/spidev.h>
 #include <poll.h>
 #include <pthread.h>
@@ -79,6 +82,16 @@
 #define LORAWAN_PATH_MAX 192
 #define LORAWAN_JOIN_RETRY_DELAY_MS 60000ULL
 #define LORAWAN_JOIN_POLL_MS 250
+#define LORAWAN_SOURCE_K230 0x01
+#define LORAWAN_SOURCE_AHT20 0x02
+#define LORAWAN_SOURCE_NRF9151_GPS 0x04
+#define LORAWAN_SOURCE_DEFAULT LORAWAN_SOURCE_K230
+#define LORAWAN_SOURCE_PROBE_INTERVAL_US 2500000ULL
+#define LORAWAN_GNSS_FIX_MAX_AGE_SEC 3600
+#define LORAWAN_LPP_DIGITAL_INPUT 0x00
+#define LORAWAN_LPP_TEMPERATURE 0x67
+#define LORAWAN_LPP_RELATIVE_HUMIDITY 0x68
+#define LORAWAN_LPP_GPS 0x88
 #define LORA_FLRC_LOG_PATH "/tmp/k230_lora_flrc.log"
 #define LORA_FLRC_VIDEO_BIN "/root/app/k230_phone_ui/k230_lora_flrc_video"
 #define LORA_FLRC_CAMERA_STREAM_BIN "/root/app/k230_phone_ui/k230_flrc_camera_stream.sh"
@@ -3352,7 +3365,20 @@ typedef struct {
     int has_tx_power;
     int8_t tx_power;
     int simulate_temperature;
+    uint32_t upload_sources;
 } lorawan_config_t;
+
+typedef struct {
+    int k230_available;
+    double k230_temp_c;
+    int aht20_available;
+    double aht20_temp_c;
+    double aht20_humidity_pct;
+    int nrf9151_present;
+    int gps_available;
+    k230_nrf9151_gnss_fix_t gps_fix;
+    uint64_t probed_us;
+} lorawan_data_state_t;
 
 static const lorawan_region_t lorawan_regions[] = {
     {"EU868", &EU868, 868.1f},
@@ -3387,6 +3413,7 @@ static lv_obj_t *lorawan_devaddr_label;
 static lv_obj_t *lorawan_fcnt_label;
 static lv_obj_t *lorawan_payload_label;
 static lv_obj_t *lorawan_downlink_label;
+static lv_obj_t *lorawan_source_summary_label;
 static lv_obj_t *lorawan_region_value_label;
 static lv_obj_t *lorawan_join_eui_value_label;
 static lv_obj_t *lorawan_dev_eui_value_label;
@@ -3401,6 +3428,7 @@ static lv_obj_t *lorawan_sim_temp_switch;
 static lv_obj_t *lorawan_region_buttons[LORAWAN_REGION_COUNT];
 static LoRaWANNode *lorawan_node;
 static lorawan_config_t lorawan_config;
+static lorawan_data_state_t lorawan_data_state;
 static int lorawan_config_loaded;
 static int lorawan_config_valid;
 static int lorawan_config_dirty;
@@ -3425,14 +3453,45 @@ static lv_timer_t *lorawan_join_timer;
 static lv_obj_t *lorawan_join_overlay;
 static lv_obj_t *lorawan_join_overlay_label;
 static lv_obj_t *lorawan_join_overlay_detail;
+static lv_obj_t *lorawan_join_overlay_spinner;
+static lv_obj_t *lorawan_join_overlay_icon;
+static uint64_t lorawan_join_overlay_close_after_us;
+static int lorawan_preserve_view_on_cleanup;
+static pthread_mutex_t lorawan_send_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t lorawan_send_thread;
+static int lorawan_send_thread_active;
+static int lorawan_send_done;
+static int lorawan_send_success;
+static int16_t lorawan_send_state = RADIOLIB_ERR_NONE;
+static size_t lorawan_send_downlink_len;
+static uint32_t lorawan_send_fcnt;
+static int lorawan_send_temp_deci_c;
+static int lorawan_send_payload_is_temp;
+static char lorawan_send_message[192];
+static lv_timer_t *lorawan_send_timer;
+static lv_obj_t *lorawan_send_overlay;
+static lv_obj_t *lorawan_send_overlay_label;
+static lv_obj_t *lorawan_send_overlay_detail;
+static lv_obj_t *lorawan_send_overlay_spinner;
+static lv_obj_t *lorawan_send_overlay_icon;
+static uint64_t lorawan_send_overlay_close_after_us;
 
 static void lorawan_reset_node(void);
 static void lorawan_apply_node_settings(void);
 static void lorawan_update_labels(void);
+static void lorawan_source_summary(char *out, size_t out_len);
+static void lorawan_probe_data_sources(int force);
+static int lorawan_source_available(uint32_t source);
+static const char *lorawan_source_missing_reason(uint32_t source);
+static int lorawan_build_cayenne_payload(uint8_t *payload, size_t payload_max,
+                                         size_t *payload_len, char *summary,
+                                         size_t summary_len);
 static int lorawan_join_is_active(void);
 static void lorawan_join_append_log(const char *fmt, ...);
 static void lorawan_join_overlay_update(void);
 static void lorawan_join_stop_worker(int wait);
+static void lorawan_send_timer_cb(lv_timer_t *timer);
+static void lorawan_send_stop_worker(int wait);
 
 static int lorawan_hex_value(char c)
 {
@@ -3578,6 +3637,7 @@ static void lorawan_config_defaults(void)
     lorawan_config.dwell_time_ms = 400;
     lorawan_config.tx_power = 14;
     lorawan_config.simulate_temperature = 0;
+    lorawan_config.upload_sources = LORAWAN_SOURCE_DEFAULT;
 }
 
 static void lorawan_set_status(const char *fmt, ...)
@@ -3589,7 +3649,7 @@ static void lorawan_set_status(const char *fmt, ...)
     vsnprintf(text, sizeof(text), fmt, ap);
     va_end(ap);
     if(lorawan_status_label && lv_obj_is_valid(lorawan_status_label)) {
-        lv_label_set_text(lorawan_status_label, text);
+        lv_label_set_text(lorawan_status_label, ui_tr(text));
     }
     lora_log("LoRaWAN %s", text);
 }
@@ -3621,6 +3681,7 @@ static int lorawan_write_template(void)
     fprintf(fp, "dwell_time=true\n");
     fprintf(fp, "dwell_time_ms=400\n");
     fprintf(fp, "simulate_temperature=false\n");
+    fprintf(fp, "upload_sources=%u\n", LORAWAN_SOURCE_DEFAULT);
     fprintf(fp, "# Optional: tx_power=14\n");
     fclose(fp);
     return 1;
@@ -3864,6 +3925,8 @@ static int lorawan_save_config_conf(const char *path)
             (unsigned long)lorawan_config.dwell_time_ms);
     fprintf(fp, "simulate_temperature=%s\n",
             lorawan_config.simulate_temperature ? "true" : "false");
+    fprintf(fp, "upload_sources=%lu\n",
+            (unsigned long)lorawan_config.upload_sources);
     if(lorawan_config.has_tx_power) {
         fprintf(fp, "tx_power=%d\n", lorawan_config.tx_power);
     }
@@ -3928,8 +3991,10 @@ static int lorawan_save_config_json(const char *path)
             lorawan_config.dwell_time ? "true" : "false");
     fprintf(fp, "  \"dwell_time_ms\": %lu,\n",
             (unsigned long)lorawan_config.dwell_time_ms);
-    fprintf(fp, "  \"simulate_temperature\": %s",
+    fprintf(fp, "  \"simulate_temperature\": %s,\n",
             lorawan_config.simulate_temperature ? "true" : "false");
+    fprintf(fp, "  \"upload_sources\": %lu",
+            (unsigned long)lorawan_config.upload_sources);
     if(lorawan_config.has_tx_power) {
         fprintf(fp, ",\n  \"tx_power\": %d\n", lorawan_config.tx_power);
     } else {
@@ -4089,6 +4154,11 @@ static int lorawan_load_json_path(const char *path)
     }
     (void)lorawan_json_get_bool(json, "simulate_temperature",
                                 &lorawan_config.simulate_temperature);
+    if(lorawan_json_get_int(json, "upload_sources", &number) && number > 0) {
+        lorawan_config.upload_sources = (uint32_t)number;
+    } else if(lorawan_config.simulate_temperature) {
+        lorawan_config.upload_sources |= LORAWAN_SOURCE_AHT20;
+    }
     if(lorawan_json_get_int(json, "tx_power", &number) && number >= -9 &&
        number <= 22) {
         lorawan_config.has_tx_power = 1;
@@ -4200,6 +4270,14 @@ static int lorawan_load_conf_path(const char *path, int create_template)
                   !strcasecmp(key, "simulate_temp")) {
             lorawan_config.simulate_temperature =
                 lorawan_parse_bool(value, lorawan_config.simulate_temperature);
+            if(lorawan_config.simulate_temperature) {
+                lorawan_config.upload_sources |= LORAWAN_SOURCE_AHT20;
+            }
+        } else if(!strcasecmp(key, "upload_sources")) {
+            int sources = atoi(value);
+            if(sources > 0) {
+                lorawan_config.upload_sources = (uint32_t)sources;
+            }
         } else if(!strcasecmp(key, "tx_power")) {
             int power = atoi(value);
             if(power >= -9 && power <= 22) {
@@ -4579,14 +4657,14 @@ static void lorawan_update_labels(void)
     }
     if(lorawan_config_label && lv_obj_is_valid(lorawan_config_label)) {
         lv_label_set_text(lorawan_config_label,
-                          lorawan_config_dirty ? "Unsaved changes" :
-                          (lorawan_config_valid ? "Saved config" :
-                           "Tap fields to configure"));
+                          ui_tr(lorawan_config_dirty ? "Unsaved changes" :
+                                (lorawan_config_valid ? "Saved config" :
+                                 "Tap fields to configure")));
     }
     if(lorawan_profile_label && lv_obj_is_valid(lorawan_profile_label)) {
         lv_label_set_text(lorawan_profile_label,
                           lorawan_selected_file[0] ? lorawan_selected_file :
-                          "No profile selected");
+                          ui_tr("No profile selected"));
     }
     if(lorawan_region_label && lv_obj_is_valid(lorawan_region_label)) {
         snprintf(text, sizeof(text), "%s SB%u DR%u %lus",
@@ -4597,8 +4675,9 @@ static void lorawan_update_labels(void)
     }
     if(lorawan_join_label && lv_obj_is_valid(lorawan_join_label)) {
         lv_label_set_text(lorawan_join_label,
-                          lorawan_joined ? "Joined" :
-                          (lorawan_config_valid ? "Ready" : "Config needed"));
+                          ui_tr(lorawan_joined ? "Joined" :
+                                (lorawan_config_valid ? "Ready" :
+                                 "Config needed")));
     }
     if(lorawan_devaddr_label && lv_obj_is_valid(lorawan_devaddr_label)) {
         if(lorawan_joined && lorawan_node) {
@@ -4685,7 +4764,325 @@ static void lorawan_update_labels(void)
             lv_obj_clear_state(lorawan_sim_temp_switch, LV_STATE_CHECKED);
         }
     }
+    if(lorawan_source_summary_label &&
+       lv_obj_is_valid(lorawan_source_summary_label)) {
+        lorawan_source_summary(text, sizeof(text));
+        lv_label_set_text(lorawan_source_summary_label, text);
+    }
     lorawan_update_region_buttons();
+}
+
+static void lorawan_probe_data_sources(int force)
+{
+    uint64_t now_us = ui_monotonic_us();
+    double value_a = 0.0;
+    double value_b = 0.0;
+
+    if(!force && lorawan_data_state.probed_us &&
+       now_us - lorawan_data_state.probed_us <
+       LORAWAN_SOURCE_PROBE_INTERVAL_US) {
+        return;
+    }
+    memset(&lorawan_data_state, 0, sizeof(lorawan_data_state));
+    lorawan_data_state.probed_us = now_us;
+    lorawan_data_state.k230_available = 1;
+    if(ui_hardware_get_cpu_temp_c(&value_a) == 0 && isfinite(value_a)) {
+        lorawan_data_state.k230_temp_c = value_a;
+    }
+    if(ui_hardware_get_aht20(&value_a, &value_b) == 0 &&
+       isfinite(value_a) && isfinite(value_b)) {
+        lorawan_data_state.aht20_available = 1;
+        lorawan_data_state.aht20_temp_c = value_a;
+        lorawan_data_state.aht20_humidity_pct = value_b;
+    }
+    lorawan_data_state.nrf9151_present = k230_nrf9151_uart_present();
+    if(lorawan_data_state.nrf9151_present &&
+       k230_nrf9151_read_gnss_fix(&lorawan_data_state.gps_fix,
+                                  LORAWAN_GNSS_FIX_MAX_AGE_SEC) == 0) {
+        lorawan_data_state.gps_available = 1;
+    }
+}
+
+static int lorawan_source_available(uint32_t source)
+{
+    lorawan_probe_data_sources(0);
+    switch(source) {
+    case LORAWAN_SOURCE_K230:
+        return lorawan_data_state.k230_available;
+    case LORAWAN_SOURCE_AHT20:
+        return lorawan_data_state.aht20_available;
+    case LORAWAN_SOURCE_NRF9151_GPS:
+        return lorawan_data_state.nrf9151_present &&
+               lorawan_data_state.gps_available;
+    default:
+        return 0;
+    }
+}
+
+static const char *lorawan_source_missing_reason(uint32_t source)
+{
+    lorawan_probe_data_sources(0);
+    switch(source) {
+    case LORAWAN_SOURCE_AHT20:
+        return "AHT20 not detected";
+    case LORAWAN_SOURCE_NRF9151_GPS:
+        return lorawan_data_state.nrf9151_present ?
+               "GNSS fix not available" : "nRF9151 GNSS not detected";
+    case LORAWAN_SOURCE_K230:
+    default:
+        return "Source unavailable";
+    }
+}
+
+static void lorawan_source_summary(char *out, size_t out_len)
+{
+    uint32_t sources = lorawan_config.upload_sources ?
+                       lorawan_config.upload_sources :
+                       LORAWAN_SOURCE_DEFAULT;
+    char text[160] = "";
+    size_t used = 0;
+
+    if(!out || out_len == 0) {
+        return;
+    }
+    lorawan_probe_data_sources(0);
+    if(sources & LORAWAN_SOURCE_K230) {
+        used += snprintf(text + used, sizeof(text) - used, "K230");
+        if(isfinite(lorawan_data_state.k230_temp_c) &&
+           lorawan_data_state.k230_temp_c != 0.0) {
+            used += snprintf(text + used, sizeof(text) - used, " %.1fC",
+                             lorawan_data_state.k230_temp_c);
+        }
+    }
+    if(sources & LORAWAN_SOURCE_AHT20) {
+        used += snprintf(text + used, sizeof(text) - used, "%sAHT20 %s",
+                         used ? "  " : "",
+                         lorawan_data_state.aht20_available ? "OK" :
+                         "missing");
+    }
+    if(sources & LORAWAN_SOURCE_NRF9151_GPS) {
+        used += snprintf(text + used, sizeof(text) - used, "%sGPS %s",
+                         used ? "  " : "",
+                         lorawan_data_state.gps_available ? "fix" :
+                         "waiting");
+    }
+    if(!text[0]) {
+        snprintf(text, sizeof(text), "No data source selected");
+    }
+    snprintf(out, out_len, "%s", text);
+}
+
+static int32_t lorawan_lpp_round(double value)
+{
+    return (int32_t)(value >= 0.0 ? value + 0.5 : value - 0.5);
+}
+
+static int lorawan_lpp_put_u8(uint8_t *payload, size_t max_len,
+                              size_t *payload_len, uint8_t value)
+{
+    if(!payload || !payload_len || *payload_len >= max_len) {
+        return 0;
+    }
+    payload[(*payload_len)++] = value;
+    return 1;
+}
+
+static int lorawan_lpp_put_i16(uint8_t *payload, size_t max_len,
+                               size_t *payload_len, int16_t value)
+{
+    if(!payload || !payload_len || *payload_len + 2U > max_len) {
+        return 0;
+    }
+    payload[(*payload_len)++] = (uint8_t)(((uint16_t)value >> 8) & 0xFFU);
+    payload[(*payload_len)++] = (uint8_t)((uint16_t)value & 0xFFU);
+    return 1;
+}
+
+static int lorawan_lpp_put_i24(uint8_t *payload, size_t max_len,
+                               size_t *payload_len, int32_t value)
+{
+    uint32_t raw = (uint32_t)value & 0x00FFFFFFU;
+
+    if(!payload || !payload_len || *payload_len + 3U > max_len) {
+        return 0;
+    }
+    payload[(*payload_len)++] = (uint8_t)((raw >> 16) & 0xFFU);
+    payload[(*payload_len)++] = (uint8_t)((raw >> 8) & 0xFFU);
+    payload[(*payload_len)++] = (uint8_t)(raw & 0xFFU);
+    return 1;
+}
+
+static int lorawan_lpp_add_digital_input(uint8_t *payload, size_t max_len,
+                                         size_t *payload_len, uint8_t channel,
+                                         uint8_t value)
+{
+    return lorawan_lpp_put_u8(payload, max_len, payload_len, channel) &&
+           lorawan_lpp_put_u8(payload, max_len, payload_len,
+                              LORAWAN_LPP_DIGITAL_INPUT) &&
+           lorawan_lpp_put_u8(payload, max_len, payload_len, value);
+}
+
+static int lorawan_lpp_add_temperature(uint8_t *payload, size_t max_len,
+                                       size_t *payload_len, uint8_t channel,
+                                       double celsius)
+{
+    int32_t scaled = lorawan_lpp_round(celsius * 10.0);
+
+    if(scaled < -32768) {
+        scaled = -32768;
+    } else if(scaled > 32767) {
+        scaled = 32767;
+    }
+    return lorawan_lpp_put_u8(payload, max_len, payload_len, channel) &&
+           lorawan_lpp_put_u8(payload, max_len, payload_len,
+                              LORAWAN_LPP_TEMPERATURE) &&
+           lorawan_lpp_put_i16(payload, max_len, payload_len,
+                               (int16_t)scaled);
+}
+
+static int lorawan_lpp_add_humidity(uint8_t *payload, size_t max_len,
+                                    size_t *payload_len, uint8_t channel,
+                                    double humidity_pct)
+{
+    int32_t scaled = lorawan_lpp_round(humidity_pct * 2.0);
+
+    if(scaled < 0) {
+        scaled = 0;
+    } else if(scaled > 200) {
+        scaled = 200;
+    }
+    return lorawan_lpp_put_u8(payload, max_len, payload_len, channel) &&
+           lorawan_lpp_put_u8(payload, max_len, payload_len,
+                              LORAWAN_LPP_RELATIVE_HUMIDITY) &&
+           lorawan_lpp_put_u8(payload, max_len, payload_len, (uint8_t)scaled);
+}
+
+static int lorawan_lpp_add_gps(uint8_t *payload, size_t max_len,
+                               size_t *payload_len, uint8_t channel,
+                               double latitude, double longitude,
+                               double altitude_m)
+{
+    return lorawan_lpp_put_u8(payload, max_len, payload_len, channel) &&
+           lorawan_lpp_put_u8(payload, max_len, payload_len, LORAWAN_LPP_GPS) &&
+           lorawan_lpp_put_i24(payload, max_len, payload_len,
+                               lorawan_lpp_round(latitude * 10000.0)) &&
+           lorawan_lpp_put_i24(payload, max_len, payload_len,
+                               lorawan_lpp_round(longitude * 10000.0)) &&
+           lorawan_lpp_put_i24(payload, max_len, payload_len,
+                               lorawan_lpp_round(altitude_m * 100.0));
+}
+
+static int lorawan_build_cayenne_payload(uint8_t *payload, size_t payload_max,
+                                         size_t *payload_len, char *summary,
+                                         size_t summary_len)
+{
+    uint32_t sources = lorawan_config.upload_sources ?
+                       lorawan_config.upload_sources :
+                       LORAWAN_SOURCE_DEFAULT;
+    char text[192] = "";
+    size_t used = 0;
+
+    if(!payload || !payload_len || payload_max == 0) {
+        return -1;
+    }
+    *payload_len = 0;
+    lorawan_probe_data_sources(1);
+    if(sources == 0) {
+        if(summary && summary_len > 0) {
+            snprintf(summary, summary_len, "%s", "Select a data source");
+        }
+        return -1;
+    }
+
+    if(sources & LORAWAN_SOURCE_K230) {
+        if(!lorawan_data_state.k230_available) {
+            if(summary && summary_len > 0) {
+                snprintf(summary, summary_len, "%s", "K230 data unavailable");
+            }
+            return -1;
+        }
+        if(!lorawan_lpp_add_digital_input(payload, payload_max, payload_len,
+                                          1, 1)) {
+            if(summary && summary_len > 0) {
+                snprintf(summary, summary_len, "%s", "Payload buffer full");
+            }
+            return -1;
+        }
+        if(isfinite(lorawan_data_state.k230_temp_c) &&
+           lorawan_data_state.k230_temp_c != 0.0) {
+            if(!lorawan_lpp_add_temperature(payload, payload_max, payload_len,
+                                            2,
+                                            lorawan_data_state.k230_temp_c)) {
+                if(summary && summary_len > 0) {
+                    snprintf(summary, summary_len, "%s", "Payload buffer full");
+                }
+                return -1;
+            }
+            used += snprintf(text + used, sizeof(text) - used, "K230 %.1fC",
+                             lorawan_data_state.k230_temp_c);
+        } else {
+            used += snprintf(text + used, sizeof(text) - used, "K230 status");
+        }
+    }
+    if(sources & LORAWAN_SOURCE_AHT20) {
+        if(!lorawan_data_state.aht20_available) {
+            if(summary && summary_len > 0) {
+                snprintf(summary, summary_len, "%s",
+                         lorawan_source_missing_reason(LORAWAN_SOURCE_AHT20));
+            }
+            return -1;
+        }
+        if(!lorawan_lpp_add_temperature(payload, payload_max, payload_len, 10,
+                                        lorawan_data_state.aht20_temp_c) ||
+           !lorawan_lpp_add_humidity(payload, payload_max, payload_len, 11,
+                                     lorawan_data_state.aht20_humidity_pct)) {
+            if(summary && summary_len > 0) {
+                snprintf(summary, summary_len, "%s", "Payload buffer full");
+            }
+            return -1;
+        }
+        used += snprintf(text + used, sizeof(text) - used,
+                         "%sAHT20 %.1fC %.1f%%",
+                         used ? "  " : "",
+                         lorawan_data_state.aht20_temp_c,
+                         lorawan_data_state.aht20_humidity_pct);
+    }
+    if(sources & LORAWAN_SOURCE_NRF9151_GPS) {
+        if(!lorawan_data_state.nrf9151_present ||
+           !lorawan_data_state.gps_available) {
+            if(summary && summary_len > 0) {
+                snprintf(summary, summary_len, "%s",
+                         lorawan_source_missing_reason(
+                             LORAWAN_SOURCE_NRF9151_GPS));
+            }
+            return -1;
+        }
+        if(!lorawan_lpp_add_gps(payload, payload_max, payload_len, 20,
+                                lorawan_data_state.gps_fix.latitude,
+                                lorawan_data_state.gps_fix.longitude,
+                                lorawan_data_state.gps_fix.has_altitude ?
+                                lorawan_data_state.gps_fix.altitude_m : 0.0)) {
+            if(summary && summary_len > 0) {
+                snprintf(summary, summary_len, "%s", "Payload buffer full");
+            }
+            return -1;
+        }
+        used += snprintf(text + used, sizeof(text) - used,
+                         "%sGPS %.5f %.5f",
+                         used ? "  " : "",
+                         lorawan_data_state.gps_fix.latitude,
+                         lorawan_data_state.gps_fix.longitude);
+    }
+    if(*payload_len == 0) {
+        if(summary && summary_len > 0) {
+            snprintf(summary, summary_len, "%s", "No payload data");
+        }
+        return -1;
+    }
+    if(summary && summary_len > 0) {
+        snprintf(summary, summary_len, "%s", text[0] ? text : "CayenneLPP");
+    }
+    return 0;
 }
 
 static lv_obj_t *lorawan_info(lv_obj_t *parent, int y, const char *name,
@@ -5033,6 +5430,162 @@ static lv_obj_t *lorawan_switch_row(lv_obj_t *parent, int y,
     return row;
 }
 
+static const char *lorawan_source_title(uint32_t source)
+{
+    switch(source) {
+    case LORAWAN_SOURCE_K230:
+        return "K230 status";
+    case LORAWAN_SOURCE_AHT20:
+        return "AHT20 environment";
+    case LORAWAN_SOURCE_NRF9151_GPS:
+        return "nRF9151 GNSS";
+    default:
+        return "Data source";
+    }
+}
+
+static void lorawan_source_detail(uint32_t source, char *out, size_t out_len)
+{
+    if(!out || out_len == 0) {
+        return;
+    }
+    lorawan_probe_data_sources(0);
+    switch(source) {
+    case LORAWAN_SOURCE_K230:
+        if(isfinite(lorawan_data_state.k230_temp_c) &&
+           lorawan_data_state.k230_temp_c != 0.0) {
+            snprintf(out, out_len, "CPU %.1f C", lorawan_data_state.k230_temp_c);
+        } else {
+            snprintf(out, out_len, "%s", "Board heartbeat");
+        }
+        break;
+    case LORAWAN_SOURCE_AHT20:
+        if(lorawan_data_state.aht20_available) {
+            snprintf(out, out_len, "%.1f C  %.1f%% RH",
+                     lorawan_data_state.aht20_temp_c,
+                     lorawan_data_state.aht20_humidity_pct);
+        } else {
+            snprintf(out, out_len, "%s", lorawan_source_missing_reason(source));
+        }
+        break;
+    case LORAWAN_SOURCE_NRF9151_GPS:
+        if(lorawan_data_state.gps_available) {
+            snprintf(out, out_len, "%.5f, %.5f  age %lds",
+                     lorawan_data_state.gps_fix.latitude,
+                     lorawan_data_state.gps_fix.longitude,
+                     lorawan_data_state.gps_fix.age_seconds);
+        } else {
+            snprintf(out, out_len, "%s", lorawan_source_missing_reason(source));
+        }
+        break;
+    default:
+        snprintf(out, out_len, "%s", "Unavailable");
+        break;
+    }
+}
+
+static void lorawan_source_apply_style(lv_obj_t *card, int selected,
+                                       int available, uint32_t color)
+{
+    if(!card || !lv_obj_is_valid(card)) {
+        return;
+    }
+    lv_obj_set_style_bg_color(card,
+                              lv_color_hex(selected ? 0x142A33 :
+                                           (available ? 0x1A2028 : 0x171A1F)),
+                              0);
+    lv_obj_set_style_border_width(card, selected ? 2 : 1, 0);
+    lv_obj_set_style_border_color(card,
+                                  lv_color_hex(selected ? color :
+                                               (available ? 0x2D3844 :
+                                                0x30343B)),
+                                  0);
+}
+
+static void lorawan_source_event_cb(lv_event_t *event)
+{
+    uint32_t source = (uint32_t)(uintptr_t)lv_event_get_user_data(event);
+    lv_obj_t *card = (lv_obj_t *)lv_event_get_target(event);
+    uint32_t current = lorawan_config.upload_sources ?
+                       lorawan_config.upload_sources :
+                       LORAWAN_SOURCE_DEFAULT;
+    uint32_t next;
+
+    lorawan_probe_data_sources(1);
+    if(!lorawan_source_available(source)) {
+        lorawan_set_status("%s", lorawan_source_missing_reason(source));
+        lorawan_source_apply_style(card, 0, 0, 0x475569);
+        lorawan_update_labels();
+        return;
+    }
+
+    if(current & source) {
+        next = current & ~source;
+        if(next == 0) {
+            lorawan_set_status("Select at least one data source");
+            lorawan_update_labels();
+            return;
+        }
+    } else {
+        next = current | source;
+    }
+
+    lorawan_config.upload_sources = next;
+    lorawan_config_dirty = 1;
+    lorawan_set_status("Data source updated");
+    lorawan_source_apply_style(card, (next & source) != 0, 1, 0x14B8A6);
+    lorawan_update_labels();
+}
+
+static lv_obj_t *lorawan_source_card(lv_obj_t *parent, int x, int y, int w,
+                                     int h, uint32_t source, uint32_t color)
+{
+    char detail[128];
+    int selected = (lorawan_config.upload_sources ?
+                    lorawan_config.upload_sources :
+                    LORAWAN_SOURCE_DEFAULT) & source;
+    int available;
+    lv_obj_t *card;
+    lv_obj_t *label;
+
+    lorawan_probe_data_sources(0);
+    available = lorawan_source_available(source);
+    card = lv_obj_create(parent);
+    lv_obj_set_pos(card, x, y);
+    lv_obj_set_size(card, w, h);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 12, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(card, 6);
+    lorawan_source_apply_style(card, selected, available, color);
+    lv_obj_add_event_cb(card, lorawan_source_event_cb, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)source);
+
+    label = ui_label(card, lorawan_source_title(source), &lv_font_montserrat_18,
+                     available ? 0xF2F5F8 : 0x7B8490);
+    lv_obj_set_width(label, w - 24);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(label, 0, 0);
+
+    lorawan_source_detail(source, detail, sizeof(detail));
+    label = ui_label(card, detail, &lv_font_montserrat_14,
+                     available ? 0x9AA4AF : 0x6B7280);
+    lv_obj_set_width(label, w - 24);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(label, 0, 30);
+
+    label = ui_label(card, selected ? "Selected" :
+                     (available ? "Available" : "Unavailable"),
+                     &lv_font_montserrat_14,
+                     selected ? color : (available ? 0x9AA4AF : 0x6B7280));
+    lv_obj_set_width(label, w - 24);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+    return card;
+}
+
 static void lorawan_reset_node(void)
 {
     lorawan_join_stop_worker(1);
@@ -5087,6 +5640,16 @@ static int lorawan_join_is_active(void)
     return active;
 }
 
+static int lorawan_send_is_active(void)
+{
+    int active;
+
+    pthread_mutex_lock(&lorawan_send_lock);
+    active = lorawan_send_thread_active;
+    pthread_mutex_unlock(&lorawan_send_lock);
+    return active;
+}
+
 static int lorawan_join_cancel_requested_now(void)
 {
     int cancel;
@@ -5136,12 +5699,14 @@ static void lorawan_join_overlay_close(void)
     lorawan_join_overlay = NULL;
     lorawan_join_overlay_label = NULL;
     lorawan_join_overlay_detail = NULL;
+    lorawan_join_overlay_spinner = NULL;
+    lorawan_join_overlay_icon = NULL;
+    lorawan_join_overlay_close_after_us = 0;
 }
 
 static void lorawan_join_overlay_open(void)
 {
     lv_obj_t *card;
-    lv_obj_t *spinner;
     lv_obj_t *btn;
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
@@ -5177,15 +5742,28 @@ static void lorawan_join_overlay_open(void)
     lv_obj_set_style_border_color(card, lv_color_hex(0x244261), 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
-    spinner = lv_spinner_create(card);
-    lv_obj_set_size(spinner, 68, 68);
-    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 18);
-    lv_obj_set_style_arc_width(spinner, 7, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(spinner, 7, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x1B3348),
-                               LV_PART_MAIN);
-    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x3DA5FF),
+    lorawan_join_overlay_spinner = lv_spinner_create(card);
+    lv_obj_set_size(lorawan_join_overlay_spinner, 68, 68);
+    lv_obj_align(lorawan_join_overlay_spinner, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_set_style_arc_width(lorawan_join_overlay_spinner, 7, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(lorawan_join_overlay_spinner, 7,
                                LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(lorawan_join_overlay_spinner,
+                               lv_color_hex(0x1B3348), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(lorawan_join_overlay_spinner,
+                               lv_color_hex(0x3DA5FF), LV_PART_INDICATOR);
+
+    lorawan_join_overlay_icon =
+        ui_label(card, LV_SYMBOL_OK, &lv_font_montserrat_36, 0xFFFFFF);
+    lv_obj_set_size(lorawan_join_overlay_icon, 72, 72);
+    lv_obj_set_style_radius(lorawan_join_overlay_icon, 36, 0);
+    lv_obj_set_style_bg_color(lorawan_join_overlay_icon,
+                              lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_opa(lorawan_join_overlay_icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_align(lorawan_join_overlay_icon,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lorawan_join_overlay_icon, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_add_flag(lorawan_join_overlay_icon, LV_OBJ_FLAG_HIDDEN);
 
     lorawan_join_overlay_label =
         ui_label(card, "Joining LoRaWAN", &lv_font_montserrat_20,
@@ -5281,6 +5859,23 @@ static void lorawan_join_overlay_update(void)
     if(lorawan_join_overlay_detail &&
        lv_obj_is_valid(lorawan_join_overlay_detail)) {
         lv_label_set_text(lorawan_join_overlay_detail, detail);
+    }
+    if(lorawan_join_overlay_spinner &&
+       lv_obj_is_valid(lorawan_join_overlay_spinner)) {
+        if(success) {
+            lv_obj_add_flag(lorawan_join_overlay_spinner, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(lorawan_join_overlay_spinner,
+                              LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if(lorawan_join_overlay_icon &&
+       lv_obj_is_valid(lorawan_join_overlay_icon)) {
+        if(success) {
+            lv_obj_clear_flag(lorawan_join_overlay_icon, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(lorawan_join_overlay_icon, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     app_request_fast_refresh();
 }
@@ -5400,6 +5995,7 @@ static void lorawan_join_timer_cb(lv_timer_t *timer)
     int cancelled;
     int active;
     int16_t state;
+    uint64_t now_us;
 
     lorawan_join_overlay_update();
 
@@ -5440,6 +6036,17 @@ static void lorawan_join_timer_cb(lv_timer_t *timer)
     }
 
     lorawan_update_labels();
+    lorawan_join_overlay_update();
+    now_us = ui_monotonic_us();
+    if(success) {
+        if(lorawan_join_overlay_close_after_us == 0) {
+            lorawan_join_overlay_close_after_us = now_us + 1400000ULL;
+            return;
+        }
+        if(now_us < lorawan_join_overlay_close_after_us) {
+            return;
+        }
+    }
     lorawan_join_overlay_close();
     if(timer && timer == lorawan_join_timer) {
         lorawan_join_timer = NULL;
@@ -5461,6 +6068,7 @@ static int lorawan_join_start_worker(void)
     lorawan_join_attempt = 0;
     lorawan_join_last_state = RADIOLIB_ERR_NONE;
     lorawan_join_next_retry_us = 0;
+    lorawan_join_overlay_close_after_us = 0;
     snprintf(lorawan_join_message, sizeof(lorawan_join_message),
              "Joining LoRaWAN...");
     pthread_mutex_unlock(&lorawan_join_lock);
@@ -5517,9 +6125,387 @@ static void lorawan_join_stop_worker(int wait)
     lorawan_join_overlay_close();
 }
 
+static void lorawan_send_overlay_close(void)
+{
+    if(lorawan_send_overlay && lv_obj_is_valid(lorawan_send_overlay)) {
+        lv_obj_delete(lorawan_send_overlay);
+    }
+    lorawan_send_overlay = NULL;
+    lorawan_send_overlay_label = NULL;
+    lorawan_send_overlay_detail = NULL;
+    lorawan_send_overlay_spinner = NULL;
+    lorawan_send_overlay_icon = NULL;
+    lorawan_send_overlay_close_after_us = 0;
+}
+
+static void lorawan_send_overlay_update(void)
+{
+    char message[sizeof(lorawan_send_message)];
+    char title[96];
+    int done;
+    int success;
+    int16_t state;
+    size_t downlink_len;
+    uint32_t fcnt;
+
+    pthread_mutex_lock(&lorawan_send_lock);
+    done = lorawan_send_done;
+    success = lorawan_send_success;
+    state = lorawan_send_state;
+    downlink_len = lorawan_send_downlink_len;
+    fcnt = lorawan_send_fcnt;
+    snprintf(message, sizeof(message), "%s", lorawan_send_message);
+    pthread_mutex_unlock(&lorawan_send_lock);
+
+    if(!lorawan_send_overlay || !lv_obj_is_valid(lorawan_send_overlay)) {
+        return;
+    }
+    if(done && success) {
+        snprintf(title, sizeof(title), "Upload complete");
+        if(!message[0]) {
+            snprintf(message, sizeof(message), "FCnt=%lu  Downlink=%u B",
+                     (unsigned long)fcnt, (unsigned)downlink_len);
+        }
+    } else if(done) {
+        snprintf(title, sizeof(title), "Upload failed");
+        if(!message[0]) {
+            snprintf(message, sizeof(message), "%s (%d)",
+                     lorawan_state_name(state), state);
+        }
+    } else {
+        snprintf(title, sizeof(title), "Uploading");
+        if(!message[0]) {
+            snprintf(message, sizeof(message), "Sending uplink...");
+        }
+    }
+    if(lorawan_send_overlay_label &&
+       lv_obj_is_valid(lorawan_send_overlay_label)) {
+        lv_label_set_text(lorawan_send_overlay_label, title);
+    }
+    if(lorawan_send_overlay_detail &&
+       lv_obj_is_valid(lorawan_send_overlay_detail)) {
+        lv_label_set_text(lorawan_send_overlay_detail, message);
+    }
+    if(lorawan_send_overlay_spinner &&
+       lv_obj_is_valid(lorawan_send_overlay_spinner)) {
+        if(done) {
+            lv_obj_add_flag(lorawan_send_overlay_spinner, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(lorawan_send_overlay_spinner,
+                              LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if(lorawan_send_overlay_icon &&
+       lv_obj_is_valid(lorawan_send_overlay_icon)) {
+        if(done) {
+            lv_obj_clear_flag(lorawan_send_overlay_icon, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(lorawan_send_overlay_icon,
+                              success ? LV_SYMBOL_OK : "!");
+            lv_obj_set_style_bg_color(lorawan_send_overlay_icon,
+                                      lv_color_hex(success ? 0x25C281 :
+                                                   0xEF4D5A), 0);
+        } else {
+            lv_obj_add_flag(lorawan_send_overlay_icon, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    app_request_fast_refresh();
+}
+
+static void lorawan_send_overlay_open(void)
+{
+    lv_obj_t *card;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 380 : 318;
+    int card_h = ui_is_landscape() ? 206 : 224;
+
+    if(lorawan_send_overlay && lv_obj_is_valid(lorawan_send_overlay)) {
+        lorawan_send_overlay_update();
+        return;
+    }
+    if(card_w > screen_w - 36) {
+        card_w = screen_w - 36;
+    }
+    if(card_h > screen_h - 36) {
+        card_h = screen_h - 36;
+    }
+
+    lorawan_send_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(lorawan_send_overlay);
+    lv_obj_set_style_bg_color(lorawan_send_overlay, lv_color_hex(0x000000),
+                              0);
+    lv_obj_set_style_bg_opa(lorawan_send_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(lorawan_send_overlay, 0, 0);
+    lv_obj_set_style_pad_all(lorawan_send_overlay, 0, 0);
+    lv_obj_add_flag(lorawan_send_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(lorawan_send_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    card = ui_panel(lorawan_send_overlay, 0, 0, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x244261), 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lorawan_send_overlay_spinner = lv_spinner_create(card);
+    lv_obj_set_size(lorawan_send_overlay_spinner, 64, 64);
+    lv_obj_align(lorawan_send_overlay_spinner, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_set_style_arc_width(lorawan_send_overlay_spinner, 7, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(lorawan_send_overlay_spinner, 7,
+                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(lorawan_send_overlay_spinner,
+                               lv_color_hex(0x1B3348), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(lorawan_send_overlay_spinner,
+                               lv_color_hex(0x14B8A6), LV_PART_INDICATOR);
+
+    lorawan_send_overlay_icon =
+        ui_label(card, LV_SYMBOL_OK, &lv_font_montserrat_36, 0xFFFFFF);
+    lv_obj_set_size(lorawan_send_overlay_icon, 68, 68);
+    lv_obj_set_style_radius(lorawan_send_overlay_icon, 34, 0);
+    lv_obj_set_style_bg_color(lorawan_send_overlay_icon,
+                              lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_opa(lorawan_send_overlay_icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_align(lorawan_send_overlay_icon,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lorawan_send_overlay_icon, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_add_flag(lorawan_send_overlay_icon, LV_OBJ_FLAG_HIDDEN);
+
+    lorawan_send_overlay_label =
+        ui_label(card, "Uploading", &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_width(lorawan_send_overlay_label, card_w - 36);
+    lv_label_set_long_mode(lorawan_send_overlay_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(lorawan_send_overlay_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lorawan_send_overlay_label, LV_ALIGN_TOP_MID, 0, 102);
+
+    lorawan_send_overlay_detail =
+        ui_label(card, "Sending uplink", &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_width(lorawan_send_overlay_detail, card_w - 36);
+    lv_label_set_long_mode(lorawan_send_overlay_detail, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lorawan_send_overlay_detail,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lorawan_send_overlay_detail, LV_ALIGN_TOP_MID, 0, 132);
+    lorawan_send_overlay_update();
+}
+
+static void *lorawan_send_thread_entry(void *arg)
+{
+    uint8_t payload[64];
+    size_t payload_len = 0;
+    uint8_t downlink[64];
+    size_t downlink_len = 0;
+    int16_t state;
+    uint32_t fcnt = 0;
+    char payload_summary[192] = "";
+
+    (void)arg;
+    memset(payload, 0, sizeof(payload));
+
+    pthread_mutex_lock(&lorawan_send_lock);
+    lorawan_send_payload_is_temp = 0;
+    lorawan_send_temp_deci_c = 0;
+    snprintf(lorawan_send_message, sizeof(lorawan_send_message),
+             "Building CayenneLPP payload");
+    pthread_mutex_unlock(&lorawan_send_lock);
+
+    if(lorawan_build_cayenne_payload(payload, sizeof(payload), &payload_len,
+                                     payload_summary,
+                                     sizeof(payload_summary)) != 0) {
+        state = RADIOLIB_ERR_INVALID_PAYLOAD;
+        pthread_mutex_lock(&lorawan_send_lock);
+        snprintf(lorawan_send_message, sizeof(lorawan_send_message), "%s",
+                 payload_summary[0] ? payload_summary : "No payload data");
+        pthread_mutex_unlock(&lorawan_send_lock);
+    } else if(!lorawan_node) {
+        state = RADIOLIB_ERR_NETWORK_NOT_JOINED;
+    } else {
+        pthread_mutex_lock(&lorawan_send_lock);
+        snprintf(lorawan_send_message, sizeof(lorawan_send_message),
+                 "Uploading CayenneLPP: %s",
+                 payload_summary[0] ? payload_summary : "payload");
+        pthread_mutex_unlock(&lorawan_send_lock);
+        lorawan_join_append_log("uplink begin fport=%u len=%u confirmed=%d "
+                                "payload=%s",
+                                lorawan_config.fport, (unsigned)payload_len,
+                                lorawan_config.confirmed,
+                                payload_summary[0] ? payload_summary :
+                                "CayenneLPP");
+        state = lorawan_node->sendReceive(payload, payload_len,
+                                          lorawan_config.fport, downlink,
+                                          &downlink_len,
+                                          lorawan_config.confirmed != 0);
+        lorawan_write_state_binary("session",
+                                   lorawan_node->getBufferSession(),
+                                   RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+        fcnt = lorawan_node->getFCntUp();
+    }
+
+    pthread_mutex_lock(&lorawan_send_lock);
+    lorawan_send_state = state;
+    lorawan_send_downlink_len = downlink_len;
+    lorawan_send_fcnt = fcnt;
+    lorawan_send_success = state >= RADIOLIB_ERR_NONE;
+    lorawan_send_done = 1;
+    if(lorawan_send_success) {
+        snprintf(lorawan_send_message, sizeof(lorawan_send_message),
+                 "%s  FCnt=%lu  Downlink=%u B",
+                 payload_summary[0] ? payload_summary : "CayenneLPP",
+                 (unsigned long)fcnt, (unsigned)downlink_len);
+    } else {
+        snprintf(lorawan_send_message, sizeof(lorawan_send_message),
+                 "%s%s%s (%d)",
+                 payload_summary[0] ? payload_summary : lorawan_state_name(state),
+                 payload_summary[0] ? " - " : "",
+                 payload_summary[0] ? lorawan_state_name(state) : "",
+                 state);
+    }
+    pthread_mutex_unlock(&lorawan_send_lock);
+    lorawan_join_append_log("uplink done state=%d %s fcnt=%lu downlink=%u "
+                            "payload=%s",
+                            state, lorawan_state_name(state),
+                            (unsigned long)fcnt, (unsigned)downlink_len,
+                            payload_summary[0] ? payload_summary : "-");
+    return NULL;
+}
+
+static int lorawan_send_start_worker(void)
+{
+    pthread_mutex_lock(&lorawan_send_lock);
+    if(lorawan_send_thread_active) {
+        pthread_mutex_unlock(&lorawan_send_lock);
+        return 1;
+    }
+    lorawan_send_done = 0;
+    lorawan_send_success = 0;
+    lorawan_send_state = RADIOLIB_ERR_NONE;
+    lorawan_send_downlink_len = 0;
+    lorawan_send_fcnt = 0;
+    lorawan_send_temp_deci_c = 0;
+    lorawan_send_payload_is_temp = 0;
+    lorawan_send_overlay_close_after_us = 0;
+    snprintf(lorawan_send_message, sizeof(lorawan_send_message),
+             "Preparing uplink...");
+    pthread_mutex_unlock(&lorawan_send_lock);
+
+    if(pthread_create(&lorawan_send_thread, NULL, lorawan_send_thread_entry,
+                      NULL) != 0) {
+        pthread_mutex_lock(&lorawan_send_lock);
+        lorawan_send_done = 1;
+        lorawan_send_success = 0;
+        lorawan_send_state = RADIOLIB_ERR_NONE;
+        snprintf(lorawan_send_message, sizeof(lorawan_send_message),
+                 "Upload worker failed to start");
+        pthread_mutex_unlock(&lorawan_send_lock);
+        return 0;
+    }
+
+    pthread_mutex_lock(&lorawan_send_lock);
+    lorawan_send_thread_active = 1;
+    pthread_mutex_unlock(&lorawan_send_lock);
+
+    if(!lorawan_send_timer) {
+        lorawan_send_timer =
+            lv_timer_create(lorawan_send_timer_cb, LORAWAN_JOIN_POLL_MS,
+                            NULL);
+    }
+    return 1;
+}
+
+static void lorawan_send_timer_cb(lv_timer_t *timer)
+{
+    int active;
+    int done;
+    int success;
+    int16_t state;
+    size_t downlink_len;
+    char message[sizeof(lorawan_send_message)];
+    uint64_t now_us;
+
+    lorawan_send_overlay_update();
+    pthread_mutex_lock(&lorawan_send_lock);
+    active = lorawan_send_thread_active;
+    done = lorawan_send_done;
+    success = lorawan_send_success;
+    state = lorawan_send_state;
+    downlink_len = lorawan_send_downlink_len;
+    snprintf(message, sizeof(message), "%s", lorawan_send_message);
+    pthread_mutex_unlock(&lorawan_send_lock);
+
+    if(!done) {
+        return;
+    }
+    if(active) {
+        pthread_join(lorawan_send_thread, NULL);
+        pthread_mutex_lock(&lorawan_send_lock);
+        lorawan_send_thread_active = 0;
+        pthread_mutex_unlock(&lorawan_send_lock);
+    }
+
+    if(success) {
+        char text[192];
+        snprintf(text, sizeof(text), "%s", message[0] ? message : "Upload OK");
+        if(lorawan_payload_label && lv_obj_is_valid(lorawan_payload_label)) {
+            lv_label_set_text(lorawan_payload_label, text);
+        }
+        if(lorawan_downlink_label && lv_obj_is_valid(lorawan_downlink_label)) {
+            snprintf(text, sizeof(text), "Downlink %u B",
+                     (unsigned)downlink_len);
+            lv_label_set_text(lorawan_downlink_label, text);
+        }
+        lorawan_set_status("Upload OK");
+    } else {
+        lorawan_set_status("Upload failed: %s",
+                           message[0] ? message : lorawan_state_name(state));
+        if(lorawan_payload_label && lv_obj_is_valid(lorawan_payload_label)) {
+            lv_label_set_text(lorawan_payload_label,
+                              message[0] ? message : "Upload failed");
+        }
+    }
+    lorawan_update_labels();
+    lorawan_send_overlay_update();
+
+    now_us = ui_monotonic_us();
+    if(lorawan_send_overlay_close_after_us == 0) {
+        lorawan_send_overlay_close_after_us = now_us + 1400000ULL;
+        return;
+    }
+    if(now_us < lorawan_send_overlay_close_after_us) {
+        return;
+    }
+
+    lorawan_send_overlay_close();
+    if(timer && timer == lorawan_send_timer) {
+        lorawan_send_timer = NULL;
+        lv_timer_delete(timer);
+    }
+}
+
+static void lorawan_send_stop_worker(int wait)
+{
+    int active;
+
+    pthread_mutex_lock(&lorawan_send_lock);
+    active = lorawan_send_thread_active;
+    pthread_mutex_unlock(&lorawan_send_lock);
+    if(wait && active) {
+        pthread_join(lorawan_send_thread, NULL);
+        pthread_mutex_lock(&lorawan_send_lock);
+        lorawan_send_thread_active = 0;
+        lorawan_send_done = 1;
+        pthread_mutex_unlock(&lorawan_send_lock);
+    }
+    if(lorawan_send_timer) {
+        lv_timer_delete(lorawan_send_timer);
+        lorawan_send_timer = NULL;
+    }
+    lorawan_send_overlay_close();
+}
+
 static void lorawan_refresh_view(lorawan_view_t view)
 {
     lorawan_view = view;
+    lorawan_preserve_view_on_cleanup = 1;
     app_refresh_current_page();
 }
 
@@ -5730,82 +6716,30 @@ static void lorawan_join_event(lv_event_t *event)
 
 static void lorawan_send_event(lv_event_t *event)
 {
-    uint8_t payload[16];
-    size_t payload_len = 12;
-    uint8_t downlink[64];
-    size_t downlink_len = 0;
-    int16_t state;
-    uint32_t now_s = (uint32_t)(ui_monotonic_us() / 1000000ULL);
-    int temp_deci_c = 0;
-
     (void)event;
     if(lorawan_join_is_active()) {
         lorawan_set_status("Join in progress");
         lorawan_join_overlay_open();
         return;
     }
+    if(lorawan_send_is_active()) {
+        lorawan_send_overlay_open();
+        return;
+    }
     if(!lorawan_joined || !lorawan_node) {
         lorawan_set_status("Join first");
+        lorawan_update_labels();
         return;
     }
 
-    memset(payload, 0, sizeof(payload));
-    if(lorawan_config.simulate_temperature) {
-        temp_deci_c = 220 + (int)((now_s * 7U) % 120U);
-        payload[0] = LORAWAN_PAYLOAD_VERSION;
-        payload[1] = 'T';
-        payload[2] = (uint8_t)((temp_deci_c >> 8) & 0xFF);
-        payload[3] = (uint8_t)(temp_deci_c & 0xFF);
-        payload[4] = (uint8_t)((now_s >> 24) & 0xFF);
-        payload[5] = (uint8_t)((now_s >> 16) & 0xFF);
-        payload[6] = (uint8_t)((now_s >> 8) & 0xFF);
-        payload[7] = (uint8_t)(now_s & 0xFF);
-        payload_len = 8;
-    } else {
-        payload[0] = LORAWAN_PAYLOAD_VERSION;
-        payload[1] = (uint8_t)lora_chip_type;
-        payload[2] = (uint8_t)((now_s >> 24) & 0xFF);
-        payload[3] = (uint8_t)((now_s >> 16) & 0xFF);
-        payload[4] = (uint8_t)((now_s >> 8) & 0xFF);
-        payload[5] = (uint8_t)(now_s & 0xFF);
-        payload[6] = (uint8_t)lorawan_config.datarate;
-        payload[7] = lorawan_config.confirmed ? 1U : 0U;
-        payload[8] = (uint8_t)lorawan_config.sub_band;
-        payload_len = 12;
-    }
-
-    lorawan_set_status("Sending...");
-    lv_refr_now(NULL);
-    state = lorawan_node->sendReceive(payload, payload_len,
-                                      lorawan_config.fport, downlink,
-                                      &downlink_len,
-                                      lorawan_config.confirmed != 0);
-    lorawan_write_state_binary("session", lorawan_node->getBufferSession(),
-                               RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
-    if(state < RADIOLIB_ERR_NONE) {
-        lorawan_set_status("Send failed: %s (%d)",
-                           lorawan_state_name(state), state);
-    } else {
-        char text[96];
-        if(lorawan_config.simulate_temperature) {
-            snprintf(text, sizeof(text), "Sim temp %.1f C  FCnt=%lu",
-                     (double)temp_deci_c / 10.0,
-                     (unsigned long)lorawan_node->getFCntUp());
-        } else {
-            snprintf(text, sizeof(text), "Sent FCnt=%lu",
-                     (unsigned long)lorawan_node->getFCntUp());
-        }
-        if(lorawan_payload_label && lv_obj_is_valid(lorawan_payload_label)) {
-            lv_label_set_text(lorawan_payload_label, text);
-        }
-        if(lorawan_downlink_label && lv_obj_is_valid(lorawan_downlink_label)) {
-            snprintf(text, sizeof(text), "%u downlink %u B",
-                     (unsigned)state, (unsigned)downlink_len);
-            lv_label_set_text(lorawan_downlink_label, text);
-        }
-        lorawan_set_status("Send OK");
-    }
+    lorawan_set_status("Uploading...");
     lorawan_update_labels();
+    if(!lorawan_send_start_worker()) {
+        lorawan_set_status("Upload worker failed");
+        lorawan_update_labels();
+        return;
+    }
+    lorawan_send_overlay_open();
 }
 
 static void lorawan_reset_event(lv_event_t *event)
@@ -5824,19 +6758,24 @@ static void lorawan_home_view(lv_obj_t *body, int landscape)
     lv_obj_t *session;
     lv_obj_t *btn;
     lv_obj_t *profile_row;
+    lv_obj_t *title;
     int body_h = ui_body_height(144);
     int content_w = ui_screen_width() - 48;
     int gap = landscape ? 18 : 20;
     int left_w = landscape ? (content_w * 44) / 100 : content_w;
     int right_w = landscape ? content_w - left_w - gap : content_w;
-    int panel_h = landscape ? body_h - 48 : 350;
+    int panel_h = landscape ? body_h - 48 : 330;
     int session_x = landscape ? 24 + left_w + gap : 24;
     int session_y = landscape ? 24 : 24 + panel_h + 20;
-    int session_h = landscape ? panel_h : 520;
+    int session_h = landscape ? panel_h : 720;
     int action_w;
     int inner_w;
+    int source_cols;
+    int source_w;
+    int source_h;
     int y;
 
+    lorawan_probe_data_sources(1);
     if(landscape && left_w < 360) {
         left_w = 360;
         right_w = content_w - left_w - gap;
@@ -5847,37 +6786,80 @@ static void lorawan_home_view(lv_obj_t *body, int landscape)
 
     status = ui_panel(body, 24, 24, left_w, panel_h);
     lv_obj_set_style_pad_all(status, 18, 0);
-    ui_label(status, "Status", &lv_font_montserrat_24, 0xF2F5F8);
-    lorawan_info(status, 48, "Radio", "Auto LoRa", &lorawan_radio_label);
-    profile_row = lorawan_info(status, 106, "Profile", "No profile selected",
+    title = ui_label(status, "LoRaWAN", &lv_font_montserrat_26, 0xF2F5F8);
+    lv_obj_set_pos(title, 0, 0);
+    lorawan_status_label =
+        ui_label(status, "Loading", &lv_font_montserrat_18, 0x25C281);
+    lv_obj_set_width(lorawan_status_label, lora_panel_content_width(status));
+    lv_label_set_long_mode(lorawan_status_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(lorawan_status_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(lorawan_status_label, LV_ALIGN_TOP_RIGHT, 0, 4);
+
+    lorawan_info(status, 52, "Radio", "Auto LoRa", &lorawan_radio_label);
+    profile_row = lorawan_info(status, 110, "Profile", "No profile selected",
                                &lorawan_profile_label);
     lv_obj_add_flag(profile_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(profile_row, lorawan_edit_view_event,
                         LV_EVENT_CLICKED, NULL);
-    lorawan_info(status, 164, "Config", "Tap fields to configure",
+    lorawan_info(status, 168, "Config", "Tap fields to configure",
                  &lorawan_config_label);
-    lorawan_info(status, 222, "Region", "--", &lorawan_region_label);
-    lorawan_status_label =
-        ui_label(status, "Loading", &lv_font_montserrat_18, 0x25C281);
-    lv_obj_set_width(lorawan_status_label, lora_panel_content_width(status));
-    lv_label_set_long_mode(lorawan_status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(lorawan_status_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lorawan_info(status, 226, "Region", "--", &lorawan_region_label);
+    if(panel_h > 312) {
+        lorawan_source_summary_label =
+            ui_label(status, "K230", &lv_font_montserrat_16, 0x9AA4AF);
+        lv_obj_set_width(lorawan_source_summary_label,
+                         lora_panel_content_width(status));
+        lv_label_set_long_mode(lorawan_source_summary_label,
+                               LV_LABEL_LONG_DOT);
+        lv_obj_align(lorawan_source_summary_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    }
 
     session = ui_panel(body, session_x, session_y, right_w, session_h);
     lv_obj_set_style_pad_all(session, 18, 0);
     ui_make_scrollable(session, 32);
-    ui_label(session, "Session", &lv_font_montserrat_24, 0xF2F5F8);
+    title = ui_label(session, "Session", &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, 0, 0);
     lorawan_info(session, 48, "Join", "--", &lorawan_join_label);
     lorawan_info(session, 106, "DevAddr", "--", &lorawan_devaddr_label);
     lorawan_info(session, 164, "FCntUp", "--", &lorawan_fcnt_label);
 
     y = 234;
-    ui_label(session, "Control", &lv_font_montserrat_24, 0xF2F5F8);
-    lv_obj_set_pos(lv_obj_get_child(session,
-                                    lv_obj_get_child_count(session) - 1),
-                   0, y);
+    title = ui_label(session, "Data sources", &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, 0, y);
     y += 42;
     inner_w = lora_panel_content_width(session);
+    if(!lorawan_source_summary_label ||
+       !lv_obj_is_valid(lorawan_source_summary_label)) {
+        lorawan_source_summary_label =
+            ui_label(session, "K230", &lv_font_montserrat_16, 0x9AA4AF);
+        lv_obj_set_width(lorawan_source_summary_label, inner_w);
+        lv_label_set_long_mode(lorawan_source_summary_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(lorawan_source_summary_label, 0, y - 6);
+        y += 28;
+    }
+    source_cols = inner_w >= 620 ? 3 : (inner_w >= 430 ? 2 : 1);
+    source_w = (inner_w - 12 * (source_cols - 1)) / source_cols;
+    source_h = 92;
+    lorawan_source_card(session, 0, y, source_w, source_h,
+                        LORAWAN_SOURCE_K230, 0x25C281);
+    lorawan_source_card(session,
+                        source_cols > 1 ? source_w + 12 : 0,
+                        y + (source_cols > 1 ? 0 : source_h + 12),
+                        source_w, source_h, LORAWAN_SOURCE_AHT20, 0xF5A524);
+    lorawan_source_card(session,
+                        source_cols > 2 ? (source_w + 12) * 2 :
+                        (source_cols > 1 ? 0 : 0),
+                        y + (source_cols > 2 ? 0 :
+                             (source_cols > 1 ? source_h + 12 :
+                              (source_h + 12) * 2)),
+                        source_w, source_h, LORAWAN_SOURCE_NRF9151_GPS,
+                        0x3DA5FF);
+    y += ((3 + source_cols - 1) / source_cols) * (source_h + 12) + 8;
+
+    title = ui_label(session, "Actions", &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, 0, y);
+    y += 42;
     action_w = (inner_w - 14) / 2;
     if(action_w < 120) {
         action_w = 120;
@@ -5890,15 +6872,12 @@ static void lorawan_home_view(lv_obj_t *body, int landscape)
     y += 66;
     btn = lora_button(session, 0, y, action_w, 54, "Edit", 0xB982FF);
     lv_obj_add_event_cb(btn, lorawan_edit_view_event, LV_EVENT_CLICKED, NULL);
-    btn = lora_button(session, action_w + 14, y, action_w, 54, "Run",
+    btn = lora_button(session, action_w + 14, y, action_w, 54, "Join",
                       0xF5A524);
     lv_obj_add_event_cb(btn, lorawan_join_event, LV_EVENT_CLICKED, NULL);
     y += 70;
-    lorawan_switch_row(session, y, "Upload simulated temperature",
-                       &lorawan_sim_temp_switch, 2);
-    y += 68;
     btn = lora_button(session, 0, y, (inner_w - 14) / 2, 54,
-                      "Send uplink", 0x14B8A6);
+                      "Upload", 0x14B8A6);
     lv_obj_add_event_cb(btn, lorawan_send_event, LV_EVENT_CLICKED, NULL);
     btn = lora_button(session, (inner_w + 14) / 2, y, (inner_w - 14) / 2, 54,
                       "Reset session", 0xEF4D5A);
@@ -6081,9 +7060,22 @@ void ui_lorawan_create(lv_obj_t *scr)
     }
 }
 
+int ui_lorawan_handle_back(void)
+{
+    if(lorawan_view == LORAWAN_VIEW_HOME) {
+        return 0;
+    }
+    lorawan_refresh_view(LORAWAN_VIEW_HOME);
+    return 1;
+}
+
 void ui_lorawan_cleanup(void)
 {
+    int keep_view = lorawan_preserve_view_on_cleanup;
+
+    lorawan_preserve_view_on_cleanup = 0;
     lorawan_join_stop_worker(1);
+    lorawan_send_stop_worker(1);
     lorawan_reset_node();
     lora_release_radio_hal();
     lorawan_status_label = NULL;
@@ -6096,6 +7088,7 @@ void ui_lorawan_cleanup(void)
     lorawan_fcnt_label = NULL;
     lorawan_payload_label = NULL;
     lorawan_downlink_label = NULL;
+    lorawan_source_summary_label = NULL;
     lorawan_region_value_label = NULL;
     lorawan_join_eui_value_label = NULL;
     lorawan_dev_eui_value_label = NULL;
@@ -6107,6 +7100,9 @@ void ui_lorawan_cleanup(void)
     lorawan_confirmed_switch = NULL;
     lorawan_adr_switch = NULL;
     lorawan_sim_temp_switch = NULL;
+    if(!keep_view) {
+        lorawan_view = LORAWAN_VIEW_HOME;
+    }
 }
 
 void ui_lora_cleanup(void)

@@ -238,6 +238,8 @@ typedef struct {
     char status[96];
 } sensor_reading_t;
 
+static int sensor_read_aht20(sensor_reading_t *reading);
+
 typedef struct {
     int scanned;
     int bq25896;
@@ -2747,6 +2749,22 @@ int ui_hardware_get_cpu_temp_c(double *temp_c)
         return -1;
     }
     return sensor_read_cpu_temp(temp_c);
+}
+
+int ui_hardware_get_aht20(double *temp_c, double *humidity_pct)
+{
+    sensor_reading_t reading;
+
+    if(sensor_read_aht20(&reading) != 0) {
+        return -1;
+    }
+    if(temp_c) {
+        *temp_c = reading.temp_c;
+    }
+    if(humidity_pct) {
+        *humidity_pct = reading.humidity_pct;
+    }
+    return 0;
 }
 
 int ui_bq25896_get_usb_present(int *present, int *vbus_mv)

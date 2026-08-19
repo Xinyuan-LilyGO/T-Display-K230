@@ -39,6 +39,7 @@ void ui_audio_input_route_leave(const char *owner);
 int ui_amp_set_enabled(int enabled);
 int ui_amp_is_enabled(void);
 int ui_hardware_get_cpu_temp_c(double *temp_c);
+int ui_hardware_get_aht20(double *temp_c, double *humidity_pct);
 int ui_bq25896_get_usb_present(int *present, int *vbus_mv);
 int ui_bq25896_get_power_state(int *usb_present, int *vbus_mv, int *vbat_mv);
 int ui_bq27220_get_current_ma(int *current_ma);
