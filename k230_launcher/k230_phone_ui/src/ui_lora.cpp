@@ -70,6 +70,7 @@
 #define LORAWAN_CONFIG_PATH "/root/lorawan/otaa.conf"
 #define LORAWAN_SESSION_PATH "/root/lorawan/session.bin"
 #define LORAWAN_NONCES_PATH "/root/lorawan/nonces.bin"
+#define LORAWAN_DEVNONCE_BOOTSTRAP 20000U
 #define LORAWAN_PAYLOAD_VERSION 1
 #define LORAWAN_PROFILE_PREFIX "lora_wan_"
 #define LORAWAN_PROFILE_EXT ".json"
@@ -3429,6 +3430,7 @@ static void lorawan_reset_node(void);
 static void lorawan_apply_node_settings(void);
 static void lorawan_update_labels(void);
 static int lorawan_join_is_active(void);
+static void lorawan_join_append_log(const char *fmt, ...);
 static void lorawan_join_overlay_update(void);
 static void lorawan_join_stop_worker(int wait);
 
@@ -4286,6 +4288,174 @@ static void lorawan_write_binary(const char *path, const uint8_t *data,
     }
     (void)fwrite(data, 1, len, fp);
     fclose(fp);
+}
+
+static void lorawan_state_path(const char *kind, char *out, size_t out_len)
+{
+    char dev_eui[24];
+
+    if(!out || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if(lorawan_config.has_dev_eui) {
+        lorawan_format_eui(lorawan_config.dev_eui, dev_eui,
+                           sizeof(dev_eui));
+        snprintf(out, out_len, "%s/%s_%s.bin", LORAWAN_CONFIG_DIR,
+                 dev_eui, kind ? kind : "state");
+    } else {
+        snprintf(out, out_len, "%s/%s.bin", LORAWAN_CONFIG_DIR,
+                 kind ? kind : "state");
+    }
+}
+
+static uint16_t lorawan_nonce_devnonce(const uint8_t *nonces)
+{
+    if(!nonces) {
+        return 0;
+    }
+    return (uint16_t)nonces[RADIOLIB_LORAWAN_NONCES_DEV_NONCE] |
+           ((uint16_t)nonces[RADIOLIB_LORAWAN_NONCES_DEV_NONCE + 1] << 8);
+}
+
+static uint16_t lorawan_nonce_checksum16(const uint8_t *data, size_t len)
+{
+    uint16_t checksum = 0;
+
+    for(size_t i = 0; i < len; i += 2) {
+        uint16_t word = (uint16_t)data[i] << 8;
+        if(i + 1 < len) {
+            word |= data[i + 1];
+        }
+        checksum ^= word;
+    }
+    return checksum;
+}
+
+static void lorawan_nonce_put_u16(uint8_t *data, size_t pos,
+                                  uint16_t value)
+{
+    data[pos] = (uint8_t)(value & 0xFF);
+    data[pos + 1] = (uint8_t)((value >> 8) & 0xFF);
+}
+
+static int lorawan_nonce_is_valid(const uint8_t *nonces, size_t len)
+{
+    uint16_t signature;
+    uint16_t checksum;
+
+    if(!nonces || len != RADIOLIB_LORAWAN_NONCES_BUF_SIZE) {
+        return 0;
+    }
+    signature =
+        (uint16_t)nonces[RADIOLIB_LORAWAN_NONCES_SIGNATURE] |
+        ((uint16_t)nonces[RADIOLIB_LORAWAN_NONCES_SIGNATURE + 1] << 8);
+    checksum = lorawan_nonce_checksum16(nonces, len - 2);
+    return signature == checksum;
+}
+
+static void lorawan_nonce_set_devnonce(uint8_t *nonces, uint16_t value)
+{
+    uint16_t signature;
+
+    if(!nonces) {
+        return;
+    }
+    lorawan_nonce_put_u16(nonces, RADIOLIB_LORAWAN_NONCES_DEV_NONCE,
+                          value);
+    signature = lorawan_nonce_checksum16(
+        nonces, RADIOLIB_LORAWAN_NONCES_BUF_SIZE - 2);
+    lorawan_nonce_put_u16(nonces, RADIOLIB_LORAWAN_NONCES_SIGNATURE,
+                          signature);
+}
+
+static int lorawan_read_state_binary(const char *kind, const char *legacy_path,
+                                     uint8_t *data, size_t len,
+                                     char *used_path, size_t used_path_len)
+{
+    char path[LORAWAN_PATH_MAX];
+    const char *read_path = NULL;
+
+    lorawan_state_path(kind, path, sizeof(path));
+    if(lorawan_file_exists(path)) {
+        read_path = path;
+    } else if(legacy_path && lorawan_file_exists(legacy_path)) {
+        read_path = legacy_path;
+    }
+    if(!read_path) {
+        if(used_path && used_path_len > 0) {
+            used_path[0] = '\0';
+        }
+        return 0;
+    }
+    lorawan_read_binary(read_path, data, len);
+    if(used_path && used_path_len > 0) {
+        snprintf(used_path, used_path_len, "%s", read_path);
+    }
+    return 1;
+}
+
+static void lorawan_write_state_binary(const char *kind,
+                                       const uint8_t *data, size_t len)
+{
+    char path[LORAWAN_PATH_MAX];
+
+    lorawan_state_path(kind, path, sizeof(path));
+    lorawan_write_binary(path, data, len);
+}
+
+static void lorawan_unlink_state_binary(const char *kind,
+                                        const char *legacy_path)
+{
+    char path[LORAWAN_PATH_MAX];
+
+    lorawan_state_path(kind, path, sizeof(path));
+    if(path[0]) {
+        unlink(path);
+    }
+    if(legacy_path) {
+        unlink(legacy_path);
+    }
+}
+
+static uint16_t lorawan_prepare_nonces_for_join(uint8_t *nonces,
+                                                size_t nonces_len)
+{
+    char loaded_path[LORAWAN_PATH_MAX];
+    uint16_t devnonce;
+    int valid = 0;
+    int loaded;
+
+    if(!lorawan_node || !nonces ||
+       nonces_len != RADIOLIB_LORAWAN_NONCES_BUF_SIZE) {
+        return 0;
+    }
+    memcpy(nonces, lorawan_node->getBufferNonces(), nonces_len);
+    loaded = lorawan_read_state_binary("nonces", LORAWAN_NONCES_PATH,
+                                       nonces, nonces_len, loaded_path,
+                                       sizeof(loaded_path));
+    if(loaded) {
+        valid = lorawan_nonce_is_valid(nonces, nonces_len);
+    }
+    if(!valid) {
+        memcpy(nonces, lorawan_node->getBufferNonces(), nonces_len);
+        if(loaded) {
+            lorawan_join_append_log("discard invalid nonces path=%s",
+                                    loaded_path);
+        }
+    }
+
+    devnonce = lorawan_nonce_devnonce(nonces);
+    if(devnonce < LORAWAN_DEVNONCE_BOOTSTRAP) {
+        devnonce = LORAWAN_DEVNONCE_BOOTSTRAP;
+        lorawan_nonce_set_devnonce(nonces, devnonce);
+        lorawan_join_append_log("bootstrap devnonce=%u", devnonce);
+    } else {
+        lorawan_join_append_log("reuse devnonce=%u path=%s", devnonce,
+                                loaded ? loaded_path : "default");
+    }
+    lorawan_write_state_binary("nonces", nonces, nonces_len);
+    return devnonce;
 }
 
 static const char *lorawan_state_name(int16_t state)
@@ -5154,9 +5324,13 @@ static void *lorawan_join_thread_entry(void *arg)
 
         state = lorawan_node->activateOTAA();
         if(lorawan_node) {
-            lorawan_write_binary(LORAWAN_NONCES_PATH,
-                                 lorawan_node->getBufferNonces(),
-                                 RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+            uint16_t next_devnonce =
+                lorawan_nonce_devnonce(lorawan_node->getBufferNonces());
+            lorawan_write_state_binary("nonces",
+                                       lorawan_node->getBufferNonces(),
+                                       RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+            lorawan_join_append_log("join attempt %d next devnonce=%u",
+                                    attempt, next_devnonce);
         }
 
         if(lorawan_join_cancel_requested_now()) {
@@ -5251,9 +5425,9 @@ static void lorawan_join_timer_cb(lv_timer_t *timer)
         lorawan_joined = 1;
         lorawan_apply_node_settings();
         if(lorawan_node) {
-            lorawan_write_binary(LORAWAN_SESSION_PATH,
-                                 lorawan_node->getBufferSession(),
-                                 RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+            lorawan_write_state_binary("session",
+                                       lorawan_node->getBufferSession(),
+                                       RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
         }
         lorawan_set_status("Joined: %s", lorawan_state_name(state));
     } else if(cancelled) {
@@ -5526,9 +5700,21 @@ static void lorawan_join_event(lv_event_t *event)
         return;
     }
 
-    lorawan_read_binary(LORAWAN_NONCES_PATH, nonces, sizeof(nonces));
-    (void)lorawan_node->setBufferNonces(nonces);
-    lorawan_read_binary(LORAWAN_SESSION_PATH, session, sizeof(session));
+    {
+        uint16_t devnonce = lorawan_prepare_nonces_for_join(nonces,
+                                                            sizeof(nonces));
+        state = lorawan_node->setBufferNonces(nonces);
+        lorawan_join_append_log("join using devnonce=%u state=%d %s",
+                                devnonce, state, lorawan_state_name(state));
+        if(state != RADIOLIB_ERR_NONE) {
+            lorawan_set_status("Nonces init failed: %s (%d)",
+                               lorawan_state_name(state), state);
+            lorawan_update_labels();
+            return;
+        }
+    }
+    lorawan_read_state_binary("session", LORAWAN_SESSION_PATH, session,
+                              sizeof(session), NULL, 0);
     (void)lorawan_node->setBufferSession(session);
 
     lorawan_joined = 0;
@@ -5594,8 +5780,8 @@ static void lorawan_send_event(lv_event_t *event)
                                       lorawan_config.fport, downlink,
                                       &downlink_len,
                                       lorawan_config.confirmed != 0);
-    lorawan_write_binary(LORAWAN_SESSION_PATH, lorawan_node->getBufferSession(),
-                         RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+    lorawan_write_state_binary("session", lorawan_node->getBufferSession(),
+                               RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
     if(state < RADIOLIB_ERR_NONE) {
         lorawan_set_status("Send failed: %s (%d)",
                            lorawan_state_name(state), state);
@@ -5626,8 +5812,8 @@ static void lorawan_reset_event(lv_event_t *event)
 {
     (void)event;
     lorawan_reset_node();
-    unlink(LORAWAN_SESSION_PATH);
-    unlink(LORAWAN_NONCES_PATH);
+    lorawan_unlink_state_binary("session", LORAWAN_SESSION_PATH);
+    lorawan_unlink_state_binary("nonces", LORAWAN_NONCES_PATH);
     lorawan_set_status("Session reset");
     lorawan_update_labels();
 }
