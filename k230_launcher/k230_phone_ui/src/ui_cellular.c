@@ -74,6 +74,7 @@ typedef enum {
     CELLULAR_ACTION_MQTT_CONNECT,
     CELLULAR_ACTION_MQTT_DISCONNECT,
     CELLULAR_ACTION_MQTT_SUBSCRIBE,
+    CELLULAR_ACTION_MQTT_UNSUBSCRIBE,
     CELLULAR_ACTION_MQTT_PUBLISH,
     CELLULAR_ACTION_MQTT_POLL,
 } cellular_action_t;
@@ -2813,6 +2814,7 @@ static void cellular_set_action_result(cellular_action_t action, int ok)
     case CELLULAR_ACTION_MQTT_CONNECT:
     case CELLULAR_ACTION_MQTT_DISCONNECT:
     case CELLULAR_ACTION_MQTT_SUBSCRIBE:
+    case CELLULAR_ACTION_MQTT_UNSUBSCRIBE:
     case CELLULAR_ACTION_MQTT_PUBLISH:
     case CELLULAR_ACTION_MQTT_POLL:
         cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
@@ -3599,6 +3601,9 @@ static void cellular_action_commands(cellular_action_t action,
     case CELLULAR_ACTION_MQTT_SUBSCRIBE:
         *title = "MQTT Subscribe";
         break;
+    case CELLULAR_ACTION_MQTT_UNSUBSCRIBE:
+        *title = "MQTT Unsubscribe";
+        break;
     case CELLULAR_ACTION_MQTT_PUBLISH:
         *title = "MQTT Publish";
         break;
@@ -3621,6 +3626,7 @@ static int cellular_action_uses_lte_manager(cellular_action_t action)
            action == CELLULAR_ACTION_MQTT_CONNECT ||
            action == CELLULAR_ACTION_MQTT_DISCONNECT ||
            action == CELLULAR_ACTION_MQTT_SUBSCRIBE ||
+           action == CELLULAR_ACTION_MQTT_UNSUBSCRIBE ||
            action == CELLULAR_ACTION_MQTT_PUBLISH ||
            action == CELLULAR_ACTION_MQTT_POLL;
 }
@@ -3632,6 +3638,7 @@ static int cellular_action_releases_mqtt(cellular_action_t action)
            action != CELLULAR_ACTION_MQTT_CONNECT &&
            action != CELLULAR_ACTION_MQTT_DISCONNECT &&
            action != CELLULAR_ACTION_MQTT_SUBSCRIBE &&
+           action != CELLULAR_ACTION_MQTT_UNSUBSCRIBE &&
            action != CELLULAR_ACTION_MQTT_PUBLISH &&
            action != CELLULAR_ACTION_MQTT_POLL;
 }
@@ -3951,6 +3958,20 @@ static int cellular_run_manager_action(cellular_action_t action,
         }
         cellular_mqtt_log_append("=== MQTT Subscribe ===");
         cellular_mqtt_log_append("%s", log[0] ? log : "No modem log");
+    } else if(action == CELLULAR_ACTION_MQTT_UNSUBSCRIBE) {
+        char topic[160];
+
+        pthread_mutex_lock(&cellular_lock);
+        snprintf(topic, sizeof(topic), "%s", cellular_mqtt_topic);
+        pthread_mutex_unlock(&cellular_lock);
+        rc = k230_nrf9151_mqtt_session_unsubscribe(
+            topic, log, sizeof(log), cellular_action_cancel_cb,
+            (void *)(uintptr_t)generation);
+        cellular_mqtt_set_status(k230_nrf9151_mqtt_session_connected(),
+                                 rc == 0 ? "Unsubscribed %s" :
+                                 "Unsubscribe failed", topic);
+        cellular_mqtt_log_append("=== MQTT Unsubscribe ===");
+        cellular_mqtt_log_append("%s", log[0] ? log : "No modem log");
     } else if(action == CELLULAR_ACTION_MQTT_PUBLISH) {
         char topic[160];
         char payload[256];
@@ -4021,6 +4042,7 @@ static int cellular_run_manager_action(cellular_action_t action,
                              action == CELLULAR_ACTION_MQTT_CONNECT ||
                              action == CELLULAR_ACTION_MQTT_DISCONNECT ||
                              action == CELLULAR_ACTION_MQTT_SUBSCRIBE ||
+                             action == CELLULAR_ACTION_MQTT_UNSUBSCRIBE ||
                              action == CELLULAR_ACTION_MQTT_PUBLISH ||
                              action == CELLULAR_ACTION_MQTT_POLL) ? "MQTT" :
                             cellular_action_uses_lte_manager(action) ? "LTE" :
@@ -4730,8 +4752,11 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
     cellular_button(config_panel, btn_w + btn_gap, 312, btn_w, "Publish",
                     0x3B82F6, cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_MQTT_PUBLISH);
-    cellular_button(config_panel, 0, 370, config_w - 32, "Clear messages",
-                    0x94A3B8, cellular_mqtt_clear_event_cb, NULL);
+    cellular_button(config_panel, 0, 370, btn_w, "Unsubscribe", 0xF97316,
+                    cellular_action_event_cb,
+                    (void *)(intptr_t)CELLULAR_ACTION_MQTT_UNSUBSCRIBE);
+    cellular_button(config_panel, btn_w + btn_gap, 370, btn_w,
+                    "Clear", 0x94A3B8, cellular_mqtt_clear_event_cb, NULL);
 
     log_panel = ui_panel(cellular_mqtt_panel, log_x, log_y, log_w, log_h);
     lv_obj_set_style_bg_color(log_panel, lv_color_hex(0x101820), 0);

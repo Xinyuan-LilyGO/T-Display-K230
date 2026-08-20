@@ -154,6 +154,10 @@ int k230_nrf9151_mqtt_session_subscribe(const char *topic, int qos,
                                          char *log, size_t log_len,
                                          k230_nrf9151_cancel_cb_t cancel_cb,
                                          void *cancel_user);
+int k230_nrf9151_mqtt_session_unsubscribe(const char *topic,
+                                           char *log, size_t log_len,
+                                           k230_nrf9151_cancel_cb_t cancel_cb,
+                                           void *cancel_user);
 int k230_nrf9151_mqtt_session_publish(const char *topic, const char *payload,
                                        int qos, int retain,
                                        char *log, size_t log_len,

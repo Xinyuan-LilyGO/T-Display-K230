@@ -3112,6 +3112,60 @@ int k230_nrf9151_mqtt_session_subscribe(const char *topic, int qos,
     return rc == 0 ? 0 : (rc == -2 ? -2 : -1);
 }
 
+int k230_nrf9151_mqtt_session_unsubscribe(const char *topic,
+                                          char *log, size_t log_len,
+                                          k230_nrf9151_cancel_cb_t cancel_cb,
+                                          void *cancel_user)
+{
+    char topic_at[180];
+    char cmd[256];
+    char more[2048] = "";
+    int rc;
+
+    if(log && log_len > 0U) {
+        log[0] = '\0';
+    }
+    if(!topic || !topic[0]) {
+        nrf9151_manager_log_append(log, log_len, "Topic is empty");
+        return -1;
+    }
+    nrf9151_manager_escape_at_string(topic, topic_at, sizeof(topic_at));
+    pthread_mutex_lock(&nrf9151_mqtt_lock);
+    if(!nrf9151_mqtt_session.connected || nrf9151_mqtt_session.fd < 0) {
+        nrf9151_manager_log_append(log, log_len, "MQTT is not connected");
+        pthread_mutex_unlock(&nrf9151_mqtt_lock);
+        return -1;
+    }
+    snprintf(cmd, sizeof(cmd), "AT#XMQTTUNSUB=\"%s\"", topic_at);
+    rc = nrf9151_manager_run_cmd_logged(
+        nrf9151_mqtt_session.fd, cmd, K230_NRF9151_CMD_TIMEOUT_US, NULL,
+        log, log_len, cancel_cb, cancel_user);
+    if(rc == 0) {
+        int urc_rc = nrf9151_manager_read_urc(
+            nrf9151_mqtt_session.fd, more, sizeof(more), 10000000ULL,
+            cancel_cb, cancel_user);
+
+        if(urc_rc == -2) {
+            rc = -2;
+        }
+        if(more[0]) {
+            nrf9151_manager_trim_text(more);
+            nrf9151_manager_log_append(log, log_len, "%s", more);
+        }
+        if(rc == 0 && strstr(more, "#XMQTTEVT:") != NULL &&
+           strstr(more, ",0") == NULL) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT UNSUBACK reports an error");
+            rc = -1;
+        }
+    }
+    if(rc == 0 && strcmp(nrf9151_mqtt_session.topic, topic) == 0) {
+        nrf9151_mqtt_session.topic[0] = '\0';
+    }
+    pthread_mutex_unlock(&nrf9151_mqtt_lock);
+    return rc == 0 ? 0 : (rc == -2 ? -2 : -1);
+}
+
 int k230_nrf9151_mqtt_session_publish(const char *topic, const char *payload,
                                        int qos, int retain,
                                        char *log, size_t log_len,
