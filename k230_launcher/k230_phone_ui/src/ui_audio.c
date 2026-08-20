@@ -2348,6 +2348,7 @@ static lv_obj_t *audio_create_row_ex(lv_obj_t *parent, int y,
                                      const char *meta, uint32_t accent,
                                      lv_event_cb_t cb, void *user_data,
                                      int right_reserved, int text_x,
+                                     int row_x, int row_w_override,
                                      lv_obj_t **icon_out,
                                      lv_obj_t **meta_out)
 {
@@ -2355,7 +2356,8 @@ static lv_obj_t *audio_create_row_ex(lv_obj_t *parent, int y,
     lv_obj_t *icon;
     lv_obj_t *name;
     lv_obj_t *detail;
-    int row_w = ui_safe_content_width(parent, 488);
+    int row_w = row_w_override > 0 ? row_w_override :
+                ui_safe_content_width(parent, 488);
     int text_w = row_w - text_x - 24 - right_reserved;
 
     if(text_w < 120) {
@@ -2365,7 +2367,7 @@ static lv_obj_t *audio_create_row_ex(lv_obj_t *parent, int y,
         text_w = 80;
     }
 
-    lv_obj_set_pos(row, 0, y);
+    lv_obj_set_pos(row, row_x, y);
     lv_obj_set_size(row, row_w, 72);
     lv_obj_set_style_bg_color(row, lv_color_hex(0x151B22), 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
@@ -2410,7 +2412,7 @@ static lv_obj_t *audio_create_row(lv_obj_t *parent, int y, const char *left_icon
                                   lv_obj_t **icon_out, lv_obj_t **meta_out)
 {
     return audio_create_row_ex(parent, y, left_icon, title, meta, accent, cb,
-                               user_data, right_reserved, 58, icon_out,
+                               user_data, right_reserved, 58, 0, 0, icon_out,
                                meta_out);
 }
 
@@ -2552,6 +2554,8 @@ void ui_notification_settings_create(lv_obj_t *scr)
     int x = ui_page_panel_x();
     int w = ui_page_panel_width();
     int content_w;
+    int list_x = ui_is_landscape() ? 24 : 16;
+    int list_w;
     int y = 0;
 
     ui_create_header(scr, "Notifications");
@@ -2559,6 +2563,11 @@ void ui_notification_settings_create(lv_obj_t *scr)
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     lv_obj_set_style_pad_all(body, 16, 0);
     content_w = ui_safe_content_width(body, 488);
+    list_w = content_w - list_x * 2;
+    if(list_w < 260) {
+        list_w = content_w > 260 ? content_w - list_x : 260;
+        list_x = (content_w - list_w) / 2;
+    }
 
     notification_scan_sounds();
     memset(notification_row, 0, sizeof(notification_row));
@@ -2594,7 +2603,7 @@ void ui_notification_settings_create(lv_obj_t *scr)
                                               "Disable sound", 0x9AA4AF,
                                               notification_select_cb,
                                               (void *)(intptr_t)-1, 0, 82,
-                                              NULL,
+                                              list_x, list_w, NULL,
                                               &notification_row_meta[0]);
     y += 84;
 
@@ -2605,7 +2614,8 @@ void ui_notification_settings_create(lv_obj_t *scr)
                                 notification_sounds[i].meta, 0xA78BFA,
                                 notification_select_cb,
                                 (void *)(intptr_t)i, 0, 82,
-                                NULL, &notification_row_meta[i + 1]);
+                                list_x, list_w, NULL,
+                                &notification_row_meta[i + 1]);
         y += 84;
     }
 
