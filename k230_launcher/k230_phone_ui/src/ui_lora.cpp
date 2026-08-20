@@ -5085,20 +5085,34 @@ static int lorawan_build_cayenne_payload(uint8_t *payload, size_t payload_max,
     return 0;
 }
 
-static lv_obj_t *lorawan_info(lv_obj_t *parent, int y, const char *name,
-                              const char *value, lv_obj_t **out)
+static lv_obj_t *lorawan_info_at(lv_obj_t *parent, int x, int y, int row_w,
+                                 const char *name, const char *value,
+                                 lv_obj_t **out)
 {
     lv_obj_t *label;
-    int row_w = lora_panel_content_width(parent);
     int value_w = row_w - 168;
-    lv_obj_t *row = ui_panel(parent, 0, y, row_w, 58);
+    int name_w = 124;
+    lv_obj_t *row;
 
+    if(row_w < 240) {
+        row_w = 240;
+    }
     if(value_w < 150) {
         value_w = 150;
     }
+    if(name_w > row_w - value_w - 36) {
+        name_w = row_w - value_w - 36;
+    }
+    if(name_w < 82) {
+        name_w = 82;
+    }
+
+    row = ui_panel(parent, x, y, row_w, 58);
     lv_obj_set_style_bg_color(row, lv_color_hex(0x1A2028), 0);
 
     label = ui_label(row, name, &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(label, name_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_LEFT_MID, 12, 0);
 
     label = ui_label(row, value, &lv_font_montserrat_18, 0xF2F5F8);
@@ -5110,6 +5124,13 @@ static lv_obj_t *lorawan_info(lv_obj_t *parent, int y, const char *name,
         *out = label;
     }
     return row;
+}
+
+static lv_obj_t *lorawan_info(lv_obj_t *parent, int y, const char *name,
+                              const char *value, lv_obj_t **out)
+{
+    return lorawan_info_at(parent, 0, y, lora_panel_content_width(parent),
+                           name, value, out);
 }
 
 typedef enum {
@@ -6754,146 +6775,199 @@ static void lorawan_reset_event(lv_event_t *event)
 
 static void lorawan_home_view(lv_obj_t *body, int landscape)
 {
-    lv_obj_t *status;
-    lv_obj_t *session;
+    lv_obj_t *panel;
     lv_obj_t *btn;
     lv_obj_t *profile_row;
     lv_obj_t *title;
     int body_h = ui_body_height(144);
     int content_w = ui_screen_width() - 48;
-    int gap = landscape ? 18 : 20;
-    int left_w = landscape ? (content_w * 44) / 100 : content_w;
-    int right_w = landscape ? content_w - left_w - gap : content_w;
-    int panel_h = landscape ? body_h - 48 : 330;
-    int session_x = landscape ? 24 + left_w + gap : 24;
-    int session_y = landscape ? 24 : 24 + panel_h + 20;
-    int session_h = landscape ? panel_h : 720;
-    int action_w;
+    int panel_h = landscape ? body_h - 48 : 1030;
     int inner_w;
+    int two_cols;
+    int col_gap = landscape ? 24 : 0;
+    int info_x = 0;
+    int info_w;
+    int work_x = 0;
+    int work_w;
+    int work_y;
+    int action_w;
+    int action_gap = 14;
+    int action_cols;
     int source_cols;
     int source_w;
     int source_h;
+    int source_rows;
     int y;
 
     lorawan_probe_data_sources(1);
-    if(landscape && left_w < 360) {
-        left_w = 360;
-        right_w = content_w - left_w - gap;
-    }
-    if(right_w < 360) {
-        right_w = 360;
+    if(panel_h < 320) {
+        panel_h = 320;
     }
 
-    status = ui_panel(body, 24, 24, left_w, panel_h);
-    lv_obj_set_style_pad_all(status, 18, 0);
-    title = ui_label(status, "LoRaWAN", &lv_font_montserrat_26, 0xF2F5F8);
+    panel = ui_panel(body, 24, 24, content_w, panel_h);
+    lv_obj_set_style_pad_all(panel, 18, 0);
+    ui_make_scrollable(panel, 56);
+    inner_w = lora_panel_content_width(panel);
+
+    two_cols = landscape && inner_w >= 760;
+    if(two_cols) {
+        info_w = (inner_w * 42) / 100;
+        if(info_w < 360) {
+            info_w = 360;
+        }
+        if(info_w > inner_w - col_gap - 380) {
+            info_w = inner_w - col_gap - 380;
+        }
+        if(info_w < 300) {
+            two_cols = 0;
+        }
+    }
+    if(two_cols) {
+        work_x = info_w + col_gap;
+        work_w = inner_w - work_x;
+        work_y = 54;
+    } else {
+        info_w = inner_w;
+        work_w = inner_w;
+        work_y = 332;
+    }
+
+    title = ui_label(panel, "LoRaWAN", &lv_font_montserrat_26, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
     lorawan_status_label =
-        ui_label(status, "Loading", &lv_font_montserrat_18, 0x25C281);
-    lv_obj_set_width(lorawan_status_label, lora_panel_content_width(status));
+        ui_label(panel, "Loading", &lv_font_montserrat_18, 0x25C281);
+    lv_obj_set_width(lorawan_status_label,
+                     inner_w > 430 ? inner_w - 190 : inner_w);
     lv_label_set_long_mode(lorawan_status_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(lorawan_status_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(lorawan_status_label, LV_ALIGN_TOP_RIGHT, 0, 4);
 
-    lorawan_info(status, 52, "Radio", "Auto LoRa", &lorawan_radio_label);
-    profile_row = lorawan_info(status, 110, "Profile", "No profile selected",
-                               &lorawan_profile_label);
+    lorawan_info_at(panel, info_x, 54, info_w, "Radio", "Auto LoRa",
+                    &lorawan_radio_label);
+    profile_row = lorawan_info_at(panel, info_x, 112, info_w, "Profile",
+                                  "No profile selected",
+                                  &lorawan_profile_label);
     lv_obj_add_flag(profile_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(profile_row, lorawan_edit_view_event,
                         LV_EVENT_CLICKED, NULL);
-    lorawan_info(status, 168, "Config", "Tap fields to configure",
-                 &lorawan_config_label);
-    lorawan_info(status, 226, "Region", "--", &lorawan_region_label);
-    if(panel_h > 312) {
-        lorawan_source_summary_label =
-            ui_label(status, "K230", &lv_font_montserrat_16, 0x9AA4AF);
-        lv_obj_set_width(lorawan_source_summary_label,
-                         lora_panel_content_width(status));
-        lv_label_set_long_mode(lorawan_source_summary_label,
-                               LV_LABEL_LONG_DOT);
-        lv_obj_align(lorawan_source_summary_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-    }
+    lorawan_info_at(panel, info_x, 170, info_w, "Config",
+                    "Tap fields to configure", &lorawan_config_label);
+    lorawan_info_at(panel, info_x, 228, info_w, "Region", "--",
+                    &lorawan_region_label);
+    lorawan_source_summary_label =
+        ui_label(panel, "K230", &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(lorawan_source_summary_label, info_w);
+    lv_label_set_long_mode(lorawan_source_summary_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(lorawan_source_summary_label, info_x, 294);
 
-    session = ui_panel(body, session_x, session_y, right_w, session_h);
-    lv_obj_set_style_pad_all(session, 18, 0);
-    ui_make_scrollable(session, 32);
-    title = ui_label(session, "Session", &lv_font_montserrat_24, 0xF2F5F8);
-    lv_obj_set_pos(title, 0, 0);
-    lorawan_info(session, 48, "Join", "--", &lorawan_join_label);
-    lorawan_info(session, 106, "DevAddr", "--", &lorawan_devaddr_label);
-    lorawan_info(session, 164, "FCntUp", "--", &lorawan_fcnt_label);
+    title = ui_label(panel, "Session", &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, work_x, work_y);
+    y = work_y + 42;
+    lorawan_info_at(panel, work_x, y, work_w, "Join", "--",
+                    &lorawan_join_label);
+    y += 58;
+    lorawan_info_at(panel, work_x, y, work_w, "DevAddr", "--",
+                    &lorawan_devaddr_label);
+    y += 58;
+    lorawan_info_at(panel, work_x, y, work_w, "FCntUp", "--",
+                    &lorawan_fcnt_label);
+    y += 70;
 
-    y = 234;
-    title = ui_label(session, "Data sources", &lv_font_montserrat_24,
+    title = ui_label(panel, "Data sources", &lv_font_montserrat_24,
                      0xF2F5F8);
-    lv_obj_set_pos(title, 0, y);
+    lv_obj_set_pos(title, work_x, y);
     y += 42;
-    inner_w = lora_panel_content_width(session);
-    if(!lorawan_source_summary_label ||
-       !lv_obj_is_valid(lorawan_source_summary_label)) {
-        lorawan_source_summary_label =
-            ui_label(session, "K230", &lv_font_montserrat_16, 0x9AA4AF);
-        lv_obj_set_width(lorawan_source_summary_label, inner_w);
-        lv_label_set_long_mode(lorawan_source_summary_label, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(lorawan_source_summary_label, 0, y - 6);
-        y += 28;
-    }
-    source_cols = inner_w >= 620 ? 3 : (inner_w >= 430 ? 2 : 1);
-    source_w = (inner_w - 12 * (source_cols - 1)) / source_cols;
-    source_h = 92;
-    lorawan_source_card(session, 0, y, source_w, source_h,
+    source_cols = work_w >= 620 ? 3 : (work_w >= 430 ? 2 : 1);
+    source_w = (work_w - 12 * (source_cols - 1)) / source_cols;
+    source_h = landscape ? 86 : 92;
+    lorawan_source_card(panel, work_x, y, source_w, source_h,
                         LORAWAN_SOURCE_K230, 0x25C281);
-    lorawan_source_card(session,
-                        source_cols > 1 ? source_w + 12 : 0,
+    lorawan_source_card(panel,
+                        work_x + (source_cols > 1 ? source_w + 12 : 0),
                         y + (source_cols > 1 ? 0 : source_h + 12),
                         source_w, source_h, LORAWAN_SOURCE_AHT20, 0xF5A524);
-    lorawan_source_card(session,
-                        source_cols > 2 ? (source_w + 12) * 2 :
-                        (source_cols > 1 ? 0 : 0),
+    lorawan_source_card(panel,
+                        work_x + (source_cols > 2 ?
+                                  (source_w + 12) * 2 : 0),
                         y + (source_cols > 2 ? 0 :
                              (source_cols > 1 ? source_h + 12 :
                               (source_h + 12) * 2)),
                         source_w, source_h, LORAWAN_SOURCE_NRF9151_GPS,
                         0x3DA5FF);
-    y += ((3 + source_cols - 1) / source_cols) * (source_h + 12) + 8;
+    source_rows = (3 + source_cols - 1) / source_cols;
+    y += source_rows * source_h + (source_rows - 1) * 12 + 20;
 
-    title = ui_label(session, "Actions", &lv_font_montserrat_24, 0xF2F5F8);
-    lv_obj_set_pos(title, 0, y);
+    title = ui_label(panel, "Actions", &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, work_x, y);
     y += 42;
-    action_w = (inner_w - 14) / 2;
+    action_cols = work_w >= 660 ? 3 : 2;
+    action_w = (work_w - action_gap * (action_cols - 1)) / action_cols;
     if(action_w < 120) {
         action_w = 120;
     }
-    btn = lora_button(session, 0, y, action_w, 54, "Load", 0x3DA5FF);
+    btn = lora_button(panel, work_x, y, action_w, 52, "Load", 0x3DA5FF);
     lv_obj_add_event_cb(btn, lorawan_load_view_event, LV_EVENT_CLICKED, NULL);
-    btn = lora_button(session, action_w + 14, y, action_w, 54, "New",
-                      0x25C281);
+    btn = lora_button(panel, work_x + action_w + action_gap, y, action_w, 52,
+                      "New", 0x25C281);
     lv_obj_add_event_cb(btn, lorawan_new_event, LV_EVENT_CLICKED, NULL);
-    y += 66;
-    btn = lora_button(session, 0, y, action_w, 54, "Edit", 0xB982FF);
-    lv_obj_add_event_cb(btn, lorawan_edit_view_event, LV_EVENT_CLICKED, NULL);
-    btn = lora_button(session, action_w + 14, y, action_w, 54, "Join",
-                      0xF5A524);
-    lv_obj_add_event_cb(btn, lorawan_join_event, LV_EVENT_CLICKED, NULL);
-    y += 70;
-    btn = lora_button(session, 0, y, (inner_w - 14) / 2, 54,
-                      "Upload", 0x14B8A6);
-    lv_obj_add_event_cb(btn, lorawan_send_event, LV_EVENT_CLICKED, NULL);
-    btn = lora_button(session, (inner_w + 14) / 2, y, (inner_w - 14) / 2, 54,
-                      "Reset session", 0xEF4D5A);
-    lv_obj_add_event_cb(btn, lorawan_reset_event, LV_EVENT_CLICKED, NULL);
-    y += 70;
-    lorawan_payload_label =
-        ui_label(session, "Payload idle", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(lorawan_payload_label, (inner_w - 20) / 2);
-    lv_label_set_long_mode(lorawan_payload_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(lorawan_payload_label, 0, y);
-    lorawan_downlink_label =
-        ui_label(session, "Downlink none", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(lorawan_downlink_label, (inner_w - 20) / 2);
-    lv_label_set_long_mode(lorawan_downlink_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(lorawan_downlink_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(lorawan_downlink_label, inner_w / 2 + 10, y);
+    if(action_cols >= 3) {
+        btn = lora_button(panel, work_x + (action_w + action_gap) * 2, y,
+                          action_w, 52, "Edit", 0xB982FF);
+        lv_obj_add_event_cb(btn, lorawan_edit_view_event, LV_EVENT_CLICKED,
+                            NULL);
+        y += 64;
+        btn = lora_button(panel, work_x, y, action_w, 52, "Join", 0xF5A524);
+        lv_obj_add_event_cb(btn, lorawan_join_event, LV_EVENT_CLICKED, NULL);
+        btn = lora_button(panel, work_x + action_w + action_gap, y, action_w,
+                          52, "Upload", 0x14B8A6);
+        lv_obj_add_event_cb(btn, lorawan_send_event, LV_EVENT_CLICKED, NULL);
+        btn = lora_button(panel, work_x + (action_w + action_gap) * 2, y,
+                          action_w, 52, "Reset session", 0xEF4D5A);
+        lv_obj_add_event_cb(btn, lorawan_reset_event, LV_EVENT_CLICKED, NULL);
+    } else {
+        y += 64;
+        btn = lora_button(panel, work_x, y, action_w, 52, "Edit", 0xB982FF);
+        lv_obj_add_event_cb(btn, lorawan_edit_view_event, LV_EVENT_CLICKED,
+                            NULL);
+        btn = lora_button(panel, work_x + action_w + action_gap, y, action_w,
+                          52, "Join", 0xF5A524);
+        lv_obj_add_event_cb(btn, lorawan_join_event, LV_EVENT_CLICKED, NULL);
+        y += 64;
+        btn = lora_button(panel, work_x, y, action_w, 52, "Upload", 0x14B8A6);
+        lv_obj_add_event_cb(btn, lorawan_send_event, LV_EVENT_CLICKED, NULL);
+        btn = lora_button(panel, work_x + action_w + action_gap, y, action_w,
+                          52, "Reset session", 0xEF4D5A);
+        lv_obj_add_event_cb(btn, lorawan_reset_event, LV_EVENT_CLICKED, NULL);
+    }
+    y += 68;
+
+    if(work_w >= 420) {
+        lorawan_payload_label =
+            ui_label(panel, "Payload idle", &lv_font_montserrat_16, 0x9AA4AF);
+        lv_obj_set_width(lorawan_payload_label, (work_w - 20) / 2);
+        lv_label_set_long_mode(lorawan_payload_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(lorawan_payload_label, work_x, y);
+        lorawan_downlink_label =
+            ui_label(panel, "Downlink none", &lv_font_montserrat_16,
+                     0x9AA4AF);
+        lv_obj_set_width(lorawan_downlink_label, (work_w - 20) / 2);
+        lv_label_set_long_mode(lorawan_downlink_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(lorawan_downlink_label,
+                                    LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_pos(lorawan_downlink_label, work_x + work_w / 2 + 10, y);
+    } else {
+        lorawan_payload_label =
+            ui_label(panel, "Payload idle", &lv_font_montserrat_16, 0x9AA4AF);
+        lv_obj_set_width(lorawan_payload_label, work_w);
+        lv_label_set_long_mode(lorawan_payload_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(lorawan_payload_label, work_x, y);
+        lorawan_downlink_label =
+            ui_label(panel, "Downlink none", &lv_font_montserrat_16,
+                     0x9AA4AF);
+        lv_obj_set_width(lorawan_downlink_label, work_w);
+        lv_label_set_long_mode(lorawan_downlink_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(lorawan_downlink_label, work_x, y + 26);
+    }
 }
 
 static void lorawan_edit_view(lv_obj_t *body, int landscape)
