@@ -169,6 +169,7 @@
 #endif
 
 #include "ui_common.h"
+#include "ui_icons.h"
 #if K230_CAMERA_FACE_KPU
 #include "camera_face_detect.h"
 #endif
@@ -4657,17 +4658,15 @@ static lv_obj_t *icon_tile(lv_obj_t *parent, const app_item_t *item, int x, int 
 
     lv_obj_t *icon_box = lv_obj_create(tile);
     lv_obj_add_style(icon_box, &style_icon, 0);
-    lv_obj_set_style_bg_color(icon_box, lv_color_hex(item->color), 0);
+    ui_style_icon_box_for_page(icon_box, item->page, item->color);
     lv_obj_set_size(icon_box, icon_size, icon_size);
     lv_obj_align(icon_box, LV_ALIGN_TOP_MID, 0, icon_y);
     lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
     make_click_forwarder(icon_box);
 
-    lv_obj_t *icon = label(icon_box, item->symbol,
-                           wide_tile ? &lv_font_montserrat_28 :
-                           &lv_font_montserrat_24, 0xFFFFFF);
-    lv_obj_center(icon);
-    make_click_forwarder(icon);
+    ui_create_page_icon(icon_box, item->page, item->symbol,
+                        wide_tile ? &lv_font_montserrat_28 :
+                        &lv_font_montserrat_24, 0xFFFFFF, icon_size);
 
     lv_obj_t *name = label(tile, item->title,
                            wide_tile ? &lv_font_montserrat_18 :
@@ -5145,13 +5144,12 @@ static lv_obj_t *settings_nav_row(lv_obj_t *parent, int y, const char *symbol,
     lv_obj_add_style(icon_box, &style_icon, 0);
     lv_obj_set_size(icon_box, 54, 54);
     lv_obj_align(icon_box, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_bg_color(icon_box, lv_color_hex(color), 0);
+    ui_style_icon_box_for_page(icon_box, page, color);
     lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
     make_click_forwarder(icon_box);
 
-    lv_obj_t *icon = label(icon_box, symbol, &lv_font_montserrat_22, 0xFFFFFF);
-    lv_obj_center(icon);
-    make_click_forwarder(icon);
+    ui_create_page_icon(icon_box, page, symbol, &lv_font_montserrat_22,
+                        0xFFFFFF, 54);
 
     lv_obj_t *name = label(row, title, &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_align(name, LV_ALIGN_TOP_LEFT, 76, 14);

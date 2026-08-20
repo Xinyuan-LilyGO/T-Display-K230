@@ -1,0 +1,296 @@
+[
+  {
+    "file": "camera.svg",
+    "mdi": "camera",
+    "color": "#3DA5FF",
+    "runtime": "camera.png"
+  },
+  {
+    "file": "music.svg",
+    "mdi": "music-circle",
+    "color": "#2563EB",
+    "runtime": "music.png"
+  },
+  {
+    "file": "video.svg",
+    "mdi": "filmstrip",
+    "color": "#F43F5E",
+    "runtime": "video.png"
+  },
+  {
+    "file": "radio.svg",
+    "mdi": "radio",
+    "color": "#25C281",
+    "runtime": "radio.png"
+  },
+  {
+    "file": "i2s.svg",
+    "mdi": "audio-input-rca",
+    "color": "#14B8A6",
+    "runtime": "i2s.png"
+  },
+  {
+    "file": "i2c.svg",
+    "mdi": "integrated-circuit-chip",
+    "color": "#22C55E",
+    "runtime": "i2c.png"
+  },
+  {
+    "file": "battery.svg",
+    "mdi": "battery-high",
+    "color": "#A3E635",
+    "runtime": "battery.png"
+  },
+  {
+    "file": "keyboard.svg",
+    "mdi": "keyboard-settings",
+    "color": "#F97316",
+    "runtime": "keyboard.png"
+  },
+  {
+    "file": "led.svg",
+    "mdi": "led-on",
+    "color": "#22D3EE",
+    "runtime": "led.png"
+  },
+  {
+    "file": "cellular.svg",
+    "mdi": "cellphone-wireless",
+    "color": "#60A5FA",
+    "runtime": "cellular.png"
+  },
+  {
+    "file": "usb_modem.svg",
+    "mdi": "usb",
+    "color": "#38BDF8",
+    "runtime": "usb_modem.png"
+  },
+  {
+    "file": "terminal.svg",
+    "mdi": "console",
+    "color": "#CBD5E1",
+    "runtime": "terminal.png"
+  },
+  {
+    "file": "record.svg",
+    "mdi": "record-circle",
+    "color": "#EF4D5A",
+    "runtime": "record.png"
+  },
+  {
+    "file": "mic_fft.svg",
+    "mdi": "chart-bar",
+    "color": "#22D3EE",
+    "runtime": "mic_fft.png"
+  },
+  {
+    "file": "lora.svg",
+    "mdi": "access-point",
+    "color": "#7C3AED",
+    "runtime": "lora.png"
+  },
+  {
+    "file": "meshtastic.svg",
+    "mdi": "hub",
+    "color": "#10B981",
+    "runtime": "meshtastic.png"
+  },
+  {
+    "file": "lora_flrc.svg",
+    "mdi": "broadcast",
+    "color": "#A855F7",
+    "runtime": "lora_flrc.png"
+  },
+  {
+    "file": "halow.svg",
+    "mdi": "router-wireless",
+    "color": "#25C281",
+    "runtime": "halow.png"
+  },
+  {
+    "file": "lorawan.svg",
+    "mdi": "access-point-network",
+    "color": "#14B8A6",
+    "runtime": "lorawan.png"
+  },
+  {
+    "file": "nes.svg",
+    "mdi": "nintendo-game-boy",
+    "color": "#F97316",
+    "runtime": "nes.png"
+  },
+  {
+    "file": "ai.svg",
+    "mdi": "brain",
+    "color": "#FF6B6B",
+    "runtime": "ai.png"
+  },
+  {
+    "file": "rtsp.svg",
+    "mdi": "cctv",
+    "color": "#22C55E",
+    "runtime": "rtsp.png"
+  },
+  {
+    "file": "wifi.svg",
+    "mdi": "wifi",
+    "color": "#25C281",
+    "runtime": "wifi.png"
+  },
+  {
+    "file": "wifi_test.svg",
+    "mdi": "speedometer",
+    "color": "#10B981",
+    "runtime": "wifi_test.png"
+  },
+  {
+    "file": "bluetooth.svg",
+    "mdi": "bluetooth",
+    "color": "#3B82F6",
+    "runtime": "bluetooth.png"
+  },
+  {
+    "file": "dfu.svg",
+    "mdi": "update",
+    "color": "#3B82F6",
+    "runtime": "dfu.png"
+  },
+  {
+    "file": "mtp.svg",
+    "mdi": "folder",
+    "color": "#41C7C7",
+    "runtime": "mtp.png"
+  },
+  {
+    "file": "gallery.svg",
+    "mdi": "image-multiple",
+    "color": "#EC4899",
+    "runtime": "gallery.png"
+  },
+  {
+    "file": "screenshot.svg",
+    "mdi": "monitor-screenshot",
+    "color": "#22C55E",
+    "runtime": "screenshot.png"
+  },
+  {
+    "file": "settings.svg",
+    "mdi": "cog",
+    "color": "#94A3B8",
+    "runtime": "settings.png"
+  },
+  {
+    "file": "system.svg",
+    "mdi": "view-list",
+    "color": "#F5A524",
+    "runtime": "system.png"
+  },
+  {
+    "file": "display.svg",
+    "mdi": "eye",
+    "color": "#8B5CF6",
+    "runtime": "display.png"
+  },
+  {
+    "file": "screen_test.svg",
+    "mdi": "palette",
+    "color": "#22C55E",
+    "runtime": "screen_test.png"
+  },
+  {
+    "file": "hdmi.svg",
+    "mdi": "hdmi-port",
+    "color": "#60A5FA",
+    "runtime": "hdmi.png"
+  },
+  {
+    "file": "touch.svg",
+    "mdi": "gesture-tap",
+    "color": "#22D3EE",
+    "runtime": "touch.png"
+  },
+  {
+    "file": "motion.svg",
+    "mdi": "play-circle",
+    "color": "#F97316",
+    "runtime": "motion.png"
+  },
+  {
+    "file": "about.svg",
+    "mdi": "information",
+    "color": "#A3E635",
+    "runtime": "about.png"
+  },
+  {
+    "file": "reboot.svg",
+    "mdi": "restart",
+    "color": "#EF4D5A",
+    "runtime": "reboot.png"
+  },
+  {
+    "file": "network.svg",
+    "mdi": "network",
+    "color": "#25C281",
+    "runtime": "network.png"
+  },
+  {
+    "file": "ethernet.svg",
+    "mdi": "ethernet",
+    "color": "#22D3EE",
+    "runtime": "ethernet.png"
+  },
+  {
+    "file": "language.svg",
+    "mdi": "translate",
+    "color": "#F59E0B",
+    "runtime": "language.png"
+  },
+  {
+    "file": "time.svg",
+    "mdi": "clock-outline",
+    "color": "#38BDF8",
+    "runtime": "time.png"
+  },
+  {
+    "file": "audio.svg",
+    "mdi": "volume-high",
+    "color": "#60A5FA",
+    "runtime": "audio.png"
+  },
+  {
+    "file": "notifications.svg",
+    "mdi": "bell-ring",
+    "color": "#EC4899",
+    "runtime": "notifications.png"
+  },
+  {
+    "file": "fan.svg",
+    "mdi": "fan",
+    "color": "#22D3EE",
+    "runtime": "fan.png"
+  },
+  {
+    "file": "sensors.svg",
+    "mdi": "thermometer",
+    "color": "#F97316",
+    "runtime": "sensors.png"
+  },
+  {
+    "file": "charger.svg",
+    "mdi": "battery-charging",
+    "color": "#A3E635",
+    "runtime": "charger.png"
+  },
+  {
+    "file": "startup.svg",
+    "mdi": "apps",
+    "color": "#10B981",
+    "runtime": "startup.png"
+  },
+  {
+    "file": "logs.svg",
+    "mdi": "file-document-outline",
+    "color": "#CBD5E1",
+    "runtime": "logs.png"
+  }
+]

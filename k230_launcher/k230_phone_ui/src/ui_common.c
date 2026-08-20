@@ -1,5 +1,6 @@
 #include "ui_common.h"
 
+#include "ui_icons.h"
 #include "ui_i18n.h"
 #include "ui_prefs.h"
 
@@ -597,14 +598,13 @@ lv_obj_t *ui_settings_nav_row(lv_obj_t *parent, int y, const char *symbol,
     lv_obj_align(icon_box, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_set_style_radius(icon_box, 8, 0);
     lv_obj_set_style_bg_opa(icon_box, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(icon_box, lv_color_hex(color), 0);
     lv_obj_set_style_border_width(icon_box, 0, 0);
+    ui_style_icon_box_for_page(icon_box, page, color);
     lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
     ui_make_click_forwarder(icon_box);
 
-    lv_obj_t *icon = ui_label(icon_box, symbol, &lv_font_montserrat_22, 0xFFFFFF);
-    lv_obj_center(icon);
-    ui_make_click_forwarder(icon);
+    ui_create_page_icon(icon_box, page, symbol, &lv_font_montserrat_22,
+                        0xFFFFFF, 54);
 
     lv_obj_t *name = ui_label(row, title, &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_align(name, LV_ALIGN_TOP_LEFT, 76, 14);

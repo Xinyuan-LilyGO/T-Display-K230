@@ -67,6 +67,7 @@ set(RADIOLIB_REQUIRED_SOURCES
 set(K230_PHONE_UI_SOURCES
     main.c
     ui_common.c
+    ui_icons.c
     ui_prefs.c
     ui_i18n.c
     ui_input.c
@@ -368,6 +369,7 @@ install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
         DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fonts DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data DESTINATION /root/app/k230_phone_ui)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/icons DESTINATION /root/app/k230_phone_ui)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/models/face_detection_320.kmodel)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/models/face_detection_320.kmodel
             DESTINATION /root/app/face_detect)
