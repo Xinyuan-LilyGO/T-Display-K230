@@ -570,7 +570,9 @@ static int nrf9151_manager_response_has_token(const char *resp,
 }
 
 static int nrf9151_manager_exchange(int fd, const char *cmd, char *resp,
-                                    size_t resp_len, uint64_t timeout_us)
+                                    size_t resp_len, uint64_t timeout_us,
+                                    k230_nrf9151_cancel_cb_t cancel_cb,
+                                    void *cancel_user)
 {
     uint64_t start;
     size_t used = 0;
@@ -595,6 +597,10 @@ static int nrf9151_manager_exchange(int fd, const char *cmd, char *resp,
         ssize_t rd;
         int rc;
 
+        if(cancel_cb && cancel_cb(cancel_user)) {
+            errno = ECANCELED;
+            return -2;
+        }
         FD_ZERO(&rfds);
         FD_SET(fd, &rfds);
         tv.tv_sec = 0;
@@ -638,8 +644,10 @@ static int nrf9151_manager_exchange(int fd, const char *cmd, char *resp,
     return -1;
 }
 
-static void nrf9151_manager_read_urc(int fd, char *resp, size_t resp_len,
-                                     uint64_t timeout_us)
+static int nrf9151_manager_read_urc(int fd, char *resp, size_t resp_len,
+                                    uint64_t timeout_us,
+                                    k230_nrf9151_cancel_cb_t cancel_cb,
+                                    void *cancel_user)
 {
     uint64_t start = nrf9151_manager_monotonic_us();
     size_t used = resp && resp_len > 0U ? strlen(resp) : 0U;
@@ -651,6 +659,10 @@ static void nrf9151_manager_read_urc(int fd, char *resp, size_t resp_len,
         ssize_t rd;
         int rc;
 
+        if(cancel_cb && cancel_cb(cancel_user)) {
+            errno = ECANCELED;
+            return -2;
+        }
         FD_ZERO(&rfds);
         FD_SET(fd, &rfds);
         tv.tv_sec = 0;
@@ -683,6 +695,7 @@ static void nrf9151_manager_read_urc(int fd, char *resp, size_t resp_len,
             start = nrf9151_manager_monotonic_us();
         }
     }
+    return 0;
 }
 
 static int nrf9151_manager_open_session(const char *owner, int wait_ms,
@@ -1217,16 +1230,21 @@ static void nrf9151_manager_update_lte_from_response(
 static int nrf9151_manager_run_cmd_logged(int fd, const char *cmd,
                                           uint64_t timeout_us,
                                           k230_nrf9151_status_t *status,
-                                          char *log, size_t log_len)
+                                          char *log, size_t log_len,
+                                          k230_nrf9151_cancel_cb_t cancel_cb,
+                                          void *cancel_user)
 {
     char resp[2048];
     int rc;
 
     nrf9151_manager_log_append(log, log_len, "> %s", cmd);
-    rc = nrf9151_manager_exchange(fd, cmd, resp, sizeof(resp), timeout_us);
+    rc = nrf9151_manager_exchange(fd, cmd, resp, sizeof(resp), timeout_us,
+                                  cancel_cb, cancel_user);
     nrf9151_manager_trim_text(resp);
     if(resp[0]) {
         nrf9151_manager_log_append(log, log_len, "%s", resp);
+    } else if(rc == -2) {
+        nrf9151_manager_log_append(log, log_len, "< canceled");
     } else {
         nrf9151_manager_log_append(log, log_len, "< no response");
     }
@@ -1236,8 +1254,10 @@ static int nrf9151_manager_run_cmd_logged(int fd, const char *cmd,
     return rc;
 }
 
-int k230_nrf9151_run_lte_check(k230_nrf9151_status_t *status,
-                               char *log, size_t log_len)
+int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
+                                  char *log, size_t log_len,
+                                  k230_nrf9151_cancel_cb_t cancel_cb,
+                                  void *cancel_user)
 {
     static const char *const cmds[] = {
         "AT",
@@ -1301,15 +1321,45 @@ int k230_nrf9151_run_lte_check(k230_nrf9151_status_t *status,
                            K230_NRF9151_LONG_TIMEOUT_US :
                            K230_NRF9151_CMD_TIMEOUT_US;
         int rc = nrf9151_manager_run_cmd_logged(fd, cmds[i], timeout,
-                                                &local, log, log_len);
+                                                &local, log, log_len,
+                                                cancel_cb, cancel_user);
 
+        if(rc == -2) {
+            snprintf(local.lte_status, sizeof(local.lte_status), "%s",
+                     "Canceled");
+            snprintf(local.last_error, sizeof(local.last_error), "%s",
+                     "Canceled");
+            local.epoch = time(NULL);
+            k230_nrf9151_write_status(&local);
+            nrf9151_manager_close_session(lock_fd, fd);
+            if(status) {
+                *status = local;
+            }
+            return -2;
+        }
         if(rc != 0) {
             failures++;
         }
         if(nrf9151_manager_starts_with(cmds[i], "AT#XPING")) {
             char more[2048] = "";
+            int urc_rc;
 
-            nrf9151_manager_read_urc(fd, more, sizeof(more), 8000000ULL);
+            urc_rc = nrf9151_manager_read_urc(fd, more, sizeof(more),
+                                              8000000ULL, cancel_cb,
+                                              cancel_user);
+            if(urc_rc == -2) {
+                snprintf(local.lte_status, sizeof(local.lte_status), "%s",
+                         "Canceled");
+                snprintf(local.last_error, sizeof(local.last_error), "%s",
+                         "Canceled");
+                local.epoch = time(NULL);
+                k230_nrf9151_write_status(&local);
+                nrf9151_manager_close_session(lock_fd, fd);
+                if(status) {
+                    *status = local;
+                }
+                return -2;
+            }
             if(more[0]) {
                 nrf9151_manager_trim_text(more);
                 nrf9151_manager_log_append(log, log_len, "%s", more);
@@ -1341,6 +1391,12 @@ int k230_nrf9151_run_lte_check(k230_nrf9151_status_t *status,
         *status = local;
     }
     return failures == 0 ? 0 : 1;
+}
+
+int k230_nrf9151_run_lte_check(k230_nrf9151_status_t *status,
+                               char *log, size_t log_len)
+{
+    return k230_nrf9151_run_lte_check_ex(status, log, log_len, NULL, NULL);
 }
 
 static int nrf9151_manager_nmea_prefix(const char *line)
@@ -1658,24 +1714,29 @@ static int nrf9151_manager_start_gnss_locked(int fd)
         k230_nrf9151_status_init(&status);
     }
     rc = nrf9151_manager_exchange(fd, "AT#XGNSS?", resp, sizeof(resp),
-                                  K230_NRF9151_CMD_TIMEOUT_US);
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
     if(rc == 0 && nrf9151_manager_response_gnss_active(resp) > 0) {
         (void)nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
-                                       K230_NRF9151_CMD_TIMEOUT_US);
+                                       K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                       NULL);
     } else {
         (void)nrf9151_manager_exchange(fd, "AT+CFUN=31", resp, sizeof(resp),
-                                       K230_NRF9151_CMD_TIMEOUT_US * 3ULL);
+                                       K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
+                                       NULL, NULL);
         (void)nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
-                                       K230_NRF9151_CMD_TIMEOUT_US);
+                                       K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                       NULL);
         rc = nrf9151_manager_exchange(fd, "AT#XGNSS=1,0,0,0", resp,
                                       sizeof(resp),
-                                      K230_NRF9151_CMD_TIMEOUT_US);
+                                      K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                      NULL);
         if(rc != 0) {
             char status_resp[1024];
 
             if(nrf9151_manager_exchange(fd, "AT#XGNSS?", status_resp,
                                         sizeof(status_resp),
-                                        K230_NRF9151_CMD_TIMEOUT_US) != 0 ||
+                                        K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                        NULL) != 0 ||
                nrf9151_manager_response_gnss_active(status_resp) <= 0) {
                 snprintf(status.gnss_status, sizeof(status.gnss_status),
                          "%s", "GNSS start failed");
@@ -1732,7 +1793,7 @@ static void *nrf9151_manager_gnss_thread(void *arg)
     nrf9151_gnss_monitor.fd = fd;
     nrf9151_gnss_monitor.lock_fd = lock_fd;
     if(nrf9151_manager_exchange(fd, "AT", NULL, 0,
-                                K230_NRF9151_CMD_TIMEOUT_US) != 0 ||
+                                K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL) != 0 ||
        nrf9151_manager_start_gnss_locked(fd) != 0) {
         nrf9151_manager_close_session(lock_fd, fd);
         pthread_mutex_lock(&nrf9151_manager_lock);
@@ -1775,18 +1836,20 @@ static void *nrf9151_manager_gnss_thread(void *arg)
             nrf9151_gnss_monitor.last_restart_us = now_us;
             (void)nrf9151_manager_exchange(fd, "AT#XGNSS=0", resp,
                                            sizeof(resp),
-                                           K230_NRF9151_CMD_TIMEOUT_US);
+                                           K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                           NULL);
             (void)nrf9151_manager_exchange(fd, "AT#XNMEA=0", resp,
                                            sizeof(resp),
-                                           K230_NRF9151_CMD_TIMEOUT_US);
+                                           K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                           NULL);
             usleep(120000);
             (void)nrf9151_manager_start_gnss_locked(fd);
         }
     }
     (void)nrf9151_manager_exchange(fd, "AT#XGNSS=0", NULL, 0,
-                                   K230_NRF9151_CMD_TIMEOUT_US);
+                                   K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
     (void)nrf9151_manager_exchange(fd, "AT#XNMEA=0", NULL, 0,
-                                   K230_NRF9151_CMD_TIMEOUT_US);
+                                   K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
     nrf9151_manager_close_session(lock_fd, fd);
     pthread_mutex_lock(&nrf9151_manager_lock);
     nrf9151_gnss_monitor.fd = -1;
@@ -1938,8 +2001,10 @@ static int nrf9151_manager_parse_socket_handle(const char *resp,
     return atoi(p);
 }
 
-int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
-                              char *log, size_t log_len)
+int k230_nrf9151_http_request_ex(const k230_nrf9151_http_request_t *request,
+                                 char *log, size_t log_len,
+                                 k230_nrf9151_cancel_cb_t cancel_cb,
+                                 void *cancel_user)
 {
     char host[160];
     char url[260];
@@ -1975,22 +2040,26 @@ int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
         return -1;
     }
     (void)nrf9151_manager_run_cmd_logged(fd, "AT", K230_NRF9151_CMD_TIMEOUT_US,
-                                         NULL, log, log_len);
+                                         NULL, log, log_len, cancel_cb,
+                                         cancel_user);
     (void)nrf9151_manager_run_cmd_logged(fd, "AT+CFUN=1",
                                          K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
-                                         NULL, log, log_len);
+                                         NULL, log, log_len, cancel_cb,
+                                         cancel_user);
     if(https) {
         snprintf(cmd, sizeof(cmd), "AT#XSSOCKET=1,1,0,%d,2",
                  request->sec_tag);
         rc = nrf9151_manager_exchange(fd, cmd, resp, sizeof(resp),
-                                      K230_NRF9151_CMD_TIMEOUT_US);
+                                      K230_NRF9151_CMD_TIMEOUT_US, cancel_cb,
+                                      cancel_user);
         nrf9151_manager_log_append(log, log_len, "> %s", cmd);
         nrf9151_manager_log_append(log, log_len, "%s", resp);
         handle = nrf9151_manager_parse_socket_handle(resp, "#XSSOCKET:");
     } else {
         snprintf(cmd, sizeof(cmd), "%s", "AT#XSOCKET=1,1,0");
         rc = nrf9151_manager_exchange(fd, cmd, resp, sizeof(resp),
-                                      K230_NRF9151_CMD_TIMEOUT_US);
+                                      K230_NRF9151_CMD_TIMEOUT_US, cancel_cb,
+                                      cancel_user);
         nrf9151_manager_log_append(log, log_len, "> %s", cmd);
         nrf9151_manager_log_append(log, log_len, "%s", resp);
         handle = nrf9151_manager_parse_socket_handle(resp, "#XSOCKET:");
@@ -2002,12 +2071,12 @@ int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
     snprintf(cmd, sizeof(cmd), "AT#XCONNECT=%d,\"%s\",%d", handle, host, port);
     rc = nrf9151_manager_run_cmd_logged(fd, cmd,
                                         K230_NRF9151_LONG_TIMEOUT_US, NULL,
-                                        log, log_len);
+                                        log, log_len, cancel_cb, cancel_user);
     if(rc != 0) {
         snprintf(cmd, sizeof(cmd), "AT#XCLOSE=%d", handle);
         (void)nrf9151_manager_run_cmd_logged(fd, cmd,
                                              K230_NRF9151_CMD_TIMEOUT_US, NULL,
-                                             log, log_len);
+                                             log, log_len, NULL, NULL);
         nrf9151_manager_close_session(lock_fd, fd);
         return -1;
     }
@@ -2020,7 +2089,8 @@ int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
                  handle, url, (unsigned)body_len);
         rc = nrf9151_manager_run_cmd_logged(fd, cmd,
                                             K230_NRF9151_CMD_TIMEOUT_US, NULL,
-                                            log, log_len);
+                                            log, log_len, cancel_cb,
+                                            cancel_user);
         if(rc == 0 && body_len > 0U) {
             ssize_t wr = write(fd, request->body, body_len);
 
@@ -2037,13 +2107,19 @@ int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
                  handle, url);
         rc = nrf9151_manager_run_cmd_logged(fd, cmd,
                                             K230_NRF9151_CMD_TIMEOUT_US, NULL,
-                                            log, log_len);
+                                            log, log_len, cancel_cb,
+                                            cancel_user);
     }
     if(rc == 0) {
         char more[4096] = "";
+        int urc_rc;
 
-        nrf9151_manager_read_urc(fd, more, sizeof(more),
-                                 K230_NRF9151_HTTP_TIMEOUT_US);
+        urc_rc = nrf9151_manager_read_urc(fd, more, sizeof(more),
+                                          K230_NRF9151_HTTP_TIMEOUT_US,
+                                          cancel_cb, cancel_user);
+        if(urc_rc == -2) {
+            rc = -2;
+        }
         if(more[0]) {
             nrf9151_manager_trim_text(more);
             nrf9151_manager_log_append(log, log_len, "%s", more);
@@ -2052,13 +2128,21 @@ int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
     snprintf(cmd, sizeof(cmd), "AT#XCLOSE=%d", handle);
     (void)nrf9151_manager_run_cmd_logged(fd, cmd,
                                          K230_NRF9151_CMD_TIMEOUT_US, NULL,
-                                         log, log_len);
+                                         log, log_len, NULL, NULL);
     nrf9151_manager_close_session(lock_fd, fd);
-    return rc == 0 ? 0 : -1;
+    return rc == 0 ? 0 : (rc == -2 ? -2 : -1);
 }
 
-int k230_nrf9151_mqtt_test(const k230_nrf9151_mqtt_request_t *request,
-                           char *log, size_t log_len)
+int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
+                              char *log, size_t log_len)
+{
+    return k230_nrf9151_http_request_ex(request, log, log_len, NULL, NULL);
+}
+
+int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
+                              char *log, size_t log_len,
+                              k230_nrf9151_cancel_cb_t cancel_cb,
+                              void *cancel_user)
 {
     char broker[160];
     char client_id[96];
@@ -2113,13 +2197,16 @@ int k230_nrf9151_mqtt_test(const k230_nrf9151_mqtt_request_t *request,
         return -1;
     }
     (void)nrf9151_manager_run_cmd_logged(fd, "AT", K230_NRF9151_CMD_TIMEOUT_US,
-                                         NULL, log, log_len);
+                                         NULL, log, log_len, cancel_cb,
+                                         cancel_user);
     (void)nrf9151_manager_run_cmd_logged(fd, "AT+CFUN=1",
                                          K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
-                                         NULL, log, log_len);
+                                         NULL, log, log_len, cancel_cb,
+                                         cancel_user);
     snprintf(cmd, sizeof(cmd), "AT#XMQTTCFG=\"%s\",60,1", client_id);
     rc = nrf9151_manager_run_cmd_logged(fd, cmd, K230_NRF9151_CMD_TIMEOUT_US,
-                                        NULL, log, log_len);
+                                        NULL, log, log_len, cancel_cb,
+                                        cancel_user);
     if(rc == 0) {
         if(request->auth == K230_NRF9151_MQTT_AUTH_TLS_USER_PASS ||
            request->auth == K230_NRF9151_MQTT_AUTH_MTLS) {
@@ -2138,11 +2225,17 @@ int k230_nrf9151_mqtt_test(const k230_nrf9151_mqtt_request_t *request,
         }
         rc = nrf9151_manager_run_cmd_logged(fd, cmd,
                                             K230_NRF9151_LONG_TIMEOUT_US, NULL,
-                                            log, log_len);
+                                            log, log_len, cancel_cb,
+                                            cancel_user);
     }
     if(rc == 0) {
-        nrf9151_manager_read_urc(fd, more, sizeof(more),
-                                 K230_NRF9151_MQTT_TIMEOUT_US);
+        int urc_rc = nrf9151_manager_read_urc(fd, more, sizeof(more),
+                                              K230_NRF9151_MQTT_TIMEOUT_US,
+                                              cancel_cb, cancel_user);
+
+        if(urc_rc == -2) {
+            rc = -2;
+        }
         if(more[0]) {
             nrf9151_manager_trim_text(more);
             nrf9151_manager_log_append(log, log_len, "%s", more);
@@ -2157,7 +2250,8 @@ int k230_nrf9151_mqtt_test(const k230_nrf9151_mqtt_request_t *request,
                  request->qos >= 0 && request->qos <= 2 ? request->qos : 0);
         (void)nrf9151_manager_run_cmd_logged(fd, cmd,
                                              K230_NRF9151_CMD_TIMEOUT_US,
-                                             NULL, log, log_len);
+                                             NULL, log, log_len, cancel_cb,
+                                             cancel_user);
     }
     if(rc == 0 && payload[0]) {
         snprintf(cmd, sizeof(cmd), "AT#XMQTTPUB=\"%s\",\"%s\",%d,%d", topic,
@@ -2166,9 +2260,11 @@ int k230_nrf9151_mqtt_test(const k230_nrf9151_mqtt_request_t *request,
                  request->retain ? 1 : 0);
         (void)nrf9151_manager_run_cmd_logged(fd, cmd,
                                              K230_NRF9151_CMD_TIMEOUT_US,
-                                             NULL, log, log_len);
+                                             NULL, log, log_len, cancel_cb,
+                                             cancel_user);
         more[0] = '\0';
-        nrf9151_manager_read_urc(fd, more, sizeof(more), 5000000ULL);
+        (void)nrf9151_manager_read_urc(fd, more, sizeof(more), 5000000ULL,
+                                       cancel_cb, cancel_user);
         if(more[0]) {
             nrf9151_manager_trim_text(more);
             nrf9151_manager_log_append(log, log_len, "%s", more);
@@ -2176,7 +2272,13 @@ int k230_nrf9151_mqtt_test(const k230_nrf9151_mqtt_request_t *request,
     }
     (void)nrf9151_manager_run_cmd_logged(fd, "AT#XMQTTCON=0",
                                          K230_NRF9151_CMD_TIMEOUT_US, NULL,
-                                         log, log_len);
+                                         log, log_len, NULL, NULL);
     nrf9151_manager_close_session(lock_fd, fd);
-    return rc == 0 ? 0 : -1;
+    return rc == 0 ? 0 : (rc == -2 ? -2 : -1);
+}
+
+int k230_nrf9151_mqtt_test(const k230_nrf9151_mqtt_request_t *request,
+                           char *log, size_t log_len)
+{
+    return k230_nrf9151_mqtt_test_ex(request, log, log_len, NULL, NULL);
 }

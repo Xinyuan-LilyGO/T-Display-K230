@@ -83,6 +83,8 @@ typedef struct {
     k230_nrf9151_mqtt_auth_t auth;
 } k230_nrf9151_mqtt_request_t;
 
+typedef int (*k230_nrf9151_cancel_cb_t)(void *user_data);
+
 typedef struct {
     int valid;
     double latitude;
@@ -116,10 +118,22 @@ int k230_nrf9151_stop_gnss_monitor(void);
 int k230_nrf9151_gnss_monitor_active(void);
 int k230_nrf9151_run_lte_check(k230_nrf9151_status_t *status,
                                char *log, size_t log_len);
+int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
+                                  char *log, size_t log_len,
+                                  k230_nrf9151_cancel_cb_t cancel_cb,
+                                  void *cancel_user);
 int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
                               char *log, size_t log_len);
+int k230_nrf9151_http_request_ex(const k230_nrf9151_http_request_t *request,
+                                 char *log, size_t log_len,
+                                 k230_nrf9151_cancel_cb_t cancel_cb,
+                                 void *cancel_user);
 int k230_nrf9151_mqtt_test(const k230_nrf9151_mqtt_request_t *request,
                            char *log, size_t log_len);
+int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
+                              char *log, size_t log_len,
+                              k230_nrf9151_cancel_cb_t cancel_cb,
+                              void *cancel_user);
 
 #ifdef __cplusplus
 }
