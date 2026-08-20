@@ -39,6 +39,8 @@
 #define K230_NRF9151_HTTP_TIMEOUT_US 60000000ULL
 #define K230_NRF9151_MQTT_TIMEOUT_US 30000000ULL
 #define K230_NRF9151_GNSS_RESTART_US (120ULL * 1000000ULL)
+#define K230_NRF9151_STATUS_REFRESH_US (30ULL * 1000000ULL)
+#define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
 
 typedef struct {
     int fd;
@@ -64,6 +66,16 @@ typedef struct {
     char topic[160];
 } k230_nrf9151_mqtt_session_t;
 
+typedef struct {
+    pthread_t thread;
+    int started;
+    int stop;
+    int request;
+    int refreshing;
+    uint64_t last_run_us;
+    uint64_t last_success_us;
+} k230_nrf9151_status_monitor_t;
+
 static pthread_mutex_t nrf9151_manager_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t nrf9151_gpio_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t nrf9151_mqtt_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -77,6 +89,7 @@ static k230_nrf9151_mqtt_session_t nrf9151_mqtt_session = {
     .fd = -1,
     .lock_fd = -1,
 };
+static k230_nrf9151_status_monitor_t nrf9151_status_monitor;
 static struct gpiod_chip *nrf9151_gpio_chip;
 static struct gpiod_line_request *nrf9151_en_gpio_request;
 static unsigned int nrf9151_en_gpio_offset;
@@ -1463,10 +1476,11 @@ static int nrf9151_manager_run_cmd_logged(int fd, const char *cmd,
     return rc;
 }
 
-int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
-                                  char *log, size_t log_len,
-                                  k230_nrf9151_cancel_cb_t cancel_cb,
-                                  void *cancel_user)
+static int nrf9151_manager_run_lte_check_common(
+    k230_nrf9151_status_t *status, char *log, size_t log_len,
+    k230_nrf9151_cancel_cb_t cancel_cb, void *cancel_user,
+    int include_ping, int wait_ms, int write_open_error,
+    int quiesce_gnss, const char *owner)
 {
     static const char *const cmds[] = {
         "AT",
@@ -1488,12 +1502,14 @@ int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
         "AT+CGACT?",
         "AT+CGPADDR",
         "AT+CGDCONT?",
-        "AT#XPING=\"223.5.5.5\",32,5000,3,1000",
     };
+    static const char *const ping_cmd =
+        "AT#XPING=\"223.5.5.5\",32,5000,3,1000";
     k230_nrf9151_status_t local;
     int lock_fd = -1;
     int fd = -1;
     int failures = 0;
+    int saved_errno;
 
     if(log && log_len > 0U) {
         log[0] = '\0';
@@ -1503,34 +1519,69 @@ int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
     }
     local.present = k230_nrf9151_uart_present();
     local.epoch = time(NULL);
-    snprintf(local.lte_status, sizeof(local.lte_status), "%s", "Checking");
-    snprintf(local.last_error, sizeof(local.last_error), "%s", "-");
     snprintf(local.modem_state, sizeof(local.modem_state), "%s",
              local.present ? "present" : "missing");
-    k230_nrf9151_write_status(&local);
-
-    if(nrf9151_manager_open_session("nrf9151-lte", 8000, &lock_fd, &fd,
-                                    log, log_len) != 0) {
-        failures++;
-        snprintf(local.modem_state, sizeof(local.modem_state), "%s",
-                 "missing");
+    if(!local.present) {
+        local.link_ok = 0;
+        local.sim_ready = 0;
+        local.lte_registered = 0;
+        local.packet_attached = 0;
+        local.pdp_active = 0;
+        local.lte_signal_level = 0;
         snprintf(local.lte_status, sizeof(local.lte_status), "%s",
-                 "UART unavailable");
+                 "UART missing");
         snprintf(local.last_error, sizeof(local.last_error), "%s",
-                 strerror(errno));
+                 "UART missing");
         k230_nrf9151_write_status(&local);
         if(status) {
             *status = local;
         }
+        errno = ENODEV;
         return -1;
     }
-    nrf9151_manager_quiesce_gnss_output(fd, log, log_len);
+
+    if(nrf9151_manager_open_session(owner ? owner : "nrf9151-lte",
+                                    wait_ms, &lock_fd, &fd,
+                                    log, log_len) != 0) {
+        saved_errno = errno;
+        failures++;
+        if(write_open_error) {
+            snprintf(local.lte_status, sizeof(local.lte_status), "%s",
+                     "UART unavailable");
+            snprintf(local.last_error, sizeof(local.last_error), "%s",
+                     strerror(saved_errno));
+            local.epoch = time(NULL);
+            k230_nrf9151_write_status(&local);
+        }
+        if(status) {
+            *status = local;
+        }
+        errno = saved_errno;
+        return -1;
+    }
+
+    local.link_ok = 0;
+    local.sim_ready = 0;
+    local.lte_registered = 0;
+    local.packet_attached = 0;
+    local.pdp_active = 0;
+    local.lte_signal_level = 0;
+    snprintf(local.sim_status, sizeof(local.sim_status), "%s", "--");
+    snprintf(local.operator_name, sizeof(local.operator_name), "%s", "--");
+    snprintf(local.ip, sizeof(local.ip), "%s", "--");
+    snprintf(local.lte_status, sizeof(local.lte_status), "%s",
+             include_ping ? "Checking" : "Refreshing");
+    snprintf(local.last_error, sizeof(local.last_error), "%s", "-");
+    local.epoch = time(NULL);
+    k230_nrf9151_write_status(&local);
+
+    if(quiesce_gnss) {
+        nrf9151_manager_quiesce_gnss_output(fd, log, log_len);
+    }
 
     for(size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
-        uint64_t timeout = nrf9151_manager_starts_with(cmds[i], "AT#XPING") ?
-                           K230_NRF9151_LONG_TIMEOUT_US :
-                           K230_NRF9151_CMD_TIMEOUT_US;
-        int rc = nrf9151_manager_run_cmd_logged(fd, cmds[i], timeout,
+        int rc = nrf9151_manager_run_cmd_logged(fd, cmds[i],
+                                                K230_NRF9151_CMD_TIMEOUT_US,
                                                 &local, log, log_len,
                                                 cancel_cb, cancel_user);
 
@@ -1550,38 +1601,61 @@ int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
         if(rc != 0) {
             failures++;
         }
-        if(nrf9151_manager_starts_with(cmds[i], "AT#XPING")) {
-            char more[2048] = "";
-            int urc_rc;
-
-            urc_rc = nrf9151_manager_read_ping_result(fd, more, sizeof(more),
-                                                      20000000ULL,
-                                                      cancel_cb,
-                                                      cancel_user);
-            if(urc_rc == -2) {
-                snprintf(local.lte_status, sizeof(local.lte_status), "%s",
-                         "Canceled");
-                snprintf(local.last_error, sizeof(local.last_error), "%s",
-                         "Canceled");
-                local.epoch = time(NULL);
-                k230_nrf9151_write_status(&local);
-                nrf9151_manager_close_session(lock_fd, fd);
-                if(status) {
-                    *status = local;
-                }
-                return -2;
-            }
-            if(more[0]) {
-                nrf9151_manager_trim_text(more);
-                nrf9151_manager_log_append(log, log_len, "%s", more);
-                nrf9151_manager_update_lte_from_response(&local, cmds[i],
-                                                         more, 0);
-            }
-            nrf9151_manager_drain_uart(fd, 150000ULL, 1000000ULL);
-        }
         local.epoch = time(NULL);
         k230_nrf9151_write_status(&local);
         usleep(100000);
+    }
+    if(include_ping) {
+        char more[2048] = "";
+        int rc;
+        int urc_rc;
+
+        rc = nrf9151_manager_run_cmd_logged(fd, ping_cmd,
+                                            K230_NRF9151_LONG_TIMEOUT_US,
+                                            &local, log, log_len,
+                                            cancel_cb, cancel_user);
+        if(rc == -2) {
+            snprintf(local.lte_status, sizeof(local.lte_status), "%s",
+                     "Canceled");
+            snprintf(local.last_error, sizeof(local.last_error), "%s",
+                     "Canceled");
+            local.epoch = time(NULL);
+            k230_nrf9151_write_status(&local);
+            nrf9151_manager_close_session(lock_fd, fd);
+            if(status) {
+                *status = local;
+            }
+            return -2;
+        }
+        if(rc != 0) {
+            failures++;
+        }
+        urc_rc = nrf9151_manager_read_ping_result(fd, more, sizeof(more),
+                                                  20000000ULL,
+                                                  cancel_cb,
+                                                  cancel_user);
+        if(urc_rc == -2) {
+            snprintf(local.lte_status, sizeof(local.lte_status), "%s",
+                     "Canceled");
+            snprintf(local.last_error, sizeof(local.last_error), "%s",
+                     "Canceled");
+            local.epoch = time(NULL);
+            k230_nrf9151_write_status(&local);
+            nrf9151_manager_close_session(lock_fd, fd);
+            if(status) {
+                *status = local;
+            }
+            return -2;
+        }
+        if(more[0]) {
+            nrf9151_manager_trim_text(more);
+            nrf9151_manager_log_append(log, log_len, "%s", more);
+            nrf9151_manager_update_lte_from_response(&local, ping_cmd,
+                                                     more, 0);
+        }
+        nrf9151_manager_drain_uart(fd, 150000ULL, 1000000ULL);
+        local.epoch = time(NULL);
+        k230_nrf9151_write_status(&local);
     }
 
     if(!local.link_ok) {
@@ -1605,13 +1679,163 @@ int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
     if(status) {
         *status = local;
     }
-    return failures == 0 ? 0 : 1;
+    return (!include_ping && local.link_ok) ? 0 : (failures == 0 ? 0 : 1);
+}
+
+int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
+                                  char *log, size_t log_len,
+                                  k230_nrf9151_cancel_cb_t cancel_cb,
+                                  void *cancel_user)
+{
+    return nrf9151_manager_run_lte_check_common(status, log, log_len,
+                                                cancel_cb, cancel_user,
+                                                1, 8000, 1, 1,
+                                                "nrf9151-lte");
 }
 
 int k230_nrf9151_run_lte_check(k230_nrf9151_status_t *status,
                                char *log, size_t log_len)
 {
     return k230_nrf9151_run_lte_check_ex(status, log, log_len, NULL, NULL);
+}
+
+static void nrf9151_manager_seed_status_monitor_cache(void)
+{
+    k230_nrf9151_status_t status;
+    int present;
+
+    present = k230_nrf9151_uart_present();
+    if(k230_nrf9151_read_status(&status, 20) == 0) {
+        return;
+    }
+    k230_nrf9151_status_init(&status);
+    status.present = present;
+    status.epoch = time(NULL);
+    snprintf(status.modem_state, sizeof(status.modem_state), "%s",
+             present ? "probing" : "missing");
+    snprintf(status.lte_status, sizeof(status.lte_status), "%s",
+             present ? "Probing" : "UART missing");
+    snprintf(status.last_error, sizeof(status.last_error), "%s",
+             present ? "-" : "UART missing");
+    k230_nrf9151_write_status(&status);
+}
+
+static void *nrf9151_manager_status_monitor_main(void *arg)
+{
+    (void)arg;
+
+    for(;;) {
+        uint64_t now = nrf9151_manager_monotonic_us();
+        int should_run = 0;
+        int stop = 0;
+
+        pthread_mutex_lock(&nrf9151_manager_lock);
+        stop = nrf9151_status_monitor.stop;
+        if(stop) {
+            nrf9151_status_monitor.started = 0;
+            nrf9151_status_monitor.refreshing = 0;
+            pthread_mutex_unlock(&nrf9151_manager_lock);
+            break;
+        }
+        if(nrf9151_status_monitor.request ||
+           nrf9151_status_monitor.last_run_us == 0ULL ||
+           now - nrf9151_status_monitor.last_run_us >=
+           K230_NRF9151_STATUS_REFRESH_US) {
+            nrf9151_status_monitor.request = 0;
+            nrf9151_status_monitor.refreshing = 1;
+            nrf9151_status_monitor.last_run_us = now;
+            should_run = 1;
+        }
+        pthread_mutex_unlock(&nrf9151_manager_lock);
+
+        if(should_run) {
+            int rc = -1;
+
+            if(!k230_nrf9151_gnss_monitor_active() &&
+               !k230_nrf9151_mqtt_session_connected()) {
+                char log[1024];
+                k230_nrf9151_status_t status;
+
+                log[0] = '\0';
+                rc = nrf9151_manager_run_lte_check_common(
+                    &status, log, sizeof(log), NULL, NULL,
+                    0, 120, 0, 0, "nrf9151-status");
+            }
+            pthread_mutex_lock(&nrf9151_manager_lock);
+            nrf9151_status_monitor.refreshing = 0;
+            if(rc == 0) {
+                nrf9151_status_monitor.last_success_us =
+                    nrf9151_manager_monotonic_us();
+            } else {
+                nrf9151_status_monitor.last_run_us =
+                    nrf9151_manager_monotonic_us() -
+                    (K230_NRF9151_STATUS_REFRESH_US -
+                     K230_NRF9151_STATUS_RETRY_US);
+            }
+            pthread_mutex_unlock(&nrf9151_manager_lock);
+        } else {
+            usleep(250000);
+        }
+    }
+    return NULL;
+}
+
+int k230_nrf9151_status_monitor_start(void)
+{
+    pthread_t thread;
+
+    nrf9151_manager_seed_status_monitor_cache();
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    if(nrf9151_status_monitor.started) {
+        pthread_mutex_unlock(&nrf9151_manager_lock);
+        return 0;
+    }
+    memset(&nrf9151_status_monitor, 0, sizeof(nrf9151_status_monitor));
+    nrf9151_status_monitor.started = 1;
+    nrf9151_status_monitor.request = 1;
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+
+    if(pthread_create(&thread, NULL,
+                      nrf9151_manager_status_monitor_main, NULL) != 0) {
+        pthread_mutex_lock(&nrf9151_manager_lock);
+        nrf9151_status_monitor.started = 0;
+        nrf9151_status_monitor.request = 0;
+        pthread_mutex_unlock(&nrf9151_manager_lock);
+        return -1;
+    }
+    pthread_detach(thread);
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    nrf9151_status_monitor.thread = thread;
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+    return 0;
+}
+
+void k230_nrf9151_status_monitor_stop(void)
+{
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    nrf9151_status_monitor.stop = 1;
+    nrf9151_status_monitor.request = 0;
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+}
+
+void k230_nrf9151_status_monitor_request_refresh(void)
+{
+    if(k230_nrf9151_status_monitor_start() != 0) {
+        return;
+    }
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    nrf9151_status_monitor.request = 1;
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+}
+
+int k230_nrf9151_status_monitor_active(void)
+{
+    int active;
+
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    active = nrf9151_status_monitor.started;
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+    return active;
 }
 
 static int nrf9151_manager_nmea_prefix(const char *line)

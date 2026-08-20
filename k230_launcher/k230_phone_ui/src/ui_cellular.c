@@ -875,7 +875,7 @@ static void cellular_sync_manager_status(void)
 {
     k230_nrf9151_status_t status;
 
-    if(k230_nrf9151_read_status(&status, 15) == 0) {
+    if(k230_nrf9151_read_status(&status, 0) == 0) {
         cellular_apply_manager_status(&status);
     }
 }
@@ -895,6 +895,14 @@ void ui_cellular_startup(void)
                         NRF9151_EN_GPIO);
     cellular_set_status("EN external/no control");
 #endif
+    if(k230_nrf9151_status_monitor_start() == 0) {
+        cellular_log_append("nRF9151 status manager started");
+        k230_nrf9151_status_monitor_request_refresh();
+        cellular_sync_manager_status();
+    } else {
+        cellular_log_append("nRF9151 status manager start failed: %s",
+                            strerror(errno));
+    }
 }
 
 static void cellular_gnss_reset_locked(void)
@@ -1491,10 +1499,10 @@ int ui_cellular_lte_signal_level(void)
     if(!k230_nrf9151_uart_present()) {
         return 0;
     }
-    if(k230_nrf9151_read_status(&status, 120) != 0) {
+    if(k230_nrf9151_read_status(&status, 300) != 0) {
         return 0;
     }
-    if(!status.sim_ready) {
+    if(!status.present || !status.sim_ready) {
         return 0;
     }
     return status.lte_signal_level > 0 ? status.lte_signal_level :
@@ -4087,6 +4095,22 @@ static void cellular_action_event_cb(lv_event_t *event)
     cellular_start_action(action);
 }
 
+static void cellular_lte_refresh_event_cb(lv_event_t *event)
+{
+    (void)event;
+    if(k230_nrf9151_status_monitor_start() == 0) {
+        k230_nrf9151_status_monitor_request_refresh();
+        cellular_set_status("LTE refresh requested");
+        cellular_log_append("LTE status refresh requested");
+        cellular_sync_manager_status();
+    } else {
+        cellular_set_status("LTE refresh unavailable");
+        cellular_log_append("LTE status manager unavailable: %s",
+                            strerror(errno));
+    }
+    app_request_fast_refresh();
+}
+
 static void cellular_http_get_submit_cb(const char *text, void *user_data)
 {
     (void)user_data;
@@ -4606,8 +4630,7 @@ void ui_cellular_create(lv_obj_t *scr)
 
     cellular_button(summary, 0, button_y, action_btn_w,
                     "LTE", 0x25C281,
-                    cellular_action_event_cb,
-                    (void *)(intptr_t)CELLULAR_ACTION_FULL_TEST);
+                    cellular_lte_refresh_event_cb, NULL);
     cellular_cno_button = cellular_button(summary, action_btn_w + 12,
                                           button_y, action_btn_w,
                                           "GNSS", 0xF97316,

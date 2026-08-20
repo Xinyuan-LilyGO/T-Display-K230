@@ -120,6 +120,10 @@ int k230_nrf9151_start_gnss_monitor(void);
 int k230_nrf9151_stop_gnss_monitor(void);
 int k230_nrf9151_stop_gnss_monitor_wait(int wait_ms);
 int k230_nrf9151_gnss_monitor_active(void);
+int k230_nrf9151_status_monitor_start(void);
+void k230_nrf9151_status_monitor_stop(void);
+void k230_nrf9151_status_monitor_request_refresh(void);
+int k230_nrf9151_status_monitor_active(void);
 int k230_nrf9151_run_lte_check(k230_nrf9151_status_t *status,
                                char *log, size_t log_len);
 int k230_nrf9151_run_lte_check_ex(k230_nrf9151_status_t *status,
