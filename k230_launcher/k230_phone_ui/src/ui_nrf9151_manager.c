@@ -2576,6 +2576,12 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
     char payload[256];
     char cmd[768];
     char more[4096] = "";
+    const char *broker_candidates[5];
+    int broker_count = 0;
+    int broker_index;
+    int connected = 0;
+    int suback_seen = 0;
+    int loopback_seen = 0;
     int lock_fd = -1;
     int fd = -1;
     int rc;
@@ -2601,7 +2607,6 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
         return -2;
     }
     port = request->port > 0 ? request->port : 1883;
-    nrf9151_manager_escape_at_string(request->broker, broker, sizeof(broker));
     nrf9151_manager_escape_at_string(request->client_id &&
                                      request->client_id[0] ?
                                      request->client_id : "k230-nrf9151",
@@ -2615,6 +2620,36 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
                                      topic, sizeof(topic));
     nrf9151_manager_escape_at_string(request->payload ? request->payload : "",
                                      payload, sizeof(payload));
+
+    broker_candidates[broker_count++] = request->broker;
+    if(request->auth == K230_NRF9151_MQTT_AUTH_NONE && port == 1883 &&
+       (strcmp(request->broker, "test.mosquitto.org") == 0 ||
+        strcmp(request->broker, "broker.hivemq.com") == 0 ||
+        strcmp(request->broker, "broker.emqx.io") == 0 ||
+        strcmp(request->broker, "mqtt.eclipseprojects.io") == 0)) {
+        static const char *const public_brokers[] = {
+            "broker.hivemq.com",
+            "broker.emqx.io",
+            "mqtt.eclipseprojects.io",
+            "test.mosquitto.org",
+        };
+
+        for(size_t i = 0; i < sizeof(public_brokers) / sizeof(public_brokers[0]);
+            i++) {
+            int exists = 0;
+
+            for(int j = 0; j < broker_count; j++) {
+                if(strcmp(broker_candidates[j], public_brokers[i]) == 0) {
+                    exists = 1;
+                    break;
+                }
+            }
+            if(!exists && broker_count < (int)(sizeof(broker_candidates) /
+                                               sizeof(broker_candidates[0]))) {
+                broker_candidates[broker_count++] = public_brokers[i];
+            }
+        }
+    }
 
     if(nrf9151_manager_open_session("nrf9151-mqtt", 8000, &lock_fd, &fd,
                                     log, log_len) != 0) {
@@ -2632,7 +2667,12 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
     rc = nrf9151_manager_run_cmd_logged(fd, cmd, K230_NRF9151_CMD_TIMEOUT_US,
                                         NULL, log, log_len, cancel_cb,
                                         cancel_user);
-    if(rc == 0) {
+    for(broker_index = 0; rc == 0 && broker_index < broker_count;
+        broker_index++) {
+        nrf9151_manager_escape_at_string(broker_candidates[broker_index],
+                                         broker, sizeof(broker));
+        nrf9151_manager_log_append(log, log_len, "MQTT broker try: %s:%d",
+                                   broker_candidates[broker_index], port);
         if(request->auth == K230_NRF9151_MQTT_AUTH_TLS_USER_PASS ||
            request->auth == K230_NRF9151_MQTT_AUTH_MTLS) {
             snprintf(cmd, sizeof(cmd),
@@ -2652,24 +2692,47 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
                                             K230_NRF9151_LONG_TIMEOUT_US, NULL,
                                             log, log_len, cancel_cb,
                                             cancel_user);
-    }
-    if(rc == 0) {
-        int urc_rc = nrf9151_manager_read_urc(fd, more, sizeof(more),
-                                              K230_NRF9151_MQTT_TIMEOUT_US,
-                                              cancel_cb, cancel_user);
+        if(rc != 0) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT connect command failed");
+            rc = 0;
+            (void)nrf9151_manager_run_cmd_logged(
+                fd, "AT#XMQTTCON=0", K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                log, log_len, NULL, NULL);
+            nrf9151_manager_drain_uart(fd, 120000ULL, 1000000ULL);
+            continue;
+        }
+        more[0] = '\0';
+        {
+            int urc_rc = nrf9151_manager_read_urc(
+                fd, more, sizeof(more), K230_NRF9151_MQTT_TIMEOUT_US,
+                cancel_cb, cancel_user);
 
-        if(urc_rc == -2) {
-            rc = -2;
+            if(urc_rc == -2) {
+                rc = -2;
+                break;
+            }
         }
         if(more[0]) {
             nrf9151_manager_trim_text(more);
             nrf9151_manager_log_append(log, log_len, "%s", more);
         }
-        if(strstr(more, "#XMQTTEVT: 0,0") == NULL) {
+        if(strstr(more, "#XMQTTEVT: 0,0") != NULL) {
             nrf9151_manager_log_append(log, log_len,
-                                       "MQTT CONNACK not observed");
-            rc = -1;
+                                       "MQTT active broker: %s:%d",
+                                       broker_candidates[broker_index], port);
+            connected = 1;
+            break;
         }
+        nrf9151_manager_log_append(log, log_len,
+                                   "MQTT CONNACK not observed");
+        (void)nrf9151_manager_run_cmd_logged(
+            fd, "AT#XMQTTCON=0", K230_NRF9151_CMD_TIMEOUT_US, NULL,
+            log, log_len, NULL, NULL);
+        nrf9151_manager_drain_uart(fd, 120000ULL, 1000000ULL);
+    }
+    if(rc == 0 && !connected) {
+        rc = -1;
     }
     if(rc == 0 && topic[0]) {
         snprintf(cmd, sizeof(cmd), "AT#XMQTTSUB=\"%s\",%d", topic,
@@ -2683,10 +2746,39 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
                                        "MQTT subscribe failed");
         }
     }
-    if(rc == 0 && payload[0]) {
-        int got_publish_evt = 0;
-        int got_loopback = 0;
+    if(rc == 0 && topic[0]) {
+        more[0] = '\0';
+        {
+            int urc_rc = nrf9151_manager_read_urc(
+                fd, more, sizeof(more), 10000000ULL, cancel_cb, cancel_user);
 
+            if(urc_rc == -2) {
+                rc = -2;
+            }
+        }
+        if(more[0]) {
+            nrf9151_manager_trim_text(more);
+            nrf9151_manager_log_append(log, log_len, "%s", more);
+        }
+        suback_seen = strstr(more, "#XMQTTEVT: 7,0") != NULL;
+        if(rc == 0 && !suback_seen) {
+            char extra[2048] = "";
+
+            (void)nrf9151_manager_read_urc(fd, extra, sizeof(extra),
+                                           6000000ULL, cancel_cb, cancel_user);
+            if(extra[0]) {
+                nrf9151_manager_trim_text(extra);
+                nrf9151_manager_log_append(log, log_len, "%s", extra);
+                suback_seen = strstr(extra, "#XMQTTEVT: 7,0") != NULL;
+            }
+        }
+        if(rc == 0 && !suback_seen) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT SUBACK not observed");
+            rc = -1;
+        }
+    }
+    if(rc == 0 && payload[0]) {
         snprintf(cmd, sizeof(cmd), "AT#XMQTTPUB=\"%s\",\"%s\",%d,%d", topic,
                  payload,
                  request->qos >= 0 && request->qos <= 2 ? request->qos : 0,
@@ -2698,13 +2790,16 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
         if(rc != 0) {
             nrf9151_manager_log_append(log, log_len,
                                        "MQTT publish command failed");
+        } else {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT publish command accepted");
         }
         more[0] = '\0';
         if(rc == 0) {
             int wait_rc;
 
             wait_rc = nrf9151_manager_read_urc(fd, more, sizeof(more),
-                                               10000000ULL, cancel_cb,
+                                               12000000ULL, cancel_cb,
                                                cancel_user);
             if(wait_rc == -2) {
                 rc = -2;
@@ -2713,40 +2808,23 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
                 nrf9151_manager_trim_text(more);
                 nrf9151_manager_log_append(log, log_len, "%s", more);
             }
-            got_publish_evt = strstr(more, "#XMQTTEVT: 7,0") != NULL;
-            got_loopback = strstr(more, "#XMQTTMSG:") != NULL;
+            loopback_seen = strstr(more, "#XMQTTMSG:") != NULL ||
+                            strstr(more, "#XMQTTEVT: 2,0") != NULL;
         }
-        if(rc == 0 && !got_publish_evt) {
+        if(rc == 0 && !loopback_seen) {
             char extra[2048] = "";
 
             (void)nrf9151_manager_read_urc(fd, extra, sizeof(extra),
-                                           8000000ULL, cancel_cb, cancel_user);
+                                           12000000ULL, cancel_cb,
+                                           cancel_user);
             if(extra[0]) {
                 nrf9151_manager_trim_text(extra);
                 nrf9151_manager_log_append(log, log_len, "%s", extra);
-                got_publish_evt = strstr(extra, "#XMQTTEVT: 7,0") != NULL;
-                got_loopback = got_loopback ||
-                               strstr(extra, "#XMQTTMSG:") != NULL;
+                loopback_seen = strstr(extra, "#XMQTTMSG:") != NULL ||
+                                strstr(extra, "#XMQTTEVT: 2,0") != NULL;
             }
         }
-        if(rc == 0 && !got_loopback) {
-            char extra[2048] = "";
-
-            (void)nrf9151_manager_read_urc(fd, extra, sizeof(extra),
-                                           8000000ULL, cancel_cb, cancel_user);
-            if(extra[0]) {
-                nrf9151_manager_trim_text(extra);
-                nrf9151_manager_log_append(log, log_len, "%s", extra);
-                got_loopback = strstr(extra, "#XMQTTMSG:") != NULL;
-                got_publish_evt = got_publish_evt ||
-                                  strstr(extra, "#XMQTTEVT: 7,0") != NULL;
-            }
-        }
-        if(rc == 0 && !got_publish_evt) {
-            nrf9151_manager_log_append(log, log_len,
-                                       "MQTT publish event not observed");
-            rc = -1;
-        } else if(rc == 0 && !got_loopback) {
+        if(rc == 0 && !loopback_seen) {
             nrf9151_manager_log_append(log, log_len,
                                        "MQTT loopback message not observed");
             rc = -1;

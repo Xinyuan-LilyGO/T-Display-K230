@@ -229,7 +229,7 @@ static char cellular_last_urc[192];
 static char cellular_http_url[256] = "http://example.com/";
 static char cellular_http_post_spec[512] = "http://httpbin.org/post|hello=k230";
 static char cellular_mqtt_spec[512] =
-    "test.mosquitto.org|1883|||k230/nrf9151/test|hello from k230|-1";
+    "broker.hivemq.com|1883|||k230/nrf9151/test|hello from k230|-1";
 static cellular_satellite_t cellular_sats[NRF9151_MAX_SATS];
 static uint64_t cellular_gnss_start_us;
 static uint64_t cellular_gnss_fix_us;
@@ -666,14 +666,20 @@ static void cellular_queue_mqtt_result(int rc,
         payload && payload[0] ? payload :
         (request && request->payload ? request->payload : "-");
     int connect_ok = cellular_log_has(log, "#XMQTTEVT: 0,0");
-    int publish_ok = cellular_log_has(log, "#XMQTTEVT: 7,0");
-    int receive_ok = cellular_log_has(log, "#XMQTTMSG:");
+    int subscribe_ok = cellular_log_has(log, "#XMQTTEVT: 7,0");
+    int publish_ok = cellular_log_has(log, "MQTT publish command accepted") ||
+                     cellular_log_has(log, "#XMQTTEVT: 3,0") ||
+                     cellular_log_has(log, "#XMQTTEVT: 4,0") ||
+                     cellular_log_has(log, "#XMQTTEVT: 6,0");
+    int receive_ok = cellular_log_has(log, "#XMQTTMSG:") ||
+                     cellular_log_has(log, "#XMQTTEVT: 2,0");
 
     if(rc == 0) {
         snprintf(message, sizeof(message),
-                 "MQTT OK\nBroker: %s\nTopic: %s\nPayload: %s\n\nConnect: %s\nSubscribe: OK\nPublish: %s\nLoopback: %s",
+                 "MQTT OK\nBroker: %s\nTopic: %s\nPayload: %s\n\nConnect: %s\nSubscribe: %s\nPublish: %s\nLoopback: %s",
                  broker_text, topic_text, payload_text,
                  connect_ok ? "OK" : "not confirmed",
+                 subscribe_ok ? "OK" : "not confirmed",
                  publish_ok ? "OK" : "not confirmed",
                  receive_ok ? "received" : "not observed");
         cellular_queue_result("MQTT OK", 1, message);
@@ -682,9 +688,10 @@ static void cellular_queue_mqtt_result(int rc,
 
     cellular_failure_reason(rc, -1, log, reason, sizeof(reason));
     snprintf(message, sizeof(message),
-             "MQTT failed\nBroker: %s\nTopic: %s\nReason: %s\n\nConnect: %s\nPublish: %s\nLoopback: %s\n\nLast log:\n",
+             "MQTT failed\nBroker: %s\nTopic: %s\nReason: %s\n\nConnect: %s\nSubscribe: %s\nPublish: %s\nLoopback: %s\n\nLast log:\n",
              broker_text, topic_text, reason,
              connect_ok ? "OK" : "not confirmed",
+             subscribe_ok ? "OK" : "not confirmed",
              publish_ok ? "OK" : "not confirmed",
              receive_ok ? "received" : "not observed");
     {
@@ -3747,7 +3754,7 @@ static void cellular_mqtt_submit_cb(const char *text, void *user_data)
     (void)user_data;
     snprintf(cellular_mqtt_spec, sizeof(cellular_mqtt_spec), "%s",
              text && text[0] ? text :
-             "test.mosquitto.org|1883|||k230/nrf9151/test|hello from k230|-1");
+             "broker.hivemq.com|1883|||k230/nrf9151/test|hello from k230|-1");
     ui_trim_text(cellular_mqtt_spec);
     cellular_start_action(CELLULAR_ACTION_MQTT_TEST);
 }
