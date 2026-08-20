@@ -217,6 +217,7 @@ static int cellular_result_pending;
 static int cellular_result_ok;
 static int cellular_mqtt_page_open;
 static int cellular_mqtt_connected;
+static int cellular_mqtt_disconnect_pending;
 static uint64_t cellular_mqtt_last_poll_us;
 static char cellular_result_title[96];
 static char cellular_result_message[NRF9151_RESULT_TEXT_MAX];
@@ -241,7 +242,7 @@ static uint64_t cellular_last_uart_us;
 static char cellular_last_nmea[NRF9151_NMEA_LINE_MAX];
 static char cellular_last_urc[192];
 static char cellular_http_url[256] = "http://example.com/";
-static char cellular_http_post_spec[512] = "http://httpbin.org/post|hello=k230";
+static char cellular_http_post_spec[512] = "http://httpbingo.org/post|hello=k230";
 static char cellular_mqtt_spec[512] =
     "broker.hivemq.com|1883|||k230/nrf9151/test|hello from k230|-1";
 static char cellular_mqtt_broker[160] = "broker.hivemq.com";
@@ -3533,6 +3534,17 @@ static int cellular_action_uses_lte_manager(cellular_action_t action)
            action == CELLULAR_ACTION_MQTT_POLL;
 }
 
+static int cellular_action_releases_mqtt(cellular_action_t action)
+{
+    return cellular_action_uses_lte_manager(action) &&
+           action != CELLULAR_ACTION_MQTT_TEST &&
+           action != CELLULAR_ACTION_MQTT_CONNECT &&
+           action != CELLULAR_ACTION_MQTT_DISCONNECT &&
+           action != CELLULAR_ACTION_MQTT_SUBSCRIBE &&
+           action != CELLULAR_ACTION_MQTT_PUBLISH &&
+           action != CELLULAR_ACTION_MQTT_POLL;
+}
+
 static int cellular_generation_active(unsigned int generation)
 {
     int active;
@@ -3670,6 +3682,19 @@ static int cellular_run_manager_action(cellular_action_t action,
             cellular_log_append("%s", log);
             cellular_set_status("nRF9151 busy");
             return -1;
+        }
+    }
+    if(cellular_action_releases_mqtt(action) &&
+       k230_nrf9151_mqtt_session_connected()) {
+        char mqtt_log[1024];
+
+        mqtt_log[0] = '\0';
+        cellular_log_append("MQTT session is active; disconnect before LTE/HTTP");
+        (void)k230_nrf9151_mqtt_session_disconnect(
+            mqtt_log, sizeof(mqtt_log));
+        cellular_mqtt_set_status(0, "Disconnected");
+        if(mqtt_log[0]) {
+            cellular_log_append("%s", mqtt_log);
         }
     }
 
@@ -4024,16 +4049,24 @@ static void cellular_mqtt_maybe_poll(void)
 {
     uint64_t now = ui_monotonic_us();
     int should_poll = 0;
+    int should_disconnect = 0;
 
     pthread_mutex_lock(&cellular_lock);
-    if(cellular_mqtt_page_open && cellular_mqtt_connected &&
+    if(cellular_mqtt_disconnect_pending &&
+       !cellular_worker_active &&
+       cellular_mqtt_connected) {
+        cellular_mqtt_disconnect_pending = 0;
+        should_disconnect = 1;
+    } else if(cellular_mqtt_page_open && cellular_mqtt_connected &&
        !cellular_worker_active &&
        now - cellular_mqtt_last_poll_us > 1200000ULL) {
         cellular_mqtt_last_poll_us = now;
         should_poll = 1;
     }
     pthread_mutex_unlock(&cellular_lock);
-    if(should_poll) {
+    if(should_disconnect) {
+        cellular_start_action(CELLULAR_ACTION_MQTT_DISCONNECT);
+    } else if(should_poll) {
         cellular_start_action(CELLULAR_ACTION_MQTT_POLL);
     }
 }
@@ -4067,7 +4100,7 @@ static void cellular_http_post_submit_cb(const char *text, void *user_data)
 {
     (void)user_data;
     snprintf(cellular_http_post_spec, sizeof(cellular_http_post_spec), "%s",
-             text && text[0] ? text : "http://httpbin.org/post|hello=k230");
+             text && text[0] ? text : "http://httpbingo.org/post|hello=k230");
     ui_trim_text(cellular_http_post_spec);
     cellular_start_action(CELLULAR_ACTION_HTTP_POST);
 }
@@ -4234,12 +4267,24 @@ static void cellular_mqtt_clear_event_cb(lv_event_t *event)
 
 static void cellular_mqtt_close_event_cb(lv_event_t *event)
 {
+    int connected;
+
     (void)event;
     pthread_mutex_lock(&cellular_lock);
     cellular_mqtt_page_open = 0;
+    connected = cellular_mqtt_connected;
+    if(connected) {
+        cellular_mqtt_disconnect_pending = 1;
+        snprintf(cellular_mqtt_status, sizeof(cellular_mqtt_status),
+                 "%s", "Disconnecting...");
+    }
     pthread_mutex_unlock(&cellular_lock);
     if(cellular_mqtt_panel) {
         lv_obj_add_flag(cellular_mqtt_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(connected) {
+        cellular_mqtt_log_append("MQTT page closed; disconnect queued");
+        app_request_fast_refresh();
     }
 }
 
