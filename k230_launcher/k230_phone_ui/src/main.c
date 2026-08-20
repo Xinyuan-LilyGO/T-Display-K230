@@ -3912,6 +3912,11 @@ static void edge_back_event_cb(lv_event_t *event)
         edge_back_log("LVGL_TRIGGER page=%s edge=%s dx=%d dy=%d",
                       page_name(current_page),
                       edge_back_edge_name(edge_back_direction), dx, dy);
+        if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
+            trace_ui_action("LVGL_EDGE_BACK_INNER", PAGE_CELLULAR);
+            edge_back_direction = 0;
+            return;
+        }
         trace_ui_action("LVGL_EDGE_BACK", page_stack_len > 0 ?
                         page_stack[page_stack_len - 1] : PAGE_HOME);
         nav_back();
@@ -3988,6 +3993,12 @@ static void edge_back_consume_raw_pending(void)
     }
 
     edge_back_log("RAW_MAIN_TRIGGER page=%s", page_name(current_page));
+    if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
+        trace_ui_action("RAW_EDGE_BACK_INNER", PAGE_CELLULAR);
+        edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
+        edge_back_hint_hide();
+        return;
+    }
     trace_ui_action("RAW_EDGE_BACK", page_stack_len > 0 ?
                     page_stack[page_stack_len - 1] : PAGE_HOME);
     edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
@@ -4012,6 +4023,10 @@ static void app_event_cb(lv_event_t *event)
 static void back_event_cb(lv_event_t *event)
 {
     (void)event;
+    if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
+        trace_ui_action("LVGL_CLICKED_BACK_INNER", PAGE_CELLULAR);
+        return;
+    }
     trace_ui_action("LVGL_CLICKED_BACK", page_stack_len > 0 ?
                     page_stack[page_stack_len - 1] : PAGE_HOME);
     nav_back();
@@ -4025,6 +4040,10 @@ void app_nav_to_page(page_id_t page)
 
 void app_nav_back(void)
 {
+    if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
+        trace_ui_action("APP_BACK_INNER", PAGE_CELLULAR);
+        return;
+    }
     trace_ui_action("LVGL_CLICKED_BACK", page_stack_len > 0 ?
                     page_stack[page_stack_len - 1] : PAGE_HOME);
     nav_back();

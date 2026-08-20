@@ -196,6 +196,18 @@ static lv_obj_t *cellular_gnss_label;
 static lv_obj_t *cellular_imei_label;
 static lv_obj_t *cellular_network_label;
 static lv_obj_t *cellular_modem_detail_label;
+static lv_obj_t *cellular_modem_chip_label;
+static lv_obj_t *cellular_modem_signal_label;
+static lv_obj_t *cellular_modem_sim_label;
+static lv_obj_t *cellular_modem_imei_label;
+static lv_obj_t *cellular_modem_firmware_label;
+static lv_obj_t *cellular_modem_operator_label;
+static lv_obj_t *cellular_modem_ip_label;
+static lv_obj_t *cellular_modem_apn_label;
+static lv_obj_t *cellular_modem_pdp_label;
+static lv_obj_t *cellular_modem_packet_label;
+static lv_obj_t *cellular_modem_lte_label;
+static lv_obj_t *cellular_modem_uart_label;
 static lv_obj_t *cellular_menu_modem_value;
 static lv_obj_t *cellular_menu_gnss_value;
 static lv_obj_t *cellular_menu_http_value;
@@ -229,6 +241,7 @@ static int cellular_cno_monitor_active;
 static int cellular_cno_monitor_stop;
 static int cellular_manager_gnss_started;
 static int cellular_page_active;
+static cellular_page_t cellular_current_page = CELLULAR_PAGE_HOME;
 static int cellular_check_was_active;
 static unsigned int cellular_action_generation;
 static char cellular_running_title[64] = "LTE";
@@ -1383,17 +1396,18 @@ static void cellular_mqtt_refresh(void)
              cellular_mqtt_port > 0 ? cellular_mqtt_port : 1883,
              cellular_mqtt_client_id[0] ? cellular_mqtt_client_id :
              "auto");
-    snprintf(topic, sizeof(topic), "Topic: %s  QoS:%d  Retain:%s",
-             cellular_mqtt_topic, cellular_mqtt_qos,
-             cellular_mqtt_retain ? "yes" : "no");
-    snprintf(payload, sizeof(payload), "Payload: %s",
+    snprintf(topic, sizeof(topic), "%s: %s  QoS:%d  %s:%s",
+             ui_tr("Topic"), cellular_mqtt_topic, cellular_mqtt_qos,
+             ui_tr("Retain"), cellular_mqtt_retain ? ui_tr("yes") :
+             ui_tr("no"));
+    snprintf(payload, sizeof(payload), "%s: %s", ui_tr("Payload"),
              cellular_mqtt_payload[0] ? cellular_mqtt_payload : "-");
     snprintf(log, sizeof(log), "%s", cellular_mqtt_log[0] ?
-             cellular_mqtt_log : "MQTT log is empty");
+             cellular_mqtt_log : ui_tr("MQTT log is empty"));
     pthread_mutex_unlock(&cellular_lock);
 
     if(cellular_mqtt_status_label) {
-        lv_label_set_text(cellular_mqtt_status_label, status);
+        lv_label_set_text(cellular_mqtt_status_label, ui_tr(status));
         lv_obj_set_style_text_color(cellular_mqtt_status_label,
                                     lv_color_hex(connected ? 0x25C281 :
                                                  0x94A3B8), 0);
@@ -1422,6 +1436,8 @@ static void cellular_status_refresh(void)
     char imei[96];
     char apn[96];
     char signal[128];
+    char operator_name[96];
+    char ip_addr[96];
     char http_url[256];
     char http_post_spec[512];
     char network[192];
@@ -1448,6 +1464,9 @@ static void cellular_status_refresh(void)
     snprintf(imei, sizeof(imei), "%s", cellular_imei_status);
     snprintf(apn, sizeof(apn), "%s", cellular_apn_status);
     snprintf(signal, sizeof(signal), "%s", cellular_signal_status);
+    snprintf(operator_name, sizeof(operator_name), "%s",
+             cellular_operator_status);
+    snprintf(ip_addr, sizeof(ip_addr), "%s", cellular_ip_status);
     snprintf(http_url, sizeof(http_url), "%s", cellular_http_url);
     snprintf(http_post_spec, sizeof(http_post_spec), "%s",
              cellular_http_post_spec);
@@ -1472,7 +1491,7 @@ static void cellular_status_refresh(void)
         snprintf(text, sizeof(text), "%s  EN=%s  %s",
                  exists ? NRF9151_UART_DEV : ui_tr("nRF9151 UART missing"),
                  NRF9151_EN_CONTROL_ENABLED ? "GPIO2" : "external",
-                 active || monitor_active ? ui_tr("Running") : status);
+                 active || monitor_active ? ui_tr("Running") : ui_tr(status));
         lv_label_set_text(cellular_status_label, text);
         lv_obj_set_style_text_color(cellular_status_label,
                                     lv_color_hex(exists ? 0x25C281 : 0xF5A524),
@@ -1497,32 +1516,71 @@ static void cellular_status_refresh(void)
         pthread_mutex_lock(&cellular_lock);
         snprintf(mqtt_status, sizeof(mqtt_status), "%s", cellular_mqtt_status);
         pthread_mutex_unlock(&cellular_lock);
-        lv_label_set_text(cellular_menu_mqtt_value, mqtt_status);
+        lv_label_set_text(cellular_menu_mqtt_value, ui_tr(mqtt_status));
     }
     if(cellular_modem_detail_label) {
-        char detail[768];
+        lv_label_set_text(cellular_modem_detail_label, ui_tr("Live modem fields"));
+    }
+    if(cellular_modem_chip_label) {
+        lv_label_set_text(cellular_modem_chip_label, "nRF9151");
+    }
+    if(cellular_modem_signal_label) {
+        char text[176];
 
-        snprintf(detail, sizeof(detail),
-                 "Chip: nRF9151\nSignal: level %d  %s\nSIM: %s\nIMEI: %s\nFirmware: %s\nOperator/IP: %s\nAPN: %s\nPDP: %s\nPacket: %s\nStatus: %s",
-                 ui_cellular_lte_signal_level(), signal, sim, imei,
-                 link, network, apn,
-                 strstr(lte, "Online") || strstr(lte, "PDP") ? "active" :
-                 "--",
-                 strstr(lte, "attached") || strstr(lte, "Online") ||
-                 strstr(lte, "Registered") ? "attached" : "--",
-                 lte);
-        lv_label_set_text(cellular_modem_detail_label, detail);
+        snprintf(text, sizeof(text), "%s %d  %s", ui_tr("Level"),
+                 ui_cellular_lte_signal_level(), signal);
+        lv_label_set_text(cellular_modem_signal_label, text);
+    }
+    if(cellular_modem_sim_label) {
+        lv_label_set_text(cellular_modem_sim_label, ui_tr(sim));
+    }
+    if(cellular_modem_imei_label) {
+        lv_label_set_text(cellular_modem_imei_label, imei);
+    }
+    if(cellular_modem_firmware_label) {
+        lv_label_set_text(cellular_modem_firmware_label, ui_tr(link));
+    }
+    if(cellular_modem_operator_label) {
+        lv_label_set_text(cellular_modem_operator_label,
+                          operator_name[0] ? operator_name : "--");
+    }
+    if(cellular_modem_ip_label) {
+        lv_label_set_text(cellular_modem_ip_label,
+                          ip_addr[0] ? ip_addr : "--");
+    }
+    if(cellular_modem_apn_label) {
+        lv_label_set_text(cellular_modem_apn_label, apn);
+    }
+    if(cellular_modem_pdp_label) {
+        lv_label_set_text(cellular_modem_pdp_label,
+                          strstr(lte, "Online") || strstr(lte, "PDP") ?
+                          ui_tr("Active") : "--");
+    }
+    if(cellular_modem_packet_label) {
+        lv_label_set_text(cellular_modem_packet_label,
+                          strstr(lte, "attached") || strstr(lte, "Online") ||
+                          strstr(lte, "Registered") ? ui_tr("Attached") :
+                          "--");
+    }
+    if(cellular_modem_lte_label) {
+        lv_label_set_text(cellular_modem_lte_label, ui_tr(lte));
+    }
+    if(cellular_modem_uart_label) {
+        lv_label_set_text(cellular_modem_uart_label,
+                          exists ? NRF9151_UART_DEV :
+                          ui_tr("nRF9151 UART missing"));
     }
     if(cellular_http_get_label) {
         char text[320];
 
-        snprintf(text, sizeof(text), "GET URL\n%s", http_url);
+        snprintf(text, sizeof(text), "%s\n%s", ui_tr("GET URL"), http_url);
         lv_label_set_text(cellular_http_get_label, text);
     }
     if(cellular_http_post_label) {
         char text[640];
 
-        snprintf(text, sizeof(text), "POST URL|body\n%s", http_post_spec);
+        snprintf(text, sizeof(text), "%s\n%s", ui_tr("POST URL|body"),
+                 http_post_spec);
         lv_label_set_text(cellular_http_post_label, text);
     }
     cellular_check_progress_refresh(
@@ -1530,16 +1588,16 @@ static void cellular_status_refresh(void)
         status, running_title);
     cellular_result_popup_refresh();
     if(cellular_link_label) {
-        lv_label_set_text(cellular_link_label, link);
+        lv_label_set_text(cellular_link_label, ui_tr(link));
     }
     if(cellular_sim_label) {
-        lv_label_set_text(cellular_sim_label, sim);
+        lv_label_set_text(cellular_sim_label, ui_tr(sim));
     }
     if(cellular_lte_label) {
-        lv_label_set_text(cellular_lte_label, lte);
+        lv_label_set_text(cellular_lte_label, ui_tr(lte));
     }
     if(cellular_gnss_label) {
-        lv_label_set_text(cellular_gnss_label, gnss);
+        lv_label_set_text(cellular_gnss_label, ui_tr(gnss));
     }
     if(cellular_imei_label) {
         lv_label_set_text(cellular_imei_label, imei);
@@ -4209,7 +4267,7 @@ static void cellular_lte_refresh_event_cb(lv_event_t *event)
             lv_obj_clear_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(cellular_check_spinner, LV_OBJ_FLAG_HIDDEN);
             lv_obj_move_foreground(cellular_check_panel);
-            lv_label_set_text(cellular_check_label, "Refreshing modem");
+            lv_label_set_text(cellular_check_label, ui_tr("Refreshing modem"));
             cellular_check_hide_us = ui_monotonic_us() + 900000ULL;
         }
         k230_nrf9151_status_monitor_request_refresh();
@@ -4500,6 +4558,36 @@ static lv_obj_t *cellular_status_card(lv_obj_t *parent, int x, int y, int w,
     return card;
 }
 
+static lv_obj_t *cellular_modem_info_card(lv_obj_t *parent, int x, int y,
+                                          int w, const char *title,
+                                          uint32_t color,
+                                          lv_obj_t **value_label)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_t *label;
+
+    lv_obj_set_pos(card, x, y);
+    lv_obj_set_size(card, w, 82);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 10, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x25303A), 0);
+    lv_obj_set_style_pad_all(card, 10, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    label = ui_label(card, title, &lv_font_montserrat_14, color);
+    lv_obj_set_width(label, w - 20);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    *value_label = ui_label(card, "--", &lv_font_montserrat_16, 0xF2F5F8);
+    lv_obj_set_width(*value_label, w - 20);
+    lv_label_set_long_mode(*value_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(*value_label, LV_ALIGN_TOP_LEFT, 0, 32);
+    return card;
+}
+
 static lv_obj_t *cellular_button(lv_obj_t *parent, int x, int y, int w,
                                  const char *text, uint32_t color,
                                  lv_event_cb_t cb, void *user_data)
@@ -4574,6 +4662,7 @@ static void cellular_show_page(cellular_page_t page)
         break;
     }
     pthread_mutex_lock(&cellular_lock);
+    cellular_current_page = page;
     cellular_mqtt_page_open = page == CELLULAR_PAGE_MQTT;
     pthread_mutex_unlock(&cellular_lock);
     app_request_fast_refresh();
@@ -4591,6 +4680,21 @@ static void cellular_page_back_event_cb(lv_event_t *event)
 {
     (void)event;
     cellular_show_page(CELLULAR_PAGE_HOME);
+}
+
+int ui_cellular_handle_back(void)
+{
+    int handled = 0;
+
+    pthread_mutex_lock(&cellular_lock);
+    if(cellular_page_active && cellular_current_page != CELLULAR_PAGE_HOME) {
+        handled = 1;
+    }
+    pthread_mutex_unlock(&cellular_lock);
+    if(handled) {
+        cellular_show_page(CELLULAR_PAGE_HOME);
+    }
+    return handled;
 }
 
 static lv_obj_t *cellular_menu_card(lv_obj_t *parent, int x, int y, int w,
@@ -4620,21 +4724,22 @@ static lv_obj_t *cellular_menu_card(lv_obj_t *parent, int x, int y, int w,
     lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(accent, LV_ALIGN_LEFT_MID, 0, 0);
 
-    label = ui_label(card, title, &lv_font_montserrat_22, 0xF2F5F8);
+    label = ui_label(card, title, &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_set_width(label, w - 54);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 18);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 16);
 
     label = ui_label(card, desc, &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_width(label, w - 54);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 52);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 50);
 
     if(value_label) {
         *value_label = ui_label(card, "--", &lv_font_montserrat_14, color);
         lv_obj_set_width(*value_label, w - 54);
         lv_label_set_long_mode(*value_label, LV_LABEL_LONG_DOT);
-        lv_obj_align(*value_label, LV_ALIGN_BOTTOM_LEFT, 24, -14);
+        lv_obj_align(*value_label, LV_ALIGN_TOP_LEFT, 24,
+                     h > 132 ? h - 42 : 88);
     }
     return card;
 }
@@ -4664,16 +4769,17 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
     int body_h = ui_body_height(144);
     int landscape = ui_is_landscape();
     int margin = ui_page_side_margin();
-    int gap = landscape ? 18 : 16;
+    int wide_layout = landscape && (screen_w - margin * 2) >= 700;
+    int gap = wide_layout ? 18 : 16;
     int content_y = 82;
     int content_h = body_h - content_y - 18;
-    int config_w = landscape ? 360 : screen_w - margin * 2;
-    int log_w = landscape ? screen_w - margin * 2 - config_w - gap :
+    int config_w = wide_layout ? 360 : screen_w - margin * 2;
+    int log_w = wide_layout ? screen_w - margin * 2 - config_w - gap :
                 screen_w - margin * 2;
-    int config_h = landscape ? content_h : 384;
-    int log_h = landscape ? content_h : 360;
-    int log_x = landscape ? margin + config_w + gap : margin;
-    int log_y = landscape ? content_y : content_y + config_h + gap;
+    int config_h = wide_layout ? content_h : 384;
+    int log_h = wide_layout ? content_h : 360;
+    int log_x = wide_layout ? margin + config_w + gap : margin;
+    int log_y = wide_layout ? content_y : content_y + config_h + gap;
     int btn_gap = 10;
     int btn_w = (config_w - 32 - btn_gap) / 2;
     lv_obj_t *back;
@@ -4688,7 +4794,7 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
         log_w = screen_w - margin * 2;
     }
 
-    cellular_mqtt_panel = cellular_page_create(parent, !landscape);
+    cellular_mqtt_panel = cellular_page_create(parent, !wide_layout);
     lv_obj_add_flag(cellular_mqtt_panel, LV_OBJ_FLAG_HIDDEN);
     back = ui_command_button(cellular_mqtt_panel, margin, 14, 92, "Back",
                              0x94A3B8);
@@ -4786,11 +4892,12 @@ void ui_cellular_create(lv_obj_t *scr)
     int body_h = ui_body_height(144);
     int margin = ui_page_side_margin();
     int panel_w = ui_page_panel_width();
+    int wide_layout = landscape && panel_w >= 700;
     int gap = landscape ? 20 : 24;
     int content_y = 84;
     int content_h = body_h - content_y - 18;
     int card_w = landscape ? (panel_w - gap) / 2 : panel_w;
-    int card_h = landscape ? 128 : 148;
+    int card_h = landscape ? 148 : 156;
     int card_x0 = margin;
     int card_x1 = landscape ? margin + card_w + gap : margin;
     int card_y_modem = content_y;
@@ -4799,17 +4906,17 @@ void ui_cellular_create(lv_obj_t *scr)
                       content_y + (card_h + gap) * 2;
     int card_y_mqtt = landscape ? content_y + card_h + gap :
                       content_y + (card_h + gap) * 3;
-    int left_w = landscape ? 430 : panel_w;
-    int right_w = landscape ? panel_w - left_w - gap : panel_w;
-    int right_x = landscape ? margin + left_w + gap : margin;
+    int left_w = wide_layout ? (panel_w * 46) / 100 : panel_w;
+    int right_w = wide_layout ? panel_w - left_w - gap : panel_w;
+    int right_x = wide_layout ? margin + left_w + gap : margin;
     int sub_y = 82;
     int sub_h = body_h - sub_y - 18;
-    int status_card_w;
     int btn_w;
     int chart_w;
 
     pthread_mutex_lock(&cellular_lock);
     cellular_page_active = 1;
+    cellular_current_page = CELLULAR_PAGE_HOME;
     pthread_mutex_unlock(&cellular_lock);
 
     if(content_h < 320) {
@@ -4828,7 +4935,7 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_set_scroll_dir(body, LV_DIR_NONE);
     lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
 
-    cellular_root_page = cellular_page_create(body, !landscape);
+    cellular_root_page = cellular_page_create(body, 1);
 
     label = ui_label(cellular_root_page, "nRF9151 Cellular",
                      &lv_font_montserrat_28, 0xF2F5F8);
@@ -4867,55 +4974,52 @@ void ui_cellular_create(lv_obj_t *scr)
                        0xA78BFA, &cellular_menu_mqtt_value,
                        CELLULAR_PAGE_MQTT);
 
-    cellular_modem_page = cellular_page_create(body, !landscape);
+    cellular_modem_page = cellular_page_create(body, 1);
     lv_obj_add_flag(cellular_modem_page, LV_OBJ_FLAG_HIDDEN);
     cellular_subpage_title(cellular_modem_page, "Modem information",
                            0x25C281);
 
-    panel = ui_panel(cellular_modem_page, margin, sub_y, left_w, sub_h);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x151B22), 0);
-    lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
-
-    status_card_w = (left_w - 44) / 2;
-    cellular_status_card(panel, 0, 0, status_card_w, "Link", 0x60A5FA,
-                         &cellular_link_label);
-    cellular_status_card(panel, status_card_w + 12, 0, status_card_w,
-                         "SIM card", 0xA3E635, &cellular_sim_label);
-    cellular_status_card(panel, 0, 84, status_card_w, "LTE", 0x25C281,
-                         &cellular_lte_label);
-    cellular_status_card(panel, status_card_w + 12, 84, status_card_w,
-                         "GNSS", 0xF5A524, &cellular_gnss_label);
-    cellular_status_card(panel, 0, 168, status_card_w, "IMEI", 0x38BDF8,
-                         &cellular_imei_label);
-    cellular_status_card(panel, status_card_w + 12, 168, status_card_w,
-                         "Network", 0x34D399,
-                         &cellular_network_label);
-    btn_w = left_w - 32;
-    cellular_button(panel, 0, 264, btn_w, "Refresh", 0x25C281,
-                    cellular_lte_refresh_event_cb, NULL);
-
-    panel = ui_panel(cellular_modem_page, landscape ? right_x : margin,
-                     landscape ? sub_y : sub_y + sub_h + gap,
-                     landscape ? right_w : panel_w, sub_h);
+    panel = ui_panel(cellular_modem_page, margin, sub_y, panel_w,
+                     sub_h > 420 ? sub_h : 420);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(panel, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
-    label = ui_label(panel, "Current modem state", &lv_font_montserrat_20,
+    label = ui_label(panel, "Live modem fields", &lv_font_montserrat_20,
                      0xF2F5F8);
-    lv_obj_set_width(label, (landscape ? right_w : panel_w) - 32);
+    lv_obj_set_width(label, panel_w - 220);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
-    cellular_modem_detail_label = ui_label(panel, "--",
-                                           &lv_font_montserrat_16, 0xDCE5EE);
-    lv_obj_set_width(cellular_modem_detail_label,
-                     (landscape ? right_w : panel_w) - 32);
-    lv_label_set_long_mode(cellular_modem_detail_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(cellular_modem_detail_label, LV_ALIGN_TOP_LEFT, 0, 42);
+    cellular_modem_detail_label = label;
+    btn_w = 150;
+    cellular_button(panel, panel_w - 32 - btn_w, 0, btn_w, "Refresh",
+                    0x25C281, cellular_lte_refresh_event_cb, NULL);
+    {
+        int inner_w = panel_w - 32;
+        int cols = inner_w >= 720 ? 3 : 2;
+        int card_gap = 12;
+        int info_w = (inner_w - card_gap * (cols - 1)) / cols;
+        int start_y = 76;
+#define MODEM_CARD(index, title, color, ptr) \
+        cellular_modem_info_card(panel, \
+            ((index) % cols) * (info_w + card_gap), \
+            start_y + ((index) / cols) * 94, info_w, title, color, ptr)
+        MODEM_CARD(0, "Chip", 0x60A5FA, &cellular_modem_chip_label);
+        MODEM_CARD(1, "Signal", 0x22C55E, &cellular_modem_signal_label);
+        MODEM_CARD(2, "SIM card", 0xA3E635, &cellular_modem_sim_label);
+        MODEM_CARD(3, "IMEI", 0x38BDF8, &cellular_modem_imei_label);
+        MODEM_CARD(4, "Firmware", 0x818CF8, &cellular_modem_firmware_label);
+        MODEM_CARD(5, "Operator", 0x34D399, &cellular_modem_operator_label);
+        MODEM_CARD(6, "IP address", 0x2DD4BF, &cellular_modem_ip_label);
+        MODEM_CARD(7, "APN", 0xF5A524, &cellular_modem_apn_label);
+        MODEM_CARD(8, "PDP context", 0xF97316, &cellular_modem_pdp_label);
+        MODEM_CARD(9, "Packet service", 0xEF4444, &cellular_modem_packet_label);
+        MODEM_CARD(10, "LTE status", 0x25C281, &cellular_modem_lte_label);
+        MODEM_CARD(11, "UART", 0x94A3B8, &cellular_modem_uart_label);
+#undef MODEM_CARD
+    }
 
-    cellular_gnss_page = cellular_page_create(body, !landscape);
+    cellular_gnss_page = cellular_page_create(body, !wide_layout);
     lv_obj_add_flag(cellular_gnss_page, LV_OBJ_FLAG_HIDDEN);
     cellular_subpage_title(cellular_gnss_page, "GNSS", 0xF97316);
 
@@ -4947,23 +5051,23 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_label_set_long_mode(cellular_sat_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(cellular_sat_label, LV_ALIGN_TOP_LEFT, 0, 214);
 
-    panel = ui_panel(cellular_gnss_page, landscape ? right_x : margin,
-                     landscape ? sub_y : sub_y + sub_h + gap,
-                     landscape ? right_w : panel_w, sub_h);
+    panel = ui_panel(cellular_gnss_page, wide_layout ? right_x : margin,
+                     wide_layout ? sub_y : sub_y + sub_h + gap,
+                     wide_layout ? right_w : panel_w, sub_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(panel, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
     label = ui_label(panel, "Carrier to noise", &lv_font_montserrat_20,
                      0xF2F5F8);
-    lv_obj_set_width(label, (landscape ? right_w : panel_w) - 32);
+    lv_obj_set_width(label, (wide_layout ? right_w : panel_w) - 32);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
-    chart_w = (landscape ? right_w : panel_w) - 32;
+    chart_w = (wide_layout ? right_w : panel_w) - 32;
     cellular_sat_chart = cellular_cn0_chart_create(panel, chart_w);
     lv_obj_align(cellular_sat_chart, LV_ALIGN_TOP_LEFT, 0, 48);
 
-    cellular_http_page = cellular_page_create(body, !landscape);
+    cellular_http_page = cellular_page_create(body, !wide_layout);
     lv_obj_add_flag(cellular_http_page, LV_OBJ_FLAG_HIDDEN);
     cellular_subpage_title(cellular_http_page, "HTTP", 0x38BDF8);
 
@@ -4988,21 +5092,21 @@ void ui_cellular_create(lv_obj_t *scr)
     cellular_button(panel, btn_w + 12, 232, btn_w, "HTTP POST", 0x60A5FA,
                     cellular_http_post_event_cb, NULL);
 
-    panel = ui_panel(cellular_http_page, landscape ? right_x : margin,
-                     landscape ? sub_y : sub_y + sub_h + gap,
-                     landscape ? right_w : panel_w, sub_h);
+    panel = ui_panel(cellular_http_page, wide_layout ? right_x : margin,
+                     wide_layout ? sub_y : sub_y + sub_h + gap,
+                     wide_layout ? right_w : panel_w, sub_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(panel, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
     label = ui_label(panel, "HTTP and modem log", &lv_font_montserrat_20,
                      0xF2F5F8);
-    lv_obj_set_width(label, (landscape ? right_w : panel_w) - 32);
+    lv_obj_set_width(label, (wide_layout ? right_w : panel_w) - 32);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
     cellular_log_label = ui_label(panel, "No log yet",
                                   &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_width(cellular_log_label, (landscape ? right_w : panel_w) - 32);
+    lv_obj_set_width(cellular_log_label, (wide_layout ? right_w : panel_w) - 32);
     lv_label_set_long_mode(cellular_log_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(cellular_log_label, LV_ALIGN_TOP_LEFT, 0, 42);
 
@@ -5056,6 +5160,7 @@ void ui_cellular_cleanup(void)
     cellular_result_pending = 0;
     cellular_mqtt_page_open = 0;
     cellular_mqtt_connected = 0;
+    cellular_current_page = CELLULAR_PAGE_HOME;
     if(cellular_cno_monitor_active) {
         cellular_cno_monitor_stop = 1;
     }
@@ -5087,6 +5192,18 @@ void ui_cellular_cleanup(void)
     cellular_imei_label = NULL;
     cellular_network_label = NULL;
     cellular_modem_detail_label = NULL;
+    cellular_modem_chip_label = NULL;
+    cellular_modem_signal_label = NULL;
+    cellular_modem_sim_label = NULL;
+    cellular_modem_imei_label = NULL;
+    cellular_modem_firmware_label = NULL;
+    cellular_modem_operator_label = NULL;
+    cellular_modem_ip_label = NULL;
+    cellular_modem_apn_label = NULL;
+    cellular_modem_pdp_label = NULL;
+    cellular_modem_packet_label = NULL;
+    cellular_modem_lte_label = NULL;
+    cellular_modem_uart_label = NULL;
     cellular_menu_modem_value = NULL;
     cellular_menu_gnss_value = NULL;
     cellular_menu_http_value = NULL;

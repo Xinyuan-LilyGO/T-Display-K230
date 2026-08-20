@@ -9,6 +9,7 @@ extern "C" {
 
 void ui_cellular_startup(void);
 int ui_cellular_lte_signal_level(void);
+int ui_cellular_handle_back(void);
 void ui_cellular_create(lv_obj_t *scr);
 void ui_cellular_cleanup(void);
 
