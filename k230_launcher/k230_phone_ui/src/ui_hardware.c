@@ -4958,26 +4958,39 @@ static void audio_settings_add_volume(lv_obj_t *body, int y, int x, int w)
 {
     lv_obj_t *slider;
     lv_obj_t *title;
-    int control_gap = ui_is_landscape() ? 32 : 28;
-    int slider_x = x + control_gap;
-    int slider_w = w - control_gap * 2;
-    int value_w = ui_is_landscape() ? 220 : 180;
+    int group_w = ui_is_landscape() ? 640 : 420;
+    int group_x;
+    int control_gap = ui_is_landscape() ? 44 : 34;
+    int slider_x;
+    int slider_w;
+    int value_w;
 
-    if(slider_w < 220) {
-        slider_w = w > 220 ? w - control_gap : 220;
-        slider_x = x + (w - slider_w) / 2;
+    if(group_w > w) {
+        group_w = w;
     }
-    if(value_w > w / 2) {
-        value_w = w / 2;
+    if(group_w < 260) {
+        group_w = w > 260 ? 260 : w;
+    }
+    group_x = x + (w - group_w) / 2;
+    slider_x = group_x + control_gap;
+    slider_w = group_w - control_gap * 2;
+    if(slider_w < 180) {
+        slider_w = group_w;
+        slider_x = group_x;
+    }
+    value_w = ui_is_landscape() ? 180 : 144;
+    if(value_w > group_w / 2) {
+        value_w = group_w / 2;
     }
 
     title = ui_label(body, "Volume", &lv_font_montserrat_22, 0xF2F5F8);
-    lv_obj_set_pos(title, x, y);
-    lv_obj_set_width(title, w - value_w - 12);
+    lv_obj_set_pos(title, group_x, y);
+    lv_obj_set_width(title, group_w - value_w - 12);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     audio_settings_volume_label = ui_label(body, "--", &lv_font_montserrat_18,
                                            0x3DA5FF);
-    lv_obj_set_pos(audio_settings_volume_label, x + w - value_w, y + 2);
+    lv_obj_set_pos(audio_settings_volume_label,
+                   group_x + group_w - value_w, y + 2);
     lv_obj_set_width(audio_settings_volume_label, value_w);
     lv_obj_set_style_text_align(audio_settings_volume_label,
                                 LV_TEXT_ALIGN_RIGHT, 0);
@@ -5972,12 +5985,15 @@ void ui_sensors_create(lv_obj_t *scr)
 void ui_bq25896_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
+    lv_obj_t *current_title;
     int last_current;
     int inset = 20;
     int content_w;
     int button_gap = 16;
     int button_w;
     int slider_gap;
+    int group_x;
+    int group_w;
     int slider_x;
     int slider_w;
     int value_w;
@@ -5987,16 +6003,24 @@ void ui_bq25896_create(lv_obj_t *scr)
                            ui_body_height(154));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     content_w = hardware_content_width(body, inset);
-    slider_gap = ui_is_landscape() ? 32 : 28;
-    slider_x = inset + slider_gap;
-    slider_w = content_w - slider_gap * 2;
-    if(slider_w < 220) {
-        slider_w = content_w > 220 ? content_w - slider_gap : 220;
-        slider_x = inset + (content_w - slider_w) / 2;
+    group_w = ui_is_landscape() ? 640 : 420;
+    if(group_w > content_w) {
+        group_w = content_w;
     }
-    value_w = ui_is_landscape() ? 320 : 244;
-    if(value_w > content_w / 2) {
-        value_w = content_w / 2;
+    if(group_w < 260) {
+        group_w = content_w > 260 ? 260 : content_w;
+    }
+    group_x = inset + (content_w - group_w) / 2;
+    slider_gap = ui_is_landscape() ? 44 : 34;
+    slider_x = group_x + slider_gap;
+    slider_w = group_w - slider_gap * 2;
+    if(slider_w < 180) {
+        slider_w = group_w;
+        slider_x = group_x;
+    }
+    value_w = ui_is_landscape() ? 220 : 160;
+    if(value_w > group_w / 2) {
+        value_w = group_w / 2;
     }
     button_w = (content_w - button_gap) / 2;
     if(button_w > 280) {
@@ -6033,14 +6057,17 @@ void ui_bq25896_create(lv_obj_t *scr)
     lv_obj_add_event_cb(bq25896_charge_off_btn, bq25896_charge_enable_event_cb,
                         LV_EVENT_CLICKED, (void *)(intptr_t)0);
 
-    ui_label(body, "Fast charge current", &lv_font_montserrat_20, 0xF2F5F8);
-    lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
-                 LV_ALIGN_TOP_LEFT, inset, 298);
+    current_title = ui_label(body, "Fast charge current",
+                             &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_pos(current_title, group_x, 298);
+    lv_obj_set_width(current_title, group_w - value_w - 12);
+    lv_label_set_long_mode(current_title, LV_LABEL_LONG_DOT);
     bq25896_slider_label = ui_label(body, "--", &lv_font_montserrat_18,
                                     0xF97316);
     lv_obj_set_width(bq25896_slider_label, value_w);
     lv_obj_set_style_text_align(bq25896_slider_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(bq25896_slider_label, inset + content_w - value_w, 300);
+    lv_obj_set_pos(bq25896_slider_label,
+                   group_x + group_w - value_w, 300);
 
     last_current = read_pref_int(PREF_BQ25896_ICHG_MA, 512, 0,
                                  BQ25896_FAST_CHG_MAX_MA);

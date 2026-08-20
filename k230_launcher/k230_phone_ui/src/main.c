@@ -9270,6 +9270,12 @@ static void create_display_page(lv_obj_t *scr)
     int slider_value;
     int body_y = page_content_top_y(154);
     int content_w;
+    int brightness_group_w;
+    int brightness_group_x;
+    int brightness_value_w;
+    int brightness_slider_gap;
+    int brightness_slider_x;
+    int brightness_slider_w;
     int button_gap = 14;
     int button_w;
 
@@ -9280,6 +9286,25 @@ static void create_display_page(lv_obj_t *scr)
     content_w = page_body_width() - 32;
     if(content_w < 360) {
         content_w = 360;
+    }
+    brightness_group_w = display_orientation_is_landscape() ? 640 : 420;
+    if(brightness_group_w > content_w) {
+        brightness_group_w = content_w;
+    }
+    if(brightness_group_w < 260) {
+        brightness_group_w = content_w > 260 ? 260 : content_w;
+    }
+    brightness_group_x = (content_w - brightness_group_w) / 2;
+    brightness_value_w = display_orientation_is_landscape() ? 180 : 144;
+    if(brightness_value_w > brightness_group_w / 2) {
+        brightness_value_w = brightness_group_w / 2;
+    }
+    brightness_slider_gap = display_orientation_is_landscape() ? 44 : 34;
+    brightness_slider_x = brightness_group_x + brightness_slider_gap;
+    brightness_slider_w = brightness_group_w - brightness_slider_gap * 2;
+    if(brightness_slider_w < 180) {
+        brightness_slider_x = brightness_group_x;
+        brightness_slider_w = brightness_group_w;
     }
     button_w = (content_w - button_gap * 3) / 4;
 
@@ -9294,7 +9319,10 @@ static void create_display_page(lv_obj_t *scr)
                    slider_min;
     display_backlight_label = label(body, "Brightness", &lv_font_montserrat_22,
                                     0xF2F5F8);
-    lv_obj_align(display_backlight_label, LV_ALIGN_TOP_LEFT, 0, 242);
+    lv_obj_set_pos(display_backlight_label, brightness_group_x, 242);
+    lv_obj_set_width(display_backlight_label,
+                     brightness_group_w - brightness_value_w - 12);
+    lv_label_set_long_mode(display_backlight_label, LV_LABEL_LONG_DOT);
 
     if(has_backlight) {
         snprintf(text, sizeof(text), "%d / %d", slider_value, backlight_max_value);
@@ -9303,11 +9331,17 @@ static void create_display_page(lv_obj_t *scr)
     }
     display_brightness_label = label(body, text, &lv_font_montserrat_18,
                                      has_backlight ? 0x25C281 : 0xF5A524);
-    lv_obj_align(display_brightness_label, LV_ALIGN_TOP_LEFT, 0, 280);
+    lv_obj_set_pos(display_brightness_label,
+                   brightness_group_x + brightness_group_w -
+                   brightness_value_w, 244);
+    lv_obj_set_width(display_brightness_label, brightness_value_w);
+    lv_obj_set_style_text_align(display_brightness_label, LV_TEXT_ALIGN_RIGHT,
+                                0);
+    lv_label_set_long_mode(display_brightness_label, LV_LABEL_LONG_DOT);
 
     slider = lv_slider_create(body);
-    lv_obj_set_pos(slider, 0, 332);
-    lv_obj_set_size(slider, content_w, 22);
+    lv_obj_set_pos(slider, brightness_slider_x, 332);
+    lv_obj_set_size(slider, brightness_slider_w, 22);
     lv_slider_set_range(slider, slider_min, has_backlight ? backlight_max_value : 100);
     lv_slider_set_value(slider, slider_value, LV_ANIM_OFF);
     lv_obj_add_event_cb(slider, display_brightness_event_cb,

@@ -2554,7 +2554,7 @@ void ui_notification_settings_create(lv_obj_t *scr)
     int x = ui_page_panel_x();
     int w = ui_page_panel_width();
     int content_w;
-    int list_x = ui_is_landscape() ? 24 : 16;
+    int list_x;
     int list_w;
     int y = 0;
 
@@ -2563,11 +2563,14 @@ void ui_notification_settings_create(lv_obj_t *scr)
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     lv_obj_set_style_pad_all(body, 16, 0);
     content_w = ui_safe_content_width(body, 488);
-    list_w = content_w - list_x * 2;
-    if(list_w < 260) {
-        list_w = content_w > 260 ? content_w - list_x : 260;
-        list_x = (content_w - list_w) / 2;
+    list_w = ui_is_landscape() ? 860 : 456;
+    if(list_w > content_w) {
+        list_w = content_w;
     }
+    if(list_w < 260) {
+        list_w = content_w > 260 ? 260 : content_w;
+    }
+    list_x = (content_w - list_w) / 2;
 
     notification_scan_sounds();
     memset(notification_row, 0, sizeof(notification_row));
@@ -2575,28 +2578,30 @@ void ui_notification_settings_create(lv_obj_t *scr)
 
     title = ui_label(body, "Notification sound", &lv_font_montserrat_24,
                      0xF2F5F8);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, y);
+    lv_obj_set_pos(title, list_x, y);
+    lv_obj_set_width(title, list_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     y += 44;
 
     notification_current_label = ui_label(body, "--", &lv_font_montserrat_18,
                                           0xA78BFA);
-    lv_obj_set_width(notification_current_label, content_w);
+    lv_obj_set_width(notification_current_label, list_w);
     lv_label_set_long_mode(notification_current_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(notification_current_label, LV_ALIGN_TOP_LEFT, 0, y);
+    lv_obj_set_pos(notification_current_label, list_x, y);
     y += 34;
 
     notification_status_label = ui_label(body, "--", &lv_font_montserrat_16,
                                          0x9AA4AF);
-    lv_obj_set_width(notification_status_label, content_w);
+    lv_obj_set_width(notification_status_label, list_w);
     lv_label_set_long_mode(notification_status_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(notification_status_label, LV_ALIGN_TOP_LEFT, 0, y);
+    lv_obj_set_pos(notification_status_label, list_x, y);
     y += 44;
 
     hint = ui_label(body, "Sounds in /root/notification",
                     &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(hint, content_w);
+    lv_obj_set_width(hint, list_w);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 0, y);
+    lv_obj_set_pos(hint, list_x, y);
     y += 42;
 
     notification_row[0] = audio_create_row_ex(body, y, "OFF", "Off",
