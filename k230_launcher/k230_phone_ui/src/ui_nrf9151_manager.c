@@ -173,6 +173,8 @@ void k230_nrf9151_status_init(k230_nrf9151_status_t *status)
     snprintf(status->sim_status, sizeof(status->sim_status), "%s", "--");
     snprintf(status->operator_name, sizeof(status->operator_name), "%s", "--");
     snprintf(status->ip, sizeof(status->ip), "%s", "--");
+    snprintf(status->apn, sizeof(status->apn), "%s", "--");
+    snprintf(status->signal_text, sizeof(status->signal_text), "%s", "--");
     snprintf(status->lte_status, sizeof(status->lte_status), "%s", "Not tested");
     snprintf(status->gnss_status, sizeof(status->gnss_status), "%s", "Off");
     snprintf(status->last_error, sizeof(status->last_error), "%s", "-");
@@ -266,6 +268,8 @@ int k230_nrf9151_write_status(const k230_nrf9151_status_t *status)
     nrf9151_manager_status_write_key(fp, "sim_status", copy.sim_status);
     nrf9151_manager_status_write_key(fp, "operator", copy.operator_name);
     nrf9151_manager_status_write_key(fp, "ip", copy.ip);
+    nrf9151_manager_status_write_key(fp, "apn", copy.apn);
+    nrf9151_manager_status_write_key(fp, "signal_text", copy.signal_text);
     nrf9151_manager_status_write_key(fp, "lte_status", copy.lte_status);
     nrf9151_manager_status_write_key(fp, "gnss_status", copy.gnss_status);
     nrf9151_manager_status_write_key(fp, "last_error", copy.last_error);
@@ -396,6 +400,12 @@ int k230_nrf9151_read_status(k230_nrf9151_status_t *status,
         } else if(strcmp(line, "ip") == 0) {
             nrf9151_manager_status_set_string(status->ip,
                                               sizeof(status->ip), eq);
+        } else if(strcmp(line, "apn") == 0) {
+            nrf9151_manager_status_set_string(status->apn,
+                                              sizeof(status->apn), eq);
+        } else if(strcmp(line, "signal_text") == 0) {
+            nrf9151_manager_status_set_string(status->signal_text,
+                                              sizeof(status->signal_text), eq);
         } else if(strcmp(line, "lte_status") == 0) {
             nrf9151_manager_status_set_string(status->lte_status,
                                               sizeof(status->lte_status), eq);
@@ -1248,6 +1258,42 @@ static void nrf9151_manager_extract_quoted(const char *line, char *out,
     out[copy] = '\0';
 }
 
+static void nrf9151_manager_extract_quoted_index(const char *line, int index,
+                                                 char *out, size_t out_len)
+{
+    const char *p = line;
+    const char *start;
+    const char *end;
+    int current = 0;
+    size_t copy;
+
+    if(!out || out_len == 0U) {
+        return;
+    }
+    out[0] = '\0';
+    if(!line || index < 0) {
+        return;
+    }
+    while((start = strchr(p, '"')) != NULL) {
+        start++;
+        end = strchr(start, '"');
+        if(!end) {
+            return;
+        }
+        if(current == index) {
+            copy = (size_t)(end - start);
+            if(copy >= out_len) {
+                copy = out_len - 1U;
+            }
+            memcpy(out, start, copy);
+            out[copy] = '\0';
+            return;
+        }
+        current++;
+        p = end + 1;
+    }
+}
+
 static int nrf9151_manager_parse_cereg_stat(const char *line)
 {
     const char *p;
@@ -1402,6 +1448,8 @@ static void nrf9151_manager_update_lte_from_response(
                                        sizeof(line)) == 0) {
         int level = nrf9151_manager_signal_level_from_cesq(line);
 
+        snprintf(status->signal_text, sizeof(status->signal_text),
+                 "%s", line);
         if(level > 0) {
             status->lte_signal_level = level;
         }
@@ -1434,6 +1482,15 @@ static void nrf9151_manager_update_lte_from_response(
             snprintf(status->ip, sizeof(status->ip), "%s", comma + 1);
             nrf9151_manager_trim_text(status->ip);
             status->pdp_active = 1;
+        }
+    }
+    if(nrf9151_manager_line_containing(resp, "+CGDCONT:", line,
+                                       sizeof(line)) == 0) {
+        char apn[96];
+
+        nrf9151_manager_extract_quoted_index(line, 1, apn, sizeof(apn));
+        if(apn[0]) {
+            snprintf(status->apn, sizeof(status->apn), "%s", apn);
         }
     }
     if(nrf9151_manager_line_containing(resp, "#XPING:", line,
@@ -1569,6 +1626,8 @@ static int nrf9151_manager_run_lte_check_common(
     snprintf(local.sim_status, sizeof(local.sim_status), "%s", "--");
     snprintf(local.operator_name, sizeof(local.operator_name), "%s", "--");
     snprintf(local.ip, sizeof(local.ip), "%s", "--");
+    snprintf(local.apn, sizeof(local.apn), "%s", "--");
+    snprintf(local.signal_text, sizeof(local.signal_text), "%s", "--");
     snprintf(local.lte_status, sizeof(local.lte_status), "%s",
              include_ping ? "Checking" : "Refreshing");
     snprintf(local.last_error, sizeof(local.last_error), "%s", "-");

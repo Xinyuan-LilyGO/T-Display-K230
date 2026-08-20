@@ -50,6 +50,8 @@ typedef struct {
     char sim_status[48];
     char operator_name[96];
     char ip[96];
+    char apn[96];
+    char signal_text[96];
     char lte_status[160];
     char gnss_status[160];
     char last_error[160];
