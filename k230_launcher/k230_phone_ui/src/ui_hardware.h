@@ -42,6 +42,7 @@ int ui_hardware_get_cpu_temp_c(double *temp_c);
 int ui_hardware_get_aht20(double *temp_c, double *humidity_pct);
 int ui_bq25896_get_usb_present(int *present, int *vbus_mv);
 int ui_bq25896_get_power_state(int *usb_present, int *vbus_mv, int *vbat_mv);
+int ui_bq25896_get_charge_state(int *charging, int *done);
 int ui_bq27220_get_current_ma(int *current_ma);
 int ui_bq27220_get_voltage_mv(int *voltage_mv);
 int ui_bq27220_get_soc_pct(int *soc_pct);

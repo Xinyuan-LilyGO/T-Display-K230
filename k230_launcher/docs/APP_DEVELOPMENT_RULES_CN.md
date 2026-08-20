@@ -26,6 +26,8 @@
 - 硬件键盘和键盘背光依赖键盘底板。未检测到键盘时，必须保留软键盘输入能力。
 - nRF9151 LTE/GNSS 功能必须先验证 modem UART 和 AT 响应。Meshtastic 位置功能
   在 nRF9151 不存在时必须跳过 GNSS 发布。
+- 需要 nRF9151 SIM/LTE/GNSS 状态的应用应读取统一 nRF9151 manager 状态，
+  不要直接各自打开 AT UART。
 - AHT20 温湿度只有在读取成功时才发布。
 
 ## UI 行为

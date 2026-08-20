@@ -1,6 +1,7 @@
 #include "ui_cellular.h"
 
 #include "ui_i18n.h"
+#include "ui_input.h"
 #include "ui_nrf9151_manager.h"
 
 #include <ctype.h>
@@ -65,6 +66,9 @@ typedef enum {
     CELLULAR_ACTION_GNSS_NMEA,
     CELLULAR_ACTION_GNSS_STOP,
     CELLULAR_ACTION_FULL_TEST,
+    CELLULAR_ACTION_HTTP_GET,
+    CELLULAR_ACTION_HTTP_POST,
+    CELLULAR_ACTION_MQTT_TEST,
 } cellular_action_t;
 
 typedef struct {
@@ -185,6 +189,7 @@ static pthread_mutex_t cellular_uart_owner_lock = PTHREAD_MUTEX_INITIALIZER;
 static int cellular_worker_active;
 static int cellular_cno_monitor_active;
 static int cellular_cno_monitor_stop;
+static int cellular_manager_gnss_started;
 static int cellular_page_active;
 static int cellular_check_was_active;
 static uint64_t cellular_check_hide_us;
@@ -208,6 +213,10 @@ static int cellular_led_auto_pending;
 static uint64_t cellular_last_uart_us;
 static char cellular_last_nmea[NRF9151_NMEA_LINE_MAX];
 static char cellular_last_urc[192];
+static char cellular_http_url[256] = "http://example.com/";
+static char cellular_http_post_spec[512] = "http://example.com/|hello=k230";
+static char cellular_mqtt_spec[512] =
+    "broker.hivemq.com|1883|||k230/test|hello from k230|-1";
 static cellular_satellite_t cellular_sats[NRF9151_MAX_SATS];
 static uint64_t cellular_gnss_start_us;
 static uint64_t cellular_gnss_fix_us;
@@ -523,6 +532,83 @@ static void cellular_set_ip(const char *ip)
              ip && ip[0] ? ip : "--");
     cellular_network_rebuild_locked();
     pthread_mutex_unlock(&cellular_lock);
+}
+
+static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
+{
+    uint64_t now_us;
+
+    if(!status) {
+        return;
+    }
+    now_us = ui_monotonic_us();
+
+    pthread_mutex_lock(&cellular_lock);
+    cellular_cno_monitor_active = k230_nrf9151_gnss_monitor_active();
+    snprintf(cellular_link_status, sizeof(cellular_link_status), "%s",
+             status->link_ok ?
+             (status->firmware[0] && strcmp(status->firmware, "--") != 0 ?
+              status->firmware : "OK") :
+             (status->present ? "No AT response" : "Not detected"));
+    snprintf(cellular_sim_status, sizeof(cellular_sim_status), "%s",
+             status->sim_ready ? "OK" :
+             (status->sim_status[0] && strcmp(status->sim_status, "--") != 0 ?
+              status->sim_status : "Not tested"));
+    snprintf(cellular_lte_status, sizeof(cellular_lte_status), "%s",
+             status->lte_status[0] ? status->lte_status : "Not tested");
+    snprintf(cellular_gnss_status, sizeof(cellular_gnss_status), "%s",
+             status->gnss_status[0] ? status->gnss_status :
+             (status->gnss_running ? "GNSS running" : "Off"));
+    snprintf(cellular_imei_status, sizeof(cellular_imei_status), "%s",
+             status->imei[0] ? status->imei : "--");
+    snprintf(cellular_operator_status, sizeof(cellular_operator_status), "%s",
+             status->operator_name[0] ? status->operator_name : "--");
+    snprintf(cellular_ip_status, sizeof(cellular_ip_status), "%s",
+             status->ip[0] ? status->ip : "--");
+    cellular_network_rebuild_locked();
+
+    cellular_nmea_count = status->nmea_rx_count;
+    cellular_urc_count = status->nmea_valid_count;
+    if(status->gnss_has_fix) {
+        snprintf(cellular_gps_status, sizeof(cellular_gps_status),
+                 "Lat %.6f  Lon %.6f  Sats %u",
+                 status->latitude, status->longitude, status->satellites);
+        cellular_gnss_fix_valid = 1;
+        cellular_gnss_fix_us = now_us;
+        if(status->ttff_ms > 0UL) {
+            cellular_gnss_start_us =
+                now_us > status->ttff_ms * 1000ULL ?
+                now_us - status->ttff_ms * 1000ULL : now_us;
+        } else if(cellular_gnss_start_us == 0ULL) {
+            cellular_gnss_start_us = now_us;
+        }
+    } else {
+        snprintf(cellular_gps_status, sizeof(cellular_gps_status),
+                 "%s  NMEA rx=%u valid=%u nofix=%u sats=%u",
+                 status->gnss_phase[0] ? status->gnss_phase :
+                 (status->gnss_running ? "searching" : "off"),
+                 status->nmea_rx_count, status->nmea_valid_count,
+                 status->nmea_nofix_count, status->satellites);
+        if(status->gnss_running && cellular_gnss_start_us == 0ULL) {
+            cellular_gnss_start_us = now_us;
+        }
+        cellular_gnss_fix_valid = 0;
+    }
+    snprintf(cellular_sat_status, sizeof(cellular_sat_status),
+             "NMEA rx=%u valid=%u nofix=%u sats=%u last=%lums",
+             status->nmea_rx_count, status->nmea_valid_count,
+             status->nmea_nofix_count, status->satellites,
+             status->last_nmea_ms);
+    pthread_mutex_unlock(&cellular_lock);
+}
+
+static void cellular_sync_manager_status(void)
+{
+    k230_nrf9151_status_t status;
+
+    if(k230_nrf9151_read_status(&status, 15) == 0) {
+        cellular_apply_manager_status(&status);
+    }
 }
 
 void ui_cellular_startup(void)
@@ -866,6 +952,8 @@ static void cellular_status_refresh(void)
     int monitor_active;
     int exists = k230_nrf9151_uart_present();
 
+    cellular_sync_manager_status();
+
     pthread_mutex_lock(&cellular_lock);
     snprintf(status, sizeof(status), "%s", cellular_status);
     snprintf(link, sizeof(link), "%s", cellular_link_status);
@@ -947,37 +1035,21 @@ static void cellular_status_refresh(void)
 
 int ui_cellular_lte_signal_level(void)
 {
-    char sim[sizeof(cellular_sim_status)];
-    char lte[sizeof(cellular_lte_status)];
-    char ip[sizeof(cellular_ip_status)];
-    int level = 0;
+    k230_nrf9151_status_t status;
 
     if(!k230_nrf9151_uart_present()) {
         return 0;
     }
-
-    pthread_mutex_lock(&cellular_lock);
-    snprintf(sim, sizeof(sim), "%s", cellular_sim_status);
-    snprintf(lte, sizeof(lte), "%s", cellular_lte_status);
-    snprintf(ip, sizeof(ip), "%s", cellular_ip_status);
-    pthread_mutex_unlock(&cellular_lock);
-
-    if(strcmp(sim, "OK") != 0) {
+    if(k230_nrf9151_read_status(&status, 120) != 0) {
         return 0;
     }
-    if(ip[0] && strcmp(ip, "--") != 0 && strcmp(ip, "0.0.0.0") != 0) {
-        return 4;
+    if(!status.sim_ready) {
+        return 0;
     }
-    if(strstr(lte, "Ping OK") || strstr(lte, "IP ")) {
-        level = 4;
-    } else if(strstr(lte, "PDP active") || strstr(lte, "Packet attached")) {
-        level = 3;
-    } else if(strstr(lte, "Registered home") ||
-              strstr(lte, "Registered roaming")) {
-        level = 2;
-    }
-
-    return level;
+    return status.lte_signal_level > 0 ? status.lte_signal_level :
+           (status.pdp_active ? 4 :
+            (status.packet_attached ? 3 :
+             (status.lte_registered ? 2 : 0)));
 }
 
 static int cellular_open_uart(void)
@@ -2956,7 +3028,163 @@ static void cellular_action_commands(cellular_action_t action,
     case CELLULAR_ACTION_FULL_TEST:
         *title = "LTE";
         break;
+    case CELLULAR_ACTION_HTTP_GET:
+        *title = "HTTP GET";
+        break;
+    case CELLULAR_ACTION_HTTP_POST:
+        *title = "HTTP POST";
+        break;
+    case CELLULAR_ACTION_MQTT_TEST:
+        *title = "MQTT";
+        break;
     }
+}
+
+static void cellular_copy_field(const char *text, int index,
+                                char *out, size_t out_len)
+{
+    const char *start = text ? text : "";
+    const char *end;
+    int current = 0;
+    size_t len;
+
+    if(!out || out_len == 0U) {
+        return;
+    }
+    out[0] = '\0';
+    while(current < index && *start) {
+        if(*start++ == '|') {
+            current++;
+        }
+    }
+    end = start;
+    while(*end && *end != '|') {
+        end++;
+    }
+    len = (size_t)(end - start);
+    if(len >= out_len) {
+        len = out_len - 1U;
+    }
+    memcpy(out, start, len);
+    out[len] = '\0';
+    ui_trim_text(out);
+}
+
+static int cellular_run_manager_action(cellular_action_t action)
+{
+    k230_nrf9151_status_t status;
+    char log[NRF9151_LOG_MAX];
+    int rc = -1;
+
+    log[0] = '\0';
+    if(action == CELLULAR_ACTION_FULL_TEST ||
+       action == CELLULAR_ACTION_HTTP_GET ||
+       action == CELLULAR_ACTION_HTTP_POST ||
+       action == CELLULAR_ACTION_MQTT_TEST) {
+        (void)k230_nrf9151_stop_gnss_monitor();
+        pthread_mutex_lock(&cellular_lock);
+        cellular_cno_monitor_active = 0;
+        cellular_manager_gnss_started = 0;
+        pthread_mutex_unlock(&cellular_lock);
+        usleep(250000);
+    }
+
+    if(action == CELLULAR_ACTION_FULL_TEST) {
+        rc = k230_nrf9151_run_lte_check(&status, log, sizeof(log));
+        cellular_apply_manager_status(&status);
+    } else if(action == CELLULAR_ACTION_HTTP_GET ||
+              action == CELLULAR_ACTION_HTTP_POST) {
+        k230_nrf9151_http_request_t req;
+        char url[256];
+        char body[256];
+
+        memset(&req, 0, sizeof(req));
+        if(action == CELLULAR_ACTION_HTTP_GET) {
+            snprintf(url, sizeof(url), "%s", cellular_http_url);
+            body[0] = '\0';
+            req.method = K230_NRF9151_HTTP_GET;
+        } else {
+            cellular_copy_field(cellular_http_post_spec, 0, url, sizeof(url));
+            cellular_copy_field(cellular_http_post_spec, 1, body, sizeof(body));
+            req.method = K230_NRF9151_HTTP_POST;
+            req.body = body;
+        }
+        req.url = url;
+        req.sec_tag = -1;
+        rc = k230_nrf9151_http_request(&req, log, sizeof(log));
+    } else if(action == CELLULAR_ACTION_MQTT_TEST) {
+        k230_nrf9151_mqtt_request_t req;
+        char broker[160];
+        char port_text[16];
+        char user[96];
+        char pass[96];
+        char topic[160];
+        char payload[256];
+        char sec_tag_text[16];
+
+        memset(&req, 0, sizeof(req));
+        cellular_copy_field(cellular_mqtt_spec, 0, broker, sizeof(broker));
+        cellular_copy_field(cellular_mqtt_spec, 1, port_text,
+                            sizeof(port_text));
+        cellular_copy_field(cellular_mqtt_spec, 2, user, sizeof(user));
+        cellular_copy_field(cellular_mqtt_spec, 3, pass, sizeof(pass));
+        cellular_copy_field(cellular_mqtt_spec, 4, topic, sizeof(topic));
+        cellular_copy_field(cellular_mqtt_spec, 5, payload, sizeof(payload));
+        cellular_copy_field(cellular_mqtt_spec, 6, sec_tag_text,
+                            sizeof(sec_tag_text));
+        req.broker = broker;
+        req.port = port_text[0] ? atoi(port_text) : 1883;
+        req.client_id = "k230-nrf9151";
+        req.username = user;
+        req.password = pass;
+        req.topic = topic[0] ? topic : "k230/test";
+        req.payload = payload;
+        req.qos = 0;
+        req.retain = 0;
+        req.sec_tag = sec_tag_text[0] ? atoi(sec_tag_text) : -1;
+        req.auth = user[0] || pass[0] ?
+                   K230_NRF9151_MQTT_AUTH_USER_PASS :
+                   K230_NRF9151_MQTT_AUTH_NONE;
+        rc = k230_nrf9151_mqtt_test(&req, log, sizeof(log));
+    } else if(action == CELLULAR_ACTION_GNSS_START ||
+              action == CELLULAR_ACTION_GNSS_NMEA ||
+              action == CELLULAR_ACTION_GNSS_STATUS) {
+        rc = k230_nrf9151_start_gnss_monitor();
+        pthread_mutex_lock(&cellular_lock);
+        cellular_cno_monitor_active = (rc == 0);
+        cellular_manager_gnss_started = (rc == 0);
+        pthread_mutex_unlock(&cellular_lock);
+        snprintf(log, sizeof(log), "%s", rc == 0 ?
+                 "GNSS manager monitor started" :
+                 "GNSS manager monitor start failed");
+        if(k230_nrf9151_read_status(&status, 0) == 0) {
+            cellular_apply_manager_status(&status);
+        }
+    } else if(action == CELLULAR_ACTION_GNSS_STOP) {
+        rc = k230_nrf9151_stop_gnss_monitor();
+        pthread_mutex_lock(&cellular_lock);
+        cellular_cno_monitor_active = 0;
+        cellular_manager_gnss_started = 0;
+        pthread_mutex_unlock(&cellular_lock);
+        snprintf(log, sizeof(log), "%s", "GNSS manager monitor stopped");
+    }
+
+    if(log[0]) {
+        char *saveptr = NULL;
+        char *line = strtok_r(log, "\n", &saveptr);
+
+        while(line) {
+            cellular_log_append("%s", line);
+            line = strtok_r(NULL, "\n", &saveptr);
+        }
+    }
+    cellular_set_status(rc == 0 ? "%s OK" : "%s issues",
+                        action == CELLULAR_ACTION_HTTP_GET ? "HTTP GET" :
+                        action == CELLULAR_ACTION_HTTP_POST ? "HTTP POST" :
+                        action == CELLULAR_ACTION_MQTT_TEST ? "MQTT" :
+                        action == CELLULAR_ACTION_FULL_TEST ? "LTE" :
+                        "GNSS");
+    return rc;
 }
 
 static void *cellular_worker_main(void *arg)
@@ -2984,6 +3212,20 @@ static void *cellular_worker_main(void *arg)
         snprintf(cellular_lte_status, sizeof(cellular_lte_status),
                  "%s", "Testing");
         pthread_mutex_unlock(&cellular_lock);
+    }
+
+    if(action == CELLULAR_ACTION_FULL_TEST ||
+       action == CELLULAR_ACTION_HTTP_GET ||
+       action == CELLULAR_ACTION_HTTP_POST ||
+       action == CELLULAR_ACTION_MQTT_TEST ||
+       action == CELLULAR_ACTION_GNSS_START ||
+       action == CELLULAR_ACTION_GNSS_STATUS ||
+       action == CELLULAR_ACTION_GNSS_NMEA ||
+       action == CELLULAR_ACTION_GNSS_STOP) {
+        int rc = cellular_run_manager_action(action);
+
+        cellular_set_action_result(action, rc == 0);
+        goto out;
     }
 
 #if NRF9151_EN_CONTROL_ENABLED
@@ -3061,7 +3303,12 @@ static void cellular_start_action(cellular_action_t action)
     int busy = 0;
 
     pthread_mutex_lock(&cellular_lock);
-    busy = cellular_worker_active || cellular_cno_monitor_active;
+    busy = cellular_worker_active ||
+           (cellular_cno_monitor_active &&
+            action != CELLULAR_ACTION_FULL_TEST &&
+            action != CELLULAR_ACTION_HTTP_GET &&
+            action != CELLULAR_ACTION_HTTP_POST &&
+            action != CELLULAR_ACTION_MQTT_TEST);
     if(!busy) {
         cellular_worker_active = 1;
     }
@@ -3100,27 +3347,110 @@ static void cellular_action_event_cb(lv_event_t *event)
     cellular_start_action(action);
 }
 
+static void cellular_http_get_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    snprintf(cellular_http_url, sizeof(cellular_http_url), "%s",
+             text && text[0] ? text : "http://example.com/");
+    ui_trim_text(cellular_http_url);
+    cellular_start_action(CELLULAR_ACTION_HTTP_GET);
+}
+
+static void cellular_http_post_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    snprintf(cellular_http_post_spec, sizeof(cellular_http_post_spec), "%s",
+             text && text[0] ? text : "http://example.com/|hello=k230");
+    ui_trim_text(cellular_http_post_spec);
+    cellular_start_action(CELLULAR_ACTION_HTTP_POST);
+}
+
+static void cellular_mqtt_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    snprintf(cellular_mqtt_spec, sizeof(cellular_mqtt_spec), "%s",
+             text && text[0] ? text :
+             "broker.hivemq.com|1883|||k230/test|hello from k230|-1");
+    ui_trim_text(cellular_mqtt_spec);
+    cellular_start_action(CELLULAR_ACTION_MQTT_TEST);
+}
+
+static void cellular_http_get_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+
+    (void)event;
+    memset(&config, 0, sizeof(config));
+    config.title = "HTTP GET";
+    config.placeholder = "http://host/path";
+    config.initial_text = cellular_http_url;
+    config.max_length = sizeof(cellular_http_url) - 1U;
+    config.min_length = 8U;
+    config.min_length_text = "Enter http:// or https:// URL";
+    config.submit_cb = cellular_http_get_submit_cb;
+    config.submit_text = "Run";
+    config.cancel_text = "Cancel";
+    ui_input_dialog_open(&config);
+}
+
+static void cellular_http_post_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+
+    (void)event;
+    memset(&config, 0, sizeof(config));
+    config.title = "HTTP POST";
+    config.placeholder = "http://host/path|body";
+    config.initial_text = cellular_http_post_spec;
+    config.max_length = sizeof(cellular_http_post_spec) - 1U;
+    config.min_length = 8U;
+    config.min_length_text = "Use URL|body";
+    config.submit_cb = cellular_http_post_submit_cb;
+    config.submit_text = "Run";
+    config.cancel_text = "Cancel";
+    ui_input_dialog_open(&config);
+}
+
+static void cellular_mqtt_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+
+    (void)event;
+    memset(&config, 0, sizeof(config));
+    config.title = "MQTT";
+    config.placeholder = "broker|port|user|pass|topic|payload|sec_tag";
+    config.initial_text = cellular_mqtt_spec;
+    config.max_length = sizeof(cellular_mqtt_spec) - 1U;
+    config.min_length = 3U;
+    config.min_length_text = "Enter MQTT broker";
+    config.submit_cb = cellular_mqtt_submit_cb;
+    config.submit_text = "Run";
+    config.cancel_text = "Cancel";
+    ui_input_dialog_open(&config);
+}
+
 static void cellular_cno_monitor_event_cb(lv_event_t *event)
 {
-    pthread_t thread;
     int active;
     int busy;
+    int rc = 0;
 
     (void)event;
     pthread_mutex_lock(&cellular_lock);
-    active = cellular_cno_monitor_active;
+    active = cellular_cno_monitor_active ||
+             k230_nrf9151_gnss_monitor_active();
     busy = cellular_worker_active;
-    if(active) {
-        cellular_cno_monitor_stop = 1;
-    } else if(!busy) {
-        cellular_cno_monitor_active = 1;
-        cellular_cno_monitor_stop = 0;
-    }
     pthread_mutex_unlock(&cellular_lock);
 
     if(active) {
-        cellular_log_append("GNSS monitor stop requested");
-        cellular_set_status("Stopping GNSS");
+        rc = k230_nrf9151_stop_gnss_monitor();
+        pthread_mutex_lock(&cellular_lock);
+        cellular_cno_monitor_active = 0;
+        cellular_cno_monitor_stop = 0;
+        cellular_manager_gnss_started = 0;
+        pthread_mutex_unlock(&cellular_lock);
+        cellular_log_append("GNSS manager monitor stop requested");
+        cellular_set_status(rc == 0 ? "GNSS stopped" : "GNSS stop failed");
         app_request_fast_refresh();
         return;
     }
@@ -3130,14 +3460,17 @@ static void cellular_cno_monitor_event_cb(lv_event_t *event)
         return;
     }
 
-    if(pthread_create(&thread, NULL, cellular_cno_monitor_main, NULL) == 0) {
-        pthread_detach(thread);
+    rc = k230_nrf9151_start_gnss_monitor();
+    pthread_mutex_lock(&cellular_lock);
+    cellular_cno_monitor_active = (rc == 0);
+    cellular_cno_monitor_stop = 0;
+    cellular_manager_gnss_started = (rc == 0);
+    pthread_mutex_unlock(&cellular_lock);
+    if(rc == 0) {
+        cellular_log_append("GNSS manager monitor started");
+        cellular_set_status("GNSS");
     } else {
-        pthread_mutex_lock(&cellular_lock);
-        cellular_cno_monitor_active = 0;
-        cellular_cno_monitor_stop = 0;
-        pthread_mutex_unlock(&cellular_lock);
-        cellular_log_append("pthread_create GNSS monitor failed");
+        cellular_log_append("GNSS manager monitor start failed");
         cellular_set_status("GNSS failed");
     }
     app_request_fast_refresh();
@@ -3221,7 +3554,9 @@ void ui_cellular_create(lv_obj_t *scr)
     int gps_label_h = landscape ? 58 : 76;
     int ttff_y = 42 + gps_label_h + 8;
     int chart_y = ttff_y + 34;
-    int log_title_y = chart_y + 162;
+    int net_button_y = chart_y + 162;
+    int net_btn_w = (info_inner_w - 24) / 3;
+    int log_title_y = net_button_y + 52;
     int log_text_y = log_title_y + 38;
 
     pthread_mutex_lock(&cellular_lock);
@@ -3314,6 +3649,16 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_align(cellular_sat_chart, LV_ALIGN_TOP_LEFT, 0, chart_y);
     cellular_sat_label = NULL;
 
+    cellular_button(info_panel, 0, net_button_y, net_btn_w,
+                    "HTTP GET", 0x38BDF8,
+                    cellular_http_get_event_cb, NULL);
+    cellular_button(info_panel, net_btn_w + 12, net_button_y, net_btn_w,
+                    "HTTP POST", 0x60A5FA,
+                    cellular_http_post_event_cb, NULL);
+    cellular_button(info_panel, (net_btn_w + 12) * 2, net_button_y, net_btn_w,
+                    "MQTT", 0xA78BFA,
+                    cellular_mqtt_event_cb, NULL);
+
     ui_label(info_panel, "Serial log", &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_align(lv_obj_get_child(info_panel,
                                   lv_obj_get_child_count(info_panel) - 1),
@@ -3367,13 +3712,21 @@ void ui_cellular_create(lv_obj_t *scr)
 
 void ui_cellular_cleanup(void)
 {
+    int stop_manager = 0;
+
     pthread_mutex_lock(&cellular_lock);
     cellular_page_active = 0;
     if(cellular_cno_monitor_active) {
         cellular_cno_monitor_stop = 1;
     }
+    stop_manager = cellular_manager_gnss_started;
+    cellular_manager_gnss_started = 0;
+    cellular_cno_monitor_active = 0;
     pthread_mutex_unlock(&cellular_lock);
-    cellular_log_append("Cellular page cleanup: GNSS monitor stop requested");
+    if(stop_manager) {
+        (void)k230_nrf9151_stop_gnss_monitor();
+        cellular_log_append("Cellular page cleanup: GNSS manager stop requested");
+    }
 
     if(cellular_timer) {
         lv_timer_delete(cellular_timer);

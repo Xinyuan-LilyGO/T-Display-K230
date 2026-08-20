@@ -522,6 +522,8 @@ static pthread_mutex_t status_hw_lock = PTHREAD_MUTEX_INITIALIZER;
 static int status_battery_cache_valid;
 static int status_battery_available_cache;
 static int status_battery_soc_cache = -1;
+static int status_battery_charging_cache;
+static int status_battery_charge_done_cache;
 static int status_battery_refresh_busy;
 static uint64_t status_battery_next_refresh_us;
 static uint64_t touch_block_last_log_us;
@@ -4228,17 +4230,30 @@ static void *status_battery_probe_thread(void *arg)
 {
     int soc = -1;
     int available = 0;
+    int charging = 0;
+    int done = 0;
+    int current_ma = 0;
 
     (void)arg;
     if(ui_extension_keyboard_base_available() &&
        ui_bq27220_get_soc_pct(&soc) == 0) {
         available = 1;
     }
+    if(ui_extension_keyboard_base_available()) {
+        (void)ui_bq25896_get_charge_state(&charging, &done);
+        if(!charging && available &&
+           ui_bq27220_get_current_ma(&current_ma) == 0 &&
+           current_ma > 20) {
+            charging = 1;
+        }
+    }
 
     pthread_mutex_lock(&status_hw_lock);
     status_battery_cache_valid = 1;
     status_battery_available_cache = available;
     status_battery_soc_cache = available ? soc : -1;
+    status_battery_charging_cache = charging;
+    status_battery_charge_done_cache = done;
     status_battery_refresh_busy = 0;
     status_battery_next_refresh_us =
         monotonic_us() + STATUS_BATTERY_REFRESH_US;
@@ -4277,7 +4292,8 @@ static void status_schedule_battery_probe(void)
     pthread_mutex_unlock(&status_hw_lock);
 }
 
-static void status_draw_battery_level(int available, int soc)
+static void status_draw_battery_level(int available, int soc,
+                                      int charging, int charge_done)
 {
     uint32_t color = available ?
                      (soc <= 15 ? 0xEF4D5A :
@@ -4285,6 +4301,10 @@ static void status_draw_battery_level(int available, int soc)
                      0x8B949E;
     int fill_w = 0;
     char percent[8];
+
+    if(charging || charge_done) {
+        color = charge_done ? 0x3DA5FF : 0x25C281;
+    }
 
     if(available) {
         if(soc < 0) {
@@ -4296,9 +4316,10 @@ static void status_draw_battery_level(int available, int soc)
         if(soc > 0 && fill_w < 2) {
             fill_w = 2;
         }
-        snprintf(percent, sizeof(percent), "%d%%", soc);
+        snprintf(percent, sizeof(percent), charging ? "+%d" : "%d%%", soc);
     } else {
-        snprintf(percent, sizeof(percent), "--");
+        fill_w = charging ? 8 : 0;
+        snprintf(percent, sizeof(percent), charging ? "+" : "--");
     }
 
     if(status_battery_shell_obj && lv_obj_is_valid(status_battery_shell_obj)) {
@@ -4326,6 +4347,8 @@ static void status_update_battery(void)
     int cache_valid;
     int available;
     int soc;
+    int charging;
+    int charge_done;
 
     status_schedule_battery_probe();
 
@@ -4333,9 +4356,13 @@ static void status_update_battery(void)
     cache_valid = status_battery_cache_valid;
     available = status_battery_available_cache;
     soc = status_battery_soc_cache;
+    charging = status_battery_charging_cache;
+    charge_done = status_battery_charge_done_cache;
     pthread_mutex_unlock(&status_hw_lock);
 
-    status_draw_battery_level(cache_valid && available, soc);
+    status_draw_battery_level(cache_valid && available, soc,
+                              cache_valid && charging,
+                              cache_valid && charge_done);
 }
 
 static void status_set_lte_bars(int level, uint32_t color)

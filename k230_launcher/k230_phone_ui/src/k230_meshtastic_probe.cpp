@@ -5841,72 +5841,94 @@ static bool nrf9151_gnss_start_locked(const probe_options_t &opts)
 
 static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
 {
-    char resp[MESHTASTIC_NRF9151_RESPONSE_MAX];
-    int rc;
+    k230_nrf9151_status_t status;
 
     if(!opts.position_enabled) {
         nrf9151_gnss_close_uart();
+        (void)k230_nrf9151_stop_gnss_monitor();
         mesh_gnss.enabled = false;
         nrf9151_gnss_set_state("off", "off", "Position disabled");
         return;
     }
     mesh_gnss.enabled = true;
-    if(mesh_gnss.fd < 0) {
+    mesh_gnss.probed = true;
+    nrf9151_gnss_close_uart();
+
+    if(!k230_nrf9151_uart_present()) {
+        mesh_gnss.present = false;
+        mesh_gnss.configured = false;
+        nrf9151_gnss_set_state("missing", "unavailable",
+                               "nRF9151 UART missing");
+        return;
+    }
+
+    if(!k230_nrf9151_gnss_monitor_active()) {
         if(now < mesh_gnss.next_probe_us) {
             return;
         }
         mesh_gnss.next_probe_us = now + MESHTASTIC_POSITION_RETRY_US;
-        mesh_gnss.probed = true;
-        nrf9151_gnss_set_state("probing", "unavailable", "Opening UART");
-        (void)nrf9151_configure_uart3_iomux();
-        mesh_gnss.lock_fd = k230_nrf9151_acquire_uart("meshtastic-gnss",
-                                                      0);
-        if(mesh_gnss.lock_fd < 0) {
-            mesh_gnss.present = false;
-            nrf9151_gnss_set_state("busy", "unavailable", "nRF9151 busy");
-            daemon_event("nRF9151 GNSS UART busy path=%s err=%s",
-                         opts.gps_uart_path.c_str(), strerror(errno));
-            return;
-        }
-        mesh_gnss.fd = nrf9151_open_uart(opts.gps_uart_path);
-        if(mesh_gnss.fd < 0) {
-            nrf9151_gnss_close_uart();
-            mesh_gnss.present = false;
-            nrf9151_gnss_set_state("missing", "unavailable", strerror(errno));
-            daemon_event("nRF9151 GNSS UART open failed path=%s err=%s",
-                         opts.gps_uart_path.c_str(), strerror(errno));
-            return;
-        }
-        rc = nrf9151_exchange(mesh_gnss.fd, "AT", resp, sizeof(resp),
-                              MESHTASTIC_NRF9151_PROBE_TIMEOUT_US);
-        nrf9151_gnss_process_response(resp);
-        if(rc != 0) {
-            nrf9151_gnss_close_uart();
-            mesh_gnss.present = false;
+        if(k230_nrf9151_start_gnss_monitor() != 0) {
+            mesh_gnss.present = true;
             mesh_gnss.configured = false;
-            nrf9151_gnss_set_state("missing", "unavailable",
-                                   "No AT response");
-            daemon_event("nRF9151 GNSS probe failed path=%s rc=%d",
-                         opts.gps_uart_path.c_str(), rc);
+            nrf9151_gnss_set_state("busy", "unavailable",
+                                   "nRF9151 manager busy");
+            daemon_event("nRF9151 manager GNSS start failed: %s",
+                         strerror(errno));
             return;
         }
+        daemon_event("nRF9151 manager GNSS monitor requested");
+    }
+
+    if(k230_nrf9151_read_status(&status, 0) != 0) {
         mesh_gnss.present = true;
-        nrf9151_gnss_set_state("present", "starting", "AT OK");
-        daemon_event("nRF9151 detected for Meshtastic GNSS path=%s",
-                     opts.gps_uart_path.c_str());
+        mesh_gnss.configured = k230_nrf9151_gnss_monitor_active();
+        if(nrf9151_gnss_apply_cache_fix(true)) {
+            return;
+        }
+        nrf9151_gnss_set_state("present", "starting",
+                               "Waiting nRF9151 manager status");
+        return;
     }
-    if(!mesh_gnss.configured) {
-        (void)nrf9151_gnss_start_locked(opts);
+
+    mesh_gnss.present = status.present || k230_nrf9151_uart_present();
+    mesh_gnss.configured = status.gnss_running;
+    mesh_gnss.nmea_rx_count = status.nmea_rx_count;
+    mesh_gnss.nmea_nofix_count = status.nmea_nofix_count;
+    mesh_gnss.position.sats_in_view = status.satellites;
+    if(status.nmea_rx_count > 0U) {
+        mesh_gnss.last_nmea_us = now;
+        mesh_gnss.last_rx_us = now;
     }
-    nrf9151_gnss_read_available();
-    if(mesh_gnss.configured && !mesh_gnss.has_fix &&
-       mesh_gnss.session_start_us > 0ULL &&
-       now >= mesh_gnss.session_start_us &&
-       now - mesh_gnss.session_start_us > MESHTASTIC_NRF9151_SEARCH_RESTART_US &&
-       (mesh_gnss.last_search_restart_us == 0ULL ||
-        now >= mesh_gnss.last_search_restart_us + MESHTASTIC_NRF9151_SEARCH_RESTART_GAP_US)) {
-        (void)nrf9151_gnss_restart_session_locked(opts, "search-timeout");
+    if(status.ttff_ms > 0UL) {
+        mesh_gnss.ttff_ms = status.ttff_ms;
+        mesh_gnss.ttff_valid = true;
+        mesh_gnss.first_fix_reported = true;
     }
+    if(mesh_gnss.session_start_us == 0ULL && status.gnss_running) {
+        mesh_gnss.session_start_us = now;
+    }
+
+    if(status.gnss_has_fix) {
+        nrf9151_gnss_apply_fix(status.latitude, status.longitude,
+                               status.has_altitude != 0,
+                               status.altitude_m, false, 0.0,
+                               false, 0.0, status.satellites,
+                               true, "nrf9151-manager");
+        mesh_gnss.used_cache_fix = false;
+        return;
+    }
+
+    if(nrf9151_gnss_apply_cache_fix(true)) {
+        return;
+    }
+
+    mesh_gnss.has_fix = false;
+    nrf9151_gnss_set_state(status.present ? "present" : "missing",
+                           status.gnss_phase[0] ? status.gnss_phase :
+                           (status.gnss_running ? "searching" :
+                            "unavailable"),
+                           status.gnss_status[0] ? status.gnss_status :
+                           "Waiting nRF9151 GNSS");
 }
 
 static void nrf9151_gnss_close(void)

@@ -30,6 +30,8 @@ Examples:
   Keep software input available when the keyboard is absent.
 - nRF9151 LTE/GNSS features must first verify the modem UART and AT response.
   Meshtastic position features must skip GNSS publishing when nRF9151 is absent.
+- Apps that need nRF9151 SIM/LTE/GNSS state should read the shared nRF9151
+  manager status instead of opening the AT UART directly.
 - AHT20 temperature/humidity should be published only when the sensor read
   succeeds.
 

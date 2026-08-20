@@ -2811,6 +2811,31 @@ int ui_bq25896_get_power_state(int *usb_present, int *vbus_mv, int *vbat_mv)
     return 0;
 }
 
+int ui_bq25896_get_charge_state(int *charging, int *done)
+{
+    bq25896_reading_t reading;
+    int state;
+
+    if(charging) {
+        *charging = 0;
+    }
+    if(done) {
+        *done = 0;
+    }
+    if(bq25896_read(&reading) != 0) {
+        return -1;
+    }
+
+    state = (reading.status_reg >> 3) & 0x03;
+    if(charging) {
+        *charging = (state == 1 || state == 2);
+    }
+    if(done) {
+        *done = (state == 3);
+    }
+    return 0;
+}
+
 int ui_bq27220_get_current_ma(int *current_ma)
 {
     bq27220_reading_t reading;
