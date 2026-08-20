@@ -639,7 +639,6 @@ static int nrf9151_manager_urc_done_seen(const char *text)
         "#XMQTTEVT: 3,",
         "#XMQTTEVT: 7,",
         "#XMQTTMSG:",
-        "#XDATAMODE: 0",
         "+CME ERROR",
         "+CMS ERROR",
         "ERROR",
@@ -2669,31 +2668,88 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
         if(strstr(more, "#XMQTTEVT: 0,0") == NULL) {
             nrf9151_manager_log_append(log, log_len,
                                        "MQTT CONNACK not observed");
+            rc = -1;
         }
     }
     if(rc == 0 && topic[0]) {
         snprintf(cmd, sizeof(cmd), "AT#XMQTTSUB=\"%s\",%d", topic,
                  request->qos >= 0 && request->qos <= 2 ? request->qos : 0);
-        (void)nrf9151_manager_run_cmd_logged(fd, cmd,
-                                             K230_NRF9151_CMD_TIMEOUT_US,
-                                             NULL, log, log_len, cancel_cb,
-                                             cancel_user);
+        rc = nrf9151_manager_run_cmd_logged(fd, cmd,
+                                            K230_NRF9151_CMD_TIMEOUT_US,
+                                            NULL, log, log_len, cancel_cb,
+                                            cancel_user);
+        if(rc != 0) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT subscribe failed");
+        }
     }
     if(rc == 0 && payload[0]) {
+        int got_publish_evt = 0;
+        int got_loopback = 0;
+
         snprintf(cmd, sizeof(cmd), "AT#XMQTTPUB=\"%s\",\"%s\",%d,%d", topic,
                  payload,
                  request->qos >= 0 && request->qos <= 2 ? request->qos : 0,
                  request->retain ? 1 : 0);
-        (void)nrf9151_manager_run_cmd_logged(fd, cmd,
-                                             K230_NRF9151_CMD_TIMEOUT_US,
-                                             NULL, log, log_len, cancel_cb,
-                                             cancel_user);
+        rc = nrf9151_manager_run_cmd_logged(fd, cmd,
+                                            K230_NRF9151_CMD_TIMEOUT_US,
+                                            NULL, log, log_len, cancel_cb,
+                                            cancel_user);
+        if(rc != 0) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT publish command failed");
+        }
         more[0] = '\0';
-        (void)nrf9151_manager_read_urc(fd, more, sizeof(more), 5000000ULL,
-                                       cancel_cb, cancel_user);
-        if(more[0]) {
-            nrf9151_manager_trim_text(more);
-            nrf9151_manager_log_append(log, log_len, "%s", more);
+        if(rc == 0) {
+            int wait_rc;
+
+            wait_rc = nrf9151_manager_read_urc(fd, more, sizeof(more),
+                                               10000000ULL, cancel_cb,
+                                               cancel_user);
+            if(wait_rc == -2) {
+                rc = -2;
+            }
+            if(more[0]) {
+                nrf9151_manager_trim_text(more);
+                nrf9151_manager_log_append(log, log_len, "%s", more);
+            }
+            got_publish_evt = strstr(more, "#XMQTTEVT: 7,0") != NULL;
+            got_loopback = strstr(more, "#XMQTTMSG:") != NULL;
+        }
+        if(rc == 0 && !got_publish_evt) {
+            char extra[2048] = "";
+
+            (void)nrf9151_manager_read_urc(fd, extra, sizeof(extra),
+                                           8000000ULL, cancel_cb, cancel_user);
+            if(extra[0]) {
+                nrf9151_manager_trim_text(extra);
+                nrf9151_manager_log_append(log, log_len, "%s", extra);
+                got_publish_evt = strstr(extra, "#XMQTTEVT: 7,0") != NULL;
+                got_loopback = got_loopback ||
+                               strstr(extra, "#XMQTTMSG:") != NULL;
+            }
+        }
+        if(rc == 0 && !got_loopback) {
+            char extra[2048] = "";
+
+            (void)nrf9151_manager_read_urc(fd, extra, sizeof(extra),
+                                           8000000ULL, cancel_cb, cancel_user);
+            if(extra[0]) {
+                nrf9151_manager_trim_text(extra);
+                nrf9151_manager_log_append(log, log_len, "%s", extra);
+                got_loopback = strstr(extra, "#XMQTTMSG:") != NULL;
+                got_publish_evt = got_publish_evt ||
+                                  strstr(extra, "#XMQTTEVT: 7,0") != NULL;
+            }
+        }
+        if(rc == 0 && !got_publish_evt) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT publish event not observed");
+            rc = -1;
+        } else if(rc == 0 && !got_loopback) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT loopback message not observed");
+            rc = -1;
         }
     }
     (void)nrf9151_manager_run_cmd_logged(fd, "AT#XMQTTCON=0",

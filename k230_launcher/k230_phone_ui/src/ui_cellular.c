@@ -227,9 +227,9 @@ static uint64_t cellular_last_uart_us;
 static char cellular_last_nmea[NRF9151_NMEA_LINE_MAX];
 static char cellular_last_urc[192];
 static char cellular_http_url[256] = "http://example.com/";
-static char cellular_http_post_spec[512] = "http://example.com/|hello=k230";
+static char cellular_http_post_spec[512] = "http://httpbin.org/post|hello=k230";
 static char cellular_mqtt_spec[512] =
-    "broker.hivemq.com|1883|||k230/test|hello from k230|-1";
+    "test.mosquitto.org|1883|||k230/nrf9151/test|hello from k230|-1";
 static cellular_satellite_t cellular_sats[NRF9151_MAX_SATS];
 static uint64_t cellular_gnss_start_us;
 static uint64_t cellular_gnss_fix_us;
@@ -642,6 +642,59 @@ static void cellular_queue_lte_result(int rc,
         }
     }
     cellular_queue_result("LTE Failed", 0, message);
+}
+
+static int cellular_log_has(const char *log, const char *needle)
+{
+    return log && needle && strstr(log, needle) != NULL;
+}
+
+static void cellular_queue_mqtt_result(int rc,
+                                       const k230_nrf9151_mqtt_request_t *request,
+                                       const char *broker, const char *topic,
+                                       const char *payload, const char *log)
+{
+    char reason[256];
+    char message[NRF9151_RESULT_TEXT_MAX];
+    const char *broker_text =
+        broker && broker[0] ? broker :
+        (request && request->broker ? request->broker : "-");
+    const char *topic_text =
+        topic && topic[0] ? topic :
+        (request && request->topic ? request->topic : "-");
+    const char *payload_text =
+        payload && payload[0] ? payload :
+        (request && request->payload ? request->payload : "-");
+    int connect_ok = cellular_log_has(log, "#XMQTTEVT: 0,0");
+    int publish_ok = cellular_log_has(log, "#XMQTTEVT: 7,0");
+    int receive_ok = cellular_log_has(log, "#XMQTTMSG:");
+
+    if(rc == 0) {
+        snprintf(message, sizeof(message),
+                 "MQTT OK\nBroker: %s\nTopic: %s\nPayload: %s\n\nConnect: %s\nSubscribe: OK\nPublish: %s\nLoopback: %s",
+                 broker_text, topic_text, payload_text,
+                 connect_ok ? "OK" : "not confirmed",
+                 publish_ok ? "OK" : "not confirmed",
+                 receive_ok ? "received" : "not observed");
+        cellular_queue_result("MQTT OK", 1, message);
+        return;
+    }
+
+    cellular_failure_reason(rc, -1, log, reason, sizeof(reason));
+    snprintf(message, sizeof(message),
+             "MQTT failed\nBroker: %s\nTopic: %s\nReason: %s\n\nConnect: %s\nPublish: %s\nLoopback: %s\n\nLast log:\n",
+             broker_text, topic_text, reason,
+             connect_ok ? "OK" : "not confirmed",
+             publish_ok ? "OK" : "not confirmed",
+             receive_ok ? "received" : "not observed");
+    {
+        size_t used = strlen(message);
+        if(used + 1U < sizeof(message)) {
+            cellular_log_tail_lines(log, message + used,
+                                    sizeof(message) - used, 8);
+        }
+    }
+    cellular_queue_result("MQTT Failed", 0, message);
 }
 
 static void cellular_set_summary(char *dst, size_t dst_len, const char *fmt, ...)
@@ -3472,6 +3525,7 @@ static int cellular_run_manager_action(cellular_action_t action,
         char topic[160];
         char payload[256];
         char sec_tag_text[16];
+        char client_id[96];
 
         memset(&req, 0, sizeof(req));
         cellular_copy_field(cellular_mqtt_spec, 0, broker, sizeof(broker));
@@ -3483,12 +3537,14 @@ static int cellular_run_manager_action(cellular_action_t action,
         cellular_copy_field(cellular_mqtt_spec, 5, payload, sizeof(payload));
         cellular_copy_field(cellular_mqtt_spec, 6, sec_tag_text,
                             sizeof(sec_tag_text));
+        snprintf(client_id, sizeof(client_id), "k230-%ld-%lu",
+                 (long)getpid(), (unsigned long)time(NULL));
         req.broker = broker;
         req.port = port_text[0] ? atoi(port_text) : 1883;
-        req.client_id = "k230-nrf9151";
+        req.client_id = client_id;
         req.username = user;
         req.password = pass;
-        req.topic = topic[0] ? topic : "k230/test";
+        req.topic = topic[0] ? topic : "k230/nrf9151/test";
         req.payload = payload;
         req.qos = 0;
         req.retain = 0;
@@ -3499,6 +3555,10 @@ static int cellular_run_manager_action(cellular_action_t action,
         rc = k230_nrf9151_mqtt_test_ex(
             &req, log, sizeof(log), cellular_action_cancel_cb,
             (void *)(uintptr_t)generation);
+        if(cellular_generation_active(generation)) {
+            cellular_queue_mqtt_result(rc, &req, broker, req.topic,
+                                       payload, log);
+        }
     } else if(action == CELLULAR_ACTION_GNSS_START ||
               action == CELLULAR_ACTION_GNSS_NMEA ||
               action == CELLULAR_ACTION_GNSS_STATUS) {
@@ -3677,7 +3737,7 @@ static void cellular_http_post_submit_cb(const char *text, void *user_data)
 {
     (void)user_data;
     snprintf(cellular_http_post_spec, sizeof(cellular_http_post_spec), "%s",
-             text && text[0] ? text : "http://example.com/|hello=k230");
+             text && text[0] ? text : "http://httpbin.org/post|hello=k230");
     ui_trim_text(cellular_http_post_spec);
     cellular_start_action(CELLULAR_ACTION_HTTP_POST);
 }
@@ -3687,7 +3747,7 @@ static void cellular_mqtt_submit_cb(const char *text, void *user_data)
     (void)user_data;
     snprintf(cellular_mqtt_spec, sizeof(cellular_mqtt_spec), "%s",
              text && text[0] ? text :
-             "broker.hivemq.com|1883|||k230/test|hello from k230|-1");
+             "test.mosquitto.org|1883|||k230/nrf9151/test|hello from k230|-1");
     ui_trim_text(cellular_mqtt_spec);
     cellular_start_action(CELLULAR_ACTION_MQTT_TEST);
 }
