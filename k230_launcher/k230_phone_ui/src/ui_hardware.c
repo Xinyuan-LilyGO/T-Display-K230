@@ -4948,11 +4948,8 @@ static void audio_settings_volume_event_cb(lv_event_t *event)
 
 static int hardware_content_width(lv_obj_t *parent, int inset)
 {
-    int w = parent ? lv_obj_get_content_width(parent) : 0;
+    int w = ui_safe_content_width(parent, 488);
 
-    if(w <= 0) {
-        w = ui_fit_width(parent, 0, 488);
-    }
     w -= inset * 2;
     return w > 240 ? w : 240;
 }

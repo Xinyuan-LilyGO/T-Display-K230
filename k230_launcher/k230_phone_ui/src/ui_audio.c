@@ -2355,13 +2355,9 @@ static lv_obj_t *audio_create_row_ex(lv_obj_t *parent, int y,
     lv_obj_t *icon;
     lv_obj_t *name;
     lv_obj_t *detail;
-    int row_w = parent ? lv_obj_get_content_width(parent) : 0;
+    int row_w = ui_safe_content_width(parent, 488);
     int text_w = row_w - text_x - 24 - right_reserved;
 
-    if(row_w <= 0) {
-        row_w = ui_fit_width(lv_obj_get_parent(row), 0, 488);
-        text_w = row_w - text_x - 24 - right_reserved;
-    }
     if(text_w < 120) {
         text_w = row_w - text_x - 12 - right_reserved;
     }
@@ -2534,11 +2530,7 @@ static void notification_select_cb(lv_event_t *event)
     }
     notification_refresh_ui();
     if(raw >= 0 && raw < notification_sound_count && notification_status_label) {
-        if(play_result == 0) {
-            lv_label_set_text(notification_status_label, ui_tr("Playing"));
-            lv_obj_set_style_text_color(notification_status_label,
-                                        lv_color_hex(0x25C281), 0);
-        } else {
+        if(play_result != 0) {
             lv_label_set_text(notification_status_label,
                               ui_tr("Playback failed"));
             lv_obj_set_style_text_color(notification_status_label,
@@ -2559,12 +2551,14 @@ void ui_notification_settings_create(lv_obj_t *scr)
     lv_obj_t *hint;
     int x = ui_page_panel_x();
     int w = ui_page_panel_width();
+    int content_w;
     int y = 0;
 
     ui_create_header(scr, "Notifications");
     body = ui_scroll_panel(scr, x, ui_page_top_y(154), w, ui_body_height(154));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     lv_obj_set_style_pad_all(body, 16, 0);
+    content_w = ui_safe_content_width(body, 488);
 
     notification_scan_sounds();
     memset(notification_row, 0, sizeof(notification_row));
@@ -2577,21 +2571,21 @@ void ui_notification_settings_create(lv_obj_t *scr)
 
     notification_current_label = ui_label(body, "--", &lv_font_montserrat_18,
                                           0xA78BFA);
-    lv_obj_set_width(notification_current_label, ui_inner_width());
+    lv_obj_set_width(notification_current_label, content_w);
     lv_label_set_long_mode(notification_current_label, LV_LABEL_LONG_DOT);
     lv_obj_align(notification_current_label, LV_ALIGN_TOP_LEFT, 0, y);
     y += 34;
 
     notification_status_label = ui_label(body, "--", &lv_font_montserrat_16,
                                          0x9AA4AF);
-    lv_obj_set_width(notification_status_label, ui_inner_width());
+    lv_obj_set_width(notification_status_label, content_w);
     lv_label_set_long_mode(notification_status_label, LV_LABEL_LONG_DOT);
     lv_obj_align(notification_status_label, LV_ALIGN_TOP_LEFT, 0, y);
     y += 44;
 
     hint = ui_label(body, "Sounds in /root/notification",
                     &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(hint, ui_inner_width());
+    lv_obj_set_width(hint, content_w);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
     lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 0, y);
     y += 42;

@@ -429,6 +429,32 @@ int ui_fit_width(lv_obj_t *parent, int x, int design_w)
     return fit_w > design_w ? fit_w : design_w;
 }
 
+int ui_safe_content_width(lv_obj_t *parent, int design_w)
+{
+    int w = 0;
+
+    if(parent) {
+        int obj_w = lv_obj_get_width(parent);
+
+        if(obj_w > 0) {
+            int pad_l = lv_obj_get_style_pad_left(parent, 0);
+            int pad_r = lv_obj_get_style_pad_right(parent, 0);
+
+            w = obj_w - pad_l - pad_r;
+        }
+        if(w <= 0) {
+            w = lv_obj_get_content_width(parent);
+        }
+    }
+    if(w <= 0) {
+        w = ui_fit_width(parent, 0, design_w > 0 ? design_w : 488);
+    }
+    if(w <= 0) {
+        w = design_w > 0 ? design_w : 248;
+    }
+    return w;
+}
+
 static void ui_portrait_scroll_refresh_cb(lv_event_t *event)
 {
     static uint64_t last_refresh_us;
@@ -643,15 +669,12 @@ void ui_info_row_inset(lv_obj_t *parent, int y, const char *name,
                        const char *value, uint32_t value_color,
                        int side_gap)
 {
-    int row_w = parent ? lv_obj_get_content_width(parent) : 0;
+    int row_w = ui_safe_content_width(parent, 488);
     int value_w;
     int label_w;
     lv_obj_t *left;
     lv_obj_t *right;
 
-    if(row_w <= 0) {
-        row_w = ui_fit_width(parent, 0, 488);
-    }
     if(side_gap < 0) {
         side_gap = 0;
     }

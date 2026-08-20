@@ -136,6 +136,7 @@ int ui_inner_width(void);
 int ui_page_top_y(int default_top_y);
 int ui_body_height(int top_y);
 int ui_fit_width(lv_obj_t *parent, int x, int design_w);
+int ui_safe_content_width(lv_obj_t *parent, int design_w);
 
 int ui_fonts_init(void);
 void ui_fonts_apply_theme(lv_display_t *disp);

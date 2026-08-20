@@ -9718,7 +9718,7 @@ static void create_reboot_page(lv_obj_t *scr)
     lv_obj_set_width(hint, content_w);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
 
-    reboot_status_label = label(body, "Ready", &lv_font_montserrat_18,
+    reboot_status_label = label(body, "", &lv_font_montserrat_18,
                                 0x25C281);
     lv_obj_set_pos(reboot_status_label, content_x, content_y + 160);
     lv_obj_set_width(reboot_status_label, content_w);
