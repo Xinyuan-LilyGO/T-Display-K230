@@ -138,6 +138,26 @@ int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,
                               char *log, size_t log_len,
                               k230_nrf9151_cancel_cb_t cancel_cb,
                               void *cancel_user);
+int k230_nrf9151_mqtt_session_connect_ex(
+    const k230_nrf9151_mqtt_request_t *request,
+    char *log, size_t log_len,
+    k230_nrf9151_cancel_cb_t cancel_cb,
+    void *cancel_user);
+int k230_nrf9151_mqtt_session_disconnect(char *log, size_t log_len);
+int k230_nrf9151_mqtt_session_subscribe(const char *topic, int qos,
+                                         char *log, size_t log_len,
+                                         k230_nrf9151_cancel_cb_t cancel_cb,
+                                         void *cancel_user);
+int k230_nrf9151_mqtt_session_publish(const char *topic, const char *payload,
+                                       int qos, int retain,
+                                       char *log, size_t log_len,
+                                       k230_nrf9151_cancel_cb_t cancel_cb,
+                                       void *cancel_user);
+int k230_nrf9151_mqtt_session_poll(char *log, size_t log_len,
+                                    unsigned int timeout_ms,
+                                    k230_nrf9151_cancel_cb_t cancel_cb,
+                                    void *cancel_user);
+int k230_nrf9151_mqtt_session_connected(void);
 
 #ifdef __cplusplus
 }

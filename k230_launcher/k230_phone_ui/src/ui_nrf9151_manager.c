@@ -55,11 +55,25 @@ typedef struct {
     size_t line_used;
 } k230_nrf9151_gnss_monitor_t;
 
+typedef struct {
+    int fd;
+    int lock_fd;
+    int connected;
+    int qos;
+    char broker[160];
+    char topic[160];
+} k230_nrf9151_mqtt_session_t;
+
 static pthread_mutex_t nrf9151_manager_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t nrf9151_gpio_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t nrf9151_mqtt_lock = PTHREAD_MUTEX_INITIALIZER;
 static k230_nrf9151_status_t nrf9151_status_cache;
 static int nrf9151_status_cache_loaded;
 static k230_nrf9151_gnss_monitor_t nrf9151_gnss_monitor = {
+    .fd = -1,
+    .lock_fd = -1,
+};
+static k230_nrf9151_mqtt_session_t nrf9151_mqtt_session = {
     .fd = -1,
     .lock_fd = -1,
 };
@@ -2561,6 +2575,335 @@ int k230_nrf9151_http_request(const k230_nrf9151_http_request_t *request,
                               char *log, size_t log_len)
 {
     return k230_nrf9151_http_request_ex(request, log, log_len, NULL, NULL);
+}
+
+static void nrf9151_manager_mqtt_session_close_locked(char *log,
+                                                      size_t log_len)
+{
+    if(nrf9151_mqtt_session.fd >= 0) {
+        (void)nrf9151_manager_run_cmd_logged(
+            nrf9151_mqtt_session.fd, "AT#XMQTTCON=0",
+            K230_NRF9151_CMD_TIMEOUT_US, NULL, log, log_len, NULL, NULL);
+        nrf9151_manager_drain_uart(nrf9151_mqtt_session.fd, 120000ULL,
+                                   900000ULL);
+        nrf9151_manager_close_session(nrf9151_mqtt_session.lock_fd,
+                                      nrf9151_mqtt_session.fd);
+    }
+    nrf9151_mqtt_session.fd = -1;
+    nrf9151_mqtt_session.lock_fd = -1;
+    nrf9151_mqtt_session.connected = 0;
+    nrf9151_mqtt_session.qos = 0;
+    nrf9151_mqtt_session.broker[0] = '\0';
+    nrf9151_mqtt_session.topic[0] = '\0';
+}
+
+int k230_nrf9151_mqtt_session_connected(void)
+{
+    int connected;
+
+    pthread_mutex_lock(&nrf9151_mqtt_lock);
+    connected = nrf9151_mqtt_session.connected &&
+                nrf9151_mqtt_session.fd >= 0;
+    pthread_mutex_unlock(&nrf9151_mqtt_lock);
+    return connected;
+}
+
+int k230_nrf9151_mqtt_session_disconnect(char *log, size_t log_len)
+{
+    pthread_mutex_lock(&nrf9151_mqtt_lock);
+    if(!nrf9151_mqtt_session.connected || nrf9151_mqtt_session.fd < 0) {
+        nrf9151_manager_log_append(log, log_len, "MQTT already disconnected");
+        pthread_mutex_unlock(&nrf9151_mqtt_lock);
+        return 0;
+    }
+    nrf9151_manager_log_append(log, log_len, "MQTT disconnect");
+    nrf9151_manager_mqtt_session_close_locked(log, log_len);
+    pthread_mutex_unlock(&nrf9151_mqtt_lock);
+    return 0;
+}
+
+int k230_nrf9151_mqtt_session_connect_ex(
+    const k230_nrf9151_mqtt_request_t *request,
+    char *log, size_t log_len,
+    k230_nrf9151_cancel_cb_t cancel_cb,
+    void *cancel_user)
+{
+    char broker[160];
+    char client_id[96];
+    char username[128];
+    char password[128];
+    char topic[160];
+    char cmd[768];
+    char more[2048] = "";
+    int lock_fd = -1;
+    int fd = -1;
+    int rc;
+    int port;
+    int op = 1;
+
+    if(log && log_len > 0U) {
+        log[0] = '\0';
+    }
+    if(!request || !request->broker || !request->broker[0]) {
+        nrf9151_manager_log_append(log, log_len, "Broker is empty");
+        return -1;
+    }
+    if(request->auth == K230_NRF9151_MQTT_AUTH_MTLS) {
+        nrf9151_manager_log_append(log, log_len,
+                                   "mTLS requires credentials preloaded in modem sec_tag");
+    }
+    if((request->auth == K230_NRF9151_MQTT_AUTH_TLS_USER_PASS ||
+        request->auth == K230_NRF9151_MQTT_AUTH_MTLS) &&
+       request->sec_tag < 0) {
+        nrf9151_manager_log_append(log, log_len,
+                                   "TLS MQTT needs sec_tag with modem credentials");
+        return -2;
+    }
+
+    port = request->port > 0 ? request->port : 1883;
+    nrf9151_manager_escape_at_string(request->broker, broker, sizeof(broker));
+    nrf9151_manager_escape_at_string(request->client_id &&
+                                     request->client_id[0] ?
+                                     request->client_id : "k230-nrf9151",
+                                     client_id, sizeof(client_id));
+    nrf9151_manager_escape_at_string(request->username ? request->username : "",
+                                     username, sizeof(username));
+    nrf9151_manager_escape_at_string(request->password ? request->password : "",
+                                     password, sizeof(password));
+    nrf9151_manager_escape_at_string(request->topic && request->topic[0] ?
+                                     request->topic : "k230/test",
+                                     topic, sizeof(topic));
+
+    pthread_mutex_lock(&nrf9151_mqtt_lock);
+    if(nrf9151_mqtt_session.connected && nrf9151_mqtt_session.fd >= 0) {
+        nrf9151_manager_log_append(log, log_len,
+                                   "MQTT reconnect: close old session");
+        nrf9151_manager_mqtt_session_close_locked(log, log_len);
+    }
+
+    if(nrf9151_manager_open_session("nrf9151-mqtt-session", 8000, &lock_fd,
+                                    &fd, log, log_len) != 0) {
+        pthread_mutex_unlock(&nrf9151_mqtt_lock);
+        return -1;
+    }
+    (void)nrf9151_manager_run_cmd_logged(fd, "AT", K230_NRF9151_CMD_TIMEOUT_US,
+                                         NULL, log, log_len, cancel_cb,
+                                         cancel_user);
+    nrf9151_manager_quiesce_gnss_output(fd, log, log_len);
+    (void)nrf9151_manager_run_cmd_logged(fd, "AT+CFUN=1",
+                                         K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
+                                         NULL, log, log_len, cancel_cb,
+                                         cancel_user);
+    snprintf(cmd, sizeof(cmd), "AT#XMQTTCFG=\"%s\",60,1", client_id);
+    rc = nrf9151_manager_run_cmd_logged(fd, cmd, K230_NRF9151_CMD_TIMEOUT_US,
+                                        NULL, log, log_len, cancel_cb,
+                                        cancel_user);
+    if(rc != 0) {
+        goto fail;
+    }
+
+    nrf9151_manager_log_append(log, log_len, "MQTT connect: %s:%d",
+                               request->broker, port);
+    if(request->auth == K230_NRF9151_MQTT_AUTH_TLS_USER_PASS ||
+       request->auth == K230_NRF9151_MQTT_AUTH_MTLS) {
+        snprintf(cmd, sizeof(cmd),
+                 "AT#XMQTTCON=%d,\"%s\",\"%s\",\"%s\",%d,%d",
+                 op, username, password, broker, port, request->sec_tag);
+    } else {
+        snprintf(cmd, sizeof(cmd),
+                 "AT#XMQTTCON=%d,\"%s\",\"%s\",\"%s\",%d",
+                 op,
+                 request->auth == K230_NRF9151_MQTT_AUTH_USER_PASS ?
+                 username : "",
+                 request->auth == K230_NRF9151_MQTT_AUTH_USER_PASS ?
+                 password : "",
+                 broker, port);
+    }
+    rc = nrf9151_manager_run_cmd_logged(fd, cmd, K230_NRF9151_LONG_TIMEOUT_US,
+                                        NULL, log, log_len, cancel_cb,
+                                        cancel_user);
+    if(rc != 0) {
+        nrf9151_manager_log_append(log, log_len,
+                                   "MQTT connect command failed");
+        goto fail;
+    }
+
+    rc = nrf9151_manager_read_urc(fd, more, sizeof(more),
+                                  K230_NRF9151_MQTT_TIMEOUT_US,
+                                  cancel_cb, cancel_user);
+    if(rc == -2) {
+        goto fail;
+    }
+    if(more[0]) {
+        nrf9151_manager_trim_text(more);
+        nrf9151_manager_log_append(log, log_len, "%s", more);
+    }
+    if(strstr(more, "#XMQTTEVT: 0,0") == NULL) {
+        nrf9151_manager_log_append(log, log_len,
+                                   "MQTT CONNACK not observed");
+        rc = -1;
+        goto fail;
+    }
+
+    nrf9151_mqtt_session.fd = fd;
+    nrf9151_mqtt_session.lock_fd = lock_fd;
+    nrf9151_mqtt_session.connected = 1;
+    nrf9151_mqtt_session.qos =
+        request->qos >= 0 && request->qos <= 2 ? request->qos : 0;
+    snprintf(nrf9151_mqtt_session.broker,
+             sizeof(nrf9151_mqtt_session.broker), "%s:%d",
+             request->broker, port);
+    snprintf(nrf9151_mqtt_session.topic,
+             sizeof(nrf9151_mqtt_session.topic), "%s",
+             request->topic && request->topic[0] ? request->topic :
+             "k230/test");
+    pthread_mutex_unlock(&nrf9151_mqtt_lock);
+    return 0;
+
+fail:
+    if(fd >= 0) {
+        (void)nrf9151_manager_run_cmd_logged(fd, "AT#XMQTTCON=0",
+                                             K230_NRF9151_CMD_TIMEOUT_US,
+                                             NULL, log, log_len, NULL, NULL);
+        nrf9151_manager_close_session(lock_fd, fd);
+    } else if(lock_fd >= 0) {
+        k230_nrf9151_release_uart(lock_fd);
+    }
+    pthread_mutex_unlock(&nrf9151_mqtt_lock);
+    return rc == -2 ? -2 : -1;
+}
+
+int k230_nrf9151_mqtt_session_subscribe(const char *topic, int qos,
+                                         char *log, size_t log_len,
+                                         k230_nrf9151_cancel_cb_t cancel_cb,
+                                         void *cancel_user)
+{
+    char topic_at[180];
+    char cmd[256];
+    char more[2048] = "";
+    int rc;
+
+    if(log && log_len > 0U) {
+        log[0] = '\0';
+    }
+    if(!topic || !topic[0]) {
+        nrf9151_manager_log_append(log, log_len, "Topic is empty");
+        return -1;
+    }
+    nrf9151_manager_escape_at_string(topic, topic_at, sizeof(topic_at));
+    pthread_mutex_lock(&nrf9151_mqtt_lock);
+    if(!nrf9151_mqtt_session.connected || nrf9151_mqtt_session.fd < 0) {
+        nrf9151_manager_log_append(log, log_len, "MQTT is not connected");
+        pthread_mutex_unlock(&nrf9151_mqtt_lock);
+        return -1;
+    }
+    snprintf(cmd, sizeof(cmd), "AT#XMQTTSUB=\"%s\",%d", topic_at,
+             qos >= 0 && qos <= 2 ? qos : 0);
+    rc = nrf9151_manager_run_cmd_logged(
+        nrf9151_mqtt_session.fd, cmd, K230_NRF9151_CMD_TIMEOUT_US, NULL,
+        log, log_len, cancel_cb, cancel_user);
+    if(rc == 0) {
+        int urc_rc = nrf9151_manager_read_urc(
+            nrf9151_mqtt_session.fd, more, sizeof(more), 10000000ULL,
+            cancel_cb, cancel_user);
+
+        if(urc_rc == -2) {
+            rc = -2;
+        }
+        if(more[0]) {
+            nrf9151_manager_trim_text(more);
+            nrf9151_manager_log_append(log, log_len, "%s", more);
+        }
+        if(rc == 0 && strstr(more, "#XMQTTEVT: 7,0") == NULL) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "MQTT SUBACK not observed");
+            rc = -1;
+        }
+    }
+    if(rc == 0) {
+        snprintf(nrf9151_mqtt_session.topic,
+                 sizeof(nrf9151_mqtt_session.topic), "%s", topic);
+        nrf9151_mqtt_session.qos = qos >= 0 && qos <= 2 ? qos : 0;
+    }
+    pthread_mutex_unlock(&nrf9151_mqtt_lock);
+    return rc == 0 ? 0 : (rc == -2 ? -2 : -1);
+}
+
+int k230_nrf9151_mqtt_session_publish(const char *topic, const char *payload,
+                                       int qos, int retain,
+                                       char *log, size_t log_len,
+                                       k230_nrf9151_cancel_cb_t cancel_cb,
+                                       void *cancel_user)
+{
+    char topic_at[180];
+    char payload_at[384];
+    char cmd[768];
+    char more[2048] = "";
+    int rc;
+
+    if(log && log_len > 0U) {
+        log[0] = '\0';
+    }
+    if(!topic || !topic[0]) {
+        nrf9151_manager_log_append(log, log_len, "Topic is empty");
+        return -1;
+    }
+    nrf9151_manager_escape_at_string(topic, topic_at, sizeof(topic_at));
+    nrf9151_manager_escape_at_string(payload ? payload : "", payload_at,
+                                     sizeof(payload_at));
+    pthread_mutex_lock(&nrf9151_mqtt_lock);
+    if(!nrf9151_mqtt_session.connected || nrf9151_mqtt_session.fd < 0) {
+        nrf9151_manager_log_append(log, log_len, "MQTT is not connected");
+        pthread_mutex_unlock(&nrf9151_mqtt_lock);
+        return -1;
+    }
+    snprintf(cmd, sizeof(cmd), "AT#XMQTTPUB=\"%s\",\"%s\",%d,%d",
+             topic_at, payload_at, qos >= 0 && qos <= 2 ? qos : 0,
+             retain ? 1 : 0);
+    rc = nrf9151_manager_run_cmd_logged(
+        nrf9151_mqtt_session.fd, cmd, K230_NRF9151_CMD_TIMEOUT_US, NULL,
+        log, log_len, cancel_cb, cancel_user);
+    if(rc == 0) {
+        nrf9151_manager_log_append(log, log_len,
+                                   "MQTT publish command accepted");
+        (void)nrf9151_manager_read_urc(nrf9151_mqtt_session.fd, more,
+                                       sizeof(more), 2500000ULL, cancel_cb,
+                                       cancel_user);
+        if(more[0]) {
+            nrf9151_manager_trim_text(more);
+            nrf9151_manager_log_append(log, log_len, "%s", more);
+        }
+    }
+    pthread_mutex_unlock(&nrf9151_mqtt_lock);
+    return rc == 0 ? 0 : (rc == -2 ? -2 : -1);
+}
+
+int k230_nrf9151_mqtt_session_poll(char *log, size_t log_len,
+                                    unsigned int timeout_ms,
+                                    k230_nrf9151_cancel_cb_t cancel_cb,
+                                    void *cancel_user)
+{
+    char more[2048] = "";
+    int rc;
+
+    if(log && log_len > 0U) {
+        log[0] = '\0';
+    }
+    pthread_mutex_lock(&nrf9151_mqtt_lock);
+    if(!nrf9151_mqtt_session.connected || nrf9151_mqtt_session.fd < 0) {
+        pthread_mutex_unlock(&nrf9151_mqtt_lock);
+        return -1;
+    }
+    rc = nrf9151_manager_read_urc(
+        nrf9151_mqtt_session.fd, more, sizeof(more),
+        (uint64_t)(timeout_ms ? timeout_ms : 250U) * 1000ULL,
+        cancel_cb, cancel_user);
+    if(more[0]) {
+        nrf9151_manager_trim_text(more);
+        nrf9151_manager_log_append(log, log_len, "%s", more);
+    }
+    pthread_mutex_unlock(&nrf9151_mqtt_lock);
+    return rc == -2 ? -2 : (more[0] ? 1 : 0);
 }
 
 int k230_nrf9151_mqtt_test_ex(const k230_nrf9151_mqtt_request_t *request,

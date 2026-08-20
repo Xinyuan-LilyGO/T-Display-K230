@@ -71,6 +71,11 @@ typedef enum {
     CELLULAR_ACTION_HTTP_GET,
     CELLULAR_ACTION_HTTP_POST,
     CELLULAR_ACTION_MQTT_TEST,
+    CELLULAR_ACTION_MQTT_CONNECT,
+    CELLULAR_ACTION_MQTT_DISCONNECT,
+    CELLULAR_ACTION_MQTT_SUBSCRIBE,
+    CELLULAR_ACTION_MQTT_PUBLISH,
+    CELLULAR_ACTION_MQTT_POLL,
 } cellular_action_t;
 
 typedef struct {
@@ -188,6 +193,12 @@ static lv_obj_t *cellular_check_dialog;
 static lv_obj_t *cellular_check_spinner;
 static lv_obj_t *cellular_check_label;
 static lv_obj_t *cellular_result_panel;
+static lv_obj_t *cellular_mqtt_panel;
+static lv_obj_t *cellular_mqtt_status_label;
+static lv_obj_t *cellular_mqtt_broker_label;
+static lv_obj_t *cellular_mqtt_topic_label;
+static lv_obj_t *cellular_mqtt_payload_label;
+static lv_obj_t *cellular_mqtt_log_label;
 static cellular_cn0_bar_t cellular_cn0_bars[NRF9151_CN0_BAR_MAX];
 static lv_timer_t *cellular_timer;
 
@@ -204,6 +215,9 @@ static char cellular_running_title[64] = "LTE";
 static uint64_t cellular_check_hide_us;
 static int cellular_result_pending;
 static int cellular_result_ok;
+static int cellular_mqtt_page_open;
+static int cellular_mqtt_connected;
+static uint64_t cellular_mqtt_last_poll_us;
 static char cellular_result_title[96];
 static char cellular_result_message[NRF9151_RESULT_TEXT_MAX];
 static char cellular_status[160] = "Ready";
@@ -230,6 +244,18 @@ static char cellular_http_url[256] = "http://example.com/";
 static char cellular_http_post_spec[512] = "http://httpbin.org/post|hello=k230";
 static char cellular_mqtt_spec[512] =
     "broker.hivemq.com|1883|||k230/nrf9151/test|hello from k230|-1";
+static char cellular_mqtt_broker[160] = "broker.hivemq.com";
+static char cellular_mqtt_client_id[96] = "k230-nrf9151";
+static char cellular_mqtt_username[96];
+static char cellular_mqtt_password[96];
+static char cellular_mqtt_topic[160] = "k230/nrf9151/test";
+static char cellular_mqtt_payload[256] = "hello from k230";
+static char cellular_mqtt_sec_tag_text[16] = "-1";
+static int cellular_mqtt_port = 1883;
+static int cellular_mqtt_qos;
+static int cellular_mqtt_retain;
+static char cellular_mqtt_status[160] = "Disconnected";
+static char cellular_mqtt_log[NRF9151_LOG_MAX];
 static cellular_satellite_t cellular_sats[NRF9151_MAX_SATS];
 static uint64_t cellular_gnss_start_us;
 static uint64_t cellular_gnss_fix_us;
@@ -246,6 +272,7 @@ static void cellular_lte_update_from_line(const char *line, int rc);
 static void cellular_process_response_lines(const char *resp);
 static int cellular_try_led_mode(int fd, int mode, const char *reason);
 static void cellular_apply_led_auto_if_pending(int fd);
+static void cellular_mqtt_refresh(void);
 
 static void cellular_iomux_write(volatile uint32_t *base, unsigned int offset,
                                  uint32_t value, const char *name)
@@ -488,6 +515,32 @@ static void cellular_log_append(const char *fmt, ...)
     snprintf(cellular_log + used, sizeof(cellular_log) - used, "%s\n", line);
     pthread_mutex_unlock(&cellular_lock);
 
+    cellular_file_log(line);
+}
+
+static void cellular_mqtt_log_append(const char *fmt, ...)
+{
+    char line[512];
+    size_t used;
+    size_t add;
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    pthread_mutex_lock(&cellular_lock);
+    used = strlen(cellular_mqtt_log);
+    add = strlen(line);
+    if(used + add + 2U >= sizeof(cellular_mqtt_log)) {
+        size_t keep = sizeof(cellular_mqtt_log) / 2U;
+
+        memmove(cellular_mqtt_log, cellular_mqtt_log + used - keep, keep + 1U);
+        used = strlen(cellular_mqtt_log);
+    }
+    snprintf(cellular_mqtt_log + used, sizeof(cellular_mqtt_log) - used,
+             "%s\n", line);
+    pthread_mutex_unlock(&cellular_lock);
     cellular_file_log(line);
 }
 
@@ -1276,6 +1329,52 @@ static void cellular_result_popup_refresh(void)
     lv_obj_move_foreground(cellular_result_panel);
 }
 
+static void cellular_mqtt_refresh(void)
+{
+    char status[160];
+    char broker[224];
+    char topic[200];
+    char payload[300];
+    char log[NRF9151_LOG_VIEW_MAX];
+    int connected;
+
+    pthread_mutex_lock(&cellular_lock);
+    connected = cellular_mqtt_connected;
+    snprintf(status, sizeof(status), "%s", cellular_mqtt_status);
+    snprintf(broker, sizeof(broker), "%s:%d  client=%s",
+             cellular_mqtt_broker,
+             cellular_mqtt_port > 0 ? cellular_mqtt_port : 1883,
+             cellular_mqtt_client_id[0] ? cellular_mqtt_client_id :
+             "auto");
+    snprintf(topic, sizeof(topic), "Topic: %s  QoS:%d  Retain:%s",
+             cellular_mqtt_topic, cellular_mqtt_qos,
+             cellular_mqtt_retain ? "yes" : "no");
+    snprintf(payload, sizeof(payload), "Payload: %s",
+             cellular_mqtt_payload[0] ? cellular_mqtt_payload : "-");
+    snprintf(log, sizeof(log), "%s", cellular_mqtt_log[0] ?
+             cellular_mqtt_log : "MQTT log is empty");
+    pthread_mutex_unlock(&cellular_lock);
+
+    if(cellular_mqtt_status_label) {
+        lv_label_set_text(cellular_mqtt_status_label, status);
+        lv_obj_set_style_text_color(cellular_mqtt_status_label,
+                                    lv_color_hex(connected ? 0x25C281 :
+                                                 0x94A3B8), 0);
+    }
+    if(cellular_mqtt_broker_label) {
+        lv_label_set_text(cellular_mqtt_broker_label, broker);
+    }
+    if(cellular_mqtt_topic_label) {
+        lv_label_set_text(cellular_mqtt_topic_label, topic);
+    }
+    if(cellular_mqtt_payload_label) {
+        lv_label_set_text(cellular_mqtt_payload_label, payload);
+    }
+    if(cellular_mqtt_log_label) {
+        lv_label_set_text(cellular_mqtt_log_label, log);
+    }
+}
+
 static void cellular_status_refresh(void)
 {
     char status[160];
@@ -1333,7 +1432,9 @@ static void cellular_status_refresh(void)
                                     lv_color_hex(exists ? 0x25C281 : 0xF5A524),
                                     0);
     }
-    cellular_check_progress_refresh(active, status, running_title);
+    cellular_check_progress_refresh(
+        active && strcmp(running_title, "MQTT Poll") != 0,
+        status, running_title);
     cellular_result_popup_refresh();
     if(cellular_link_label) {
         lv_label_set_text(cellular_link_label, link);
@@ -1379,6 +1480,7 @@ static void cellular_status_refresh(void)
                                         0);
         }
     }
+    cellular_mqtt_refresh();
 }
 
 int ui_cellular_lte_signal_level(void)
@@ -2616,6 +2718,11 @@ static void cellular_set_action_result(cellular_action_t action, int ok)
     case CELLULAR_ACTION_HTTP_GET:
     case CELLULAR_ACTION_HTTP_POST:
     case CELLULAR_ACTION_MQTT_TEST:
+    case CELLULAR_ACTION_MQTT_CONNECT:
+    case CELLULAR_ACTION_MQTT_DISCONNECT:
+    case CELLULAR_ACTION_MQTT_SUBSCRIBE:
+    case CELLULAR_ACTION_MQTT_PUBLISH:
+    case CELLULAR_ACTION_MQTT_POLL:
         cellular_set_summary(cellular_lte_status, sizeof(cellular_lte_status),
                              "%s", text);
         break;
@@ -3391,6 +3498,21 @@ static void cellular_action_commands(cellular_action_t action,
     case CELLULAR_ACTION_MQTT_TEST:
         *title = "MQTT";
         break;
+    case CELLULAR_ACTION_MQTT_CONNECT:
+        *title = "MQTT Connect";
+        break;
+    case CELLULAR_ACTION_MQTT_DISCONNECT:
+        *title = "MQTT Disconnect";
+        break;
+    case CELLULAR_ACTION_MQTT_SUBSCRIBE:
+        *title = "MQTT Subscribe";
+        break;
+    case CELLULAR_ACTION_MQTT_PUBLISH:
+        *title = "MQTT Publish";
+        break;
+    case CELLULAR_ACTION_MQTT_POLL:
+        *title = "MQTT Poll";
+        break;
     }
 }
 
@@ -3403,7 +3525,12 @@ static int cellular_action_uses_lte_manager(cellular_action_t action)
            action == CELLULAR_ACTION_FULL_TEST ||
            action == CELLULAR_ACTION_HTTP_GET ||
            action == CELLULAR_ACTION_HTTP_POST ||
-           action == CELLULAR_ACTION_MQTT_TEST;
+           action == CELLULAR_ACTION_MQTT_TEST ||
+           action == CELLULAR_ACTION_MQTT_CONNECT ||
+           action == CELLULAR_ACTION_MQTT_DISCONNECT ||
+           action == CELLULAR_ACTION_MQTT_SUBSCRIBE ||
+           action == CELLULAR_ACTION_MQTT_PUBLISH ||
+           action == CELLULAR_ACTION_MQTT_POLL;
 }
 
 static int cellular_generation_active(unsigned int generation)
@@ -3451,6 +3578,74 @@ static void cellular_copy_field(const char *text, int index,
     memcpy(out, start, len);
     out[len] = '\0';
     ui_trim_text(out);
+}
+
+static void cellular_mqtt_sync_spec_locked(void)
+{
+    snprintf(cellular_mqtt_spec, sizeof(cellular_mqtt_spec),
+             "%s|%d|%s|%s|%s|%s|%s",
+             cellular_mqtt_broker,
+             cellular_mqtt_port > 0 ? cellular_mqtt_port : 1883,
+             cellular_mqtt_username,
+             cellular_mqtt_password,
+             cellular_mqtt_topic,
+             cellular_mqtt_payload,
+             cellular_mqtt_sec_tag_text[0] ? cellular_mqtt_sec_tag_text : "-1");
+}
+
+static void cellular_mqtt_load_spec(const char *spec)
+{
+    char broker[160];
+    char port_text[16];
+    char user[96];
+    char pass[96];
+    char topic[160];
+    char payload[256];
+    char sec_tag_text[16];
+
+    cellular_copy_field(spec, 0, broker, sizeof(broker));
+    cellular_copy_field(spec, 1, port_text, sizeof(port_text));
+    cellular_copy_field(spec, 2, user, sizeof(user));
+    cellular_copy_field(spec, 3, pass, sizeof(pass));
+    cellular_copy_field(spec, 4, topic, sizeof(topic));
+    cellular_copy_field(spec, 5, payload, sizeof(payload));
+    cellular_copy_field(spec, 6, sec_tag_text, sizeof(sec_tag_text));
+
+    pthread_mutex_lock(&cellular_lock);
+    if(broker[0]) {
+        snprintf(cellular_mqtt_broker, sizeof(cellular_mqtt_broker), "%s",
+                 broker);
+    }
+    cellular_mqtt_port = port_text[0] ? atoi(port_text) : 1883;
+    if(cellular_mqtt_port <= 0) {
+        cellular_mqtt_port = 1883;
+    }
+    snprintf(cellular_mqtt_username, sizeof(cellular_mqtt_username), "%s",
+             user);
+    snprintf(cellular_mqtt_password, sizeof(cellular_mqtt_password), "%s",
+             pass);
+    if(topic[0]) {
+        snprintf(cellular_mqtt_topic, sizeof(cellular_mqtt_topic), "%s",
+                 topic);
+    }
+    snprintf(cellular_mqtt_payload, sizeof(cellular_mqtt_payload), "%s",
+             payload[0] ? payload : "hello from k230");
+    snprintf(cellular_mqtt_sec_tag_text, sizeof(cellular_mqtt_sec_tag_text),
+             "%s", sec_tag_text[0] ? sec_tag_text : "-1");
+    cellular_mqtt_sync_spec_locked();
+    pthread_mutex_unlock(&cellular_lock);
+}
+
+static void cellular_mqtt_set_status(int connected, const char *fmt, ...)
+{
+    va_list ap;
+
+    pthread_mutex_lock(&cellular_lock);
+    cellular_mqtt_connected = connected ? 1 : 0;
+    va_start(ap, fmt);
+    vsnprintf(cellular_mqtt_status, sizeof(cellular_mqtt_status), fmt, ap);
+    va_end(ap);
+    pthread_mutex_unlock(&cellular_lock);
 }
 
 static int cellular_run_manager_action(cellular_action_t action,
@@ -3566,6 +3761,108 @@ static int cellular_run_manager_action(cellular_action_t action,
             cellular_queue_mqtt_result(rc, &req, broker, req.topic,
                                        payload, log);
         }
+    } else if(action == CELLULAR_ACTION_MQTT_CONNECT) {
+        k230_nrf9151_mqtt_request_t req;
+        char broker[160];
+        char user[96];
+        char pass[96];
+        char topic[160];
+        char client_id[96];
+        char sec_tag_text[16];
+        int port;
+        int qos;
+        int retain;
+
+        memset(&req, 0, sizeof(req));
+        pthread_mutex_lock(&cellular_lock);
+        snprintf(broker, sizeof(broker), "%s", cellular_mqtt_broker);
+        snprintf(user, sizeof(user), "%s", cellular_mqtt_username);
+        snprintf(pass, sizeof(pass), "%s", cellular_mqtt_password);
+        snprintf(topic, sizeof(topic), "%s", cellular_mqtt_topic);
+        snprintf(client_id, sizeof(client_id), "%s", cellular_mqtt_client_id);
+        snprintf(sec_tag_text, sizeof(sec_tag_text), "%s",
+                 cellular_mqtt_sec_tag_text);
+        port = cellular_mqtt_port;
+        qos = cellular_mqtt_qos;
+        retain = cellular_mqtt_retain;
+        pthread_mutex_unlock(&cellular_lock);
+        if(!client_id[0] || strcmp(client_id, "k230-nrf9151") == 0) {
+            snprintf(client_id, sizeof(client_id), "k230-%ld-%lu",
+                     (long)getpid(), (unsigned long)time(NULL));
+        }
+        req.broker = broker;
+        req.port = port > 0 ? port : 1883;
+        req.client_id = client_id;
+        req.username = user;
+        req.password = pass;
+        req.topic = topic[0] ? topic : "k230/nrf9151/test";
+        req.payload = "";
+        req.qos = qos;
+        req.retain = retain;
+        req.sec_tag = sec_tag_text[0] ? atoi(sec_tag_text) : -1;
+        req.auth = user[0] || pass[0] ?
+                   K230_NRF9151_MQTT_AUTH_USER_PASS :
+                   K230_NRF9151_MQTT_AUTH_NONE;
+        rc = k230_nrf9151_mqtt_session_connect_ex(
+            &req, log, sizeof(log), cellular_action_cancel_cb,
+            (void *)(uintptr_t)generation);
+        cellular_mqtt_set_status(rc == 0,
+                                 rc == 0 ? "Connected %s:%d" :
+                                 "Connect failed", broker, req.port);
+        cellular_mqtt_log_append("=== MQTT Connect ===");
+        cellular_mqtt_log_append("%s", log[0] ? log : "No modem log");
+    } else if(action == CELLULAR_ACTION_MQTT_DISCONNECT) {
+        rc = k230_nrf9151_mqtt_session_disconnect(log, sizeof(log));
+        cellular_mqtt_set_status(0, "Disconnected");
+        cellular_mqtt_log_append("=== MQTT Disconnect ===");
+        cellular_mqtt_log_append("%s", log[0] ? log : "Disconnected");
+    } else if(action == CELLULAR_ACTION_MQTT_SUBSCRIBE) {
+        char topic[160];
+        int qos;
+
+        pthread_mutex_lock(&cellular_lock);
+        snprintf(topic, sizeof(topic), "%s", cellular_mqtt_topic);
+        qos = cellular_mqtt_qos;
+        pthread_mutex_unlock(&cellular_lock);
+        rc = k230_nrf9151_mqtt_session_subscribe(
+            topic, qos, log, sizeof(log), cellular_action_cancel_cb,
+            (void *)(uintptr_t)generation);
+        if(rc == 0) {
+            cellular_mqtt_set_status(1, "Subscribed %s", topic);
+        } else {
+            cellular_mqtt_set_status(k230_nrf9151_mqtt_session_connected(),
+                                     "Subscribe failed");
+        }
+        cellular_mqtt_log_append("=== MQTT Subscribe ===");
+        cellular_mqtt_log_append("%s", log[0] ? log : "No modem log");
+    } else if(action == CELLULAR_ACTION_MQTT_PUBLISH) {
+        char topic[160];
+        char payload[256];
+        int qos;
+        int retain;
+
+        pthread_mutex_lock(&cellular_lock);
+        snprintf(topic, sizeof(topic), "%s", cellular_mqtt_topic);
+        snprintf(payload, sizeof(payload), "%s", cellular_mqtt_payload);
+        qos = cellular_mqtt_qos;
+        retain = cellular_mqtt_retain;
+        pthread_mutex_unlock(&cellular_lock);
+        rc = k230_nrf9151_mqtt_session_publish(
+            topic, payload, qos, retain, log, sizeof(log),
+            cellular_action_cancel_cb, (void *)(uintptr_t)generation);
+        cellular_mqtt_set_status(k230_nrf9151_mqtt_session_connected(),
+                                 rc == 0 ? "Published" : "Publish failed");
+        cellular_mqtt_log_append("=== MQTT Publish ===");
+        cellular_mqtt_log_append("%s", log[0] ? log : "No modem log");
+    } else if(action == CELLULAR_ACTION_MQTT_POLL) {
+        rc = k230_nrf9151_mqtt_session_poll(
+            log, sizeof(log), 250, cellular_action_cancel_cb,
+            (void *)(uintptr_t)generation);
+        if(rc > 0 && log[0]) {
+            cellular_mqtt_log_append("=== MQTT Message ===");
+            cellular_mqtt_log_append("%s", log);
+        }
+        rc = rc < 0 ? rc : 0;
     } else if(action == CELLULAR_ACTION_GNSS_START ||
               action == CELLULAR_ACTION_GNSS_NMEA ||
               action == CELLULAR_ACTION_GNSS_STATUS) {
@@ -3598,12 +3895,18 @@ static int cellular_run_manager_action(cellular_action_t action,
             line = strtok_r(NULL, "\n", &saveptr);
         }
     }
-    if(cellular_generation_active(generation)) {
+    if(action != CELLULAR_ACTION_MQTT_POLL &&
+       cellular_generation_active(generation)) {
         cellular_set_status(rc == -2 ? "%s canceled" :
                             (rc == 0 ? "%s OK" : "%s issues"),
                             action == CELLULAR_ACTION_HTTP_GET ? "HTTP GET" :
                             action == CELLULAR_ACTION_HTTP_POST ? "HTTP POST" :
-                            action == CELLULAR_ACTION_MQTT_TEST ? "MQTT" :
+                            (action == CELLULAR_ACTION_MQTT_TEST ||
+                             action == CELLULAR_ACTION_MQTT_CONNECT ||
+                             action == CELLULAR_ACTION_MQTT_DISCONNECT ||
+                             action == CELLULAR_ACTION_MQTT_SUBSCRIBE ||
+                             action == CELLULAR_ACTION_MQTT_PUBLISH ||
+                             action == CELLULAR_ACTION_MQTT_POLL) ? "MQTT" :
                             cellular_action_uses_lte_manager(action) ? "LTE" :
                             "GNSS");
     }
@@ -3649,7 +3952,8 @@ static void *cellular_worker_main(void *arg)
     }
 
     rc = cellular_run_manager_action(action, generation);
-    if(cellular_generation_active(generation)) {
+    if(action != CELLULAR_ACTION_MQTT_POLL &&
+       cellular_generation_active(generation)) {
         cellular_set_action_result(action, rc == 0);
     }
 
@@ -3716,9 +4020,28 @@ static void cellular_start_action(cellular_action_t action)
     app_request_fast_refresh();
 }
 
+static void cellular_mqtt_maybe_poll(void)
+{
+    uint64_t now = ui_monotonic_us();
+    int should_poll = 0;
+
+    pthread_mutex_lock(&cellular_lock);
+    if(cellular_mqtt_page_open && cellular_mqtt_connected &&
+       !cellular_worker_active &&
+       now - cellular_mqtt_last_poll_us > 1200000ULL) {
+        cellular_mqtt_last_poll_us = now;
+        should_poll = 1;
+    }
+    pthread_mutex_unlock(&cellular_lock);
+    if(should_poll) {
+        cellular_start_action(CELLULAR_ACTION_MQTT_POLL);
+    }
+}
+
 static void cellular_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+    cellular_mqtt_maybe_poll();
     cellular_status_refresh();
     cellular_log_refresh();
 }
@@ -3749,14 +4072,59 @@ static void cellular_http_post_submit_cb(const char *text, void *user_data)
     cellular_start_action(CELLULAR_ACTION_HTTP_POST);
 }
 
-static void cellular_mqtt_submit_cb(const char *text, void *user_data)
+static void cellular_mqtt_config_submit_cb(const char *text, void *user_data)
 {
     (void)user_data;
-    snprintf(cellular_mqtt_spec, sizeof(cellular_mqtt_spec), "%s",
-             text && text[0] ? text :
-             "broker.hivemq.com|1883|||k230/nrf9151/test|hello from k230|-1");
-    ui_trim_text(cellular_mqtt_spec);
-    cellular_start_action(CELLULAR_ACTION_MQTT_TEST);
+    if(text && text[0]) {
+        cellular_mqtt_load_spec(text);
+        cellular_mqtt_log_append("MQTT config updated");
+        app_request_fast_refresh();
+    }
+}
+
+static void cellular_mqtt_topic_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    pthread_mutex_lock(&cellular_lock);
+    snprintf(cellular_mqtt_topic, sizeof(cellular_mqtt_topic), "%s",
+             text && text[0] ? text : "k230/nrf9151/test");
+    ui_trim_text(cellular_mqtt_topic);
+    cellular_mqtt_sync_spec_locked();
+    pthread_mutex_unlock(&cellular_lock);
+    cellular_mqtt_log_append("MQTT topic updated");
+    app_request_fast_refresh();
+}
+
+static void cellular_mqtt_payload_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    pthread_mutex_lock(&cellular_lock);
+    snprintf(cellular_mqtt_payload, sizeof(cellular_mqtt_payload), "%s",
+             text ? text : "");
+    ui_trim_text(cellular_mqtt_payload);
+    cellular_mqtt_sync_spec_locked();
+    pthread_mutex_unlock(&cellular_lock);
+    cellular_mqtt_log_append("MQTT payload updated");
+    app_request_fast_refresh();
+}
+
+static void cellular_mqtt_qos_retain_event_cb(lv_event_t *event)
+{
+    (void)event;
+    pthread_mutex_lock(&cellular_lock);
+    if(cellular_mqtt_qos < 2) {
+        cellular_mqtt_qos++;
+    } else if(!cellular_mqtt_retain) {
+        cellular_mqtt_qos = 0;
+        cellular_mqtt_retain = 1;
+    } else {
+        cellular_mqtt_qos = 0;
+        cellular_mqtt_retain = 0;
+    }
+    cellular_mqtt_sync_spec_locked();
+    pthread_mutex_unlock(&cellular_lock);
+    cellular_mqtt_log_append("MQTT QoS/retain changed");
+    app_request_fast_refresh();
 }
 
 static void cellular_http_get_event_cb(lv_event_t *event)
@@ -3795,7 +4163,7 @@ static void cellular_http_post_event_cb(lv_event_t *event)
     ui_input_dialog_open(&config);
 }
 
-static void cellular_mqtt_event_cb(lv_event_t *event)
+static void cellular_mqtt_config_event_cb(lv_event_t *event)
 {
     ui_input_dialog_config_t config;
 
@@ -3807,10 +4175,85 @@ static void cellular_mqtt_event_cb(lv_event_t *event)
     config.max_length = sizeof(cellular_mqtt_spec) - 1U;
     config.min_length = 3U;
     config.min_length_text = "Enter MQTT broker";
-    config.submit_cb = cellular_mqtt_submit_cb;
-    config.submit_text = "Run";
+    config.submit_cb = cellular_mqtt_config_submit_cb;
+    config.submit_text = "Save";
     config.cancel_text = "Cancel";
     ui_input_dialog_open(&config);
+}
+
+static void cellular_mqtt_topic_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+    char topic[160];
+
+    (void)event;
+    pthread_mutex_lock(&cellular_lock);
+    snprintf(topic, sizeof(topic), "%s", cellular_mqtt_topic);
+    pthread_mutex_unlock(&cellular_lock);
+    memset(&config, 0, sizeof(config));
+    config.title = "MQTT Topic";
+    config.placeholder = "topic/name";
+    config.initial_text = topic;
+    config.max_length = sizeof(cellular_mqtt_topic) - 1U;
+    config.min_length = 1U;
+    config.min_length_text = "Enter topic";
+    config.submit_cb = cellular_mqtt_topic_submit_cb;
+    config.submit_text = "Save";
+    config.cancel_text = "Cancel";
+    ui_input_dialog_open(&config);
+}
+
+static void cellular_mqtt_payload_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+    char payload[256];
+
+    (void)event;
+    pthread_mutex_lock(&cellular_lock);
+    snprintf(payload, sizeof(payload), "%s", cellular_mqtt_payload);
+    pthread_mutex_unlock(&cellular_lock);
+    memset(&config, 0, sizeof(config));
+    config.title = "MQTT Payload";
+    config.placeholder = "message";
+    config.initial_text = payload;
+    config.max_length = sizeof(cellular_mqtt_payload) - 1U;
+    config.submit_cb = cellular_mqtt_payload_submit_cb;
+    config.submit_text = "Save";
+    config.cancel_text = "Cancel";
+    ui_input_dialog_open(&config);
+}
+
+static void cellular_mqtt_clear_event_cb(lv_event_t *event)
+{
+    (void)event;
+    pthread_mutex_lock(&cellular_lock);
+    cellular_mqtt_log[0] = '\0';
+    pthread_mutex_unlock(&cellular_lock);
+    cellular_mqtt_refresh();
+}
+
+static void cellular_mqtt_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    pthread_mutex_lock(&cellular_lock);
+    cellular_mqtt_page_open = 0;
+    pthread_mutex_unlock(&cellular_lock);
+    if(cellular_mqtt_panel) {
+        lv_obj_add_flag(cellular_mqtt_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void cellular_mqtt_event_cb(lv_event_t *event)
+{
+    (void)event;
+    pthread_mutex_lock(&cellular_lock);
+    cellular_mqtt_page_open = 1;
+    pthread_mutex_unlock(&cellular_lock);
+    if(cellular_mqtt_panel) {
+        lv_obj_clear_flag(cellular_mqtt_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(cellular_mqtt_panel);
+    }
+    cellular_mqtt_refresh();
 }
 
 static void cellular_cno_monitor_event_cb(lv_event_t *event)
@@ -3909,6 +4352,132 @@ static lv_obj_t *cellular_button(lv_obj_t *parent, int x, int y, int w,
 
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
     return btn;
+}
+
+static void cellular_mqtt_page_create(void)
+{
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int landscape = ui_is_landscape();
+    int margin = landscape ? 38 : 24;
+    int top_y = landscape ? 30 : 34;
+    int gap = landscape ? 20 : 18;
+    int content_y = top_y + 72;
+    int content_h = screen_h - content_y - 30;
+    int left_w = landscape ? 380 : screen_w - margin * 2;
+    int right_w = landscape ? screen_w - margin * 2 - left_w - gap :
+                  screen_w - margin * 2;
+    int left_h = landscape ? content_h : 520;
+    int right_h = landscape ? content_h : content_h - left_h - gap;
+    int right_x = landscape ? margin + left_w + gap : margin;
+    int right_y = landscape ? content_y : content_y + left_h + gap;
+    int btn_gap = 10;
+    int btn_w = (left_w - 32 - btn_gap) / 2;
+    lv_obj_t *title;
+    lv_obj_t *close_btn;
+    lv_obj_t *config_panel;
+    lv_obj_t *log_panel;
+
+    if(right_h < 280) {
+        right_h = 280;
+    }
+
+    cellular_mqtt_panel = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(cellular_mqtt_panel);
+    lv_obj_set_style_bg_color(cellular_mqtt_panel, lv_color_hex(0x0B1117), 0);
+    lv_obj_set_style_bg_opa(cellular_mqtt_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(cellular_mqtt_panel, 0, 0);
+    lv_obj_set_style_pad_all(cellular_mqtt_panel, 0, 0);
+    lv_obj_set_scroll_dir(cellular_mqtt_panel,
+                          landscape ? LV_DIR_NONE : LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cellular_mqtt_panel,
+                              landscape ? LV_SCROLLBAR_MODE_OFF :
+                              LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(cellular_mqtt_panel, LV_OBJ_FLAG_HIDDEN);
+
+    title = ui_label(cellular_mqtt_panel, "MQTT Console",
+                     &lv_font_montserrat_28, 0xF2F5F8);
+    lv_obj_set_width(title, screen_w - margin * 2 - 100);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, margin, top_y);
+
+    close_btn = ui_command_button(cellular_mqtt_panel, screen_w - margin - 92,
+                                  top_y - 6, 92, "Back", 0x94A3B8);
+    lv_obj_add_event_cb(close_btn, cellular_mqtt_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    config_panel = ui_panel(cellular_mqtt_panel, margin, content_y, left_w,
+                            left_h);
+    lv_obj_set_style_bg_color(config_panel, lv_color_hex(0x151B22), 0);
+    lv_obj_set_style_pad_all(config_panel, 16, 0);
+
+    cellular_mqtt_status_label = ui_label(config_panel, "Disconnected",
+                                          &lv_font_montserrat_18, 0x94A3B8);
+    lv_obj_set_width(cellular_mqtt_status_label, left_w - 32);
+    lv_label_set_long_mode(cellular_mqtt_status_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_mqtt_status_label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    cellular_mqtt_broker_label = ui_label(config_panel, "-",
+                                          &lv_font_montserrat_16, 0xDCE5EE);
+    lv_obj_set_width(cellular_mqtt_broker_label, left_w - 32);
+    lv_label_set_long_mode(cellular_mqtt_broker_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_mqtt_broker_label, LV_ALIGN_TOP_LEFT, 0, 42);
+
+    cellular_mqtt_topic_label = ui_label(config_panel, "-",
+                                         &lv_font_montserrat_16, 0xDCE5EE);
+    lv_obj_set_width(cellular_mqtt_topic_label, left_w - 32);
+    lv_label_set_long_mode(cellular_mqtt_topic_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_mqtt_topic_label, LV_ALIGN_TOP_LEFT, 0, 76);
+
+    cellular_mqtt_payload_label = ui_label(config_panel, "-",
+                                           &lv_font_montserrat_16, 0xDCE5EE);
+    lv_obj_set_width(cellular_mqtt_payload_label, left_w - 32);
+    lv_label_set_long_mode(cellular_mqtt_payload_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_mqtt_payload_label, LV_ALIGN_TOP_LEFT, 0, 110);
+
+    cellular_button(config_panel, 0, 158, btn_w, "Config", 0xA78BFA,
+                    cellular_mqtt_config_event_cb, NULL);
+    cellular_button(config_panel, btn_w + btn_gap, 158, btn_w, "Topic",
+                    0x38BDF8, cellular_mqtt_topic_event_cb, NULL);
+    cellular_button(config_panel, 0, 228, btn_w, "Payload", 0x60A5FA,
+                    cellular_mqtt_payload_event_cb, NULL);
+    cellular_button(config_panel, btn_w + btn_gap, 228, btn_w, "QoS/Retain",
+                    0xF5A524, cellular_mqtt_qos_retain_event_cb, NULL);
+
+    cellular_button(config_panel, 0, 308, btn_w, "Connect", 0x25C281,
+                    cellular_action_event_cb,
+                    (void *)(intptr_t)CELLULAR_ACTION_MQTT_CONNECT);
+    cellular_button(config_panel, btn_w + btn_gap, 308, btn_w, "Disconnect",
+                    0xEF4444, cellular_action_event_cb,
+                    (void *)(intptr_t)CELLULAR_ACTION_MQTT_DISCONNECT);
+    cellular_button(config_panel, 0, 368, btn_w, "Subscribe", 0x22C55E,
+                    cellular_action_event_cb,
+                    (void *)(intptr_t)CELLULAR_ACTION_MQTT_SUBSCRIBE);
+    cellular_button(config_panel, btn_w + btn_gap, 368, btn_w, "Publish",
+                    0x3B82F6, cellular_action_event_cb,
+                    (void *)(intptr_t)CELLULAR_ACTION_MQTT_PUBLISH);
+
+    if(left_h > 474) {
+        cellular_button(config_panel, 0, 448, left_w - 32, "Clear",
+                        0x94A3B8, cellular_mqtt_clear_event_cb, NULL);
+    }
+
+    log_panel = ui_panel(cellular_mqtt_panel, right_x, right_y, right_w,
+                         right_h);
+    lv_obj_set_style_bg_color(log_panel, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_pad_all(log_panel, 16, 0);
+    lv_obj_add_flag(log_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(log_panel, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(log_panel, LV_SCROLLBAR_MODE_AUTO);
+
+    ui_label(log_panel, "Messages", &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_align(lv_obj_get_child(log_panel, lv_obj_get_child_count(log_panel) - 1),
+                 LV_ALIGN_TOP_LEFT, 0, 0);
+    cellular_mqtt_log_label = ui_label(log_panel, "MQTT log is empty",
+                                       &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_width(cellular_mqtt_log_label, right_w - 32);
+    lv_label_set_long_mode(cellular_mqtt_log_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(cellular_mqtt_log_label, LV_ALIGN_TOP_LEFT, 0, 42);
 }
 
 void ui_cellular_create(lv_obj_t *scr)
@@ -4057,6 +4626,8 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_label_set_long_mode(cellular_log_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(cellular_log_label, LV_ALIGN_TOP_LEFT, 0, log_text_y);
 
+    cellular_mqtt_page_create();
+
     cellular_check_panel = lv_obj_create(lv_layer_top());
     ui_set_fullscreen(cellular_check_panel);
     lv_obj_set_style_bg_color(cellular_check_panel, lv_color_hex(0x000000), 0);
@@ -4103,6 +4674,8 @@ void ui_cellular_cleanup(void)
     cellular_action_generation++;
     cellular_worker_active = 0;
     cellular_result_pending = 0;
+    cellular_mqtt_page_open = 0;
+    cellular_mqtt_connected = 0;
     if(cellular_cno_monitor_active) {
         cellular_cno_monitor_stop = 1;
     }
@@ -4116,6 +4689,7 @@ void ui_cellular_cleanup(void)
         (void)k230_nrf9151_stop_gnss_monitor();
         cellular_log_append("Cellular page cleanup: GNSS manager stop requested");
     }
+    (void)k230_nrf9151_mqtt_session_disconnect(NULL, 0);
 
     if(cellular_timer) {
         lv_timer_delete(cellular_timer);
@@ -4141,6 +4715,15 @@ void ui_cellular_cleanup(void)
     cellular_check_dialog = NULL;
     cellular_check_spinner = NULL;
     cellular_check_label = NULL;
+    if(cellular_mqtt_panel) {
+        lv_obj_delete(cellular_mqtt_panel);
+    }
+    cellular_mqtt_panel = NULL;
+    cellular_mqtt_status_label = NULL;
+    cellular_mqtt_broker_label = NULL;
+    cellular_mqtt_topic_label = NULL;
+    cellular_mqtt_payload_label = NULL;
+    cellular_mqtt_log_label = NULL;
     if(cellular_result_panel) {
         lv_obj_delete(cellular_result_panel);
     }
