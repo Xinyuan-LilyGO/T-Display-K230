@@ -68,6 +68,7 @@ set(K230_PHONE_UI_SOURCES
     main.c
     ui_common.c
     ui_icons.c
+    ui_icon_assets.c
     ui_prefs.c
     ui_i18n.c
     ui_input.c

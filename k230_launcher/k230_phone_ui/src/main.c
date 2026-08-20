@@ -708,6 +708,10 @@ static const char *page_name(page_id_t page)
         return "Battery";
     case PAGE_KEYBOARD_SETTINGS:
         return "Keyboard settings";
+    case PAGE_KEYBOARD_HOTKEYS:
+        return "F-key hotkeys";
+    case PAGE_KEYBOARD_HOTKEY_ACTION:
+        return "F-key action";
     case PAGE_KEYBOARD_TEST:
         return "Keyboard";
     case PAGE_BUTTON_TEST:
@@ -3606,6 +3610,11 @@ static page_id_t nav_fallback_parent(page_id_t page)
     case PAGE_LANGUAGE:
     case PAGE_TIME:
     case PAGE_KEYBOARD_SETTINGS:
+        return PAGE_SETTINGS;
+    case PAGE_KEYBOARD_HOTKEYS:
+        return PAGE_KEYBOARD_SETTINGS;
+    case PAGE_KEYBOARD_HOTKEY_ACTION:
+        return PAGE_KEYBOARD_HOTKEYS;
     case PAGE_AUDIO_SETTINGS:
     case PAGE_AUDIO_OUTPUT:
     case PAGE_NOTIFICATION_SETTINGS:
@@ -10279,6 +10288,12 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_KEYBOARD_SETTINGS:
         ui_keyboard_settings_create(scr);
+        break;
+    case PAGE_KEYBOARD_HOTKEYS:
+        ui_keyboard_hotkeys_create(scr);
+        break;
+    case PAGE_KEYBOARD_HOTKEY_ACTION:
+        ui_keyboard_hotkey_action_create(scr);
         break;
     case PAGE_KEYBOARD_TEST:
         ui_keyboard_test_create(scr);

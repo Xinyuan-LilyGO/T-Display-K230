@@ -64,6 +64,8 @@ void ui_sensors_create(lv_obj_t *scr);
 void ui_bq25896_create(lv_obj_t *scr);
 void ui_battery_monitor_create(lv_obj_t *scr);
 void ui_keyboard_settings_create(lv_obj_t *scr);
+void ui_keyboard_hotkeys_create(lv_obj_t *scr);
+void ui_keyboard_hotkey_action_create(lv_obj_t *scr);
 void ui_keyboard_test_create(lv_obj_t *scr);
 void ui_button_test_create(lv_obj_t *scr);
 void ui_int0_test_create(lv_obj_t *scr);

@@ -498,6 +498,8 @@ static lv_obj_t *keyboard_settings_auto_switch;
 static lv_obj_t *keyboard_settings_esc_back_switch;
 static lv_obj_t *keyboard_settings_interval_btn[3];
 static lv_obj_t *keyboard_settings_hotkey_btn[KEYBOARD_HOTKEY_FKEY_COUNT];
+static lv_obj_t *keyboard_hotkey_action_btn[KEYBOARD_HOTKEY_COUNT];
+static int keyboard_hotkey_edit_index;
 
 static void style_choice_button(lv_obj_t *btn, int selected, uint32_t accent);
 static int keyboard_backlight_pref_frequency_hz(void);
@@ -507,6 +509,8 @@ static void keyboard_backlight_apply(int duty_percent, int frequency_hz,
 static int xl9555_set_led(int index, int enabled);
 static uint32_t extension_keyboard_shift_symbol_for_code(int code);
 static void keyboard_settings_update_ui(void);
+static void keyboard_hotkeys_update_ui(void);
+static void keyboard_hotkey_action_update_ui(void);
 
 static const keyboard_hotkey_fkey_t keyboard_hotkey_fkeys[] = {
     { 1, 50, "F1", KEYBOARD_HOTKEY_HOME },
@@ -3253,17 +3257,6 @@ static const char *keyboard_hotkey_action_label(keyboard_hotkey_action_t action)
     return "None";
 }
 
-static keyboard_hotkey_action_t keyboard_hotkey_next_action(
-    keyboard_hotkey_action_t action)
-{
-    int next = (int)keyboard_hotkey_normalize_action((int)action) + 1;
-
-    if(next >= KEYBOARD_HOTKEY_COUNT) {
-        next = 0;
-    }
-    return (keyboard_hotkey_action_t)next;
-}
-
 static int keyboard_hotkey_next_rotation(int degrees)
 {
     switch(degrees) {
@@ -5031,6 +5024,13 @@ static void keyboard_settings_update_ui(void)
     }
 }
 
+static void keyboard_hotkeys_update_ui(void)
+{
+    for(int i = 0; i < KEYBOARD_HOTKEY_FKEY_COUNT; i++) {
+        keyboard_settings_update_hotkey_button(i);
+    }
+}
+
 static void keyboard_settings_esc_back_event_cb(lv_event_t *event)
 {
     lv_obj_t *sw = lv_event_get_target(event);
@@ -5072,18 +5072,79 @@ static void keyboard_settings_probe_event_cb(lv_event_t *event)
     app_request_fast_refresh();
 }
 
-static void keyboard_settings_hotkey_event_cb(lv_event_t *event)
+static void keyboard_hotkey_list_event_cb(lv_event_t *event)
 {
     int f_index = (int)(intptr_t)lv_event_get_user_data(event);
-    keyboard_hotkey_action_t action;
 
     if(f_index < 0 || f_index >= KEYBOARD_HOTKEY_FKEY_COUNT) {
         return;
     }
 
-    action = keyboard_hotkey_next_action(keyboard_hotkey_get_action(f_index));
-    keyboard_hotkey_set_action(f_index, action);
-    keyboard_settings_update_hotkey_button(f_index);
+    keyboard_hotkey_edit_index = f_index;
+    app_nav_to_page(PAGE_KEYBOARD_HOTKEY_ACTION);
+}
+
+static void keyboard_hotkey_action_update_button(int action_index)
+{
+    lv_obj_t *btn;
+    lv_obj_t *lbl;
+    keyboard_hotkey_action_t selected_action;
+    keyboard_hotkey_action_t action;
+    char text[96];
+
+    if(action_index < 0 ||
+       action_index >= (int)(sizeof(keyboard_hotkey_actions) /
+                             sizeof(keyboard_hotkey_actions[0]))) {
+        return;
+    }
+    btn = keyboard_hotkey_action_btn[action_index];
+    if(!btn || !lv_obj_is_valid(btn)) {
+        return;
+    }
+
+    action = keyboard_hotkey_actions[action_index].action;
+    selected_action = keyboard_hotkey_get_action(keyboard_hotkey_edit_index);
+    snprintf(text, sizeof(text), "%s%s",
+             action == selected_action ? "* " : "",
+             ui_tr(keyboard_hotkey_actions[action_index].label));
+
+    lbl = lv_obj_get_child(btn, 0);
+    if(lbl && lv_obj_is_valid(lbl)) {
+        lv_label_set_text(lbl, text);
+        lv_obj_set_style_text_font(lbl,
+                                   ui_font_for_text(text,
+                                                    &lv_font_montserrat_18),
+                                   0);
+        lv_obj_set_width(lbl, lv_obj_get_width(btn) - 18);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(lbl);
+    }
+
+    style_choice_button(btn, action == selected_action, 0x3DA5FF);
+}
+
+static void keyboard_hotkey_action_update_ui(void)
+{
+    for(int i = 0; i < (int)(sizeof(keyboard_hotkey_actions) /
+                            sizeof(keyboard_hotkey_actions[0])); i++) {
+        keyboard_hotkey_action_update_button(i);
+    }
+}
+
+static void keyboard_hotkey_action_event_cb(lv_event_t *event)
+{
+    int action_index = (int)(intptr_t)lv_event_get_user_data(event);
+
+    if(action_index < 0 ||
+       action_index >= (int)(sizeof(keyboard_hotkey_actions) /
+                             sizeof(keyboard_hotkey_actions[0]))) {
+        return;
+    }
+
+    keyboard_hotkey_set_action(keyboard_hotkey_edit_index,
+                               keyboard_hotkey_actions[action_index].action);
+    keyboard_hotkey_action_update_ui();
     app_request_fast_refresh();
 }
 
@@ -5099,23 +5160,12 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
     int inner_w = panel_w - 32;
     int button_gap = 12;
     int button_w = (inner_w - button_gap * 2) / 3;
-    int hotkey_cols = ui_is_landscape() ? 2 : 1;
-    int hotkey_gap = 12;
-    int hotkey_cell_w;
-    int hotkey_rows;
-    int hotkey_panel_h;
 
     if(button_w < 130) {
         button_w = 130;
     }
-    hotkey_cell_w = (inner_w - hotkey_gap * (hotkey_cols - 1)) /
-                    hotkey_cols;
-    if(hotkey_cell_w < 180) {
-        hotkey_cell_w = 180;
-    }
-    hotkey_rows = (KEYBOARD_HOTKEY_FKEY_COUNT + hotkey_cols - 1) /
-                  hotkey_cols;
-    hotkey_panel_h = 108 + hotkey_rows * 72;
+    memset(keyboard_settings_hotkey_btn, 0, sizeof(keyboard_settings_hotkey_btn));
+    memset(keyboard_hotkey_action_btn, 0, sizeof(keyboard_hotkey_action_btn));
 
     ui_create_header(scr, "Keyboard settings");
     body = ui_page_body(scr, 154);
@@ -5200,10 +5250,45 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
                         "Backlight and key test", 0xF97316,
                         PAGE_KEYBOARD_TEST);
 
-    panel = ui_panel(body, panel_x, 738, panel_w, hotkey_panel_h);
+    ui_settings_nav_row(body, 732, "F1", "F-key hotkeys",
+                        "Choose F1-F11 shortcut actions", 0x3DA5FF,
+                        PAGE_KEYBOARD_HOTKEYS);
+
+    keyboard_settings_update_ui();
+}
+
+void ui_keyboard_hotkeys_create(lv_obj_t *scr)
+{
+    lv_obj_t *body;
+    lv_obj_t *panel;
+    lv_obj_t *label;
+    int panel_x = ui_page_panel_x();
+    int panel_w = ui_page_panel_width();
+    int inner_w = panel_w - 32;
+    int cols = ui_is_landscape() ? 3 : 2;
+    int gap = 12;
+    int cell_w;
+    int rows;
+    int panel_h;
+
+    cell_w = (inner_w - gap * (cols - 1)) / cols;
+    if(cell_w < 132) {
+        cols = 1;
+        cell_w = inner_w;
+    }
+    rows = (KEYBOARD_HOTKEY_FKEY_COUNT + cols - 1) / cols;
+    panel_h = 102 + rows * 72;
+    memset(keyboard_settings_hotkey_btn, 0, sizeof(keyboard_settings_hotkey_btn));
+    memset(keyboard_hotkey_action_btn, 0, sizeof(keyboard_hotkey_action_btn));
+
+    ui_create_header(scr, "F-key hotkeys");
+    body = ui_page_body(scr, 154);
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+
+    panel = ui_panel(body, panel_x, 0, panel_w, panel_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x151B22), 0);
 
-    label = ui_label(panel, "F-key hotkeys", &lv_font_montserrat_22,
+    label = ui_label(panel, "Select a function key", &lv_font_montserrat_22,
                      0xF2F5F8);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
 
@@ -5211,24 +5296,94 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
                      "Tap each function key to choose its shortcut action",
                      &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_width(label, inner_w);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 38);
 
     for(int i = 0; i < KEYBOARD_HOTKEY_FKEY_COUNT; i++) {
-        int row = i / hotkey_cols;
-        int col = i % hotkey_cols;
-        int x = col * (hotkey_cell_w + hotkey_gap);
-        int y = 86 + row * 72;
+        int row = i / cols;
+        int col = i % cols;
+        int x = col * (cell_w + gap);
+        int y = 82 + row * 72;
 
         keyboard_settings_hotkey_btn[i] =
-            ui_command_button(panel, x, y, hotkey_cell_w,
+            ui_command_button(panel, x, y, cell_w,
                               keyboard_hotkey_fkeys[i].name, 0x3DA5FF);
         lv_obj_add_event_cb(keyboard_settings_hotkey_btn[i],
-                            keyboard_settings_hotkey_event_cb,
+                            keyboard_hotkey_list_event_cb,
                             LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
 
-    keyboard_settings_update_ui();
+    keyboard_hotkeys_update_ui();
+}
+
+void ui_keyboard_hotkey_action_create(lv_obj_t *scr)
+{
+    lv_obj_t *body;
+    lv_obj_t *panel;
+    lv_obj_t *label;
+    int panel_x = ui_page_panel_x();
+    int panel_w = ui_page_panel_width();
+    int inner_w = panel_w - 32;
+    int cols = ui_is_landscape() ? 3 : 2;
+    int gap = 12;
+    int cell_w;
+    int action_count = (int)(sizeof(keyboard_hotkey_actions) /
+                             sizeof(keyboard_hotkey_actions[0]));
+    int rows;
+    int panel_h;
+    char title[96];
+
+    if(keyboard_hotkey_edit_index < 0 ||
+       keyboard_hotkey_edit_index >= KEYBOARD_HOTKEY_FKEY_COUNT) {
+        keyboard_hotkey_edit_index = 0;
+    }
+
+    cell_w = (inner_w - gap * (cols - 1)) / cols;
+    if(cell_w < 132) {
+        cols = 1;
+        cell_w = inner_w;
+    }
+    rows = (action_count + cols - 1) / cols;
+    panel_h = 132 + rows * 68;
+    memset(keyboard_hotkey_action_btn, 0, sizeof(keyboard_hotkey_action_btn));
+
+    snprintf(title, sizeof(title), "%s  %s",
+             keyboard_hotkey_fkeys[keyboard_hotkey_edit_index].name,
+             ui_tr("Select shortcut action"));
+
+    ui_create_header(scr, "Select shortcut action");
+    body = ui_page_body(scr, 154);
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+
+    panel = ui_panel(body, panel_x, 0, panel_w, panel_h);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x151B22), 0);
+
+    label = ui_label(panel, title, &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_width(label, inner_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    label = ui_label(panel, "Choose an action for this key",
+                     &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(label, inner_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 40);
+
+    for(int i = 0; i < action_count; i++) {
+        int row = i / cols;
+        int col = i % cols;
+        int x = col * (cell_w + gap);
+        int y = 82 + row * 68;
+
+        keyboard_hotkey_action_btn[i] =
+            ui_command_button(panel, x, y, cell_w,
+                              keyboard_hotkey_actions[i].label, 0x3DA5FF);
+        lv_obj_add_event_cb(keyboard_hotkey_action_btn[i],
+                            keyboard_hotkey_action_event_cb,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
+
+    keyboard_hotkey_action_update_ui();
 }
 
 static void audio_update_page(void)

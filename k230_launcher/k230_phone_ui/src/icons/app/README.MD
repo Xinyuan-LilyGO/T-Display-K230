@@ -4,7 +4,9 @@ Generated launcher icons for the K230 phone UI.
 
 Base glyphs: Material Design Icons by Pictogrammers, Apache-2.0.
 The generated app-icon SVG files use a simple rounded background plus the MDI glyph path.
-The matching PNG files are pre-rendered 96x96 runtime assets used by the launcher for faster drawing on K230.
+The matching PNG files are pre-rendered 96x96 fallback assets. The launcher normally uses
+embedded RGB565A8 `lv_image_dsc_t` data generated from these PNG files at the UI's common
+54/58/68 pixel sizes, so app list scrolling does not need runtime PNG decoding or scaling.
 
 | Source file | Runtime file | MDI source | Color |
 | --- | --- | --- |
