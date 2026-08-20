@@ -59,6 +59,9 @@ typedef struct {
     const char *url;
     k230_nrf9151_http_method_t method;
     const char *body;
+    char *response_body;
+    size_t response_body_len;
+    int *status_code;
     int sec_tag;
 } k230_nrf9151_http_request_t;
 

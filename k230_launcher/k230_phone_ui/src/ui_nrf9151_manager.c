@@ -36,7 +36,7 @@
 #define K230_NRF9151_IOMUX_DS_8MA (8U << 1)
 #define K230_NRF9151_CMD_TIMEOUT_US 1800000ULL
 #define K230_NRF9151_LONG_TIMEOUT_US 12000000ULL
-#define K230_NRF9151_HTTP_TIMEOUT_US 30000000ULL
+#define K230_NRF9151_HTTP_TIMEOUT_US 60000000ULL
 #define K230_NRF9151_MQTT_TIMEOUT_US 30000000ULL
 #define K230_NRF9151_GNSS_RESTART_US (120ULL * 1000000ULL)
 
@@ -2247,24 +2247,159 @@ static int nrf9151_manager_parse_socket_handle(const char *resp,
     return atoi(p);
 }
 
-static int nrf9151_manager_http_status_ok(const char *resp)
+static int nrf9151_manager_hex_value(int c)
+{
+    if(c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if(c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if(c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static int nrf9151_manager_http_status_code(const char *resp)
 {
     const char *p;
-    int status;
+    char *endp;
+    long status;
 
     if(!resp) {
-        return 0;
+        return -1;
     }
     p = strstr(resp, "#XHTTPCSTAT");
     if(!p) {
-        return 0;
+        return -1;
     }
     p = strchr(p, ',');
     if(!p) {
-        return 0;
+        return -1;
     }
-    status = atoi(p + 1);
+    status = strtol(p + 1, &endp, 10);
+    if(endp == p + 1 || status < 0 || status > 999) {
+        return -1;
+    }
+    return (int)status;
+}
+
+static int nrf9151_manager_http_status_ok(const char *resp)
+{
+    int status = nrf9151_manager_http_status_code(resp);
+
     return status >= 200 && status < 300;
+}
+
+static size_t nrf9151_manager_decode_hex_line(const char *line,
+                                              const char *line_end,
+                                              char *out, size_t out_len,
+                                              size_t used)
+{
+    const char *p = line;
+
+    while(p < line_end) {
+        int hi;
+        int lo;
+        unsigned char byte;
+
+        while(p < line_end && isspace((unsigned char)*p)) {
+            p++;
+        }
+        if(p >= line_end) {
+            break;
+        }
+        hi = nrf9151_manager_hex_value((unsigned char)p[0]);
+        lo = p + 1 < line_end ?
+             nrf9151_manager_hex_value((unsigned char)p[1]) : -1;
+        if(hi < 0 || lo < 0) {
+            break;
+        }
+        byte = (unsigned char)((hi << 4) | lo);
+        if(out && out_len > 0U && used + 1U < out_len) {
+            if(byte == '\r') {
+                out[used++] = '\n';
+            } else if(byte == 0U) {
+                /* Drop NUL bytes from modem payload previews. */
+            } else if(byte < 0x20U && byte != '\n' && byte != '\t') {
+                out[used++] = ' ';
+            } else {
+                out[used++] = (char)byte;
+            }
+            out[used] = '\0';
+        }
+        p += 2;
+    }
+    return used;
+}
+
+static void nrf9151_manager_http_decode_body(const char *resp,
+                                             char *out, size_t out_len)
+{
+    const char *p;
+    size_t used = 0U;
+
+    if(out && out_len > 0U) {
+        out[0] = '\0';
+    }
+    if(!resp || !out || out_len == 0U) {
+        return;
+    }
+    p = resp;
+    while((p = strstr(p, "#XHTTPCDATA:")) != NULL) {
+        const char *line = strchr(p, '\n');
+
+        if(!line) {
+            break;
+        }
+        line++;
+        for(;;) {
+            const char *line_end;
+            const char *scan;
+            int hex_pairs = 0;
+            int non_space = 0;
+
+            while(*line == '\r' || *line == '\n') {
+                line++;
+            }
+            if(!*line || *line == '#' || *line == '>') {
+                break;
+            }
+            line_end = line;
+            while(*line_end && *line_end != '\r' && *line_end != '\n') {
+                line_end++;
+            }
+            scan = line;
+            while(scan < line_end) {
+                if(isspace((unsigned char)*scan)) {
+                    scan++;
+                    continue;
+                }
+                non_space = 1;
+                if(scan + 1 < line_end &&
+                   nrf9151_manager_hex_value((unsigned char)scan[0]) >= 0 &&
+                   nrf9151_manager_hex_value((unsigned char)scan[1]) >= 0) {
+                    hex_pairs++;
+                    scan += 2;
+                    continue;
+                }
+                hex_pairs = 0;
+                break;
+            }
+            if(!non_space || hex_pairs <= 0) {
+                break;
+            }
+            used = nrf9151_manager_decode_hex_line(line, line_end, out,
+                                                   out_len, used);
+            if(used + 1U >= out_len) {
+                out[out_len - 1U] = '\0';
+                return;
+            }
+            line = line_end;
+        }
+        p = line;
+    }
 }
 
 int k230_nrf9151_http_request_ex(const k230_nrf9151_http_request_t *request,
@@ -2286,6 +2421,12 @@ int k230_nrf9151_http_request_ex(const k230_nrf9151_http_request_t *request,
 
     if(log && log_len > 0U) {
         log[0] = '\0';
+    }
+    if(request && request->response_body && request->response_body_len > 0U) {
+        request->response_body[0] = '\0';
+    }
+    if(request && request->status_code) {
+        *request->status_code = -1;
     }
     if(!request || !request->url ||
        nrf9151_manager_parse_url(request->url, &https, host, sizeof(host),
@@ -2395,6 +2536,12 @@ int k230_nrf9151_http_request_ex(const k230_nrf9151_http_request_t *request,
         if(more[0]) {
             nrf9151_manager_trim_text(more);
             nrf9151_manager_log_append(log, log_len, "%s", more);
+            if(request->status_code) {
+                *request->status_code =
+                    nrf9151_manager_http_status_code(more);
+            }
+            nrf9151_manager_http_decode_body(more, request->response_body,
+                                             request->response_body_len);
         }
         if(rc == 0 && !nrf9151_manager_http_status_ok(more)) {
             nrf9151_manager_log_append(log, log_len,

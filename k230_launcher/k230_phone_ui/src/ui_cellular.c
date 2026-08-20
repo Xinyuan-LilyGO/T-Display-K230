@@ -44,6 +44,8 @@
 #define K230_IOMUX_DS_8MA (8U << 1)
 #define NRF9151_LOG_MAX 4096
 #define NRF9151_LOG_VIEW_MAX 4096
+#define NRF9151_HTTP_BODY_MAX 2048
+#define NRF9151_RESULT_TEXT_MAX 3072
 #define NRF9151_TEST_LOG "/tmp/k230_nrf9151_test.log"
 #define NRF9151_CMD_TIMEOUT_US 1800000ULL
 #define NRF9151_NMEA_READ_SECONDS 15U
@@ -185,6 +187,7 @@ static lv_obj_t *cellular_check_panel;
 static lv_obj_t *cellular_check_dialog;
 static lv_obj_t *cellular_check_spinner;
 static lv_obj_t *cellular_check_label;
+static lv_obj_t *cellular_result_panel;
 static cellular_cn0_bar_t cellular_cn0_bars[NRF9151_CN0_BAR_MAX];
 static lv_timer_t *cellular_timer;
 
@@ -199,6 +202,10 @@ static int cellular_check_was_active;
 static unsigned int cellular_action_generation;
 static char cellular_running_title[64] = "LTE";
 static uint64_t cellular_check_hide_us;
+static int cellular_result_pending;
+static int cellular_result_ok;
+static char cellular_result_title[96];
+static char cellular_result_message[NRF9151_RESULT_TEXT_MAX];
 static char cellular_status[160] = "Ready";
 static char cellular_link_status[160] = "Not tested";
 static char cellular_sim_status[160] = "Not tested";
@@ -493,6 +500,148 @@ static void cellular_set_status(const char *fmt, ...)
     vsnprintf(cellular_status, sizeof(cellular_status), fmt, ap);
     va_end(ap);
     pthread_mutex_unlock(&cellular_lock);
+}
+
+static void cellular_queue_result(const char *title, int ok,
+                                  const char *message)
+{
+    pthread_mutex_lock(&cellular_lock);
+    cellular_result_pending = 1;
+    cellular_result_ok = ok ? 1 : 0;
+    snprintf(cellular_result_title, sizeof(cellular_result_title), "%s",
+             title && title[0] ? title : "Result");
+    snprintf(cellular_result_message, sizeof(cellular_result_message), "%s",
+             message && message[0] ? message : "-");
+    pthread_mutex_unlock(&cellular_lock);
+}
+
+static void cellular_log_tail_lines(const char *log, char *out, size_t out_len,
+                                    int max_lines)
+{
+    const char *start;
+    const char *p;
+    int lines = 0;
+
+    if(!out || out_len == 0U) {
+        return;
+    }
+    out[0] = '\0';
+    if(!log || !log[0]) {
+        snprintf(out, out_len, "%s", "No modem log");
+        return;
+    }
+    start = log;
+    p = log + strlen(log);
+    while(p > log && lines < max_lines) {
+        p--;
+        if(*p == '\n' && p[1] != '\0') {
+            lines++;
+            if(lines == max_lines) {
+                start = p + 1;
+                break;
+            }
+        }
+    }
+    snprintf(out, out_len, "%s", start);
+    ui_trim_text(out);
+}
+
+static void cellular_failure_reason(int rc, int status_code, const char *log,
+                                    char *out, size_t out_len)
+{
+    if(!out || out_len == 0U) {
+        return;
+    }
+    if(rc == -2) {
+        snprintf(out, out_len, "%s", "Canceled");
+    } else if(status_code >= 0 && (status_code < 200 || status_code >= 300)) {
+        snprintf(out, out_len, "HTTP status %d", status_code);
+    } else if(log && strstr(log, "Invalid URL")) {
+        snprintf(out, out_len, "%s", "Invalid URL");
+    } else if(log && strstr(log, "HTTPS needs")) {
+        snprintf(out, out_len, "%s", "HTTPS requires modem TLS credentials");
+    } else if(log && strstr(log, "HTTP response timeout")) {
+        snprintf(out, out_len, "%s", "HTTP response timeout");
+    } else if(log && strstr(log, "HTTP status is not 2xx")) {
+        snprintf(out, out_len, "%s", "HTTP status is not 2xx");
+    } else if(log && strstr(log, "UART busy")) {
+        snprintf(out, out_len, "%s", "nRF9151 UART is busy");
+    } else if(log && strstr(log, "< no response")) {
+        snprintf(out, out_len, "%s", "Modem command timeout");
+    } else if(log && strstr(log, "ERROR")) {
+        snprintf(out, out_len, "%s", "Modem returned ERROR");
+    } else {
+        cellular_log_tail_lines(log, out, out_len, 3);
+    }
+}
+
+static void cellular_queue_http_result(cellular_action_t action, int rc,
+                                       int status_code, const char *url,
+                                       const char *body, const char *log)
+{
+    char title[96];
+    char reason[256];
+    char message[NRF9151_RESULT_TEXT_MAX];
+    const char *action_name =
+        action == CELLULAR_ACTION_HTTP_POST ? "HTTP POST" : "HTTP GET";
+
+    if(rc == 0) {
+        const char *payload = body && body[0] ? body : "No payload";
+
+        snprintf(title, sizeof(title), "%s OK", action_name);
+        snprintf(message, sizeof(message),
+                 "%s\nStatus: %d\nURL: %s\n\nPayload:\n%s",
+                 action_name, status_code >= 0 ? status_code : 0,
+                 url && url[0] ? url : "-", payload);
+        cellular_queue_result(title, 1, message);
+        return;
+    }
+
+    cellular_failure_reason(rc, status_code, log, reason, sizeof(reason));
+    snprintf(title, sizeof(title), "%s Failed", action_name);
+    snprintf(message, sizeof(message),
+             "%s failed\nURL: %s\nReason: %s\n\nLast log:\n",
+             action_name, url && url[0] ? url : "-", reason);
+    {
+        size_t used = strlen(message);
+        if(used + 1U < sizeof(message)) {
+            cellular_log_tail_lines(log, message + used,
+                                    sizeof(message) - used, 8);
+        }
+    }
+    cellular_queue_result(title, 0, message);
+}
+
+static void cellular_queue_lte_result(int rc,
+                                      const k230_nrf9151_status_t *status,
+                                      const char *log)
+{
+    char reason[256];
+    char message[NRF9151_RESULT_TEXT_MAX];
+
+    if(rc == 0 && status) {
+        snprintf(message, sizeof(message),
+                 "LTE OK\nSIM: %s\nNetwork: %s\nIP: %s\nIMEI: %s\nFW: %s",
+                 status->sim_status[0] ? status->sim_status : "-",
+                 status->operator_name[0] ? status->operator_name : "-",
+                 status->ip[0] ? status->ip : "-",
+                 status->imei[0] ? status->imei : "-",
+                 status->firmware[0] ? status->firmware : "-");
+        cellular_queue_result("LTE OK", 1, message);
+        return;
+    }
+
+    cellular_failure_reason(rc, -1, log, reason, sizeof(reason));
+    snprintf(message, sizeof(message), "LTE failed\nReason: %s\n\nLast log:\n",
+             reason);
+    {
+        size_t used = strlen(message);
+        if(used + 1U < sizeof(message)) {
+            cellular_log_tail_lines(log, message + used,
+                                    sizeof(message) - used, 8);
+        }
+    }
+    cellular_queue_result("LTE Failed", 0, message);
 }
 
 static void cellular_set_summary(char *dst, size_t dst_len, const char *fmt, ...)
@@ -941,6 +1090,132 @@ static void cellular_check_progress_refresh(int active, const char *status,
     }
 }
 
+static void cellular_result_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    if(cellular_result_panel) {
+        lv_obj_delete(cellular_result_panel);
+        cellular_result_panel = NULL;
+    }
+}
+
+static void cellular_result_popup_refresh(void)
+{
+    char title[96];
+    char message[NRF9151_RESULT_TEXT_MAX];
+    int ok;
+    int pending;
+    int screen_w;
+    int screen_h;
+    int panel_w;
+    int panel_h;
+    int pad;
+    int button_w;
+    int button_h = 52;
+    lv_obj_t *dialog;
+    lv_obj_t *label;
+    lv_obj_t *text_box;
+    lv_obj_t *btn;
+
+    if(cellular_result_panel) {
+        return;
+    }
+
+    pthread_mutex_lock(&cellular_lock);
+    pending = cellular_result_pending;
+    if(pending) {
+        cellular_result_pending = 0;
+        ok = cellular_result_ok;
+        snprintf(title, sizeof(title), "%s", cellular_result_title);
+        snprintf(message, sizeof(message), "%s", cellular_result_message);
+    }
+    pthread_mutex_unlock(&cellular_lock);
+    if(!pending) {
+        return;
+    }
+
+    if(cellular_check_panel) {
+        lv_obj_add_flag(cellular_check_panel, LV_OBJ_FLAG_HIDDEN);
+        cellular_check_was_active = 0;
+        cellular_check_hide_us = 0;
+    }
+
+    screen_w = ui_screen_width();
+    screen_h = ui_screen_height();
+    panel_w = ui_is_landscape() ? screen_w - 160 : screen_w - 52;
+    panel_h = ui_is_landscape() ? screen_h - 96 : screen_h - 220;
+    if(panel_w > 760) {
+        panel_w = 760;
+    }
+    if(panel_w < 420) {
+        panel_w = screen_w - 36;
+    }
+    if(panel_h > 560) {
+        panel_h = 560;
+    }
+    if(panel_h < 320) {
+        panel_h = screen_h - 72;
+    }
+    pad = ui_is_landscape() ? 28 : 24;
+    button_w = panel_w < 460 ? panel_w - pad * 2 : 180;
+
+    cellular_result_panel = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(cellular_result_panel);
+    lv_obj_set_style_bg_color(cellular_result_panel, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(cellular_result_panel, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(cellular_result_panel, 0, 0);
+    lv_obj_set_style_pad_all(cellular_result_panel, 0, 0);
+    lv_obj_add_flag(cellular_result_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(cellular_result_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    dialog = lv_obj_create(cellular_result_panel);
+    lv_obj_set_size(dialog, panel_w, panel_h);
+    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(dialog, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(dialog, 16, 0);
+    lv_obj_set_style_border_width(dialog, 1, 0);
+    lv_obj_set_style_border_color(dialog, lv_color_hex(ok ? 0x25C281 : 0xEF4444),
+                                  0);
+    lv_obj_set_style_shadow_width(dialog, 18, 0);
+    lv_obj_set_style_shadow_opa(dialog, LV_OPA_30, 0);
+    lv_obj_set_style_shadow_color(dialog, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_pad_all(dialog, 0, 0);
+    lv_obj_clear_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(dialog);
+
+    label = ui_label(dialog, title, &lv_font_montserrat_24,
+                     ok ? 0x25C281 : 0xF87171);
+    lv_obj_set_width(label, panel_w - pad * 2);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, pad, 22);
+
+    text_box = lv_obj_create(dialog);
+    lv_obj_set_pos(text_box, pad, 68);
+    lv_obj_set_size(text_box, panel_w - pad * 2,
+                    panel_h - 68 - button_h - pad * 2);
+    lv_obj_set_style_bg_color(text_box, lv_color_hex(0x0B1117), 0);
+    lv_obj_set_style_bg_opa(text_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(text_box, 1, 0);
+    lv_obj_set_style_border_color(text_box, lv_color_hex(0x22303D), 0);
+    lv_obj_set_style_radius(text_box, 10, 0);
+    lv_obj_set_style_pad_all(text_box, 14, 0);
+    lv_obj_set_scroll_dir(text_box, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(text_box, LV_SCROLLBAR_MODE_AUTO);
+
+    label = ui_label(text_box, message, &lv_font_montserrat_16, 0xDCE5EE);
+    lv_obj_set_width(label, panel_w - pad * 2 - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    btn = ui_command_button(dialog,
+                            (panel_w - button_w) / 2,
+                            panel_h - button_h - pad,
+                            button_w, "OK", ok ? 0x25C281 : 0xEF4444);
+    lv_obj_add_event_cb(btn, cellular_result_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(cellular_result_panel);
+}
+
 static void cellular_status_refresh(void)
 {
     char status[160];
@@ -999,6 +1274,7 @@ static void cellular_status_refresh(void)
                                     0);
     }
     cellular_check_progress_refresh(active, status, running_title);
+    cellular_result_popup_refresh();
     if(cellular_link_label) {
         lv_label_set_text(cellular_link_label, link);
     }
@@ -3151,13 +3427,20 @@ static int cellular_run_manager_action(cellular_action_t action,
             &status, log, sizeof(log), cellular_action_cancel_cb,
             (void *)(uintptr_t)generation);
         cellular_apply_manager_status(&status);
+        if(action == CELLULAR_ACTION_FULL_TEST &&
+           cellular_generation_active(generation)) {
+            cellular_queue_lte_result(rc, &status, log);
+        }
     } else if(action == CELLULAR_ACTION_HTTP_GET ||
               action == CELLULAR_ACTION_HTTP_POST) {
         k230_nrf9151_http_request_t req;
         char url[256];
         char body[256];
+        char response_body[NRF9151_HTTP_BODY_MAX];
+        int status_code = -1;
 
         memset(&req, 0, sizeof(req));
+        response_body[0] = '\0';
         if(action == CELLULAR_ACTION_HTTP_GET) {
             snprintf(url, sizeof(url), "%s", cellular_http_url);
             body[0] = '\0';
@@ -3170,9 +3453,16 @@ static int cellular_run_manager_action(cellular_action_t action,
         }
         req.url = url;
         req.sec_tag = -1;
+        req.response_body = response_body;
+        req.response_body_len = sizeof(response_body);
+        req.status_code = &status_code;
         rc = k230_nrf9151_http_request_ex(
             &req, log, sizeof(log), cellular_action_cancel_cb,
             (void *)(uintptr_t)generation);
+        if(cellular_generation_active(generation)) {
+            cellular_queue_http_result(action, rc, status_code, url,
+                                       response_body, log);
+        }
     } else if(action == CELLULAR_ACTION_MQTT_TEST) {
         k230_nrf9151_mqtt_request_t req;
         char broker[160];
@@ -3745,6 +4035,7 @@ void ui_cellular_cleanup(void)
     cellular_page_active = 0;
     cellular_action_generation++;
     cellular_worker_active = 0;
+    cellular_result_pending = 0;
     if(cellular_cno_monitor_active) {
         cellular_cno_monitor_stop = 1;
     }
@@ -3783,6 +4074,10 @@ void ui_cellular_cleanup(void)
     cellular_check_dialog = NULL;
     cellular_check_spinner = NULL;
     cellular_check_label = NULL;
+    if(cellular_result_panel) {
+        lv_obj_delete(cellular_result_panel);
+    }
+    cellular_result_panel = NULL;
     cellular_check_was_active = 0;
     cellular_check_hide_us = 0;
     memset(cellular_cn0_bars, 0, sizeof(cellular_cn0_bars));
