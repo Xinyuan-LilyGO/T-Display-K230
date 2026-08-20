@@ -519,6 +519,12 @@ static void ui_nav_event_cb(lv_event_t *event)
     app_nav_to_page(page);
 }
 
+static void ui_settings_nav_event_cb(lv_event_t *event)
+{
+    page_id_t page = (page_id_t)(intptr_t)lv_event_get_user_data(event);
+    app_nav_to_settings_page(page);
+}
+
 static void ui_back_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -557,7 +563,7 @@ lv_obj_t *ui_settings_nav_row(lv_obj_t *parent, int y, const char *symbol,
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(row, 6);
-    lv_obj_add_event_cb(row, ui_nav_event_cb, LV_EVENT_CLICKED,
+    lv_obj_add_event_cb(row, ui_settings_nav_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)page);
 
     lv_obj_t *icon_box = lv_obj_create(row);

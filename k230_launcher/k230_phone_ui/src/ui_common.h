@@ -110,6 +110,7 @@ typedef enum {
 } page_id_t;
 
 void app_nav_to_page(page_id_t page);
+void app_nav_to_settings_page(page_id_t page);
 void app_nav_back(void);
 void app_take_screenshot(void);
 void app_request_fast_refresh(void);

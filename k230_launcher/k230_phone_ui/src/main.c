@@ -4081,6 +4081,15 @@ void app_nav_to_page(page_id_t page)
     nav_to(page);
 }
 
+void app_nav_to_settings_page(page_id_t page)
+{
+    settings_subpage_context = 1;
+    touch_trace_log("SETTINGS_NAV page=%s current=%s stack_len=%d",
+                    page_name(page), page_name(current_page), page_stack_len);
+    trace_ui_action("LVGL_CLICKED_SETTINGS_NAV", page);
+    nav_to(page);
+}
+
 void app_nav_back(void)
 {
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
