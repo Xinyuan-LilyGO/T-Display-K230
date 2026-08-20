@@ -4970,7 +4970,7 @@ static void audio_settings_add_volume(lv_obj_t *body, int y, int x, int w)
     if(group_w < 260) {
         group_w = w > 260 ? 260 : w;
     }
-    group_x = x + (w - group_w) / 2;
+    group_x = x;
     slider_x = group_x;
     slider_w = group_w;
     value_w = ui_is_landscape() ? 180 : 144;
@@ -6004,7 +6004,7 @@ void ui_bq25896_create(lv_obj_t *scr)
     if(group_w < 260) {
         group_w = content_w > 260 ? 260 : content_w;
     }
-    group_x = inset + (content_w - group_w) / 2;
+    group_x = inset;
     slider_x = group_x;
     slider_w = group_w;
     value_w = ui_is_landscape() ? 220 : 160;

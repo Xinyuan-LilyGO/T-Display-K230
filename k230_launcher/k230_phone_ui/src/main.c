@@ -9293,7 +9293,13 @@ static void create_display_page(lv_obj_t *scr)
     if(brightness_group_w < 260) {
         brightness_group_w = content_w > 260 ? 260 : content_w;
     }
-    brightness_group_x = (content_w - brightness_group_w) / 2;
+    brightness_group_x = display_orientation_is_landscape() ? 24 : 20;
+    if(brightness_group_x + brightness_group_w > content_w) {
+        brightness_group_x = content_w - brightness_group_w;
+    }
+    if(brightness_group_x < 0) {
+        brightness_group_x = 0;
+    }
     brightness_value_w = display_orientation_is_landscape() ? 180 : 144;
     if(brightness_value_w > brightness_group_w / 2) {
         brightness_value_w = brightness_group_w / 2;
