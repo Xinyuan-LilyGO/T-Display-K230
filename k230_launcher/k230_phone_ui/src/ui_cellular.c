@@ -97,7 +97,6 @@ typedef struct {
 static const char *const cellular_link_cmds[] = {
     "AT",
     "AT+CMEE=1",
-    "ATI",
     "AT+CGSN",
     "AT+CGMR",
 };
