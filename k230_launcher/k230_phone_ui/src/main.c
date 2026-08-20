@@ -9273,7 +9273,6 @@ static void create_display_page(lv_obj_t *scr)
     int brightness_group_w;
     int brightness_group_x;
     int brightness_value_w;
-    int brightness_slider_gap;
     int brightness_slider_x;
     int brightness_slider_w;
     int button_gap = 14;
@@ -9287,7 +9286,7 @@ static void create_display_page(lv_obj_t *scr)
     if(content_w < 360) {
         content_w = 360;
     }
-    brightness_group_w = display_orientation_is_landscape() ? 640 : 420;
+    brightness_group_w = content_w * 85 / 100;
     if(brightness_group_w > content_w) {
         brightness_group_w = content_w;
     }
@@ -9299,13 +9298,8 @@ static void create_display_page(lv_obj_t *scr)
     if(brightness_value_w > brightness_group_w / 2) {
         brightness_value_w = brightness_group_w / 2;
     }
-    brightness_slider_gap = display_orientation_is_landscape() ? 44 : 34;
-    brightness_slider_x = brightness_group_x + brightness_slider_gap;
-    brightness_slider_w = brightness_group_w - brightness_slider_gap * 2;
-    if(brightness_slider_w < 180) {
-        brightness_slider_x = brightness_group_x;
-        brightness_slider_w = brightness_group_w;
-    }
+    brightness_slider_x = brightness_group_x;
+    brightness_slider_w = brightness_group_w;
     button_w = (content_w - button_gap * 3) / 4;
 
     info_row(body, 8, "Panel", "RM69A10 AMOLED", 0xF2F5F8);

@@ -2563,7 +2563,7 @@ void ui_notification_settings_create(lv_obj_t *scr)
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     lv_obj_set_style_pad_all(body, 16, 0);
     content_w = ui_safe_content_width(body, 488);
-    list_w = ui_is_landscape() ? 860 : 456;
+    list_w = content_w * 85 / 100;
     if(list_w > content_w) {
         list_w = content_w;
     }

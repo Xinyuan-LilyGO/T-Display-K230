@@ -4958,9 +4958,8 @@ static void audio_settings_add_volume(lv_obj_t *body, int y, int x, int w)
 {
     lv_obj_t *slider;
     lv_obj_t *title;
-    int group_w = ui_is_landscape() ? 640 : 420;
+    int group_w = w * 85 / 100;
     int group_x;
-    int control_gap = ui_is_landscape() ? 44 : 34;
     int slider_x;
     int slider_w;
     int value_w;
@@ -4972,12 +4971,8 @@ static void audio_settings_add_volume(lv_obj_t *body, int y, int x, int w)
         group_w = w > 260 ? 260 : w;
     }
     group_x = x + (w - group_w) / 2;
-    slider_x = group_x + control_gap;
-    slider_w = group_w - control_gap * 2;
-    if(slider_w < 180) {
-        slider_w = group_w;
-        slider_x = group_x;
-    }
+    slider_x = group_x;
+    slider_w = group_w;
     value_w = ui_is_landscape() ? 180 : 144;
     if(value_w > group_w / 2) {
         value_w = group_w / 2;
@@ -5991,7 +5986,6 @@ void ui_bq25896_create(lv_obj_t *scr)
     int content_w;
     int button_gap = 16;
     int button_w;
-    int slider_gap;
     int group_x;
     int group_w;
     int slider_x;
@@ -6003,7 +5997,7 @@ void ui_bq25896_create(lv_obj_t *scr)
                            ui_body_height(154));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     content_w = hardware_content_width(body, inset);
-    group_w = ui_is_landscape() ? 640 : 420;
+    group_w = content_w * 85 / 100;
     if(group_w > content_w) {
         group_w = content_w;
     }
@@ -6011,13 +6005,8 @@ void ui_bq25896_create(lv_obj_t *scr)
         group_w = content_w > 260 ? 260 : content_w;
     }
     group_x = inset + (content_w - group_w) / 2;
-    slider_gap = ui_is_landscape() ? 44 : 34;
-    slider_x = group_x + slider_gap;
-    slider_w = group_w - slider_gap * 2;
-    if(slider_w < 180) {
-        slider_w = group_w;
-        slider_x = group_x;
-    }
+    slider_x = group_x;
+    slider_w = group_w;
     value_w = ui_is_landscape() ? 220 : 160;
     if(value_w > group_w / 2) {
         value_w = group_w / 2;
