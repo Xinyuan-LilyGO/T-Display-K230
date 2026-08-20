@@ -569,6 +569,33 @@ static int nrf9151_manager_response_has_token(const char *resp,
     return 0;
 }
 
+static int nrf9151_manager_urc_done_seen(const char *text)
+{
+    static const char *const tokens[] = {
+        "#XHTTPCSTAT",
+        "#XMQTTEVT: 0,",
+        "#XMQTTEVT: 1,",
+        "#XMQTTEVT: 2,",
+        "#XMQTTEVT: 3,",
+        "#XMQTTEVT: 7,",
+        "#XMQTTMSG:",
+        "#XDATAMODE: 0",
+        "+CME ERROR",
+        "+CMS ERROR",
+        "ERROR",
+    };
+
+    if(!text) {
+        return 0;
+    }
+    for(size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
+        if(strstr(text, tokens[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int nrf9151_manager_exchange(int fd, const char *cmd, char *resp,
                                     size_t resp_len, uint64_t timeout_us,
                                     k230_nrf9151_cancel_cb_t cancel_cb,
@@ -651,6 +678,7 @@ static int nrf9151_manager_read_urc(int fd, char *resp, size_t resp_len,
 {
     uint64_t start = nrf9151_manager_monotonic_us();
     size_t used = resp && resp_len > 0U ? strlen(resp) : 0U;
+    char tail[192] = "";
 
     while(nrf9151_manager_monotonic_us() - start < timeout_us) {
         fd_set rfds;
@@ -675,6 +703,40 @@ static int nrf9151_manager_read_urc(int fd, char *resp, size_t resp_len,
         if(rd <= 0) {
             continue;
         }
+        {
+            char scan[sizeof(tail) + sizeof(buf) + 1U];
+            char chunk[sizeof(buf) + 1U];
+            size_t chunk_len = (size_t)rd;
+            size_t scan_len;
+
+            if(chunk_len >= sizeof(chunk)) {
+                chunk_len = sizeof(chunk) - 1U;
+            }
+            memcpy(chunk, buf, chunk_len);
+            chunk[chunk_len] = '\0';
+            snprintf(scan, sizeof(scan), "%s%s", tail, chunk);
+            scan_len = strlen(scan);
+            if(scan_len >= sizeof(tail)) {
+                memcpy(tail, scan + scan_len - (sizeof(tail) - 1U),
+                       sizeof(tail) - 1U);
+                tail[sizeof(tail) - 1U] = '\0';
+            } else {
+                snprintf(tail, sizeof(tail), "%s", scan);
+            }
+            if(nrf9151_manager_urc_done_seen(scan)) {
+                if(resp && resp_len > 0U && used + 1U < resp_len) {
+                    size_t copy = (size_t)rd;
+
+                    if(copy > resp_len - used - 1U) {
+                        copy = resp_len - used - 1U;
+                    }
+                    memcpy(resp + used, buf, copy);
+                    used += copy;
+                    resp[used] = '\0';
+                }
+                return 1;
+            }
+        }
         if(resp && resp_len > 0U && used + 1U < resp_len) {
             size_t copy = (size_t)rd;
 
@@ -685,14 +747,8 @@ static int nrf9151_manager_read_urc(int fd, char *resp, size_t resp_len,
             used += copy;
             resp[used] = '\0';
         }
-        if(resp && (strstr(resp, "#XHTTPCSTAT:") ||
-                    strstr(resp, "#XMQTTEVT: 0,0") ||
-                    strstr(resp, "#XMQTTEVT: 1,0") ||
-                    strstr(resp, "#XMQTTEVT: 7,0") ||
-                    strstr(resp, "#XMQTTEVT: 3,0") ||
-                    strstr(resp, "#XMQTTEVT: 2,0") ||
-                    strstr(resp, "#XDATAMODE: 0"))) {
-            start = nrf9151_manager_monotonic_us();
+        if(nrf9151_manager_urc_done_seen(resp)) {
+            return 1;
         }
     }
     return 0;
@@ -1704,6 +1760,16 @@ static int nrf9151_manager_response_gnss_active(const char *resp)
     return atoi(p) > 0 ? 1 : 0;
 }
 
+static int nrf9151_manager_gnss_should_stop(void)
+{
+    int stop;
+
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    stop = nrf9151_gnss_monitor.stop;
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+    return stop;
+}
+
 static int nrf9151_manager_start_gnss_locked(int fd)
 {
     char resp[1024];
@@ -1804,7 +1870,7 @@ static void *nrf9151_manager_gnss_thread(void *arg)
         return NULL;
     }
 
-    while(!nrf9151_gnss_monitor.stop) {
+    while(!nrf9151_manager_gnss_should_stop()) {
         fd_set rfds;
         struct timeval tv;
         char buf[256];
@@ -1890,6 +1956,40 @@ int k230_nrf9151_stop_gnss_monitor(void)
     nrf9151_gnss_monitor.stop = 1;
     pthread_mutex_unlock(&nrf9151_manager_lock);
     return 0;
+}
+
+int k230_nrf9151_stop_gnss_monitor_wait(int wait_ms)
+{
+    uint64_t start_us;
+    int active;
+
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    active = nrf9151_gnss_monitor.active;
+    if(active) {
+        nrf9151_gnss_monitor.stop = 1;
+    }
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+    if(!active) {
+        return 0;
+    }
+    if(wait_ms <= 0) {
+        return 0;
+    }
+
+    start_us = nrf9151_manager_monotonic_us();
+    do {
+        usleep(20000);
+        pthread_mutex_lock(&nrf9151_manager_lock);
+        active = nrf9151_gnss_monitor.active;
+        pthread_mutex_unlock(&nrf9151_manager_lock);
+        if(!active) {
+            return 0;
+        }
+    } while((int)((nrf9151_manager_monotonic_us() - start_us) / 1000ULL) <
+            wait_ms);
+
+    errno = ETIMEDOUT;
+    return -1;
 }
 
 int k230_nrf9151_gnss_monitor_active(void)
@@ -1999,6 +2099,26 @@ static int nrf9151_manager_parse_socket_handle(const char *resp,
         p++;
     }
     return atoi(p);
+}
+
+static int nrf9151_manager_http_status_ok(const char *resp)
+{
+    const char *p;
+    int status;
+
+    if(!resp) {
+        return 0;
+    }
+    p = strstr(resp, "#XHTTPCSTAT");
+    if(!p) {
+        return 0;
+    }
+    p = strchr(p, ',');
+    if(!p) {
+        return 0;
+    }
+    status = atoi(p + 1);
+    return status >= 200 && status < 300;
 }
 
 int k230_nrf9151_http_request_ex(const k230_nrf9151_http_request_t *request,
@@ -2119,10 +2239,19 @@ int k230_nrf9151_http_request_ex(const k230_nrf9151_http_request_t *request,
                                           cancel_cb, cancel_user);
         if(urc_rc == -2) {
             rc = -2;
+        } else if(urc_rc <= 0) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "HTTP response timeout");
+            rc = -1;
         }
         if(more[0]) {
             nrf9151_manager_trim_text(more);
             nrf9151_manager_log_append(log, log_len, "%s", more);
+        }
+        if(rc == 0 && !nrf9151_manager_http_status_ok(more)) {
+            nrf9151_manager_log_append(log, log_len,
+                                       "HTTP status is not 2xx");
+            rc = -1;
         }
     }
     snprintf(cmd, sizeof(cmd), "AT#XCLOSE=%d", handle);

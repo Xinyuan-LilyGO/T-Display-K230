@@ -115,6 +115,7 @@ int k230_nrf9151_acquire_uart(const char *owner, int wait_ms);
 void k230_nrf9151_release_uart(int lock_fd);
 int k230_nrf9151_start_gnss_monitor(void);
 int k230_nrf9151_stop_gnss_monitor(void);
+int k230_nrf9151_stop_gnss_monitor_wait(int wait_ms);
 int k230_nrf9151_gnss_monitor_active(void);
 int k230_nrf9151_run_lte_check(k230_nrf9151_status_t *status,
                                char *log, size_t log_len);

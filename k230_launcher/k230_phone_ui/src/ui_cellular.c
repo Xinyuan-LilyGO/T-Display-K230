@@ -3127,12 +3127,20 @@ static int cellular_run_manager_action(cellular_action_t action,
 
     log[0] = '\0';
     if(cellular_action_uses_lte_manager(action)) {
-        (void)k230_nrf9151_stop_gnss_monitor();
+        int stop_rc = k230_nrf9151_stop_gnss_monitor_wait(6000);
+
         pthread_mutex_lock(&cellular_lock);
         cellular_cno_monitor_active = 0;
+        cellular_cno_monitor_stop = 1;
         cellular_manager_gnss_started = 0;
         pthread_mutex_unlock(&cellular_lock);
-        usleep(250000);
+        if(stop_rc != 0 && k230_nrf9151_gnss_monitor_active()) {
+            snprintf(log, sizeof(log), "%s",
+                     "GNSS monitor still owns UART");
+            cellular_log_append("%s", log);
+            cellular_set_status("nRF9151 busy");
+            return -1;
+        }
     }
 
     if(action == CELLULAR_ACTION_LINK ||
