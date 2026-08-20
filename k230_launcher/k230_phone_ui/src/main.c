@@ -474,6 +474,7 @@ static int edge_back_enabled;
 static int edge_back_tracking;
 static lv_point_t edge_back_start_point;
 static int edge_back_direction;
+static uint64_t edge_back_lvgl_suppress_until_us;
 static int edge_back_raw_tracking;
 static lv_point_t edge_back_raw_start_point;
 static int edge_back_raw_direction;
@@ -3881,10 +3882,26 @@ static void edge_back_event_cb(lv_event_t *event)
 {
     lv_event_code_t code = lv_event_get_code(event);
     lv_point_t point;
+    uint64_t now;
     int dx;
     int dy;
 
     edge_back_load_pref();
+    now = ui_monotonic_us();
+    if(edge_back_lvgl_suppress_until_us &&
+       now < edge_back_lvgl_suppress_until_us) {
+        if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST ||
+           code == LV_EVENT_PRESSING || code == LV_EVENT_PRESSED) {
+            edge_back_log("LVGL_SUPPRESS code=%d page=%s",
+                          (int)code, page_name(current_page));
+            if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+                edge_back_tracking = 0;
+                edge_back_direction = 0;
+                edge_back_hint_hide();
+            }
+        }
+        return;
+    }
     if(!edge_back_enabled || !evdev_indev || current_page == PAGE_HOME ||
        page_transition_active) {
         if(code == LV_EVENT_PRESSED || code == LV_EVENT_RELEASED ||
@@ -4036,6 +4053,9 @@ static void edge_back_consume_raw_pending(void)
     }
 
     edge_back_log("RAW_MAIN_TRIGGER page=%s", page_name(current_page));
+    edge_back_tracking = 0;
+    edge_back_direction = 0;
+    edge_back_lvgl_suppress_until_us = ui_monotonic_us() + 250000ULL;
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
         trace_ui_action("RAW_EDGE_BACK_INNER", PAGE_CELLULAR);
         edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
