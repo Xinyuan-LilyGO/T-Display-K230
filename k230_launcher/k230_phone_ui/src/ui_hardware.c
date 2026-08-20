@@ -19,6 +19,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #define PREF_AUDIO_OUTPUT "audio.output"
@@ -50,6 +51,7 @@
 #define BUTTON_BOOT0_IDLE_VALUE 1
 #define BUTTON_INT0_IDLE_VALUE 0
 #define BUTTON_TEST_LOG "/tmp/k230_button_test.log"
+#define REBOOT_DIAG_LOG "/tmp/k230_reboot_diag.log"
 #define KEYBOARD_BACKLIGHT_LOG "/tmp/k230_keyboard_backlight.log"
 #define BOOT0_TOGGLE_DEBOUNCE_US 500000ULL
 #define BOOT0_FADE_STEPS 12
@@ -2492,6 +2494,65 @@ static void keyboard_base_get_state(keyboard_base_state_t *state)
     pthread_mutex_unlock(&keyboard_base_lock);
 }
 
+void ui_hardware_reboot_diag_dump(const char *tag)
+{
+    keyboard_base_state_t base;
+    uint8_t reg_bq25896 = 0;
+    uint8_t reg_bq27220 = 0;
+    uint8_t reg_tca8418 = 0;
+    uint8_t reg_xl9555 = 0;
+    double uptime = 0.0;
+    time_t now;
+    FILE *fp;
+    FILE *up;
+    int rc_bq25896;
+    int rc_bq27220;
+    int rc_tca8418;
+    int rc_xl9555;
+
+    keyboard_base_probe();
+    keyboard_base_get_state(&base);
+
+    rc_bq25896 = keyboard_i2c_read_reg(BQ25896_ADDR,
+                                       BQ25896_REG_DEVICE_REV, &reg_bq25896);
+    rc_bq27220 = keyboard_i2c_read_reg(BQ27220_ADDR,
+                                       BQ27220_REG_VOLTAGE, &reg_bq27220);
+    rc_tca8418 = keyboard_i2c_read_reg(TCA8418_ADDR, TCA8418_REG_CFG,
+                                       &reg_tca8418);
+    rc_xl9555 = keyboard_i2c_read_reg(XL9555_ADDR, XL9555_REG_INPUT0,
+                                      &reg_xl9555);
+
+    up = fopen("/proc/uptime", "r");
+    if(up) {
+        if(fscanf(up, "%lf", &uptime) != 1) {
+            uptime = 0.0;
+        }
+        fclose(up);
+    }
+
+    fp = fopen(REBOOT_DIAG_LOG, "a");
+    if(!fp) {
+        return;
+    }
+
+    now = time(NULL);
+    fprintf(fp,
+            "%llu unix=%lld uptime=%.2f tag=%s scanned=%d "
+            "present{bq25896=%d bq27220=%d tca8418=%d xl9555=%d} "
+            "read_rc{bq25896=%d bq27220=%d tca8418=%d xl9555=%d} "
+            "read_val{bq25896=0x%02X bq27220=0x%02X tca8418=0x%02X xl9555=0x%02X} "
+            "runtime{hw_thread=%d ext_req=%d ext_active=%d tca_ready=%d} "
+            "status=\"%s\"\n",
+            (unsigned long long)ui_monotonic_us(), (long long)now, uptime,
+            tag ? tag : "unknown", base.scanned, base.bq25896,
+            base.bq27220, base.tca8418, base.xl9555, rc_bq25896,
+            rc_bq27220, rc_tca8418, rc_xl9555, reg_bq25896, reg_bq27220,
+            reg_tca8418, reg_xl9555, hardware_thread_started,
+            extension_keyboard_requested, extension_keyboard_active,
+            keyboard_tca8418_ready, base.status);
+    fclose(fp);
+}
+
 static const char *bq25896_charge_state_name(uint8_t status_reg)
 {
     switch((status_reg >> 3) & 0x03) {
@@ -4885,21 +4946,39 @@ static void audio_settings_volume_event_cb(lv_event_t *event)
     }
 }
 
-static void audio_settings_add_volume(lv_obj_t *body, int y)
+static int hardware_content_width(lv_obj_t *parent, int inset)
+{
+    int w = parent ? lv_obj_get_content_width(parent) : 0;
+
+    if(w <= 0) {
+        w = ui_fit_width(parent, 0, 488);
+    }
+    w -= inset * 2;
+    return w > 240 ? w : 240;
+}
+
+static void audio_settings_add_volume(lv_obj_t *body, int y, int x, int w)
 {
     lv_obj_t *slider;
+    lv_obj_t *title;
+    int value_w = 112;
 
-    ui_label(body, "Volume", &lv_font_montserrat_22, 0xF2F5F8);
-    lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, y);
+    title = ui_label(body, "Volume", &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_pos(title, x, y);
+    lv_obj_set_width(title, w - value_w - 12);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     audio_settings_volume_label = ui_label(body, "--", &lv_font_montserrat_18,
                                            0x3DA5FF);
-    lv_obj_align(audio_settings_volume_label, LV_ALIGN_TOP_RIGHT, 0, y + 2);
+    lv_obj_set_pos(audio_settings_volume_label, x + w - value_w, y + 2);
+    lv_obj_set_width(audio_settings_volume_label, value_w);
+    lv_obj_set_style_text_align(audio_settings_volume_label,
+                                LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(audio_settings_volume_label, LV_LABEL_LONG_DOT);
 
     slider = lv_slider_create(body);
     audio_settings_volume_slider = slider;
-    lv_obj_set_pos(slider, 0, y + 54);
-    lv_obj_set_size(slider, ui_fit_width(lv_obj_get_parent(slider), 0, 488), 24);
+    lv_obj_set_pos(slider, x, y + 54);
+    lv_obj_set_size(slider, w, 24);
     lv_slider_set_range(slider, 0, ui_audio_get_volume_max());
     lv_slider_set_value(slider, ui_audio_get_volume_value(), LV_ANIM_OFF);
     lv_obj_set_style_bg_color(slider, lv_color_hex(0x2A3037), LV_PART_MAIN);
@@ -4919,35 +4998,49 @@ void ui_audio_settings_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
     lv_obj_t *title;
+    int inset = 20;
+    int content_w;
+    int button_gap = 16;
+    int button_w;
 
     ui_create_header(scr, "Audio");
     body = ui_scroll_panel(scr, 24, ui_page_top_y(154), 520,
                            ui_body_height(154));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    content_w = hardware_content_width(body, inset);
+    button_w = (content_w - button_gap) / 2;
+    if(button_w > 280) {
+        button_w = 280;
+    }
 
     title = ui_label(body, "Audio settings", &lv_font_montserrat_24, 0xF2F5F8);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, inset, 0);
 
-    audio_settings_add_volume(body, 70);
+    audio_settings_add_volume(body, 70, inset, content_w);
 
     audio_status_label = ui_label(body, "--", &lv_font_montserrat_18, 0x9AA4AF);
-    lv_obj_set_width(audio_status_label, ui_inner_width());
+    lv_obj_set_width(audio_status_label, content_w);
     lv_label_set_long_mode(audio_status_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(audio_status_label, LV_ALIGN_TOP_LEFT, 0, 188);
+    lv_obj_align(audio_status_label, LV_ALIGN_TOP_LEFT, inset, 188);
 
-    audio_headphones_btn = ui_command_button(body, 0, 256, 236, "Headphones",
-                                             0x3DA5FF);
+    audio_headphones_btn = ui_command_button(body, inset, 256, button_w,
+                                             "Headphones", 0x3DA5FF);
     lv_obj_add_event_cb(audio_headphones_btn, audio_output_event_cb,
                         LV_EVENT_CLICKED, (void *)AUDIO_OUTPUT_HEADPHONES);
-    audio_external_btn = ui_command_button(body, 252, 256, 236,
+    audio_external_btn = ui_command_button(body, inset + button_w + button_gap,
+                                           256, button_w,
                                            "External speaker", 0x25C281);
     lv_obj_add_event_cb(audio_external_btn, audio_output_event_cb,
                         LV_EVENT_CLICKED, (void *)AUDIO_OUTPUT_EXTERNAL);
 
-    ui_info_row(body, 366, "I2S pins", "BCLK32 LRCK33 DATA35", 0xF2F5F8);
-    ui_info_row(body, 420, "Amp shutdown", "GPIO34 high enable", 0xF2F5F8);
-    ui_info_row(body, 474, "ALSA card", "K230_I2S_INNO", 0x25C281);
-    ui_info_row(body, 528, "Mixer", AUDIO_EXTERNAL_I2S_CONTROL, 0x9AA4AF);
+    ui_info_row_inset(body, 366, "I2S pins", "BCLK32 LRCK33 DATA35",
+                      0xF2F5F8, inset);
+    ui_info_row_inset(body, 420, "Amp shutdown", "GPIO34 high enable",
+                      0xF2F5F8, inset);
+    ui_info_row_inset(body, 474, "ALSA card", "K230_I2S_INNO", 0x25C281,
+                      inset);
+    ui_info_row_inset(body, 528, "Mixer", AUDIO_EXTERNAL_I2S_CONTROL,
+                      0x9AA4AF, inset);
 
     audio_update_page();
 }
@@ -5558,12 +5651,16 @@ static void battery_refresh_event_cb(lv_event_t *event)
 static void battery_info_row(lv_obj_t *parent, int y, const char *name,
                              const char *value, uint32_t value_color)
 {
-    int row_w = ui_fit_width(parent, 0, 488);
-    int side_pad = ui_is_landscape() ? 30 : 12;
-    int value_w = row_w - 196 - side_pad * 2;
+    int row_w = parent ? lv_obj_get_content_width(parent) : 0;
+    int side_pad = ui_is_landscape() ? 34 : 24;
+    int value_w;
     lv_obj_t *left;
     lv_obj_t *right;
 
+    if(row_w <= 0) {
+        row_w = ui_fit_width(parent, 0, 488);
+    }
+    value_w = row_w - 196 - side_pad * 2;
     if(value_w < 160) {
         value_w = 160;
     }
@@ -5825,32 +5922,40 @@ static void xl9555_all_event_cb(lv_event_t *event)
 void ui_sensors_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
+    int inset = 20;
+    int content_w;
 
     ui_create_header(scr, "Sensors");
     body = ui_scroll_panel(scr, 24, ui_page_top_y(154), 520,
                            ui_body_height(154));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    content_w = hardware_content_width(body, inset);
 
     ui_label(body, "AHT20", &lv_font_montserrat_24, 0xF2F5F8);
     lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, 0);
+                 LV_ALIGN_TOP_LEFT, inset, 0);
 
     sensor_status_label = ui_label(body, "--", &lv_font_montserrat_20,
                                    0x9AA4AF);
-    lv_obj_align(sensor_status_label, LV_ALIGN_TOP_LEFT, 0, 52);
+    lv_obj_set_width(sensor_status_label, content_w);
+    lv_label_set_long_mode(sensor_status_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(sensor_status_label, LV_ALIGN_TOP_LEFT, inset, 52);
 
-    ui_info_row(body, 122, "Temperature", "--", 0x25C281);
+    ui_info_row_inset(body, 122, "Temperature", "--", 0x25C281, inset);
     sensor_temp_label = lv_obj_get_child(body, lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 176, "Humidity", "--", 0x3DA5FF);
+    ui_info_row_inset(body, 176, "Humidity", "--", 0x3DA5FF, inset);
     sensor_humidity_label = lv_obj_get_child(body,
                                              lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 230, "I2C", "I2C4 SDA47/SCL46", 0xF2F5F8);
+    ui_info_row_inset(body, 230, "I2C", "I2C4 SDA47/SCL46", 0xF2F5F8,
+                      inset);
     sensor_bus_label = lv_obj_get_child(body, lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 284, "CPU temp", "--", 0xF5A524);
+    ui_info_row_inset(body, 284, "CPU temp", "--", 0xF5A524, inset);
     sensor_cpu_label = lv_obj_get_child(body, lv_obj_get_child_count(body) - 1);
 
-    ui_info_row(body, 360, "Expected addr", "0x38", 0xF2F5F8);
-    ui_info_row(body, 414, "Current scan", "fixed /dev/i2c-0 only", 0x9AA4AF);
+    ui_info_row_inset(body, 360, "Expected addr", "0x38", 0xF2F5F8,
+                      inset);
+    ui_info_row_inset(body, 414, "Current scan", "fixed /dev/i2c-0 only",
+                      0x9AA4AF, inset);
 
     hardware_page_timer = lv_timer_create(sensors_timer_cb, 1200, NULL);
     sensors_update_page();
@@ -5861,34 +5966,45 @@ void ui_bq25896_create(lv_obj_t *scr)
     lv_obj_t *body;
     lv_obj_t *refresh;
     int last_current;
+    int inset = 20;
+    int content_w;
+    int button_gap = 16;
+    int button_w;
 
     ui_create_header(scr, "Charger");
     body = ui_scroll_panel(scr, 24, ui_page_top_y(154), 520,
                            ui_body_height(154));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    content_w = hardware_content_width(body, inset);
+    button_w = (content_w - button_gap) / 2;
+    if(button_w > 280) {
+        button_w = 280;
+    }
 
     ui_label(body, "BQ25896", &lv_font_montserrat_24, 0xF2F5F8);
     lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, 0);
+                 LV_ALIGN_TOP_LEFT, inset, 0);
 
     bq25896_base_label = ui_label(body, "--", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(bq25896_base_label, ui_inner_width());
+    lv_obj_set_width(bq25896_base_label, content_w);
     lv_label_set_long_mode(bq25896_base_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(bq25896_base_label, LV_ALIGN_TOP_LEFT, 0, 48);
+    lv_obj_align(bq25896_base_label, LV_ALIGN_TOP_LEFT, inset, 48);
 
     bq25896_status_label = ui_label(body, "--", &lv_font_montserrat_20,
                                     0x9AA4AF);
-    lv_obj_set_width(bq25896_status_label, ui_inner_width());
+    lv_obj_set_width(bq25896_status_label, content_w);
     lv_label_set_long_mode(bq25896_status_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(bq25896_status_label, LV_ALIGN_TOP_LEFT, 0, 86);
+    lv_obj_align(bq25896_status_label, LV_ALIGN_TOP_LEFT, inset, 86);
 
-    ui_info_row(body, 148, "Charge", "--", 0x25C281);
+    ui_info_row_inset(body, 148, "Charge", "--", 0x25C281, inset);
     bq25896_charge_label = lv_obj_get_child(body,
                                             lv_obj_get_child_count(body) - 1);
 
-    bq25896_charge_on_btn = ui_command_button(body, 0, 208, 236, "Enable",
-                                              0x25C281);
-    bq25896_charge_off_btn = ui_command_button(body, 252, 208, 236, "Disable",
+    bq25896_charge_on_btn = ui_command_button(body, inset, 208, button_w,
+                                              "Enable", 0x25C281);
+    bq25896_charge_off_btn = ui_command_button(body,
+                                               inset + button_w + button_gap,
+                                               208, button_w, "Disable",
                                                0xEF4D5A);
     lv_obj_add_event_cb(bq25896_charge_on_btn, bq25896_charge_enable_event_cb,
                         LV_EVENT_CLICKED, (void *)(intptr_t)1);
@@ -5897,16 +6013,18 @@ void ui_bq25896_create(lv_obj_t *scr)
 
     ui_label(body, "Fast charge current", &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, 298);
+                 LV_ALIGN_TOP_LEFT, inset, 298);
     bq25896_slider_label = ui_label(body, "--", &lv_font_montserrat_18,
                                     0xF97316);
-    lv_obj_align(bq25896_slider_label, LV_ALIGN_TOP_RIGHT, 0, 300);
+    lv_obj_set_width(bq25896_slider_label, 130);
+    lv_obj_set_style_text_align(bq25896_slider_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(bq25896_slider_label, inset + content_w - 130, 300);
 
     last_current = read_pref_int(PREF_BQ25896_ICHG_MA, 512, 0,
                                  BQ25896_FAST_CHG_MAX_MA);
     bq25896_current_slider = lv_slider_create(body);
-    lv_obj_set_pos(bq25896_current_slider, 0, 354);
-    lv_obj_set_size(bq25896_current_slider, ui_fit_width(lv_obj_get_parent(bq25896_current_slider), 0, 488), 24);
+    lv_obj_set_pos(bq25896_current_slider, inset, 354);
+    lv_obj_set_size(bq25896_current_slider, content_w, 24);
     lv_slider_set_range(bq25896_current_slider, 0, BQ25896_FAST_CHG_MAX_MA);
     lv_slider_set_value(bq25896_current_slider, last_current, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(bq25896_current_slider, lv_color_hex(0x2A3037),
@@ -5923,32 +6041,33 @@ void ui_bq25896_create(lv_obj_t *scr)
     lv_obj_add_event_cb(bq25896_current_slider, bq25896_current_event_cb,
                         LV_EVENT_RELEASED, NULL);
 
-    ui_info_row(body, 430, "Input limit", "--", 0xF2F5F8);
+    ui_info_row_inset(body, 430, "Input limit", "--", 0xF2F5F8, inset);
     bq25896_input_label = lv_obj_get_child(body,
                                            lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 484, "Charge voltage", "--", 0xF2F5F8);
+    ui_info_row_inset(body, 484, "Charge voltage", "--", 0xF2F5F8, inset);
     bq25896_voltage_label = lv_obj_get_child(body,
                                              lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 558, "VBAT", "--", 0x25C281);
+    ui_info_row_inset(body, 558, "VBAT", "--", 0x25C281, inset);
     bq25896_vbat_label = lv_obj_get_child(body,
                                           lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 612, "VSYS", "--", 0x3DA5FF);
+    ui_info_row_inset(body, 612, "VSYS", "--", 0x3DA5FF, inset);
     bq25896_vsys_label = lv_obj_get_child(body,
                                           lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 666, "VBUS", "--", 0xF5A524);
+    ui_info_row_inset(body, 666, "VBUS", "--", 0xF5A524, inset);
     bq25896_vbus_label = lv_obj_get_child(body,
                                           lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 720, "Charge ADC", "--", 0xF97316);
+    ui_info_row_inset(body, 720, "Charge ADC", "--", 0xF97316, inset);
     bq25896_ichg_label = lv_obj_get_child(body,
                                           lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 774, "NTC", "--", 0x22D3EE);
+    ui_info_row_inset(body, 774, "NTC", "--", 0x22D3EE, inset);
     bq25896_ntc_label = lv_obj_get_child(body,
                                          lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 828, "Fault", "--", 0xEF4D5A);
+    ui_info_row_inset(body, 828, "Fault", "--", 0xEF4D5A, inset);
     bq25896_fault_label = lv_obj_get_child(body,
                                            lv_obj_get_child_count(body) - 1);
 
-    refresh = ui_command_button(body, 0, 878, 488, "Probe", 0xF97316);
+    refresh = ui_command_button(body, inset, 878, content_w, "Probe",
+                                0xF97316);
     lv_obj_add_event_cb(refresh, bq25896_refresh_event_cb, LV_EVENT_CLICKED,
                         NULL);
 

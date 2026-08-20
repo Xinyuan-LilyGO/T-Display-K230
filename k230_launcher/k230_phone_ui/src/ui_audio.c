@@ -2355,10 +2355,18 @@ static lv_obj_t *audio_create_row_ex(lv_obj_t *parent, int y,
     lv_obj_t *icon;
     lv_obj_t *name;
     lv_obj_t *detail;
-    int row_w = ui_fit_width(lv_obj_get_parent(row), 0, 488);
+    int row_w = parent ? lv_obj_get_content_width(parent) : 0;
     int text_w = row_w - text_x - 24 - right_reserved;
-    if(text_w < 260) {
-        text_w = 260;
+
+    if(row_w <= 0) {
+        row_w = ui_fit_width(lv_obj_get_parent(row), 0, 488);
+        text_w = row_w - text_x - 24 - right_reserved;
+    }
+    if(text_w < 120) {
+        text_w = row_w - text_x - 12 - right_reserved;
+    }
+    if(text_w < 80) {
+        text_w = 80;
     }
 
     lv_obj_set_pos(row, 0, y);

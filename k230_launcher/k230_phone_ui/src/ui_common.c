@@ -639,6 +639,57 @@ void ui_info_row(lv_obj_t *parent, int y, const char *name, const char *value,
     lv_obj_align(right, LV_ALIGN_TOP_RIGHT, 0, y - 2);
 }
 
+void ui_info_row_inset(lv_obj_t *parent, int y, const char *name,
+                       const char *value, uint32_t value_color,
+                       int side_gap)
+{
+    int row_w = parent ? lv_obj_get_content_width(parent) : 0;
+    int value_w;
+    int label_w;
+    lv_obj_t *left;
+    lv_obj_t *right;
+
+    if(row_w <= 0) {
+        row_w = ui_fit_width(parent, 0, 488);
+    }
+    if(side_gap < 0) {
+        side_gap = 0;
+    }
+    if(side_gap * 2 >= row_w) {
+        side_gap = row_w > 120 ? 24 : 0;
+    }
+
+    value_w = row_w / 2;
+    if(value_w > 320) {
+        value_w = 320;
+    }
+    if(value_w < 150) {
+        value_w = 150;
+    }
+    if(value_w > row_w - side_gap * 2 - 96) {
+        value_w = row_w - side_gap * 2 - 96;
+    }
+    if(value_w < 96) {
+        value_w = 96;
+    }
+
+    label_w = row_w - value_w - side_gap * 2 - 16;
+    if(label_w < 80) {
+        label_w = 80;
+    }
+
+    left = ui_label(parent, name, &lv_font_montserrat_18, 0x9AA4AF);
+    lv_obj_set_width(left, label_w);
+    lv_label_set_long_mode(left, LV_LABEL_LONG_DOT);
+    lv_obj_align(left, LV_ALIGN_TOP_LEFT, side_gap, y);
+
+    right = ui_label(parent, value, &lv_font_montserrat_20, value_color);
+    lv_obj_set_width(right, value_w);
+    lv_label_set_long_mode(right, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(right, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(right, LV_ALIGN_TOP_RIGHT, -side_gap, y - 2);
+}
+
 int ui_path_exists(const char *path)
 {
     return path && access(path, F_OK) == 0;

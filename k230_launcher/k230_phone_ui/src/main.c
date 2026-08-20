@@ -87,6 +87,7 @@
 #define CAMERA_PHOTO_DIR "/root/photos"
 #define SCREENSHOT_DIR "/root/screenshots"
 #define SCREENSHOT_LOG "/tmp/k230_screenshot.log"
+#define REBOOT_DIAG_LOG "/tmp/k230_reboot_diag.log"
 #define CAMERA_CAPTURE_DEVICE 1
 #define CAMERA_CAPTURE_W 1920
 #define CAMERA_CAPTURE_H 1080
@@ -121,7 +122,7 @@
 #define STATUS_BAR_ITEM_H 30
 #define STATUS_BAR_ITEM_GAP 6
 #define STATUS_BAR_LTE_W 40
-#define STATUS_BAR_BATTERY_W 62
+#define STATUS_BAR_BATTERY_W 74
 #define STATUS_BATTERY_REFRESH_US 10000000ULL
 #define NET_MAX_APS 6
 #define NET_SSID_MAX 64
@@ -4263,7 +4264,11 @@ static lv_obj_t *status_battery_item(lv_obj_t *parent)
 
     status_battery_percent_label = label(item, "--", &lv_font_montserrat_12,
                                          0x8B949E);
-    lv_obj_align(status_battery_percent_label, LV_ALIGN_RIGHT_MID, -1, 1);
+    lv_obj_set_pos(status_battery_percent_label, 37, 7);
+    lv_obj_set_width(status_battery_percent_label, STATUS_BAR_BATTERY_W - 39);
+    lv_label_set_long_mode(status_battery_percent_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(status_battery_percent_label,
+                                LV_TEXT_ALIGN_RIGHT, 0);
     make_click_forwarder(status_battery_percent_label);
     return item;
 }
@@ -9566,6 +9571,26 @@ static void create_placeholder_page(lv_obj_t *scr, const char *title, const char
     info_row(body, 214, "Integration", "Next stage", 0xF5A524);
 }
 
+static void reboot_diag_shell_snapshot(const char *tag)
+{
+    char cmd[768];
+    int rc;
+
+    snprintf(cmd, sizeof(cmd),
+             "{ echo; echo '[reboot-diag] tag=%s'; date; "
+             "printf '[reboot-diag] uptime='; cat /proc/uptime; "
+             "echo '[reboot-diag] i2c-dev:'; ls -l /dev/i2c-* 2>/dev/null; "
+             "if command -v i2cdetect >/dev/null 2>&1; then "
+             "for d in /dev/i2c-*; do n=${d##*-}; "
+             "echo \"[reboot-diag] i2cdetect bus=$n\"; i2cdetect -y \"$n\"; "
+             "done; else echo '[reboot-diag] i2cdetect missing'; fi; } "
+             ">> " REBOOT_DIAG_LOG " 2>&1",
+             tag ? tag : "unknown");
+    rc = system(cmd);
+    touch_trace_log("REBOOT_SHELL_SNAPSHOT tag=%s rc=%d",
+                    tag ? tag : "unknown", rc);
+}
+
 static void reboot_timer_cb(lv_timer_t *timer)
 {
     int rc;
@@ -9573,6 +9598,8 @@ static void reboot_timer_cb(lv_timer_t *timer)
     (void)timer;
 
     touch_trace_log("REBOOT_EXECUTE");
+    ui_hardware_reboot_diag_dump("reboot-timer-before-command");
+    reboot_diag_shell_snapshot("reboot-timer-before-command");
     rc = system("(sync; reboot -f || reboot) >/tmp/k230_reboot.log 2>&1 &");
     touch_trace_log("REBOOT_COMMAND rc=%d", rc);
 }
@@ -9588,6 +9615,7 @@ static void reboot_confirm_event_cb(lv_event_t *event)
     }
     reboot_confirm_started = 1;
     touch_trace_log("REBOOT_CONFIRM");
+    ui_hardware_reboot_diag_dump("reboot-confirm");
 
     if(reboot_confirm_btn && lv_obj_is_valid(reboot_confirm_btn)) {
         lv_obj_add_state(reboot_confirm_btn, LV_STATE_DISABLED);
@@ -9701,9 +9729,13 @@ static void create_reboot_page(lv_obj_t *scr)
     if(button_w > 240) {
         button_w = 240;
     }
-    if(landscape) {
+    {
         int buttons_total = button_w * 2 + button_gap;
-        int button_x = body_w - 24 - buttons_total;
+        int button_x = (body_w - buttons_total) / 2;
+
+        if(button_x < 20) {
+            button_x = 20;
+        }
 
         lv_obj_t *cancel = command_button(body, button_x, button_y,
                                           button_w, "Cancel", 0xCBD5E1);
@@ -9711,14 +9743,6 @@ static void create_reboot_page(lv_obj_t *scr)
                             NULL);
         reboot_confirm_btn = command_button(body,
                                             button_x + button_w + button_gap,
-                                            button_y, button_w, "Reboot",
-                                            0xEF4D5A);
-    } else {
-        lv_obj_t *cancel = command_button(body, 20, button_y, button_w,
-                                          "Cancel", 0xCBD5E1);
-        lv_obj_add_event_cb(cancel, reboot_cancel_event_cb, LV_EVENT_CLICKED,
-                            NULL);
-        reboot_confirm_btn = command_button(body, 20 + button_w + button_gap,
                                             button_y, button_w, "Reboot",
                                             0xEF4D5A);
     }
@@ -10335,6 +10359,7 @@ int main(void)
     ui_i18n_init();
     ui_time_settings_apply_startup();
     ui_hardware_startup();
+    ui_hardware_reboot_diag_dump("app-start-after-hardware-startup");
     apply_display_brightness_pref();
     ui_cellular_startup();
     ui_ethernet_apply_startup();
@@ -10433,7 +10458,9 @@ int main(void)
     stop_power_key_monitor();
     touch_trace_running = 0;
     ui_multitouch_stop();
+    ui_hardware_reboot_diag_dump("app-stop-before-hardware-shutdown");
     ui_hardware_shutdown();
+    ui_hardware_reboot_diag_dump("app-stop-after-hardware-shutdown");
     touch_trace_log("APP_STOP");
     return 0;
 }

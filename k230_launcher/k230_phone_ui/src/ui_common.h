@@ -158,6 +158,9 @@ lv_obj_t *ui_settings_nav_row(lv_obj_t *parent, int y, const char *symbol,
 void ui_create_header(lv_obj_t *scr, const char *title);
 void ui_info_row(lv_obj_t *parent, int y, const char *name, const char *value,
                  uint32_t value_color);
+void ui_info_row_inset(lv_obj_t *parent, int y, const char *name,
+                       const char *value, uint32_t value_color,
+                       int side_gap);
 void ui_make_click_forwarder(lv_obj_t *obj);
 void ui_make_scrollable(lv_obj_t *obj, int bottom_pad);
 void ui_set_fullscreen(lv_obj_t *obj);

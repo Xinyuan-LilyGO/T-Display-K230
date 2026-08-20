@@ -13,6 +13,7 @@ extern "C" {
 
 void ui_hardware_startup(void);
 void ui_hardware_shutdown(void);
+void ui_hardware_reboot_diag_dump(const char *tag);
 void ui_extension_keyboard_register_indev(void);
 typedef void (*ui_extension_keyboard_key_cb_t)(int code, uint32_t key,
                                                int pressed, void *user_data);
