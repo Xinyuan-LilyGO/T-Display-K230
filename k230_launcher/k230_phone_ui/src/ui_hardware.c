@@ -32,6 +32,7 @@
 #define PREF_EXTENSION_KEYBOARD "keyboard.extension_enabled"
 #define PREF_EXTENSION_KEYBOARD_AUTO_DETECT "keyboard.auto_detect"
 #define PREF_EXTENSION_KEYBOARD_AUTO_INTERVAL "keyboard.auto_detect_interval_s"
+#define PREF_EXTENSION_KEYBOARD_AUTO_ROTATE "keyboard.auto_rotate_display"
 #define PREF_EXTENSION_KEYBOARD_ESC_BACK "keyboard.esc_back_enabled"
 
 #define AUDIO_OUTPUT_HEADPHONES "headphones"
@@ -4004,7 +4005,8 @@ static int extension_keyboard_enable_runtime(int save_pref)
     if(save_pref) {
         ui_prefs_set(PREF_EXTENSION_KEYBOARD, "1");
     }
-    if(app_display_rotation_degrees() != 270) {
+    if(ui_extension_keyboard_auto_rotate_enabled() &&
+       app_display_rotation_degrees() != 270) {
         ui_prefs_set("display.rotation", "270");
         lv_async_call(extension_keyboard_rotate_270_async, NULL);
     }
@@ -4075,6 +4077,16 @@ int ui_extension_keyboard_auto_detect_interval_s(void)
 
     return extension_keyboard_interval_valid(seconds) ?
            seconds : extension_keyboard_normalize_interval(seconds);
+}
+
+int ui_extension_keyboard_auto_rotate_enabled(void)
+{
+    return read_pref_int(PREF_EXTENSION_KEYBOARD_AUTO_ROTATE, 1, 0, 1);
+}
+
+void ui_extension_keyboard_set_auto_rotate_enabled(int enabled)
+{
+    write_pref_int(PREF_EXTENSION_KEYBOARD_AUTO_ROTATE, enabled ? 1 : 0);
 }
 
 int ui_extension_keyboard_probe_now(void)
@@ -4711,21 +4723,21 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
     lv_obj_t *label;
     lv_obj_t *probe;
     lv_obj_t *sw;
-    int body_w = ui_screen_width() - 48;
-    int panel_w = body_w > 520 ? body_w - 32 : 520;
+    int panel_x = ui_page_panel_x();
+    int panel_w = ui_page_panel_width();
+    int inner_w = panel_w - 32;
     int button_gap = 12;
-    int button_w = (panel_w - 32 - button_gap * 2) / 3;
+    int button_w = (inner_w - button_gap * 2) / 3;
 
     if(button_w < 130) {
         button_w = 130;
     }
 
     ui_create_header(scr, "Keyboard settings");
-    body = ui_scroll_panel(scr, 24, ui_page_top_y(154), 520,
-                           ui_body_height(154));
+    body = ui_page_body(scr, 154);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
 
-    panel = ui_panel(body, 0, 0, 520, 220);
+    panel = ui_panel(body, panel_x, 0, panel_w, 220);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x151B22), 0);
 
     label = ui_label(panel, "Extension keyboard", &lv_font_montserrat_24,
@@ -4734,7 +4746,7 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
 
     keyboard_settings_status_label =
         ui_label(panel, "--", &lv_font_montserrat_18, 0x9AA4AF);
-    lv_obj_set_width(keyboard_settings_status_label, panel_w - 32);
+    lv_obj_set_width(keyboard_settings_status_label, inner_w);
     lv_label_set_long_mode(keyboard_settings_status_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(keyboard_settings_status_label, LV_ALIGN_TOP_LEFT, 0, 46);
 
@@ -4753,7 +4765,7 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
     lv_obj_add_event_cb(sw, keyboard_settings_auto_event_cb,
                         LV_EVENT_VALUE_CHANGED, NULL);
 
-    panel = ui_panel(body, 0, 244, 520, 198);
+    panel = ui_panel(body, panel_x, 244, panel_w, 198);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x151B22), 0);
 
     label = ui_label(panel, "Detection interval", &lv_font_montserrat_22,
@@ -4775,12 +4787,12 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
                             LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
 
-    probe = ui_command_button(panel, 0, 122, panel_w - 32, "Probe now",
+    probe = ui_command_button(panel, 0, 122, inner_w, "Probe now",
                               0x25C281);
     lv_obj_add_event_cb(probe, keyboard_settings_probe_event_cb,
                         LV_EVENT_CLICKED, NULL);
 
-    panel = ui_panel(body, 0, 466, 520, 130);
+    panel = ui_panel(body, panel_x, 466, panel_w, 130);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x151B22), 0);
 
     label = ui_label(panel, "Esc key back", &lv_font_montserrat_22,
@@ -4789,7 +4801,7 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
 
     label = ui_label(panel, "Use Esc to return to previous page",
                      &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(label, panel_w - 128);
+    lv_obj_set_width(label, inner_w > 128 ? inner_w - 128 : inner_w);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 46);
 

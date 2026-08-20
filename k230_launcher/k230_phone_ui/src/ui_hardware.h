@@ -24,6 +24,8 @@ int ui_extension_keyboard_auto_detect_enabled(void);
 void ui_extension_keyboard_set_auto_detect_enabled(int enabled);
 int ui_extension_keyboard_auto_detect_interval_s(void);
 void ui_extension_keyboard_set_auto_detect_interval_s(int seconds);
+int ui_extension_keyboard_auto_rotate_enabled(void);
+void ui_extension_keyboard_set_auto_rotate_enabled(int enabled);
 int ui_extension_keyboard_probe_now(void);
 const char *ui_extension_keyboard_status(void);
 void ui_extension_keyboard_focus_obj(lv_obj_t *obj);

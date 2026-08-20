@@ -346,6 +346,7 @@ static lv_obj_t *display_transition_label;
 static lv_obj_t *display_transition_btn[PAGE_TRANSITION_MODE_COUNT];
 static lv_obj_t *display_timeout_label;
 static lv_obj_t *display_timeout_btn[DISPLAY_TIMEOUT_MODE_COUNT];
+static lv_obj_t *display_keyboard_auto_rotate_switch;
 static lv_display_t *main_display;
 static int32_t motion_bar_travel[MOTION_BAR_COUNT];
 static int32_t motion_bar_x[MOTION_BAR_COUNT];
@@ -489,6 +490,7 @@ static uint32_t edge_back_raw_hint_generation;
 static lv_obj_t *edge_back_hint_obj;
 static lv_obj_t *edge_back_hint_label;
 static int edge_back_hint_opa;
+static int settings_subpage_context;
 static pthread_t power_key_thread;
 static int power_key_thread_started;
 static volatile int power_key_thread_stop;
@@ -3592,12 +3594,34 @@ static void home_apply_scroll_restore(lv_obj_t *apps)
 static page_id_t nav_fallback_parent(page_id_t page)
 {
     switch(page) {
+    case PAGE_WIFI:
+    case PAGE_ETHERNET:
+    case PAGE_BLE:
+    case PAGE_CELLULAR:
+    case PAGE_USB_MODEM:
+    case PAGE_DISPLAY:
+    case PAGE_LANGUAGE:
+    case PAGE_TIME:
     case PAGE_KEYBOARD_SETTINGS:
+    case PAGE_AUDIO_SETTINGS:
+    case PAGE_AUDIO_OUTPUT:
+    case PAGE_NOTIFICATION_SETTINGS:
+    case PAGE_FAN:
+    case PAGE_SENSORS:
+    case PAGE_BQ25896:
+    case PAGE_BATTERY:
     case PAGE_APP_STARTUP:
+    case PAGE_SYSTEM:
+    case PAGE_ABOUT:
         return PAGE_SETTINGS;
     default:
         return PAGE_HOME;
     }
+}
+
+static int page_is_settings_subpage(page_id_t page)
+{
+    return nav_fallback_parent(page) == PAGE_SETTINGS;
 }
 
 static void transition_to_page(page_id_t page, lv_screen_load_anim_t anim_type)
@@ -3631,6 +3655,11 @@ static void nav_to(page_id_t page)
     if(page == PAGE_HOME) {
         home_prepare_open(1);
     }
+    if(current_page == PAGE_SETTINGS && page_is_settings_subpage(page)) {
+        settings_subpage_context = 1;
+    } else if(page == PAGE_SETTINGS || page == PAGE_HOME) {
+        settings_subpage_context = 0;
+    }
 
     if(page_stack_len < (int)(sizeof(page_stack) / sizeof(page_stack[0]))) {
         page_stack[page_stack_len++] = current_page;
@@ -3657,6 +3686,18 @@ static void nav_back(void)
         return;
     }
 
+    if(page_is_settings_subpage(current_page) && settings_subpage_context &&
+       (page_stack_len <= 0 ||
+        page_stack[page_stack_len - 1] != PAGE_SETTINGS)) {
+        if(nav_transition_busy(PAGE_SETTINGS)) {
+            return;
+        }
+        ui_settings_prepare_open(1);
+        settings_subpage_context = 0;
+        transition_to_page(PAGE_SETTINGS, LV_SCREEN_LOAD_ANIM_OVER_RIGHT);
+        return;
+    }
+
     if(page_stack_len > 0) {
         page_id_t target = page_stack[page_stack_len - 1];
 
@@ -3672,6 +3713,7 @@ static void nav_back(void)
         }
         if(target == PAGE_SETTINGS) {
             ui_settings_prepare_open(1);
+            settings_subpage_context = 0;
         } else {
             ui_settings_clear_saved_scroll();
         }
@@ -3692,6 +3734,7 @@ static void nav_back(void)
         }
         if(fallback == PAGE_SETTINGS) {
             ui_settings_prepare_open(1);
+            settings_subpage_context = 0;
         } else if(fallback == PAGE_HOME) {
             home_prepare_open(1);
         }
@@ -5492,6 +5535,30 @@ static void display_update_timeout_controls(void)
                                          display_timeout_s == timeouts[i],
                                          timeouts[i] == 0 ? 0x9AA4AF : 0x25C281);
     }
+}
+
+static void display_update_keyboard_auto_rotate_control(void)
+{
+    if(!display_keyboard_auto_rotate_switch ||
+       !lv_obj_is_valid(display_keyboard_auto_rotate_switch)) {
+        return;
+    }
+    if(ui_extension_keyboard_auto_rotate_enabled()) {
+        lv_obj_add_state(display_keyboard_auto_rotate_switch, LV_STATE_CHECKED);
+    } else {
+        lv_obj_clear_state(display_keyboard_auto_rotate_switch,
+                           LV_STATE_CHECKED);
+    }
+}
+
+static void display_keyboard_auto_rotate_event_cb(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target(event);
+
+    ui_extension_keyboard_set_auto_rotate_enabled(
+        sw && lv_obj_has_state(sw, LV_STATE_CHECKED));
+    display_update_keyboard_auto_rotate_control();
+    request_fast_refresh();
 }
 
 static void display_timeout_event_cb(lv_event_t *event)
@@ -8971,6 +9038,7 @@ static void cleanup_page_state(void)
     display_font_label = NULL;
     display_transition_label = NULL;
     display_timeout_label = NULL;
+    display_keyboard_auto_rotate_switch = NULL;
     memset(display_rotation_btn, 0, sizeof(display_rotation_btn));
     memset(display_font_btn, 0, sizeof(display_font_btn));
     memset(display_transition_btn, 0, sizeof(display_transition_btn));
@@ -9247,25 +9315,48 @@ static void create_display_page(lv_obj_t *scr)
                         LV_EVENT_CLICKED, (void *)"270");
     display_update_orientation_controls();
 
-    label(body, "Font size", &lv_font_montserrat_22, 0xF2F5F8);
+    label(body, "Keyboard auto landscape", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
                  LV_ALIGN_TOP_LEFT, 0, 570);
 
+    label(body, "Rotate to 270 deg when the extension keyboard is detected",
+          &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
+                     content_w > 120 ? content_w - 120 : content_w);
+    lv_label_set_long_mode(lv_obj_get_child(body,
+                           lv_obj_get_child_count(body) - 1),
+                           LV_LABEL_LONG_WRAP);
+    lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
+                 LV_ALIGN_TOP_LEFT, 0, 608);
+
+    display_keyboard_auto_rotate_switch = lv_switch_create(body);
+    lv_obj_set_size(display_keyboard_auto_rotate_switch, 72, 38);
+    lv_obj_align(display_keyboard_auto_rotate_switch, LV_ALIGN_TOP_RIGHT, 0,
+                 590);
+    lv_obj_add_event_cb(display_keyboard_auto_rotate_switch,
+                        display_keyboard_auto_rotate_event_cb,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+    display_update_keyboard_auto_rotate_control();
+
+    label(body, "Font size", &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
+                 LV_ALIGN_TOP_LEFT, 0, 690);
+
     display_font_label = label(body, ui_font_size_label(),
                                &lv_font_montserrat_18, 0x25C281);
-    lv_obj_align(display_font_label, LV_ALIGN_TOP_LEFT, 0, 608);
+    lv_obj_align(display_font_label, LV_ALIGN_TOP_LEFT, 0, 728);
 
     button_w = (content_w - button_gap * 2) / 3;
-    display_font_btn[0] = command_button(body, 0, 668, button_w, "Small",
+    display_font_btn[0] = command_button(body, 0, 788, button_w, "Small",
                                          0x3DA5FF);
     lv_obj_add_event_cb(display_font_btn[0], display_font_size_event_cb,
                         LV_EVENT_CLICKED, (void *)"small");
-    display_font_btn[1] = command_button(body, button_w + button_gap, 668,
+    display_font_btn[1] = command_button(body, button_w + button_gap, 788,
                                          button_w, "Medium", 0x25C281);
     lv_obj_add_event_cb(display_font_btn[1], display_font_size_event_cb,
                         LV_EVENT_CLICKED, (void *)"medium");
     display_font_btn[2] = command_button(body,
-                                         (button_w + button_gap) * 2, 668,
+                                         (button_w + button_gap) * 2, 788,
                                          button_w, "Large", 0x3DA5FF);
     lv_obj_add_event_cb(display_font_btn[2], display_font_size_event_cb,
                         LV_EVENT_CLICKED, (void *)"large");
@@ -9273,45 +9364,45 @@ static void create_display_page(lv_obj_t *scr)
 
     label(body, "Page transition", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, 750);
+                 LV_ALIGN_TOP_LEFT, 0, 870);
 
     display_transition_label = label(body, page_transition_label_text(),
                                      &lv_font_montserrat_18, 0x9AA4AF);
-    lv_obj_align(display_transition_label, LV_ALIGN_TOP_LEFT, 0, 788);
+    lv_obj_align(display_transition_label, LV_ALIGN_TOP_LEFT, 0, 908);
 
     button_w = (content_w - button_gap * 2) / 3;
-    display_transition_btn[0] = command_button(body, 0, 848, button_w, "Off",
+    display_transition_btn[0] = command_button(body, 0, 968, button_w, "Off",
                                                0x9AA4AF);
     lv_obj_add_event_cb(display_transition_btn[0],
                         display_transition_event_cb, LV_EVENT_CLICKED,
                         (void *)"off");
     display_transition_btn[1] = command_button(body, button_w + button_gap,
-                                               848, button_w, "Fade",
+                                               968, button_w, "Fade",
                                                0x3DA5FF);
     lv_obj_add_event_cb(display_transition_btn[1],
                         display_transition_event_cb, LV_EVENT_CLICKED,
                         (void *)"fade");
     display_transition_btn[2] = command_button(body,
                                                (button_w + button_gap) * 2,
-                                               848, button_w, "Left",
+                                               968, button_w, "Left",
                                                0x3DA5FF);
     lv_obj_add_event_cb(display_transition_btn[2],
                         display_transition_event_cb, LV_EVENT_CLICKED,
                         (void *)"slide_left");
-    display_transition_btn[3] = command_button(body, 0, 914, button_w, "Right",
+    display_transition_btn[3] = command_button(body, 0, 1034, button_w, "Right",
                                                0x3DA5FF);
     lv_obj_add_event_cb(display_transition_btn[3],
                         display_transition_event_cb, LV_EVENT_CLICKED,
                         (void *)"slide_right");
     display_transition_btn[4] = command_button(body, button_w + button_gap,
-                                               914, button_w, "Up",
+                                               1034, button_w, "Up",
                                                0x3DA5FF);
     lv_obj_add_event_cb(display_transition_btn[4],
                         display_transition_event_cb, LV_EVENT_CLICKED,
                         (void *)"slide_up");
     display_transition_btn[5] = command_button(body,
                                                (button_w + button_gap) * 2,
-                                               914, button_w, "Cover",
+                                               1034, button_w, "Cover",
                                                0x3DA5FF);
     lv_obj_add_event_cb(display_transition_btn[5],
                         display_transition_event_cb, LV_EVENT_CLICKED,
@@ -9320,39 +9411,39 @@ static void create_display_page(lv_obj_t *scr)
 
     label(body, "Screen timeout", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_align(lv_obj_get_child(body, lv_obj_get_child_count(body) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, 1000);
+                 LV_ALIGN_TOP_LEFT, 0, 1120);
 
     display_timeout_load_pref();
     display_timeout_label = label(body, display_timeout_label_text(display_timeout_s),
                                   &lv_font_montserrat_18, 0x25C281);
-    lv_obj_align(display_timeout_label, LV_ALIGN_TOP_LEFT, 0, 1038);
+    lv_obj_align(display_timeout_label, LV_ALIGN_TOP_LEFT, 0, 1158);
 
     button_w = (content_w - button_gap * 2) / 3;
-    display_timeout_btn[0] = command_button(body, 0, 1098, button_w, "5 sec",
+    display_timeout_btn[0] = command_button(body, 0, 1218, button_w, "5 sec",
                                             0x25C281);
     lv_obj_add_event_cb(display_timeout_btn[0],
                         display_timeout_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)5);
     display_timeout_btn[1] = command_button(body, button_w + button_gap,
-                                            1098, button_w, "10 sec",
+                                            1218, button_w, "10 sec",
                                             0x25C281);
     lv_obj_add_event_cb(display_timeout_btn[1],
                         display_timeout_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)10);
     display_timeout_btn[2] = command_button(body,
                                             (button_w + button_gap) * 2,
-                                            1098, button_w, "30 sec",
+                                            1218, button_w, "30 sec",
                                             0x25C281);
     lv_obj_add_event_cb(display_timeout_btn[2],
                         display_timeout_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)30);
-    display_timeout_btn[3] = command_button(body, 0, 1164, button_w, "60 sec",
+    display_timeout_btn[3] = command_button(body, 0, 1284, button_w, "60 sec",
                                             0x25C281);
     lv_obj_add_event_cb(display_timeout_btn[3],
                         display_timeout_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)60);
     display_timeout_btn[4] = command_button(body, button_w + button_gap,
-                                            1164, button_w, "Never",
+                                            1284, button_w, "Never",
                                             0x9AA4AF);
     lv_obj_add_event_cb(display_timeout_btn[4],
                         display_timeout_event_cb, LV_EVENT_CLICKED,
