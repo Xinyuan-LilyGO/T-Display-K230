@@ -569,10 +569,35 @@ static int nrf9151_manager_response_has_token(const char *resp,
     return 0;
 }
 
+static int nrf9151_manager_http_stat_complete(const char *text)
+{
+    const char *p;
+    const char *first_comma;
+    const char *second_comma;
+    char *endp;
+
+    if(!text) {
+        return 0;
+    }
+    p = strstr(text, "#XHTTPCSTAT:");
+    if(!p) {
+        return 0;
+    }
+    first_comma = strchr(p, ',');
+    if(!first_comma) {
+        return 0;
+    }
+    second_comma = strchr(first_comma + 1, ',');
+    if(!second_comma) {
+        return 0;
+    }
+    (void)strtol(first_comma + 1, &endp, 10);
+    return endp && endp > first_comma + 1 && endp <= second_comma;
+}
+
 static int nrf9151_manager_urc_done_seen(const char *text)
 {
     static const char *const tokens[] = {
-        "#XHTTPCSTAT",
         "#XMQTTEVT: 0,",
         "#XMQTTEVT: 1,",
         "#XMQTTEVT: 2,",
@@ -587,6 +612,9 @@ static int nrf9151_manager_urc_done_seen(const char *text)
 
     if(!text) {
         return 0;
+    }
+    if(nrf9151_manager_http_stat_complete(text)) {
+        return 1;
     }
     for(size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
         if(strstr(text, tokens[i])) {
