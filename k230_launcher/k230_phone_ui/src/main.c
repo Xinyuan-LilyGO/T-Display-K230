@@ -283,11 +283,13 @@ static lv_obj_t *date_label;
 static lv_obj_t *home_temp_value_label;
 static lv_obj_t *home_power_source_value_label;
 static lv_obj_t *home_power_draw_value_label;
+static lv_obj_t *home_eth_title_label;
 static lv_obj_t *home_eth_value_label;
 static lv_obj_t *home_temp_badge;
 static lv_obj_t *home_power_source_badge;
 static lv_obj_t *home_power_draw_badge;
 static lv_obj_t *home_eth_badge;
+static lv_obj_t *home_eth_badge_text_label;
 static lv_obj_t *home_apps_scroll;
 static uint64_t home_telemetry_last_us;
 static lv_timer_t *home_telemetry_timer;
@@ -299,6 +301,8 @@ static unsigned int home_telemetry_displayed_generation;
 static char home_temp_cache[64] = "--";
 static char home_power_source_cache[64] = "--";
 static char home_power_draw_cache[64] = "--";
+static char home_eth_title_cache[32] = "Network IP";
+static char home_eth_symbol_cache[8] = "NET";
 static char home_eth_cache[64] = "--";
 static uint32_t home_temp_cache_color = 0x9AA4AF;
 static uint32_t home_power_source_cache_color = 0x9AA4AF;
@@ -2270,7 +2274,9 @@ static int read_power_draw_summary(char *buf, size_t len)
     return 0;
 }
 
-static int read_ethernet_summary(char *buf, size_t len, uint32_t *color)
+static int read_home_network_summary(char *title, size_t title_len,
+                                     char *symbol, size_t symbol_len,
+                                     char *buf, size_t len, uint32_t *color)
 {
     char path[128];
     char ip[64];
@@ -2280,17 +2286,97 @@ static int read_ethernet_summary(char *buf, size_t len, uint32_t *color)
         return -1;
     }
 
+    if(title && title_len > 0) {
+        snprintf(title, title_len, "Network IP");
+    }
+    if(symbol && symbol_len > 0) {
+        snprintf(symbol, symbol_len, "NET");
+    }
+
     snprintf(path, sizeof(path), "/sys/class/net/%s", NET_ETH_IFACE);
-    if(!path_exists(path)) {
-        snprintf(buf, len, "Missing");
+    if(path_exists(path)) {
+        carrier = ui_read_iface_carrier(NET_ETH_IFACE);
+        if(carrier == 1 &&
+           ui_read_iface_ip(NET_ETH_IFACE, ip, sizeof(ip)) == 0) {
+            char *slash = strchr(ip, '/');
+
+            if(slash) {
+                *slash = '\0';
+            }
+            if(title && title_len > 0) {
+                snprintf(title, title_len, "Ethernet IP");
+            }
+            if(symbol && symbol_len > 0) {
+                snprintf(symbol, symbol_len, "ETH");
+            }
+            snprintf(buf, len, "%s", ip[0] ? ip : "--");
+            if(color) {
+                *color = 0x25C281;
+            }
+            return 0;
+        }
+
+        if(carrier == 1) {
+            if(title && title_len > 0) {
+                snprintf(title, title_len, "Ethernet IP");
+            }
+            if(symbol && symbol_len > 0) {
+                snprintf(symbol, symbol_len, "ETH");
+            }
+            snprintf(buf, len, "No IP");
+            if(color) {
+                *color = 0xF5A524;
+            }
+            return -1;
+        }
+    }
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s", NET_WIFI_IFACE);
+    if(path_exists(path) &&
+       ui_read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip)) == 0) {
+        char *slash = strchr(ip, '/');
+
+        if(slash) {
+            *slash = '\0';
+        }
+        if(title && title_len > 0) {
+            snprintf(title, title_len, "WiFi IP");
+        }
+        if(symbol && symbol_len > 0) {
+            snprintf(symbol, symbol_len, "WIFI");
+        }
+        snprintf(buf, len, "%s", ip[0] ? ip : "--");
         if(color) {
-            *color = 0x9AA4AF;
+            *color = 0x22D3EE;
+        }
+        return 0;
+    }
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s", NET_ETH_IFACE);
+    if(path_exists(path)) {
+        carrier = ui_read_iface_carrier(NET_ETH_IFACE);
+        if(title && title_len > 0) {
+            snprintf(title, title_len, "Ethernet IP");
+        }
+        if(symbol && symbol_len > 0) {
+            snprintf(symbol, symbol_len, "ETH");
+        }
+        snprintf(buf, len, carrier == 0 ? "No link" :
+                 carrier == 1 ? "No IP" : "Unknown");
+        if(color) {
+            *color = carrier == 1 ? 0xF5A524 : 0x9AA4AF;
         }
         return -1;
     }
 
-    carrier = ui_read_iface_carrier(NET_ETH_IFACE);
-    if(carrier == 0) {
+    snprintf(path, sizeof(path), "/sys/class/net/%s", NET_WIFI_IFACE);
+    if(path_exists(path)) {
+        if(title && title_len > 0) {
+            snprintf(title, title_len, "WiFi IP");
+        }
+        if(symbol && symbol_len > 0) {
+            snprintf(symbol, symbol_len, "WIFI");
+        }
         snprintf(buf, len, "No link");
         if(color) {
             *color = 0x9AA4AF;
@@ -2298,22 +2384,9 @@ static int read_ethernet_summary(char *buf, size_t len, uint32_t *color)
         return -1;
     }
 
-    if(ui_read_iface_ip(NET_ETH_IFACE, ip, sizeof(ip)) == 0) {
-        char *slash = strchr(ip, '/');
-
-        if(slash) {
-            *slash = '\0';
-        }
-        snprintf(buf, len, "%s", ip[0] ? ip : "--");
-        if(color) {
-            *color = 0x25C281;
-        }
-        return 0;
-    }
-
-    snprintf(buf, len, carrier == 1 ? "No IP" : "Unknown");
+    snprintf(buf, len, "Missing");
     if(color) {
-        *color = carrier == 1 ? 0xF5A524 : 0x9AA4AF;
+        *color = 0x9AA4AF;
     }
     return -1;
 }
@@ -2323,6 +2396,8 @@ static void *home_telemetry_thread_cb(void *arg)
     char temp_text[64];
     char power_source_text[64];
     char power_draw_text[64];
+    char eth_title[32];
+    char eth_symbol[8];
     char eth_text[64];
     uint32_t temp_color;
     uint32_t source_color;
@@ -2339,7 +2414,9 @@ static void *home_telemetry_thread_cb(void *arg)
     draw_color = read_power_draw_summary(power_draw_text,
                                          sizeof(power_draw_text)) == 0 ?
                  0x22D3EE : 0x9AA4AF;
-    read_ethernet_summary(eth_text, sizeof(eth_text), &eth_color);
+    read_home_network_summary(eth_title, sizeof(eth_title),
+                              eth_symbol, sizeof(eth_symbol),
+                              eth_text, sizeof(eth_text), &eth_color);
 
     pthread_mutex_lock(&home_telemetry_lock);
     snprintf(home_temp_cache, sizeof(home_temp_cache), "%s", temp_text);
@@ -2347,6 +2424,10 @@ static void *home_telemetry_thread_cb(void *arg)
              power_source_text);
     snprintf(home_power_draw_cache, sizeof(home_power_draw_cache), "%s",
              power_draw_text);
+    snprintf(home_eth_title_cache, sizeof(home_eth_title_cache), "%s",
+             eth_title);
+    snprintf(home_eth_symbol_cache, sizeof(home_eth_symbol_cache), "%s",
+             eth_symbol);
     snprintf(home_eth_cache, sizeof(home_eth_cache), "%s", eth_text);
     home_temp_cache_color = temp_color;
     home_power_source_cache_color = source_color;
@@ -2389,6 +2470,8 @@ static void update_home_telemetry_labels(int force)
     char temp_text[64];
     char power_source_text[64];
     char power_draw_text[64];
+    char eth_title[32];
+    char eth_symbol[8];
     char eth_text[64];
     uint32_t temp_color;
     uint32_t source_color;
@@ -2416,6 +2499,8 @@ static void update_home_telemetry_labels(int force)
              home_power_source_cache);
     snprintf(power_draw_text, sizeof(power_draw_text), "%s",
              home_power_draw_cache);
+    snprintf(eth_title, sizeof(eth_title), "%s", home_eth_title_cache);
+    snprintf(eth_symbol, sizeof(eth_symbol), "%s", home_eth_symbol_cache);
     snprintf(eth_text, sizeof(eth_text), "%s", home_eth_cache);
     temp_color = home_temp_cache_color;
     source_color = home_power_source_cache_color;
@@ -2457,6 +2542,9 @@ static void update_home_telemetry_labels(int force)
         lv_obj_set_style_bg_color(home_power_draw_badge,
                                   lv_color_hex(draw_color), 0);
     }
+    if(home_eth_title_label && lv_obj_is_valid(home_eth_title_label)) {
+        lv_label_set_text(home_eth_title_label, eth_title);
+    }
     if(home_eth_value_label && lv_obj_is_valid(home_eth_value_label)) {
         lv_label_set_text(home_eth_value_label, eth_text);
         lv_obj_set_style_text_color(home_eth_value_label,
@@ -2464,6 +2552,10 @@ static void update_home_telemetry_labels(int force)
     }
     if(home_eth_badge && lv_obj_is_valid(home_eth_badge)) {
         lv_obj_set_style_bg_color(home_eth_badge, lv_color_hex(eth_color), 0);
+    }
+    if(home_eth_badge_text_label &&
+       lv_obj_is_valid(home_eth_badge_text_label)) {
+        lv_label_set_text(home_eth_badge_text_label, eth_symbol);
     }
 }
 
@@ -4842,6 +4934,8 @@ static void status_bar_update(lv_timer_t *timer)
         return;
     }
 
+    ui_network_sync_default_route("status-bar");
+
     wifi_present = path_exists("/sys/class/net/" NET_WIFI_IFACE);
     wifi_has_ip = read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip)) == 0;
     status_set_wifi_visible(wifi_has_ip);
@@ -5073,8 +5167,10 @@ static void create_home_app_grid(lv_obj_t *parent, int cols, int tile_w,
 static lv_obj_t *home_status_row(lv_obj_t *parent, int y, int w,
                                  const char *symbol, const char *title,
                                  const char *value, uint32_t value_color,
+                                 lv_obj_t **title_label_out,
                                  lv_obj_t **value_label_out,
-                                 lv_obj_t **badge_out)
+                                 lv_obj_t **badge_out,
+                                 lv_obj_t **badge_text_out)
 {
     lv_obj_t *row = lv_obj_create(parent);
     int row_x = 18;
@@ -5113,11 +5209,17 @@ static lv_obj_t *home_status_row(lv_obj_t *parent, int y, int w,
     lv_obj_set_width(state, row_w - 64);
     lv_label_set_long_mode(state, LV_LABEL_LONG_DOT);
     lv_obj_align(state, LV_ALIGN_TOP_LEFT, 52, 36);
+    if(title_label_out) {
+        *title_label_out = name;
+    }
     if(value_label_out) {
         *value_label_out = state;
     }
     if(badge_out) {
         *badge_out = badge;
+    }
+    if(badge_text_out) {
+        *badge_text_out = badge_text;
     }
 
     return row;
@@ -5128,6 +5230,8 @@ static void create_home(lv_obj_t *scr)
     char temp_text[64];
     char power_source_text[64];
     char power_draw_text[64];
+    char eth_title[32];
+    char eth_symbol[8];
     char eth_text[64];
     uint32_t temp_color;
     uint32_t source_color;
@@ -5143,17 +5247,21 @@ static void create_home(lv_obj_t *scr)
     home_temp_value_label = NULL;
     home_power_source_value_label = NULL;
     home_power_draw_value_label = NULL;
+    home_eth_title_label = NULL;
     home_eth_value_label = NULL;
     home_temp_badge = NULL;
     home_power_source_badge = NULL;
     home_power_draw_badge = NULL;
     home_eth_badge = NULL;
+    home_eth_badge_text_label = NULL;
     pthread_mutex_lock(&home_telemetry_lock);
     snprintf(temp_text, sizeof(temp_text), "%s", home_temp_cache);
     snprintf(power_source_text, sizeof(power_source_text), "%s",
              home_power_source_cache);
     snprintf(power_draw_text, sizeof(power_draw_text), "%s",
              home_power_draw_cache);
+    snprintf(eth_title, sizeof(eth_title), "%s", home_eth_title_cache);
+    snprintf(eth_symbol, sizeof(eth_symbol), "%s", home_eth_symbol_cache);
     snprintf(eth_text, sizeof(eth_text), "%s", home_eth_cache);
     temp_color = home_temp_cache_color;
     source_color = home_power_source_cache_color;
@@ -5244,20 +5352,21 @@ static void create_home(lv_obj_t *scr)
             lv_obj_align(date_label, LV_ALIGN_TOP_LEFT, 20, 44);
 
             card_w = left_w - 34;
-            home_status_row(dash, 88, card_w, "ETH", "Ethernet IP",
-                            eth_text, eth_color, &home_eth_value_label,
-                            &home_eth_badge);
+            home_status_row(dash, 88, card_w, eth_symbol, eth_title,
+                            eth_text, eth_color, &home_eth_title_label,
+                            &home_eth_value_label, &home_eth_badge,
+                            &home_eth_badge_text_label);
             home_status_row(dash, 166, card_w, "TMP", "K230 Thermal",
-                            temp_text, temp_color, &home_temp_value_label,
-                            &home_temp_badge);
+                            temp_text, temp_color, NULL,
+                            &home_temp_value_label, &home_temp_badge, NULL);
             home_status_row(dash, 244, card_w, "PWR", "Power Source",
-                            power_source_text, source_color,
+                            power_source_text, source_color, NULL,
                             &home_power_source_value_label,
-                            &home_power_source_badge);
+                            &home_power_source_badge, NULL);
             home_status_row(dash, 322, card_w, "ENE", "Energy",
-                            power_draw_text, draw_color,
+                            power_draw_text, draw_color, NULL,
                             &home_power_draw_value_label,
-                            &home_power_draw_badge);
+                            &home_power_draw_badge, NULL);
         } else {
             home_time_label = NULL;
             date_label = NULL;
@@ -5301,8 +5410,9 @@ static void create_home(lv_obj_t *scr)
     lv_obj_set_style_border_width(home_eth_badge, 0, 0);
     lv_obj_clear_flag(home_eth_badge, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(home_eth_badge, LV_ALIGN_RIGHT_MID, -168, 0);
-    lv_obj_t *eth_icon = label(home_eth_badge, "ETH", &lv_font_montserrat_14,
-                               0xFFFFFF);
+    lv_obj_t *eth_icon = label(home_eth_badge, eth_symbol,
+                               &lv_font_montserrat_14, 0xFFFFFF);
+    home_eth_badge_text_label = eth_icon;
     lv_obj_center(eth_icon);
 
     home_eth_value_label = label(hero, eth_text, &lv_font_montserrat_22,
@@ -9622,11 +9732,13 @@ static void cleanup_page_state(void)
     home_temp_value_label = NULL;
     home_power_source_value_label = NULL;
     home_power_draw_value_label = NULL;
+    home_eth_title_label = NULL;
     home_eth_value_label = NULL;
     home_temp_badge = NULL;
     home_power_source_badge = NULL;
     home_power_draw_badge = NULL;
     home_eth_badge = NULL;
+    home_eth_badge_text_label = NULL;
     home_apps_scroll = NULL;
     home_telemetry_last_us = 0;
     touch_area = NULL;

@@ -177,6 +177,7 @@ int ui_read_iface_carrier(const char *iface);
 int ui_read_iface_ip(const char *iface, char *buf, size_t len);
 void ui_read_iface_state(const char *iface, char *buf, size_t len,
                          uint32_t *color);
+void ui_network_sync_default_route(const char *reason);
 int ui_shell_exit_code(int rc);
 uint64_t ui_monotonic_us(void);
 

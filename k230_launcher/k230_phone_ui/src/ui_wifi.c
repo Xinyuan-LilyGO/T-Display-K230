@@ -1331,6 +1331,7 @@ static void *wifi_connect_thread_cb(void *arg)
     pthread_mutex_unlock(&wifi_lock);
 
     if(rc == 0 && ui_read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip)) == 0) {
+        ui_network_sync_default_route("wifi-connect");
         wifi_profile_remember(req->ssid, req->password, req->encrypted);
     }
 

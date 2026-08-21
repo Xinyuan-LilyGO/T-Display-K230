@@ -19,6 +19,8 @@
 #define UI_PORTRAIT_SCROLL_REPAIR_INTERVAL_US 12000ULL
 #define UI_PORTRAIT_SCROLL_REPAIR_DEFAULT_PERCENT 38
 #define UI_PORTRAIT_SCROLL_REPAIR_EXTRA_PX 24
+#define UI_NETWORK_ROUTE_LOG "/tmp/k230_route_manager.log"
+#define UI_NETWORK_ROUTE_SYNC_MIN_US 6000000ULL
 
 typedef struct {
     const lv_font_t *fallback;
@@ -35,6 +37,11 @@ static int ui_fonts_emoji_ready;
 static int ui_font_size_loaded;
 static int ui_font_size_delta;
 static char ui_font_size_mode_value[8] = "medium";
+static uint64_t ui_network_route_last_us;
+static char ui_network_route_last_preferred[16] = "";
+static int ui_network_route_last_eth_carrier = -2;
+static int ui_network_route_last_eth_ip;
+static int ui_network_route_last_wifi_ip;
 
 static ui_font_slot_t ui_font_slots[] = {
     { &lv_font_montserrat_12, 12, NULL, NULL },
@@ -947,6 +954,137 @@ void ui_read_iface_state(const char *iface, char *buf, size_t len,
         if(color) {
             *color = 0x9AA4AF;
         }
+    }
+}
+
+static void ui_network_route_log(const char *reason, const char *preferred,
+                                 int eth_carrier, int eth_has_ip,
+                                 const char *eth_ip, int wifi_has_ip,
+                                 const char *wifi_ip, int rc)
+{
+    FILE *fp = fopen(UI_NETWORK_ROUTE_LOG, "a");
+
+    if(!fp) {
+        return;
+    }
+
+    fprintf(fp,
+            "[%llu] reason=%s preferred=%s eth_carrier=%d eth_ip=%s wifi_ip=%s rc=%d\n",
+            (unsigned long long)ui_monotonic_us(),
+            reason && reason[0] ? reason : "periodic",
+            preferred && preferred[0] ? preferred : "none",
+            eth_carrier,
+            eth_has_ip && eth_ip && eth_ip[0] ? eth_ip : "--",
+            wifi_has_ip && wifi_ip && wifi_ip[0] ? wifi_ip : "--",
+            rc);
+    fclose(fp);
+}
+
+static int ui_network_run_route_sync(const char *preferred,
+                                     const char *other,
+                                     int flush_other_ipv4)
+{
+    char cmd[768];
+    int rc;
+
+    if(!preferred || !preferred[0]) {
+        return -1;
+    }
+
+    snprintf(cmd, sizeof(cmd),
+             "PREF='%s'; OTHER='%s'; "
+             "if command -v ip >/dev/null 2>&1; then "
+             "ip route del default dev \"$OTHER\" >/dev/null 2>&1 || true; "
+             "%s"
+             "if ! ip route show default dev \"$PREF\" | grep -q .; then "
+             "GW=$(ip route show default 2>/dev/null | "
+             "awk '/ via / {print $3; exit}'); "
+             "if [ -z \"$GW\" ]; then "
+             "GW=$(ip -4 addr show dev \"$PREF\" 2>/dev/null | "
+             "awk '/ inet / {split($2,a,\"/\"); split(a[1],o,\".\"); "
+             "if(o[1] != \"\") print o[1]\".\"o[2]\".\"o[3]\".1\"; exit}'); "
+             "fi; "
+             "[ -n \"$GW\" ] && "
+             "ip route replace default via \"$GW\" dev \"$PREF\" "
+             ">/dev/null 2>&1 || true; "
+             "fi; "
+             "else "
+             "route del default dev \"$OTHER\" >/dev/null 2>&1 || true; "
+             "fi",
+             preferred, other && other[0] ? other : "",
+             flush_other_ipv4 ?
+             "ip addr flush dev \"$OTHER\" >/dev/null 2>&1 || true; " : "");
+
+    rc = system(cmd);
+    return ui_shell_exit_code(rc);
+}
+
+void ui_network_sync_default_route(const char *reason)
+{
+    char eth_ip[64] = "";
+    char wifi_ip[64] = "";
+    char eth_path[128];
+    char wifi_path[128];
+    const char *preferred = NULL;
+    const char *other = NULL;
+    int flush_other_ipv4 = 0;
+    int eth_present;
+    int wifi_present;
+    int eth_carrier = -1;
+    int eth_has_ip;
+    int wifi_has_ip;
+    uint64_t now = ui_monotonic_us();
+    int should_run = 0;
+    int state_changed = 0;
+    int rc = 0;
+
+    snprintf(eth_path, sizeof(eth_path), "/sys/class/net/%s", NET_ETH_IFACE);
+    snprintf(wifi_path, sizeof(wifi_path), "/sys/class/net/%s", NET_WIFI_IFACE);
+    eth_present = ui_path_exists(eth_path);
+    wifi_present = ui_path_exists(wifi_path);
+    eth_carrier = eth_present ? ui_read_iface_carrier(NET_ETH_IFACE) : -1;
+    eth_has_ip = eth_present &&
+                 ui_read_iface_ip(NET_ETH_IFACE, eth_ip, sizeof(eth_ip)) == 0;
+    wifi_has_ip = wifi_present &&
+                  ui_read_iface_ip(NET_WIFI_IFACE, wifi_ip,
+                                   sizeof(wifi_ip)) == 0;
+
+    if(eth_carrier == 1 && eth_has_ip) {
+        preferred = NET_ETH_IFACE;
+        other = NET_WIFI_IFACE;
+    } else if(wifi_has_ip) {
+        preferred = NET_WIFI_IFACE;
+        other = NET_ETH_IFACE;
+        flush_other_ipv4 = eth_present && eth_carrier != 1 && eth_has_ip;
+    }
+
+    if(!preferred) {
+        return;
+    }
+
+    state_changed =
+        strcmp(ui_network_route_last_preferred, preferred) != 0 ||
+        ui_network_route_last_eth_carrier != eth_carrier ||
+        ui_network_route_last_eth_ip != eth_has_ip ||
+        ui_network_route_last_wifi_ip != wifi_has_ip;
+    if(state_changed ||
+       now - ui_network_route_last_us >= UI_NETWORK_ROUTE_SYNC_MIN_US) {
+        should_run = 1;
+    }
+    if(!should_run) {
+        return;
+    }
+
+    rc = ui_network_run_route_sync(preferred, other, flush_other_ipv4);
+    snprintf(ui_network_route_last_preferred,
+             sizeof(ui_network_route_last_preferred), "%s", preferred);
+    ui_network_route_last_eth_carrier = eth_carrier;
+    ui_network_route_last_eth_ip = eth_has_ip;
+    ui_network_route_last_wifi_ip = wifi_has_ip;
+    ui_network_route_last_us = now;
+    if(state_changed || rc != 0) {
+        ui_network_route_log(reason, preferred, eth_carrier, eth_has_ip,
+                             eth_ip, wifi_has_ip, wifi_ip, rc);
     }
 }
 
