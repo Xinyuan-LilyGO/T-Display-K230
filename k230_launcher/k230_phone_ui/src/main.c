@@ -142,6 +142,7 @@
 #define DISPLAY_ORIENTATION_LANDSCAPE "landscape"
 #define DISPLAY_ROTATION_ENV "K230_DISPLAY_ROTATION"
 #define DISPLAY_ORIENTATION_ENV "K230_DISPLAY_ORIENTATION"
+#define DISPLAY_ROTATION_RESTART_ENV "K230_DISPLAY_ROTATION_RESTART"
 #define DISPLAY_ROTATION_PREF_KEY "display.rotation"
 #define DISPLAY_BRIGHTNESS_PREF_KEY "display.brightness"
 #define PAGE_TRANSITION_PREF_KEY "display.page_transition"
@@ -609,6 +610,8 @@ static void apply_ui_stage_transform(void);
 static void style_fullscreen_root(lv_obj_t *obj);
 static int display_drm_rotation_from_orientation(void);
 static void restart_for_display_orientation(const char *value);
+static void apply_display_rotation_change(int old_degrees, const char *reason);
+static void show_rotation_startup_cover(lv_display_t *disp);
 static void display_orientation_event_cb(lv_event_t *event);
 static void display_update_orientation_controls(void);
 static void page_transition_load_pref(void);
@@ -1032,6 +1035,11 @@ static int display_orientation_is_landscape(void)
     return display_rotation_degrees == 90 || display_rotation_degrees == 270;
 }
 
+static int display_degrees_is_landscape(int degrees)
+{
+    return degrees == 90 || degrees == 270;
+}
+
 static int parse_display_rotation_degrees(const char *value)
 {
     if(!value) {
@@ -1110,11 +1118,13 @@ int app_display_rotation_degrees(void)
 
 void app_set_display_rotation_degrees(int degrees)
 {
+    int old_degrees = display_rotation_degrees;
+
     set_display_rotation_degrees(degrees);
     save_runtime_display_orientation();
     touch_trace_log("DISPLAY_ROTATION_APP_SET degrees=%d persistent=on",
                     display_rotation_degrees);
-    restart_for_display_orientation(display_orientation_value);
+    apply_display_rotation_change(old_degrees, "app");
 }
 
 static int page_transition_mode_valid(const char *mode)
@@ -1373,12 +1383,101 @@ static void restart_for_display_orientation(const char *value)
     degrees = parse_display_rotation_degrees(value);
     set_display_rotation_degrees(degrees);
 
+    if(main_display) {
+        lv_obj_t *overlay = lv_obj_create(lv_layer_top());
+        lv_obj_t *spinner;
+        lv_obj_t *label;
+
+        lv_obj_set_pos(overlay, 0, 0);
+        lv_obj_set_size(overlay, display_logical_width(),
+                        display_logical_height());
+        lv_obj_set_style_bg_color(overlay, lv_color_hex(0x05070A), 0);
+        lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(overlay, 0, 0);
+        lv_obj_set_style_pad_all(overlay, 0, 0);
+        lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(overlay, LV_OBJ_FLAG_IGNORE_LAYOUT);
+
+        spinner = lv_spinner_create(overlay);
+        lv_obj_set_size(spinner, 72, 72);
+        lv_obj_center(spinner);
+
+        label = lv_label_create(overlay);
+        lv_label_set_text_fmt(label, "Rotate %d deg", display_rotation_degrees);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xDDE7F0), 0);
+        lv_obj_align_to(label, spinner, LV_ALIGN_OUT_BOTTOM_MID, 0, 18);
+
+        lv_refr_now(main_display);
+        usleep(50000);
+    }
+
     touch_trace_log("DISPLAY_ROTATION_RESTART degrees=%d persistent=on",
                     display_rotation_degrees);
     setenv(DISPLAY_ROTATION_ENV, display_orientation_value, 1);
     setenv(DISPLAY_ORIENTATION_ENV, display_orientation_value, 1);
+    setenv(DISPLAY_ROTATION_RESTART_ENV, "1", 1);
     execl(PHONE_UI_BIN, "k230_phone_ui", NULL);
     touch_trace_log("DISPLAY_ORIENTATION_RESTART_FAILED errno=%d", errno);
+}
+
+static void apply_display_rotation_change(int old_degrees, const char *reason)
+{
+    if(old_degrees == display_rotation_degrees) {
+        display_update_orientation_controls();
+        request_fast_refresh();
+        return;
+    }
+
+    if(!main_display ||
+       display_degrees_is_landscape(old_degrees) !=
+       display_degrees_is_landscape(display_rotation_degrees)) {
+        touch_trace_log("DISPLAY_ROTATION_CHANGE degrees=%d old=%d "
+                        "mode=restart reason=%s",
+                        display_rotation_degrees, old_degrees,
+                        reason ? reason : "unknown");
+        restart_for_display_orientation(display_orientation_value);
+        return;
+    }
+
+    touch_trace_log("DISPLAY_ROTATION_CHANGE degrees=%d old=%d "
+                    "mode=runtime reason=%s",
+                    display_rotation_degrees, old_degrees,
+                    reason ? reason : "unknown");
+    lv_linux_drm_set_rotation(main_display,
+                              display_drm_rotation_from_orientation());
+    apply_display_orientation(main_display);
+    render_page(current_page, LV_SCREEN_LOAD_ANIM_NONE, 0);
+    display_update_orientation_controls();
+    lv_refr_now(main_display);
+}
+
+static void show_rotation_startup_cover(lv_display_t *disp)
+{
+    const char *restart_env = getenv(DISPLAY_ROTATION_RESTART_ENV);
+    lv_obj_t *cover;
+    lv_obj_t *spinner;
+
+    if(!disp || !restart_env || strcmp(restart_env, "1") != 0) {
+        return;
+    }
+
+    cover = lv_obj_create(NULL);
+    lv_obj_set_pos(cover, 0, 0);
+    lv_obj_set_size(cover, display_logical_width(), display_logical_height());
+    lv_obj_set_style_bg_color(cover, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_bg_opa(cover, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(cover, 0, 0);
+    lv_obj_set_style_pad_all(cover, 0, 0);
+    lv_obj_clear_flag(cover, LV_OBJ_FLAG_SCROLLABLE);
+
+    spinner = lv_spinner_create(cover);
+    lv_obj_set_size(spinner, 72, 72);
+    lv_obj_center(spinner);
+
+    lv_screen_load(cover);
+    touch_trace_log("DISPLAY_ROTATION_STARTUP_COVER degrees=%d",
+                    display_rotation_degrees);
+    lv_refr_now(disp);
 }
 
 static int32_t map_axis(int32_t raw, int32_t raw_max, int32_t out_size)
@@ -5810,6 +5909,7 @@ static void display_font_size_event_cb(lv_event_t *event)
 static void display_orientation_event_cb(lv_event_t *event)
 {
     const char *value = (const char *)lv_event_get_user_data(event);
+    int old_degrees;
     int degrees;
 
     if(!value) {
@@ -5817,15 +5917,14 @@ static void display_orientation_event_cb(lv_event_t *event)
     }
 
     trace_ui_action("LVGL_DISPLAY_ORIENTATION", PAGE_DISPLAY);
+    old_degrees = display_rotation_degrees;
     degrees = parse_display_rotation_degrees(value);
     set_display_rotation_degrees(degrees);
     save_runtime_display_orientation();
     touch_trace_log("DISPLAY_ROTATION_RUNTIME degrees=%d persistent=on",
                     display_rotation_degrees);
 
-    restart_for_display_orientation(display_orientation_value);
-    apply_display_orientation(main_display);
-    render_page(current_page, LV_SCREEN_LOAD_ANIM_NONE, 0);
+    apply_display_rotation_change(old_degrees, "display-settings");
 }
 
 static uint32_t compact_page_color(page_id_t page)
@@ -10619,6 +10718,7 @@ int main(void)
     lv_free(drm_path);
     main_display = disp;
     apply_display_orientation(disp);
+    show_rotation_startup_cover(disp);
 
     input_dev = find_input_event();
     if(input_dev) {
