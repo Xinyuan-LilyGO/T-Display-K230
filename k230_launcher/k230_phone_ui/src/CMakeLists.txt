@@ -253,6 +253,8 @@ target_link_libraries(${ui_target} PRIVATE
     avutil
     swscale
     jpeg
+    png
+    z
     m
     pthread
 )

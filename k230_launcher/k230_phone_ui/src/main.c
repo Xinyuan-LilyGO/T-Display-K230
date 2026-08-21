@@ -32,6 +32,7 @@
 #if LV_USE_FFMPEG
 #include <lvgl/src/libs/ffmpeg/lv_ffmpeg.h>
 #endif
+#include <png.h>
 #include <v4l2-drm.h>
 
 #include "ui_nrf9151_manager.h"
@@ -8165,20 +8166,89 @@ static int camera_decode_png_to_rgb565(const char *path, uint8_t *dst,
                                        unsigned dst_w, unsigned dst_h,
                                        int contain)
 {
-    unsigned char *rgba = NULL;
-    unsigned src_w = 0;
-    unsigned src_h = 0;
-    unsigned png_error;
+    FILE *fp = NULL;
+    png_structp png = NULL;
+    png_infop info = NULL;
+    png_bytep image = NULL;
+    png_bytep *rows = NULL;
+    png_uint_32 png_w = 0;
+    png_uint_32 png_h = 0;
+    png_size_t rowbytes;
+    int color_type;
+    int bit_depth;
+    unsigned src_w;
+    unsigned src_h;
+    int rc = -1;
 
     if(!path || !dst || dst_w == 0 || dst_h == 0) {
         return -1;
     }
 
-    png_error = lodepng_decode32_file(&rgba, &src_w, &src_h, path);
-    if(png_error || !rgba || src_w == 0 || src_h == 0) {
-        free(rgba);
+    fp = fopen(path, "rb");
+    if(!fp) {
         return -1;
     }
+
+    png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if(!png) {
+        goto out;
+    }
+
+    info = png_create_info_struct(png);
+    if(!info) {
+        goto out;
+    }
+
+    if(setjmp(png_jmpbuf(png))) {
+        goto out;
+    }
+
+    png_init_io(png, fp);
+    png_read_info(png, info);
+    png_get_IHDR(png, info, &png_w, &png_h, &bit_depth, &color_type,
+                 NULL, NULL, NULL);
+
+    if(png_w == 0 || png_h == 0 || png_w > 8192U || png_h > 8192U) {
+        goto out;
+    }
+
+    if(bit_depth == 16) {
+        png_set_strip_16(png);
+    }
+    if(color_type == PNG_COLOR_TYPE_PALETTE) {
+        png_set_palette_to_rgb(png);
+    }
+    if(color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) {
+        png_set_expand_gray_1_2_4_to_8(png);
+    }
+    if(png_get_valid(png, info, PNG_INFO_tRNS)) {
+        png_set_tRNS_to_alpha(png);
+    }
+    if(color_type == PNG_COLOR_TYPE_GRAY ||
+       color_type == PNG_COLOR_TYPE_GRAY_ALPHA) {
+        png_set_gray_to_rgb(png);
+    }
+    if(!(color_type & PNG_COLOR_MASK_ALPHA)) {
+        png_set_add_alpha(png, 0xFF, PNG_FILLER_AFTER);
+    }
+
+    png_read_update_info(png, info);
+    rowbytes = png_get_rowbytes(png, info);
+    src_w = (unsigned)png_get_image_width(png, info);
+    src_h = (unsigned)png_get_image_height(png, info);
+    if(src_w == 0 || src_h == 0 || rowbytes < (png_size_t)src_w * 4U) {
+        goto out;
+    }
+
+    image = malloc((size_t)rowbytes * src_h);
+    rows = malloc(sizeof(*rows) * src_h);
+    if(!image || !rows) {
+        goto out;
+    }
+    for(unsigned y = 0; y < src_h; y++) {
+        rows[y] = image + (size_t)y * rowbytes;
+    }
+    png_read_image(png, rows);
 
     if(contain) {
         unsigned draw_w = dst_w;
@@ -8222,7 +8292,7 @@ static int camera_decode_png_to_rgb565(const char *path, uint8_t *dst,
                     src_x = src_w - 1U;
                 }
 
-                p = rgba + ((size_t)src_y * src_w + (size_t)src_x) * 4U;
+                p = image + (size_t)src_y * rowbytes + (size_t)src_x * 4U;
                 a = p[3];
                 r = ((unsigned)p[0] * a) / 255U;
                 g = ((unsigned)p[1] * a) / 255U;
@@ -8278,7 +8348,7 @@ static int camera_decode_png_to_rgb565(const char *path, uint8_t *dst,
                     src_x = src_w - 1U;
                 }
 
-                p = rgba + ((size_t)src_y * src_w + (size_t)src_x) * 4U;
+                p = image + (size_t)src_y * rowbytes + (size_t)src_x * 4U;
                 a = p[3];
                 r = ((unsigned)p[0] * a) / 255U;
                 g = ((unsigned)p[1] * a) / 255U;
@@ -8288,8 +8358,18 @@ static int camera_decode_png_to_rgb565(const char *path, uint8_t *dst,
         }
     }
 
-    free(rgba);
-    return 0;
+    rc = 0;
+
+out:
+    free(rows);
+    free(image);
+    if(png || info) {
+        png_destroy_read_struct(&png, info ? &info : NULL, NULL);
+    }
+    if(fp) {
+        fclose(fp);
+    }
+    return rc;
 }
 
 static void camera_apply_canvas(lv_obj_t *canvas, lv_obj_t *hint,
@@ -8327,85 +8407,6 @@ static void camera_apply_canvas(lv_obj_t *canvas, lv_obj_t *hint,
             lv_obj_clear_flag(hint, LV_OBJ_FLAG_HIDDEN);
         }
     }
-}
-
-static int camera_write_thumb_file(const char *path)
-{
-    FILE *fp;
-    size_t written;
-
-    if(!path || !path[0]) {
-        return -1;
-    }
-
-    fp = fopen(path, "wb");
-    if(!fp) {
-        return -1;
-    }
-
-    written = fwrite(camera_stored_thumb_buf, 1, CAMERA_STORED_THUMB_BYTES, fp);
-    if(fclose(fp) != 0 || written != CAMERA_STORED_THUMB_BYTES) {
-        unlink(path);
-        return -1;
-    }
-
-    return 0;
-}
-
-static int camera_make_screenshot_thumb_path(const char *png_path,
-                                             char *thumb_path,
-                                             size_t thumb_len)
-{
-    size_t path_len;
-
-    if(!png_path || !thumb_path || thumb_len == 0) {
-        return -1;
-    }
-
-    path_len = strlen(png_path);
-    if(path_len < 5 || strcmp(png_path + path_len - 4, ".png") != 0) {
-        return -1;
-    }
-
-    if(path_len - 4 + strlen(".thumb.rgb565") + 1 > thumb_len) {
-        return -1;
-    }
-
-    snprintf(thumb_path, thumb_len, "%.*s.thumb.rgb565",
-             (int)(path_len - 4), png_path);
-    return 0;
-}
-
-static int camera_ensure_screenshot_thumb(const char *png_path,
-                                          const struct stat *png_st,
-                                          char *thumb_path,
-                                          size_t thumb_len)
-{
-    struct stat thumb_st;
-    int rebuild = 0;
-
-    if(camera_make_screenshot_thumb_path(png_path, thumb_path, thumb_len) != 0) {
-        return -1;
-    }
-
-    if(stat(thumb_path, &thumb_st) != 0 ||
-       !S_ISREG(thumb_st.st_mode) ||
-       thumb_st.st_size != (off_t)CAMERA_STORED_THUMB_BYTES ||
-       (png_st && thumb_st.st_mtime < png_st->st_mtime)) {
-        rebuild = 1;
-    }
-
-    if(!rebuild) {
-        return 0;
-    }
-
-    if(camera_decode_png_to_rgb565(png_path, camera_stored_thumb_buf,
-                                   CAMERA_STORED_THUMB_W,
-                                   CAMERA_STORED_THUMB_H, 1) != 0) {
-        return -1;
-    }
-
-    return camera_write_thumb_file(thumb_path);
 }
 
 static void camera_apply_preview_placeholder(lv_obj_t *canvas, lv_obj_t *hint,
@@ -8598,10 +8599,7 @@ static void camera_gallery_scan_dir(const char *dir_path, int screenshot_dir)
         }
 
         if(screenshot_dir) {
-            if(camera_ensure_screenshot_thumb(path, &st, thumb_path,
-                                              sizeof(thumb_path)) != 0) {
-                snprintf(thumb_path, sizeof(thumb_path), "%s", path);
-            }
+            snprintf(thumb_path, sizeof(thumb_path), "%s", path);
         } else {
             snprintf(thumb_path, sizeof(thumb_path), "%s/%.*s.thumb.rgb565",
                      dir_path, (int)(len - 4), ent->d_name);
