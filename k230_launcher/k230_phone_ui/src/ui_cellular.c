@@ -1637,20 +1637,36 @@ static void cellular_status_refresh(void)
 int ui_cellular_lte_signal_level(void)
 {
     k230_nrf9151_status_t status;
+    static int last_valid_level;
+    int level;
+    int transient_refresh;
 
     if(!k230_nrf9151_uart_present()) {
+        last_valid_level = 0;
         return 0;
     }
     if(k230_nrf9151_read_status(&status, 300) != 0) {
         return 0;
     }
+    transient_refresh = strstr(status.lte_status, "Refreshing") ||
+                        strstr(status.lte_status, "Checking");
+    if(transient_refresh && last_valid_level > 0) {
+        return last_valid_level;
+    }
     if(!status.present || !status.sim_ready) {
+        last_valid_level = 0;
         return 0;
     }
-    return status.lte_signal_level > 0 ? status.lte_signal_level :
-           (status.pdp_active ? 4 :
-            (status.packet_attached ? 3 :
-             (status.lte_registered ? 2 : 0)));
+    level = status.lte_signal_level > 0 ? status.lte_signal_level :
+            (status.pdp_active ? 4 :
+             (status.packet_attached ? 3 :
+              (status.lte_registered ? 2 : 0)));
+    if(level > 0) {
+        last_valid_level = level;
+    } else {
+        last_valid_level = 0;
+    }
+    return level;
 }
 
 static int cellular_open_uart(void)

@@ -21,6 +21,7 @@
 #define UI_PORTRAIT_SCROLL_REPAIR_EXTRA_PX 24
 #define UI_NETWORK_ROUTE_LOG "/tmp/k230_route_manager.log"
 #define UI_NETWORK_ROUTE_SYNC_MIN_US 6000000ULL
+#define UI_NETWORK_ETH_DHCP_MIN_US 10000000ULL
 
 typedef struct {
     const lv_font_t *fallback;
@@ -42,6 +43,7 @@ static char ui_network_route_last_preferred[16] = "";
 static int ui_network_route_last_eth_carrier = -2;
 static int ui_network_route_last_eth_ip;
 static int ui_network_route_last_wifi_ip;
+static uint64_t ui_network_eth_dhcp_last_us;
 
 static ui_font_slot_t ui_font_slots[] = {
     { &lv_font_montserrat_12, 12, NULL, NULL },
@@ -1019,6 +1021,38 @@ static int ui_network_run_route_sync(const char *preferred,
     return ui_shell_exit_code(rc);
 }
 
+static void ui_network_start_eth_dhcp(const char *reason, uint64_t now)
+{
+    FILE *fp;
+    char cmd[1024];
+    int rc;
+
+    if(now - ui_network_eth_dhcp_last_us < UI_NETWORK_ETH_DHCP_MIN_US) {
+        return;
+    }
+    ui_network_eth_dhcp_last_us = now;
+
+    snprintf(cmd, sizeof(cmd),
+             "if [ -d /sys/class/net/%s ]; then "
+             "rm -f /var/run/udhcpc.%s.pid; "
+             "ifconfig %s up >/dev/null 2>&1 || true; "
+             "(echo '[dhcp] start %s'; "
+             "udhcpc -q -n -t 5 -p /var/run/udhcpc.%s.pid -i %s; "
+             "echo '[dhcp] done rc='$?) >>/tmp/k230_eth_dhcp.log 2>&1 & "
+             "fi",
+             NET_ETH_IFACE, NET_ETH_IFACE, NET_ETH_IFACE, NET_ETH_IFACE,
+             NET_ETH_IFACE, NET_ETH_IFACE);
+
+    rc = ui_shell_exit_code(system(cmd));
+    fp = fopen(UI_NETWORK_ROUTE_LOG, "a");
+    if(fp) {
+        fprintf(fp, "[%llu] reason=%s eth_dhcp_start rc=%d\n",
+                (unsigned long long)now,
+                reason && reason[0] ? reason : "periodic", rc);
+        fclose(fp);
+    }
+}
+
 void ui_network_sync_default_route(const char *reason)
 {
     char eth_ip[64] = "";
@@ -1048,6 +1082,10 @@ void ui_network_sync_default_route(const char *reason)
     wifi_has_ip = wifi_present &&
                   ui_read_iface_ip(NET_WIFI_IFACE, wifi_ip,
                                    sizeof(wifi_ip)) == 0;
+
+    if(eth_present && eth_carrier == 1 && !eth_has_ip) {
+        ui_network_start_eth_dhcp(reason, now);
+    }
 
     if(eth_carrier == 1 && eth_has_ip) {
         preferred = NET_ETH_IFACE;
