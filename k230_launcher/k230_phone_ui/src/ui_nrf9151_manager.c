@@ -874,9 +874,12 @@ static int nrf9151_manager_exchange(int fd, const char *cmd, char *resp,
     uint64_t start;
     size_t used = 0;
     size_t cmd_len;
+    char scratch[512];
+    char *scan_resp = resp && resp_len > 0U ? resp : scratch;
+    size_t scan_len = resp && resp_len > 0U ? resp_len : sizeof(scratch);
 
-    if(resp && resp_len > 0U) {
-        resp[0] = '\0';
+    if(scan_len > 0U) {
+        scan_resp[0] = '\0';
     }
     if(fd < 0 || !cmd) {
         errno = EINVAL;
@@ -923,20 +926,19 @@ static int nrf9151_manager_exchange(int fd, const char *cmd, char *resp,
         if(rd == 0) {
             continue;
         }
-        if(resp && resp_len > 0U && used + 1U < resp_len) {
+        if(scan_len > 0U && used + 1U < scan_len) {
             size_t copy = (size_t)rd;
 
-            if(copy > resp_len - used - 1U) {
-                copy = resp_len - used - 1U;
+            if(copy > scan_len - used - 1U) {
+                copy = scan_len - used - 1U;
             }
-            memcpy(resp + used, buf, copy);
+            memcpy(scan_resp + used, buf, copy);
             used += copy;
-            resp[used] = '\0';
+            scan_resp[used] = '\0';
         }
-        if(resp &&
-           (nrf9151_manager_response_has_token(resp, "OK") ||
-            nrf9151_manager_response_has_token(resp, "ERROR"))) {
-            return nrf9151_manager_response_has_token(resp, "OK") ? 0 : 1;
+        if(nrf9151_manager_response_has_token(scan_resp, "OK") ||
+           nrf9151_manager_response_has_token(scan_resp, "ERROR")) {
+            return nrf9151_manager_response_has_token(scan_resp, "OK") ? 0 : 1;
         }
     }
     return -1;
