@@ -218,6 +218,17 @@ static lv_obj_t *cellular_gps_label;
 static lv_obj_t *cellular_ttff_label;
 static lv_obj_t *cellular_sat_chart;
 static lv_obj_t *cellular_sat_label;
+static lv_obj_t *cellular_gnss_lat_label;
+static lv_obj_t *cellular_gnss_lon_label;
+static lv_obj_t *cellular_gnss_sats_label;
+static lv_obj_t *cellular_gnss_time_label;
+static lv_obj_t *cellular_gnss_hdop_label;
+static lv_obj_t *cellular_gnss_ttff_card_label;
+static lv_obj_t *cellular_gnss_alt_label;
+static lv_obj_t *cellular_gnss_speed_label;
+static lv_obj_t *cellular_gnss_course_label;
+static lv_obj_t *cellular_gnss_signal_summary_label;
+static lv_obj_t *cellular_gnss_cno_stats_label;
 static lv_obj_t *cellular_log_label;
 static lv_obj_t *cellular_cno_button;
 static lv_obj_t *cellular_check_panel;
@@ -1094,6 +1105,58 @@ static void cellular_ttff_text(char *out, size_t out_len, uint64_t start_us,
     snprintf(out, out_len, "TTFF: searching %.1fs", seconds);
 }
 
+static void cellular_ttff_value_text(char *out, size_t out_len,
+                                     uint64_t start_us, uint64_t fix_us,
+                                     int fix_valid)
+{
+    uint64_t now;
+    double seconds;
+
+    if(!out || out_len == 0) {
+        return;
+    }
+    if(!start_us) {
+        snprintf(out, out_len, "--");
+        return;
+    }
+    if(fix_valid && fix_us >= start_us) {
+        seconds = (double)(fix_us - start_us) / 1000000.0;
+        snprintf(out, out_len, "%.1fs", seconds);
+        return;
+    }
+    now = ui_monotonic_us();
+    seconds = now > start_us ? (double)(now - start_us) / 1000000.0 : 0.0;
+    snprintf(out, out_len, "%.1fs", seconds);
+}
+
+static void cellular_sat_stats(const cellular_satellite_t *sats,
+                               size_t sat_count, int *best, int *avg,
+                               int *active)
+{
+    int sum = 0;
+    int count = 0;
+    int best_value = -1;
+
+    if(!best || !avg || !active) {
+        return;
+    }
+    for(size_t i = 0; sats && i < sat_count; i++) {
+        if(!sats[i].valid) {
+            continue;
+        }
+        if(sats[i].cn0 > best_value) {
+            best_value = sats[i].cn0;
+        }
+        if(sats[i].cn0 > 0) {
+            sum += sats[i].cn0;
+            count++;
+        }
+    }
+    *best = best_value >= 0 ? best_value : 0;
+    *avg = count > 0 ? sum / count : 0;
+    *active = count;
+}
+
 static uint32_t cellular_sat_color(const char *talker)
 {
     if(!talker) {
@@ -1174,9 +1237,11 @@ static void cellular_cn0_bar_create(lv_obj_t *parent, cellular_cn0_bar_t *bar)
 {
     const lv_coord_t col_w = 32;
     const lv_coord_t track_w = 12;
+    const lv_coord_t col_h = ui_is_landscape() ? 154 : 122;
+    const lv_coord_t track_h = ui_is_landscape() ? 108 : 78;
 
     bar->column = lv_obj_create(parent);
-    lv_obj_set_size(bar->column, col_w, 122);
+    lv_obj_set_size(bar->column, col_w, col_h);
     lv_obj_set_style_bg_opa(bar->column, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar->column, 0, 0);
     lv_obj_set_style_radius(bar->column, 0, 0);
@@ -1189,7 +1254,7 @@ static void cellular_cn0_bar_create(lv_obj_t *parent, cellular_cn0_bar_t *bar)
     lv_obj_align(bar->value, LV_ALIGN_TOP_MID, 0, 0);
 
     bar->track = lv_obj_create(bar->column);
-    lv_obj_set_size(bar->track, track_w, 78);
+    lv_obj_set_size(bar->track, track_w, track_h);
     lv_obj_set_style_bg_color(bar->track, lv_color_hex(0x26313D), 0);
     lv_obj_set_style_bg_opa(bar->track, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bar->track, 0, 0);
@@ -1221,7 +1286,7 @@ static lv_obj_t *cellular_cn0_chart_create(lv_obj_t *parent, int width)
 {
     lv_obj_t *chart = lv_obj_create(parent);
 
-    lv_obj_set_size(chart, width, 140);
+    lv_obj_set_size(chart, width, ui_is_landscape() ? 176 : 140);
     lv_obj_set_style_bg_opa(chart, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(chart, 1, 0);
     lv_obj_set_style_border_color(chart, lv_color_hex(0x25303A), 0);
@@ -1488,19 +1553,40 @@ static void cellular_status_refresh(void)
     char http_url[256];
     char http_post_spec[512];
     char network[192];
-    char gps[256];
     char ttff[64];
-    char sats[NRF9151_SAT_TEXT_MAX];
+    char ttff_value[32];
+    char gnss_utc[32];
+    char gnss_hdop[24];
     char running_title[64];
     cellular_satellite_t sats_copy[NRF9151_MAX_SATS];
+    double latitude = 0.0;
+    double longitude = 0.0;
+    double altitude_m = 0.0;
+    double speed_knots = 0.0;
+    double course_deg = 0.0;
+    unsigned int satellite_count = 0;
+    unsigned int nmea_rx_count = 0;
+    int gnss_has_fix = 0;
+    int has_altitude = 0;
+    int has_speed = 0;
+    int has_course = 0;
+    int best_cn0 = 0;
+    int avg_cn0 = 0;
+    int active_cn0 = 0;
     uint64_t gnss_start_us;
     uint64_t gnss_fix_us;
     int gnss_fix_valid;
     int active;
     int monitor_active;
     int exists = k230_nrf9151_uart_present();
+    k230_nrf9151_status_t manager_status;
 
-    cellular_sync_manager_status();
+    memset(&manager_status, 0, sizeof(manager_status));
+    if(k230_nrf9151_read_status(&manager_status, 0) == 0) {
+        cellular_apply_manager_status(&manager_status);
+    } else {
+        k230_nrf9151_status_init(&manager_status);
+    }
 
     pthread_mutex_lock(&cellular_lock);
     snprintf(status, sizeof(status), "%s", cellular_status);
@@ -1518,9 +1604,23 @@ static void cellular_status_refresh(void)
     snprintf(http_post_spec, sizeof(http_post_spec), "%s",
              cellular_http_post_spec);
     snprintf(network, sizeof(network), "%s", cellular_network_status);
-    snprintf(gps, sizeof(gps), "%s", cellular_gps_status);
-    snprintf(sats, sizeof(sats), "%s", cellular_sat_status);
     memcpy(sats_copy, cellular_sats, sizeof(sats_copy));
+    latitude = manager_status.latitude;
+    longitude = manager_status.longitude;
+    altitude_m = manager_status.altitude_m;
+    speed_knots = manager_status.speed_knots;
+    course_deg = manager_status.course_deg;
+    satellite_count = manager_status.satellites;
+    nmea_rx_count = manager_status.nmea_rx_count;
+    gnss_has_fix = manager_status.gnss_has_fix;
+    has_altitude = manager_status.has_altitude;
+    has_speed = manager_status.has_speed;
+    has_course = manager_status.has_course;
+    snprintf(gnss_utc, sizeof(gnss_utc), "%s",
+             manager_status.gnss_utc_time[0] ?
+             manager_status.gnss_utc_time : "--");
+    snprintf(gnss_hdop, sizeof(gnss_hdop), "%s",
+             manager_status.gnss_hdop[0] ? manager_status.gnss_hdop : "--");
     gnss_start_us = cellular_gnss_start_us;
     gnss_fix_us = cellular_gnss_fix_us;
     gnss_fix_valid = cellular_gnss_fix_valid;
@@ -1531,6 +1631,10 @@ static void cellular_status_refresh(void)
     pthread_mutex_unlock(&cellular_lock);
     cellular_ttff_text(ttff, sizeof(ttff), gnss_start_us, gnss_fix_us,
                        gnss_fix_valid);
+    cellular_ttff_value_text(ttff_value, sizeof(ttff_value), gnss_start_us,
+                             gnss_fix_us, gnss_fix_valid);
+    cellular_sat_stats(sats_copy, NRF9151_MAX_SATS, &best_cn0, &avg_cn0,
+                       &active_cn0);
 
     if(cellular_status_label) {
         char text[224];
@@ -1552,7 +1656,13 @@ static void cellular_status_refresh(void)
         lv_label_set_text(cellular_menu_modem_value, text);
     }
     if(cellular_menu_gnss_value) {
-        lv_label_set_text(cellular_menu_gnss_value, gps);
+        char text[160];
+
+        snprintf(text, sizeof(text), "%s  S%u  C/N0 %d/%d",
+                 gnss_has_fix ? "Fix" :
+                 (manager_status.gnss_running ? "Searching" : "Off"),
+                 satellite_count, best_cn0, avg_cn0);
+        lv_label_set_text(cellular_menu_gnss_value, text);
     }
     if(cellular_menu_http_value) {
         lv_label_set_text(cellular_menu_http_value, network);
@@ -1653,7 +1763,14 @@ static void cellular_status_refresh(void)
         lv_label_set_text(cellular_network_label, network);
     }
     if(cellular_gps_label) {
-        lv_label_set_text(cellular_gps_label, gps);
+        lv_label_set_text(cellular_gps_label,
+                          ui_tr(gnss_has_fix ? "Position locked" :
+                                (manager_status.gnss_running ?
+                                 "Searching satellites" : "GNSS off")));
+        lv_obj_set_style_text_color(cellular_gps_label,
+                                    lv_color_hex(gnss_has_fix ? 0x25C281 :
+                                                 (manager_status.gnss_running ?
+                                                  0xF5A524 : 0x94A3B8)), 0);
     }
     if(cellular_ttff_label) {
         lv_label_set_text(cellular_ttff_label, ttff);
@@ -1664,7 +1781,60 @@ static void cellular_status_refresh(void)
     }
     cellular_cn0_chart_refresh(sats_copy, NRF9151_MAX_SATS);
     if(cellular_sat_label) {
-        lv_label_set_text(cellular_sat_label, sats);
+        char text[160];
+
+        snprintf(text, sizeof(text), "Best %d dB-Hz  Avg %d  Active %d  RX %u",
+                 best_cn0, avg_cn0, active_cn0, nmea_rx_count);
+        lv_label_set_text(cellular_sat_label, text);
+    }
+    if(cellular_gnss_lat_label) {
+        lv_label_set_text_fmt(cellular_gnss_lat_label,
+                              gnss_has_fix ? "%.6f" : "--", latitude);
+    }
+    if(cellular_gnss_lon_label) {
+        lv_label_set_text_fmt(cellular_gnss_lon_label,
+                              gnss_has_fix ? "%.6f" : "--", longitude);
+    }
+    if(cellular_gnss_sats_label) {
+        lv_label_set_text_fmt(cellular_gnss_sats_label, "%u", satellite_count);
+    }
+    if(cellular_gnss_time_label) {
+        lv_label_set_text(cellular_gnss_time_label, gnss_utc);
+    }
+    if(cellular_gnss_hdop_label) {
+        lv_label_set_text(cellular_gnss_hdop_label, gnss_hdop);
+    }
+    if(cellular_gnss_ttff_card_label) {
+        lv_label_set_text(cellular_gnss_ttff_card_label, ttff_value);
+    }
+    if(cellular_gnss_alt_label) {
+        lv_label_set_text_fmt(cellular_gnss_alt_label,
+                              gnss_has_fix && has_altitude ? "%.1f m" : "--",
+                              altitude_m);
+    }
+    if(cellular_gnss_speed_label) {
+        lv_label_set_text_fmt(cellular_gnss_speed_label,
+                              gnss_has_fix && has_speed ? "%.1f kn" : "--",
+                              speed_knots);
+    }
+    if(cellular_gnss_course_label) {
+        lv_label_set_text_fmt(cellular_gnss_course_label,
+                              gnss_has_fix && has_course ? "%.0f deg" : "--",
+                              course_deg);
+    }
+    if(cellular_gnss_signal_summary_label) {
+        lv_label_set_text_fmt(cellular_gnss_signal_summary_label, "%s",
+                              gnss_has_fix ? "LOCKED" :
+                              (manager_status.gnss_running ? "SEARCH" : "OFF"));
+        lv_obj_set_style_text_color(cellular_gnss_signal_summary_label,
+                                    lv_color_hex(gnss_has_fix ? 0x25C281 :
+                                                 (manager_status.gnss_running ?
+                                                  0xF5A524 : 0x94A3B8)), 0);
+    }
+    if(cellular_gnss_cno_stats_label) {
+        lv_label_set_text_fmt(cellular_gnss_cno_stats_label,
+                              "Best %d  Avg %d  Seen %d/%u",
+                              best_cn0, avg_cn0, active_cn0, satellite_count);
     }
     cellular_mqtt_refresh();
 }
@@ -4540,6 +4710,48 @@ static lv_obj_t *cellular_modem_info_card(lv_obj_t *parent, int x, int y,
     return card;
 }
 
+static lv_obj_t *cellular_gnss_metric_card(lv_obj_t *parent, int x, int y,
+                                           int w, int h, const char *title,
+                                           uint32_t color,
+                                           lv_obj_t **value_label)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_t *accent;
+    lv_obj_t *label;
+
+    lv_obj_set_pos(card, x, y);
+    lv_obj_set_size(card, w, h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 10, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x25303A), 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    accent = lv_obj_create(card);
+    lv_obj_set_size(accent, 4, h - 18);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(accent, 0, 0);
+    lv_obj_set_style_radius(accent, 4, 0);
+    lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(accent, LV_ALIGN_LEFT_MID, 0, 0);
+
+    label = ui_label(card, title, &lv_font_montserrat_12, 0x94A3B8);
+    lv_obj_set_width(label, w - 34);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 18, 8);
+
+    if(value_label) {
+        *value_label = ui_label(card, "--", &lv_font_montserrat_18, 0xF2F5F8);
+        lv_obj_set_width(*value_label, w - 34);
+        lv_label_set_long_mode(*value_label, LV_LABEL_LONG_DOT);
+        lv_obj_align(*value_label, LV_ALIGN_TOP_LEFT, 18, h > 66 ? 32 : 29);
+    }
+    return card;
+}
+
 static lv_obj_t *cellular_button(lv_obj_t *parent, int x, int y, int w,
                                  const char *text, uint32_t color,
                                  lv_event_cb_t cb, void *user_data)
@@ -4867,8 +5079,11 @@ void ui_cellular_create(lv_obj_t *scr)
     int right_x = wide_layout ? margin + left_w + gap : margin;
     int sub_y = 82;
     int sub_h = body_h - sub_y - 18;
-    int gnss_sub_y = 18;
-    int gnss_sub_h = body_h - gnss_sub_y - 18;
+    int gnss_sub_y = 16;
+    int gnss_sub_h = body_h - gnss_sub_y - 16;
+    int gnss_left_h;
+    int gnss_right_h;
+    int gnss_right_y;
     int btn_w;
     int chart_w;
 
@@ -4886,6 +5101,9 @@ void ui_cellular_create(lv_obj_t *scr)
     if(gnss_sub_h < 360) {
         gnss_sub_h = 360;
     }
+    gnss_left_h = wide_layout ? gnss_sub_h : 520;
+    gnss_right_h = wide_layout ? gnss_sub_h : 300;
+    gnss_right_y = wide_layout ? gnss_sub_y : gnss_sub_y + gnss_left_h + gap;
 
     ui_create_header(scr, "Cellular");
     body = ui_page_body(scr, 144);
@@ -4984,46 +5202,87 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_add_flag(cellular_gnss_page, LV_OBJ_FLAG_HIDDEN);
 
     panel = ui_panel(cellular_gnss_page, margin, gnss_sub_y, left_w,
-                     gnss_sub_h);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x151B22), 0);
-    lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(panel, LV_DIR_VER);
+                     gnss_left_h);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x121821), 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
     label = ui_label(panel, "GNSS", &lv_font_montserrat_26, 0xF97316);
     lv_obj_set_width(label, left_w - 32);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
-    cellular_gps_label = ui_label(panel, "Waiting for NMEA",
-                                  &lv_font_montserrat_16, 0xDCE5EE);
+    cellular_gps_label = ui_label(panel, "Searching satellites",
+                                  &lv_font_montserrat_18, 0xF5A524);
     lv_obj_set_width(cellular_gps_label, left_w - 32);
-    lv_label_set_long_mode(cellular_gps_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(cellular_gps_label, LV_ALIGN_TOP_LEFT, 0, 50);
+    lv_label_set_long_mode(cellular_gps_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_gps_label, LV_ALIGN_TOP_LEFT, 0, 36);
     cellular_ttff_label = ui_label(panel, "TTFF: not started",
-                                   &lv_font_montserrat_16, 0xF5A524);
+                                   &lv_font_montserrat_14, 0x94A3B8);
     lv_obj_set_width(cellular_ttff_label, left_w - 32);
     lv_label_set_long_mode(cellular_ttff_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(cellular_ttff_label, LV_ALIGN_TOP_LEFT, 0, 154);
-    cellular_sat_label = ui_label(panel, "No satellite data",
-                                  &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_width(cellular_sat_label, left_w - 32);
-    lv_label_set_long_mode(cellular_sat_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(cellular_sat_label, LV_ALIGN_TOP_LEFT, 0, 202);
+    lv_obj_align(cellular_ttff_label, LV_ALIGN_TOP_LEFT, 0, 62);
+    {
+        int metric_top = 96;
+        int metric_gap = 10;
+        int metric_cols = wide_layout ? 3 : 2;
+        int metric_w = (left_w - 32 - metric_gap * (metric_cols - 1)) /
+                       metric_cols;
+        int metric_h = wide_layout ? 64 : 68;
+        int metric_x;
+        int metric_y;
+
+#define GNSS_METRIC(index, title, color, ptr) \
+        do { \
+            metric_x = ((index) % metric_cols) * (metric_w + metric_gap); \
+            metric_y = metric_top + ((index) / metric_cols) * \
+                       (metric_h + metric_gap); \
+            cellular_gnss_metric_card(panel, metric_x, metric_y, metric_w, \
+                                      metric_h, title, color, ptr); \
+        } while(0)
+        GNSS_METRIC(0, "Latitude", 0x25C281, &cellular_gnss_lat_label);
+        GNSS_METRIC(1, "Longitude", 0x38BDF8, &cellular_gnss_lon_label);
+        GNSS_METRIC(2, "Satellites", 0xF97316, &cellular_gnss_sats_label);
+        GNSS_METRIC(3, "UTC time", 0xA78BFA, &cellular_gnss_time_label);
+        GNSS_METRIC(4, "HDOP", 0xF5A524, &cellular_gnss_hdop_label);
+        GNSS_METRIC(5, "TTFF", 0x22C55E, &cellular_gnss_ttff_card_label);
+        GNSS_METRIC(6, "Altitude", 0x60A5FA, &cellular_gnss_alt_label);
+        GNSS_METRIC(7, "Speed", 0x2DD4BF, &cellular_gnss_speed_label);
+        GNSS_METRIC(8, "Course", 0xEF4444, &cellular_gnss_course_label);
+#undef GNSS_METRIC
+    }
 
     panel = ui_panel(cellular_gnss_page, wide_layout ? right_x : margin,
-                     wide_layout ? gnss_sub_y : gnss_sub_y + gnss_sub_h + gap,
-                     wide_layout ? right_w : panel_w, gnss_sub_h);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
-    lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
-    label = ui_label(panel, "Carrier to noise", &lv_font_montserrat_20,
+                     gnss_right_y, wide_layout ? right_w : panel_w,
+                     gnss_right_h);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x0E1720), 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_OFF);
+    label = ui_label(panel, "Signal radar", &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_width(label, (wide_layout ? right_w : panel_w) - 32);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
+    cellular_gnss_signal_summary_label =
+        ui_label(panel, "SEARCH", &lv_font_montserrat_28, 0xF5A524);
+    lv_obj_set_width(cellular_gnss_signal_summary_label,
+                     (wide_layout ? right_w : panel_w) - 32);
+    lv_label_set_long_mode(cellular_gnss_signal_summary_label,
+                           LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_gnss_signal_summary_label, LV_ALIGN_TOP_LEFT, 0, 38);
+    cellular_gnss_cno_stats_label =
+        ui_label(panel, "Best 0  Avg 0  Seen 0/0", &lv_font_montserrat_16,
+                 0x94A3B8);
+    lv_obj_set_width(cellular_gnss_cno_stats_label,
+                     (wide_layout ? right_w : panel_w) - 32);
+    lv_label_set_long_mode(cellular_gnss_cno_stats_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_gnss_cno_stats_label, LV_ALIGN_TOP_LEFT, 0, 76);
+    cellular_sat_label = ui_label(panel, "Best 0 dB-Hz  Avg 0  Active 0  RX 0",
+                                  &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_width(cellular_sat_label, (wide_layout ? right_w : panel_w) - 32);
+    lv_label_set_long_mode(cellular_sat_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(cellular_sat_label, LV_ALIGN_TOP_LEFT, 0, 104);
     chart_w = (wide_layout ? right_w : panel_w) - 32;
     cellular_sat_chart = cellular_cn0_chart_create(panel, chart_w);
-    lv_obj_align(cellular_sat_chart, LV_ALIGN_TOP_LEFT, 0, 48);
+    lv_obj_align(cellular_sat_chart, LV_ALIGN_TOP_LEFT, 0, 136);
 
     cellular_http_page = cellular_page_create(body, !wide_layout);
     lv_obj_add_flag(cellular_http_page, LV_OBJ_FLAG_HIDDEN);
@@ -5166,6 +5425,17 @@ void ui_cellular_cleanup(void)
     cellular_ttff_label = NULL;
     cellular_sat_chart = NULL;
     cellular_sat_label = NULL;
+    cellular_gnss_lat_label = NULL;
+    cellular_gnss_lon_label = NULL;
+    cellular_gnss_sats_label = NULL;
+    cellular_gnss_time_label = NULL;
+    cellular_gnss_hdop_label = NULL;
+    cellular_gnss_ttff_card_label = NULL;
+    cellular_gnss_alt_label = NULL;
+    cellular_gnss_speed_label = NULL;
+    cellular_gnss_course_label = NULL;
+    cellular_gnss_signal_summary_label = NULL;
+    cellular_gnss_cno_stats_label = NULL;
     cellular_log_label = NULL;
     cellular_cno_button = NULL;
     if(cellular_check_panel) {

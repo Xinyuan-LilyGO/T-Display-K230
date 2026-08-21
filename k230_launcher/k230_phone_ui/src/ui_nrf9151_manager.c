@@ -420,6 +420,21 @@ static void nrf9151_manager_upsert_satellite_detail(
     nrf9151_manager_recount_satellite_details(status);
 }
 
+static void nrf9151_manager_set_utc_time(k230_nrf9151_status_t *status,
+                                         const char *utc)
+{
+    if(!status || !utc || !utc[0]) {
+        return;
+    }
+    if(strlen(utc) >= 6U) {
+        snprintf(status->gnss_utc_time, sizeof(status->gnss_utc_time),
+                 "%.2s:%.2s:%.2s UTC", utc, utc + 2, utc + 4);
+    } else {
+        snprintf(status->gnss_utc_time, sizeof(status->gnss_utc_time), "%s",
+                 utc);
+    }
+}
+
 void k230_nrf9151_status_init(k230_nrf9151_status_t *status)
 {
     if(!status) {
@@ -438,6 +453,8 @@ void k230_nrf9151_status_init(k230_nrf9151_status_t *status)
     snprintf(status->signal_text, sizeof(status->signal_text), "%s", "--");
     snprintf(status->lte_status, sizeof(status->lte_status), "%s", "Not tested");
     snprintf(status->gnss_status, sizeof(status->gnss_status), "%s", "Off");
+    snprintf(status->gnss_utc_time, sizeof(status->gnss_utc_time), "%s", "--");
+    snprintf(status->gnss_hdop, sizeof(status->gnss_hdop), "%s", "--");
     snprintf(status->last_error, sizeof(status->last_error), "%s", "-");
 }
 
@@ -532,6 +549,10 @@ int k230_nrf9151_write_status(const k230_nrf9151_status_t *status)
     fprintf(fp, "lon=%.7f\n", copy.longitude);
     fprintf(fp, "alt=%.2f\n", copy.altitude_m);
     fprintf(fp, "has_alt=%d\n", copy.has_altitude);
+    fprintf(fp, "speed_knots=%.2f\n", copy.speed_knots);
+    fprintf(fp, "course_deg=%.2f\n", copy.course_deg);
+    fprintf(fp, "has_speed=%d\n", copy.has_speed);
+    fprintf(fp, "has_course=%d\n", copy.has_course);
     nrf9151_manager_status_write_key(fp, "modem_state", copy.modem_state);
     nrf9151_manager_status_write_key(fp, "gps_state", copy.gps_state);
     nrf9151_manager_status_write_key(fp, "gnss_phase", copy.gnss_phase);
@@ -544,6 +565,9 @@ int k230_nrf9151_write_status(const k230_nrf9151_status_t *status)
     nrf9151_manager_status_write_key(fp, "signal_text", copy.signal_text);
     nrf9151_manager_status_write_key(fp, "lte_status", copy.lte_status);
     nrf9151_manager_status_write_key(fp, "gnss_status", copy.gnss_status);
+    nrf9151_manager_status_write_key(fp, "gnss_utc_time",
+                                     copy.gnss_utc_time);
+    nrf9151_manager_status_write_key(fp, "gnss_hdop", copy.gnss_hdop);
     nrf9151_manager_status_write_key(fp, "last_error", copy.last_error);
     if(fclose(fp) != 0) {
         int saved_errno = errno;
@@ -665,6 +689,14 @@ int k230_nrf9151_read_status(k230_nrf9151_status_t *status,
             status->altitude_m = strtod(eq, NULL);
         } else if(strcmp(line, "has_alt") == 0) {
             status->has_altitude = atoi(eq);
+        } else if(strcmp(line, "speed_knots") == 0) {
+            status->speed_knots = strtod(eq, NULL);
+        } else if(strcmp(line, "course_deg") == 0) {
+            status->course_deg = strtod(eq, NULL);
+        } else if(strcmp(line, "has_speed") == 0) {
+            status->has_speed = atoi(eq);
+        } else if(strcmp(line, "has_course") == 0) {
+            status->has_course = atoi(eq);
         } else if(strcmp(line, "modem_state") == 0) {
             nrf9151_manager_status_set_string(status->modem_state,
                                               sizeof(status->modem_state), eq);
@@ -701,6 +733,12 @@ int k230_nrf9151_read_status(k230_nrf9151_status_t *status,
         } else if(strcmp(line, "gnss_status") == 0) {
             nrf9151_manager_status_set_string(status->gnss_status,
                                               sizeof(status->gnss_status), eq);
+        } else if(strcmp(line, "gnss_utc_time") == 0) {
+            nrf9151_manager_status_set_string(status->gnss_utc_time,
+                                              sizeof(status->gnss_utc_time), eq);
+        } else if(strcmp(line, "gnss_hdop") == 0) {
+            nrf9151_manager_status_set_string(status->gnss_hdop,
+                                              sizeof(status->gnss_hdop), eq);
         } else if(strcmp(line, "last_error") == 0) {
             nrf9151_manager_status_set_string(status->last_error,
                                               sizeof(status->last_error), eq);
@@ -2360,8 +2398,15 @@ static void nrf9151_manager_process_nmea_sentence(
         int fix = count > 6 ? nrf9151_manager_parse_int_field(fields[6]) : 0;
         int sats = count > 7 ? nrf9151_manager_parse_int_field(fields[7]) : 0;
 
+        if(count > 1) {
+            nrf9151_manager_set_utc_time(status, fields[1]);
+        }
         if(sats > 0) {
             status->satellites = (unsigned int)sats;
+        }
+        if(count > 8 && fields[8] && fields[8][0]) {
+            snprintf(status->gnss_hdop, sizeof(status->gnss_hdop), "%s",
+                     fields[8]);
         }
         if(fix > 0 && count > 9 &&
            nrf9151_manager_coord_to_double(fields[2], fields[3], &lat) &&
@@ -2377,11 +2422,32 @@ static void nrf9151_manager_process_nmea_sentence(
     } else if(strcmp(type, "RMC") == 0) {
         double lat = 0.0;
         double lon = 0.0;
+        double speed = 0.0;
+        double course = 0.0;
 
+        if(count > 1) {
+            nrf9151_manager_set_utc_time(status, fields[1]);
+        }
         if(count > 6 && fields[2][0] == 'A' &&
            nrf9151_manager_coord_to_double(fields[3], fields[4], &lat) &&
            nrf9151_manager_coord_to_double(fields[5], fields[6], &lon)) {
-            nrf9151_manager_apply_gnss_fix(status, lat, lon, 0, 0.0,
+            if(count > 7 && fields[7] && fields[7][0]) {
+                speed = strtod(fields[7], NULL);
+                if(isfinite(speed)) {
+                    status->speed_knots = speed;
+                    status->has_speed = 1;
+                }
+            }
+            if(count > 8 && fields[8] && fields[8][0]) {
+                course = strtod(fields[8], NULL);
+                if(isfinite(course)) {
+                    status->course_deg = course;
+                    status->has_course = 1;
+                }
+            }
+            nrf9151_manager_apply_gnss_fix(status, lat, lon,
+                                           status->has_altitude,
+                                           status->altitude_m,
                                            status->satellites);
         } else if(count > 2 && fields[2][0] == 'V') {
             status->gnss_has_fix = 0;

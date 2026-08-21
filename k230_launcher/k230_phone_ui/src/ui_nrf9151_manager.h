@@ -52,7 +52,11 @@ typedef struct {
     double latitude;
     double longitude;
     double altitude_m;
+    double speed_knots;
+    double course_deg;
     int has_altitude;
+    int has_speed;
+    int has_course;
     time_t epoch;
     long age_seconds;
     char modem_state[32];
@@ -67,6 +71,8 @@ typedef struct {
     char signal_text[96];
     char lte_status[160];
     char gnss_status[160];
+    char gnss_utc_time[32];
+    char gnss_hdop[24];
     char last_error[160];
 } k230_nrf9151_status_t;
 
