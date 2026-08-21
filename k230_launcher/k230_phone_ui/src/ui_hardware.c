@@ -65,6 +65,7 @@
 #define BUTTON_TEST_LOG "/tmp/k230_button_test.log"
 #define REBOOT_DIAG_LOG "/tmp/k230_reboot_diag.log"
 #define KEYBOARD_BACKLIGHT_LOG "/tmp/k230_keyboard_backlight.log"
+#define KEYBOARD_HOTKEY_LOG "/tmp/k230_keyboard_hotkey.log"
 #define BOOT0_TOGGLE_DEBOUNCE_US 500000ULL
 #define BOOT0_FADE_STEPS 12
 #define BOOT0_FADE_STEP_US 25000
@@ -525,6 +526,23 @@ static lv_obj_t *keyboard_hotkey_osd_title_label;
 static lv_obj_t *keyboard_hotkey_osd_value_label;
 static lv_obj_t *keyboard_hotkey_osd_bar;
 static lv_timer_t *keyboard_hotkey_osd_timer;
+
+static void keyboard_hotkey_log(const char *fmt, ...)
+{
+    FILE *fp;
+    va_list ap;
+
+    fp = fopen(KEYBOARD_HOTKEY_LOG, "a");
+    if(!fp) {
+        return;
+    }
+    fprintf(fp, "%ld ", (long)time(NULL));
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+}
 
 static void style_choice_button(lv_obj_t *btn, int selected, uint32_t accent);
 static int keyboard_backlight_pref_frequency_hz(void);
@@ -5406,6 +5424,10 @@ static void keyboard_hotkey_list_event_cb(lv_event_t *event)
     }
 
     keyboard_hotkey_edit_index = f_index;
+    keyboard_hotkey_log("select %s index=%d current=%s",
+                        keyboard_hotkey_fkeys[f_index].name, f_index,
+                        keyboard_hotkey_action_label(
+                            keyboard_hotkey_get_action(f_index)));
     app_nav_to_page(PAGE_KEYBOARD_HOTKEY_ACTION);
 }
 
@@ -5480,8 +5502,12 @@ static void keyboard_hotkey_action_event_cb(lv_event_t *event)
 
     keyboard_hotkey_set_action(keyboard_hotkey_edit_index,
                                keyboard_hotkey_actions[action_index].action);
-    keyboard_hotkey_action_update_ui();
+    keyboard_hotkey_log("set %s index=%d action=%s",
+                        keyboard_hotkey_fkeys[keyboard_hotkey_edit_index].name,
+                        keyboard_hotkey_edit_index,
+                        keyboard_hotkey_actions[action_index].label);
     app_request_fast_refresh();
+    app_nav_to_page(PAGE_KEYBOARD_HOTKEYS);
 }
 
 void ui_keyboard_settings_create(lv_obj_t *scr)

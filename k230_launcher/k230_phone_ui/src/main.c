@@ -122,6 +122,7 @@
 #define STATUS_BAR_ITEM_H 30
 #define STATUS_BAR_ITEM_GAP 6
 #define STATUS_BAR_AUDIO_W 46
+#define STATUS_BAR_AUDIO_ICON_PX 24
 #define STATUS_BAR_LTE_W 40
 #define STATUS_BAR_BATTERY_W 74
 #define STATUS_BATTERY_REFRESH_US 10000000ULL
@@ -147,8 +148,8 @@
 #define PREF_AUDIO_OUTPUT "audio.output"
 #define AUDIO_OUTPUT_HEADPHONES "headphones"
 #define AUDIO_OUTPUT_EXTERNAL "external"
-#define STATUS_AUDIO_EARPHONE_ICON "/root/app/k230_phone_ui/icons/status/earphone.svg"
-#define STATUS_AUDIO_SPEAKER_ICON "/root/app/k230_phone_ui/icons/status/speaker.svg"
+#define STATUS_AUDIO_EARPHONE_ICON "/root/app/k230_phone_ui/icons/status/earphone.png"
+#define STATUS_AUDIO_SPEAKER_ICON "/root/app/k230_phone_ui/icons/status/speaker.png"
 #define PHONE_UI_BIN "/root/app/k230_phone_ui/k230_phone_ui"
 #define EDGE_BACK_PREF_KEY "nav.edge_back"
 #define EDGE_BACK_LOG_PATH "/tmp/k230_edge_back.log"
@@ -4207,12 +4208,12 @@ static void status_audio_set_image_color(lv_obj_t *obj, uint32_t color)
     lv_obj_set_style_image_recolor_opa(obj, LV_OPA_COVER, 0);
 }
 
-static lv_obj_t *status_audio_svg_image(lv_obj_t *parent, const char *path)
+static lv_obj_t *status_audio_png_image(lv_obj_t *parent, const char *path)
 {
     lv_obj_t *img = lv_image_create(parent);
 
     lv_image_set_src(img, path);
-    lv_image_set_scale(img, (28 * 256) / 80);
+    lv_image_set_scale(img, (STATUS_BAR_AUDIO_ICON_PX * 256) / 96);
     lv_obj_center(img);
     lv_obj_clear_flag(img, LV_OBJ_FLAG_SCROLLABLE);
     make_click_forwarder(img);
@@ -4236,9 +4237,9 @@ static lv_obj_t *status_audio_item(lv_obj_t *parent)
                         (void *)(intptr_t)PAGE_AUDIO_SETTINGS);
 
     status_audio_earphone_img =
-        status_audio_svg_image(item, STATUS_AUDIO_EARPHONE_ICON);
+        status_audio_png_image(item, STATUS_AUDIO_EARPHONE_ICON);
     status_audio_speaker_img =
-        status_audio_svg_image(item, STATUS_AUDIO_SPEAKER_ICON);
+        status_audio_png_image(item, STATUS_AUDIO_SPEAKER_ICON);
     status_audio_set_obj_visible(status_audio_speaker_img, 0);
 
     return item;
