@@ -79,6 +79,9 @@
 #define INPUT_BITS_PER_LONG ((int)(sizeof(unsigned long) * 8U))
 #define INPUT_ABS_BITS_LEN ((ABS_MAX / INPUT_BITS_PER_LONG) + 1)
 #define DISPLAY_REFR_PERIOD_MS 16
+#define PORTRAIT_SCROLL_REPAIR_INTERVAL_US 12000ULL
+#define PORTRAIT_SCROLL_REPAIR_DEFAULT_PERCENT 38
+#define PORTRAIT_SCROLL_REPAIR_EXTRA_PX 24
 #define PAGE_TRANSITION_ANIM_MS 180
 #define PAGE_TRANSITION_MODE_COUNT 6
 #define MOTION_BAR_COUNT 8
@@ -1763,21 +1766,74 @@ static lv_obj_t *panel(lv_obj_t *parent, int x, int y, int w, int h)
 static void portrait_scroll_refresh_cb(lv_event_t *event)
 {
     static uint64_t last_refresh_us;
+    static int config_logged;
     uint64_t now;
+    lv_event_code_t code;
+    lv_obj_t *screen;
     lv_obj_t *target;
+    lv_area_t repair_area;
+    const char *enabled_env;
+    const char *percent_env;
+    int repair_percent = PORTRAIT_SCROLL_REPAIR_DEFAULT_PERCENT;
+    int force_refresh;
+    int logical_w;
+    int logical_h;
+    int repair_h;
+    int y1;
 
     if(display_logical_width() >= display_logical_height()) {
         return;
     }
+
+    code = lv_event_get_code(event);
+    enabled_env = getenv("K230_PORTRAIT_SCROLL_REPAIR");
+    if(!enabled_env || strcmp(enabled_env, "1") != 0) {
+        return;
+    }
+    percent_env = getenv("K230_PORTRAIT_SCROLL_REPAIR_PERCENT");
+    if(percent_env && percent_env[0]) {
+        int value = atoi(percent_env);
+
+        if(value >= 20 && value <= 70) {
+            repair_percent = value;
+        }
+    }
+
+    if(!config_logged) {
+        touch_trace_log("PORTRAIT_SCROLL_REPAIR percent=%d interval_us=%llu",
+                        repair_percent,
+                        (unsigned long long)PORTRAIT_SCROLL_REPAIR_INTERVAL_US);
+        config_logged = 1;
+    }
+
+    force_refresh = (code == LV_EVENT_SCROLL_BEGIN ||
+                     code == LV_EVENT_SCROLL_END);
     now = monotonic_us();
-    if(last_refresh_us != 0ULL && now - last_refresh_us < 8000ULL) {
+    if(!force_refresh && last_refresh_us != 0ULL &&
+       now - last_refresh_us < PORTRAIT_SCROLL_REPAIR_INTERVAL_US) {
         return;
     }
     last_refresh_us = now;
 
-    target = app_screen ? app_screen : lv_event_get_target(event);
+    target = lv_event_get_target(event);
     if(target) {
         lv_obj_invalidate(target);
+    }
+
+    screen = lv_scr_act();
+    logical_w = display_logical_width();
+    logical_h = display_logical_height();
+    repair_h = logical_h * repair_percent / 100;
+    if(repair_h < 120) {
+        repair_h = 120;
+    }
+    y1 = logical_h - repair_h - PORTRAIT_SCROLL_REPAIR_EXTRA_PX;
+    if(y1 < 0) {
+        y1 = 0;
+    }
+    if(logical_w > 0 && logical_h > 0 && screen) {
+        lv_area_set(&repair_area, 0, y1, logical_w - 1, logical_h - 1);
+        lv_obj_invalidate_area(screen, &repair_area);
     }
     request_fast_refresh();
 }
@@ -1791,7 +1847,11 @@ static lv_obj_t *scroll_panel(lv_obj_t *parent, int x, int y, int w, int h)
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_bottom(obj, 48, 0);
     lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
                         LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_END, NULL);
     return obj;
 }
 
@@ -1809,7 +1869,11 @@ static lv_obj_t *scroll_region(lv_obj_t *parent, int x, int y, int w, int h)
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
                         LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(obj, portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_END, NULL);
     return obj;
 }
 
@@ -10493,6 +10557,7 @@ int main(void)
     unlink(EDGE_BACK_LOG_PATH);
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
+    setenv("K230_LVGL_DRM_STAGING", "1", 0);
     touch_trace_verbose = getenv("K230_TOUCH_TRACE_VERBOSE") &&
                           strcmp(getenv("K230_TOUCH_TRACE_VERBOSE"), "0") != 0;
     touch_trace_log("APP_START trace_log=%s", TOUCH_TRACE_PATH);

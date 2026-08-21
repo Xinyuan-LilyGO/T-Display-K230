@@ -142,6 +142,7 @@ add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(k230_nrf52840_dfu k230_nrf52840_dfu.cpp)
 add_executable(drm_motion_probe drm_motion_probe.c)
 add_executable(drm_motion_probe_rgb565 drm_motion_probe.c)
+add_executable(lvgl_scroll_probe lvgl_scroll_probe.c)
 
 foreach(ui_target k230_phone_ui k230_phone_ui_fullswitch_test)
 target_include_directories(${ui_target} PRIVATE
@@ -170,6 +171,12 @@ target_include_directories(drm_motion_probe PRIVATE
 target_include_directories(drm_motion_probe_rgb565 PRIVATE
     ${CMAKE_SYSROOT}/usr/include
     ${CMAKE_SYSROOT}/usr/include/libdrm
+)
+
+target_include_directories(lvgl_scroll_probe PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${CMAKE_SYSROOT}/usr/include/libdrm
+    ${CMAKE_SYSROOT}/usr/include/libevdev-1.0
 )
 
 target_include_directories(k230_camera_capture PRIVATE
@@ -281,12 +288,26 @@ target_compile_definitions(drm_motion_probe_rgb565 PRIVATE
     K230_DRM_PROBE_RGB565=1
 )
 
+target_compile_definitions(lvgl_scroll_probe PRIVATE
+    LV_CONF_PATH="${CMAKE_SYSROOT}/usr/include/lvgl/lv_conf.h"
+)
+
 target_link_libraries(drm_motion_probe PRIVATE
     drm
 )
 
 target_link_libraries(drm_motion_probe_rgb565 PRIVATE
     drm
+)
+
+target_link_libraries(lvgl_scroll_probe PRIVATE
+    lvgl_linux
+    lvgl
+    lvgl_linux
+    drm
+    evdev
+    m
+    pthread
 )
 
 target_link_directories(k230_camera_capture PRIVATE
@@ -364,7 +385,7 @@ target_link_libraries(k230_qr_scan PRIVATE
     m
 )
 
-install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_lorawan_test k230_halow_udp_stream k230_meshtastic_probe k230_qr_scan k230_pcm_volume k230_nrf52840_dfu drm_motion_probe drm_motion_probe_rgb565 RUNTIME DESTINATION /root/app/k230_phone_ui)
+install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_lorawan_test k230_halow_udp_stream k230_meshtastic_probe k230_qr_scan k230_pcm_volume k230_nrf52840_dfu drm_motion_probe drm_motion_probe_rgb565 lvgl_scroll_probe RUNTIME DESTINATION /root/app/k230_phone_ui)
 install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
         ${CMAKE_CURRENT_SOURCE_DIR}/k230_halow_camera_stream.sh
         DESTINATION /root/app/k230_phone_ui)

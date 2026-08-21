@@ -42,7 +42,8 @@ start()
 		return 0
 	}
 
-	HOME=/root nohup "$DAEMON" >>"$LOGFILE" 2>&1 &
+	HOME=/root K230_LVGL_DRM_STAGING="${K230_LVGL_DRM_STAGING:-1}" \
+		nohup "$DAEMON" >>"$LOGFILE" 2>&1 &
 	echo $! > "$PIDFILE"
 	echo "OK"
 }
