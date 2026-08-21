@@ -1619,18 +1619,6 @@ static void cellular_status_refresh(void)
     if(cellular_sat_label) {
         lv_label_set_text(cellular_sat_label, sats);
     }
-    if(cellular_cno_button) {
-        lv_obj_t *label = lv_obj_get_child(cellular_cno_button, 0);
-
-        if(label) {
-            lv_label_set_text(label, ui_tr(monitor_active ? "Stop GNSS" :
-                                           "GNSS"));
-            lv_obj_set_style_text_color(label,
-                                        lv_color_hex(monitor_active ?
-                                                     0xEF4D5A : 0xF97316),
-                                        0);
-        }
-    }
     cellular_mqtt_refresh();
 }
 
@@ -1671,44 +1659,8 @@ int ui_cellular_lte_signal_level(void)
 
 static int cellular_open_uart(void)
 {
-    struct termios tio;
-    int lock_fd;
-    int fd;
-
-    pthread_mutex_lock(&cellular_uart_owner_lock);
-    if(cellular_uart_lock_fd >= 0) {
-        pthread_mutex_unlock(&cellular_uart_owner_lock);
-        errno = EBUSY;
-        return -1;
-    }
-    pthread_mutex_unlock(&cellular_uart_owner_lock);
-
-    lock_fd = k230_nrf9151_acquire_uart("lte", 250);
-    if(lock_fd < 0) {
-        return -1;
-    }
-    cellular_configure_uart3_iomux();
-    fd = open(NRF9151_UART_DEV, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
-    if(fd < 0) {
-        k230_nrf9151_release_uart(lock_fd);
-        return -1;
-    }
-    memset(&tio, 0, sizeof(tio));
-    if(tcgetattr(fd, &tio) == 0) {
-        cfmakeraw(&tio);
-        cfsetispeed(&tio, NRF9151_UART_BAUD);
-        cfsetospeed(&tio, NRF9151_UART_BAUD);
-        tio.c_cflag |= CLOCAL | CREAD;
-        tio.c_cflag &= ~CRTSCTS;
-        tio.c_cc[VMIN] = 0;
-        tio.c_cc[VTIME] = 0;
-        tcsetattr(fd, TCSANOW, &tio);
-    }
-    tcflush(fd, TCIOFLUSH);
-    pthread_mutex_lock(&cellular_uart_owner_lock);
-    cellular_uart_lock_fd = lock_fd;
-    pthread_mutex_unlock(&cellular_uart_owner_lock);
-    return fd;
+    errno = ENOTSUP;
+    return -1;
 }
 
 static void cellular_close_uart(int fd)
@@ -3634,25 +3586,10 @@ static void cellular_action_commands(cellular_action_t action,
         *title = "LTE+GNSS mode";
         break;
     case CELLULAR_ACTION_GNSS_START:
-        *cmds = cellular_gnss_start_cmds;
-        *count = sizeof(cellular_gnss_start_cmds) /
-                 sizeof(cellular_gnss_start_cmds[0]);
-        *title = "Start GNSS";
-        break;
     case CELLULAR_ACTION_GNSS_STATUS:
-        *cmds = cellular_gnss_status_cmds;
-        *count = sizeof(cellular_gnss_status_cmds) /
-                 sizeof(cellular_gnss_status_cmds[0]);
-        *title = "GNSS status";
-        break;
     case CELLULAR_ACTION_GNSS_NMEA:
-        *title = "Read NMEA";
-        break;
     case CELLULAR_ACTION_GNSS_STOP:
-        *cmds = cellular_gnss_stop_cmds;
-        *count = sizeof(cellular_gnss_stop_cmds) /
-                 sizeof(cellular_gnss_stop_cmds[0]);
-        *title = "Stop GNSS";
+        *title = "GNSS refresh";
         break;
     case CELLULAR_ACTION_FULL_TEST:
         *title = "LTE";
@@ -4076,25 +4013,17 @@ static int cellular_run_manager_action(cellular_action_t action,
         rc = rc < 0 ? rc : 0;
     } else if(action == CELLULAR_ACTION_GNSS_START ||
               action == CELLULAR_ACTION_GNSS_NMEA ||
-              action == CELLULAR_ACTION_GNSS_STATUS) {
-        rc = k230_nrf9151_start_gnss_monitor();
-        pthread_mutex_lock(&cellular_lock);
-        cellular_cno_monitor_active = (rc == 0);
-        cellular_manager_gnss_started = (rc == 0);
-        pthread_mutex_unlock(&cellular_lock);
-        snprintf(log, sizeof(log), "%s", rc == 0 ?
-                 "GNSS manager monitor started" :
-                 "GNSS manager monitor start failed");
-        if(k230_nrf9151_read_status(&status, 0) == 0) {
+              action == CELLULAR_ACTION_GNSS_STATUS ||
+              action == CELLULAR_ACTION_GNSS_STOP) {
+        rc = k230_nrf9151_read_status(&status, 0);
+        if(rc == 0) {
             cellular_apply_manager_status(&status);
+            snprintf(log, sizeof(log), "%s",
+                     "GNSS data refreshed from nRF9151 manager cache");
+        } else {
+            snprintf(log, sizeof(log), "GNSS status cache unavailable: %s",
+                     strerror(errno));
         }
-    } else if(action == CELLULAR_ACTION_GNSS_STOP) {
-        rc = k230_nrf9151_stop_gnss_monitor();
-        pthread_mutex_lock(&cellular_lock);
-        cellular_cno_monitor_active = 0;
-        cellular_manager_gnss_started = 0;
-        pthread_mutex_unlock(&cellular_lock);
-        snprintf(log, sizeof(log), "%s", "GNSS manager monitor stopped");
     }
 
     if(log[0]) {
@@ -4488,48 +4417,10 @@ static void cellular_mqtt_close_event_cb(lv_event_t *event)
 
 static void cellular_cno_monitor_event_cb(lv_event_t *event)
 {
-    int active;
-    int busy;
-    int rc = 0;
-
     (void)event;
-    pthread_mutex_lock(&cellular_lock);
-    active = cellular_cno_monitor_active ||
-             k230_nrf9151_gnss_monitor_active();
-    busy = cellular_worker_active;
-    pthread_mutex_unlock(&cellular_lock);
-
-    if(active) {
-        rc = k230_nrf9151_stop_gnss_monitor();
-        pthread_mutex_lock(&cellular_lock);
-        cellular_cno_monitor_active = 0;
-        cellular_cno_monitor_stop = 0;
-        cellular_manager_gnss_started = 0;
-        pthread_mutex_unlock(&cellular_lock);
-        cellular_log_append("GNSS manager monitor stop requested");
-        cellular_set_status(rc == 0 ? "GNSS stopped" : "GNSS stop failed");
-        app_request_fast_refresh();
-        return;
-    }
-    if(busy) {
-        cellular_log_append("GNSS monitor ignored: worker busy");
-        app_request_fast_refresh();
-        return;
-    }
-
-    rc = k230_nrf9151_start_gnss_monitor();
-    pthread_mutex_lock(&cellular_lock);
-    cellular_cno_monitor_active = (rc == 0);
-    cellular_cno_monitor_stop = 0;
-    cellular_manager_gnss_started = (rc == 0);
-    pthread_mutex_unlock(&cellular_lock);
-    if(rc == 0) {
-        cellular_log_append("GNSS manager monitor started");
-        cellular_set_status("GNSS");
-    } else {
-        cellular_log_append("GNSS manager monitor start failed");
-        cellular_set_status("GNSS failed");
-    }
+    cellular_sync_manager_status();
+    cellular_log_append("GNSS page refreshed from manager cache");
+    cellular_set_status("GNSS refreshed");
     app_request_fast_refresh();
 }
 
@@ -4665,6 +4556,7 @@ static void cellular_show_page(cellular_page_t page)
         if(cellular_gnss_page) {
             lv_obj_clear_flag(cellular_gnss_page, LV_OBJ_FLAG_HIDDEN);
         }
+        cellular_sync_manager_status();
         break;
     case CELLULAR_PAGE_HTTP:
         if(cellular_http_page) {
@@ -5054,18 +4946,11 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_set_width(cellular_ttff_label, left_w - 32);
     lv_label_set_long_mode(cellular_ttff_label, LV_LABEL_LONG_DOT);
     lv_obj_align(cellular_ttff_label, LV_ALIGN_TOP_LEFT, 0, 104);
-    btn_w = (left_w - 44) / 2;
-    cellular_cno_button = cellular_button(panel, 0, 148, btn_w, "GNSS",
-                                          0xF97316,
-                                          cellular_cno_monitor_event_cb, NULL);
-    cellular_button(panel, btn_w + 12, 148, btn_w, "Clear log",
-                    0x94A3B8, cellular_clear_event_cb, NULL);
-
     cellular_sat_label = ui_label(panel, "No satellite data",
                                   &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_width(cellular_sat_label, left_w - 32);
     lv_label_set_long_mode(cellular_sat_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(cellular_sat_label, LV_ALIGN_TOP_LEFT, 0, 214);
+    lv_obj_align(cellular_sat_label, LV_ALIGN_TOP_LEFT, 0, 150);
 
     panel = ui_panel(cellular_gnss_page, wide_layout ? right_x : margin,
                      wide_layout ? sub_y : sub_y + sub_h + gap,
@@ -5167,8 +5052,6 @@ void ui_cellular_create(lv_obj_t *scr)
 
 void ui_cellular_cleanup(void)
 {
-    int stop_manager = 0;
-
     pthread_mutex_lock(&cellular_lock);
     cellular_page_active = 0;
     cellular_action_generation++;
@@ -5180,16 +5063,12 @@ void ui_cellular_cleanup(void)
     if(cellular_cno_monitor_active) {
         cellular_cno_monitor_stop = 1;
     }
-    stop_manager = cellular_manager_gnss_started;
     cellular_manager_gnss_started = 0;
     cellular_cno_monitor_active = 0;
     snprintf(cellular_running_title, sizeof(cellular_running_title), "%s",
              "LTE");
     pthread_mutex_unlock(&cellular_lock);
-    if(stop_manager) {
-        (void)k230_nrf9151_stop_gnss_monitor();
-        cellular_log_append("Cellular page cleanup: GNSS manager stop requested");
-    }
+    cellular_log_append("Cellular page cleanup: shared GNSS manager unchanged");
     (void)k230_nrf9151_mqtt_session_disconnect(NULL, 0);
 
     if(cellular_timer) {

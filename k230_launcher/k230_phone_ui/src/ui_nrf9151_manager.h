@@ -119,7 +119,9 @@ int k230_nrf9151_write_gnss_fix(double latitude, double longitude,
 int k230_nrf9151_acquire_uart(const char *owner, int wait_ms);
 void k230_nrf9151_release_uart(int lock_fd);
 int k230_nrf9151_start_gnss_monitor(void);
+int k230_nrf9151_start_gnss_monitor_for(const char *owner);
 int k230_nrf9151_stop_gnss_monitor(void);
+int k230_nrf9151_stop_gnss_monitor_for(const char *owner);
 int k230_nrf9151_stop_gnss_monitor_wait(int wait_ms);
 int k230_nrf9151_gnss_monitor_active(void);
 int k230_nrf9151_status_monitor_start(void);

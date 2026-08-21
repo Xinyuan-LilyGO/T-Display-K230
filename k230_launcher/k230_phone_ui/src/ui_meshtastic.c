@@ -4239,7 +4239,7 @@ static void mesh_start_event_cb(lv_event_t *event)
                         sizeof(mesh_status_text)) == 0) {
         mesh_append_log("daemon already running");
         if(mesh_position_enabled) {
-            (void)k230_nrf9151_start_gnss_monitor();
+            (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
         }
         mesh_background_monitor_start();
         mesh_refresh_status();
@@ -4351,7 +4351,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
                     MESHTASTIC_DAEMON_LOG);
     if(mesh_position_enabled) {
-        (void)k230_nrf9151_start_gnss_monitor();
+        (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
     }
     usleep(250000);
     mesh_background_monitor_start();
@@ -4370,7 +4370,7 @@ static void mesh_stop_event_cb(lv_event_t *event)
         ui_trim_text(response);
         mesh_append_log("stop failed: %s", response);
     }
-    (void)k230_nrf9151_stop_gnss_monitor();
+    (void)k230_nrf9151_stop_gnss_monitor_for("meshtastic");
     usleep(120000);
     mesh_refresh_status();
 }
@@ -4388,7 +4388,7 @@ void ui_meshtastic_pause_for_radio_owner(const char *owner)
     snprintf(mesh_radio_pause_owner, sizeof(mesh_radio_pause_owner), "%s",
              owner && owner[0] ? owner : "LoRa");
     mesh_background_monitor_stop();
-    (void)k230_nrf9151_stop_gnss_monitor();
+    (void)k230_nrf9151_stop_gnss_monitor_for("meshtastic");
 
     if(mesh_ipc_command("STATUS\n", response, sizeof(response)) == 0 &&
        mesh_status_is_online(response)) {
@@ -4437,7 +4437,7 @@ void ui_meshtastic_resume_after_radio_owner(void)
     mesh_load_profile_prefs();
     mesh_start_event_cb(NULL);
     if(mesh_position_enabled) {
-        (void)k230_nrf9151_start_gnss_monitor();
+        (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
     }
     mesh_background_monitor_start();
 }

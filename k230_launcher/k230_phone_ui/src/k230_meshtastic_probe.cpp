@@ -5402,33 +5402,9 @@ static int nrf9151_configure_uart3_iomux(void)
 
 static int nrf9151_open_uart(const std::string &path)
 {
-    int fd = open(path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
-    struct termios tio;
-
-    if(fd < 0) {
-        return -1;
-    }
-    if(tcgetattr(fd, &tio) != 0) {
-        close(fd);
-        return -1;
-    }
-    cfmakeraw(&tio);
-    cfsetispeed(&tio, MESHTASTIC_NRF9151_UART_BAUD);
-    cfsetospeed(&tio, MESHTASTIC_NRF9151_UART_BAUD);
-    tio.c_cflag |= CLOCAL | CREAD;
-    tio.c_cflag &= ~(PARENB | CSTOPB | CSIZE);
-    tio.c_cflag |= CS8;
-#ifdef CRTSCTS
-    tio.c_cflag &= ~CRTSCTS;
-#endif
-    tio.c_cc[VMIN] = 0;
-    tio.c_cc[VTIME] = 0;
-    if(tcsetattr(fd, TCSANOW, &tio) != 0) {
-        close(fd);
-        return -1;
-    }
-    tcflush(fd, TCIOFLUSH);
-    return fd;
+    (void)path;
+    errno = ENOTSUP;
+    return -1;
 }
 
 static bool nrf9151_response_has_token(const char *resp, const char *token)
@@ -5845,7 +5821,6 @@ static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
 
     if(!opts.position_enabled) {
         nrf9151_gnss_close_uart();
-        (void)k230_nrf9151_stop_gnss_monitor();
         mesh_gnss.enabled = false;
         nrf9151_gnss_set_state("off", "off", "Position disabled");
         return;
@@ -5862,26 +5837,9 @@ static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
         return;
     }
 
-    if(!k230_nrf9151_gnss_monitor_active()) {
-        if(now < mesh_gnss.next_probe_us) {
-            return;
-        }
-        mesh_gnss.next_probe_us = now + MESHTASTIC_POSITION_RETRY_US;
-        if(k230_nrf9151_start_gnss_monitor() != 0) {
-            mesh_gnss.present = true;
-            mesh_gnss.configured = false;
-            nrf9151_gnss_set_state("busy", "unavailable",
-                                   "nRF9151 manager busy");
-            daemon_event("nRF9151 manager GNSS start failed: %s",
-                         strerror(errno));
-            return;
-        }
-        daemon_event("nRF9151 manager GNSS monitor requested");
-    }
-
     if(k230_nrf9151_read_status(&status, 0) != 0) {
         mesh_gnss.present = true;
-        mesh_gnss.configured = k230_nrf9151_gnss_monitor_active();
+        mesh_gnss.configured = false;
         if(nrf9151_gnss_apply_cache_fix(true)) {
             return;
         }
@@ -5892,6 +5850,18 @@ static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
 
     mesh_gnss.present = status.present || k230_nrf9151_uart_present();
     mesh_gnss.configured = status.gnss_running;
+    if(!status.gnss_running) {
+        if(now >= mesh_gnss.next_probe_us) {
+            mesh_gnss.next_probe_us = now + MESHTASTIC_POSITION_RETRY_US;
+            daemon_event("nRF9151 GNSS cache is not running; waiting launcher manager");
+        }
+        if(nrf9151_gnss_apply_cache_fix(true)) {
+            return;
+        }
+        nrf9151_gnss_set_state("present", "starting",
+                               "Waiting launcher nRF9151 manager");
+        return;
+    }
     mesh_gnss.nmea_rx_count = status.nmea_rx_count;
     mesh_gnss.nmea_nofix_count = status.nmea_nofix_count;
     mesh_gnss.position.sats_in_view = status.satellites;
@@ -18815,7 +18785,7 @@ static void print_usage(const char *argv0)
             "  --position-interval SEC  Periodic Position interval, default 900\n"
             "  --fixed-position-i LAT_I,LON_I[,ALT_M]  Use fixed 1e-7 degree position\n"
             "  --no-fixed-position  Clear fixed-position CLI override\n"
-            "  --gps-uart PATH  nRF9151 AT UART for GNSS, default " MESHTASTIC_NRF9151_UART_DEV "\n"
+            "  --gps-uart PATH  legacy option; GNSS uses launcher manager cache\n"
             "  --telemetry      Enable device telemetry broadcast (default)\n"
             "  --no-telemetry   Disable device telemetry broadcast\n"
             "  --telemetry-interval SEC  Device telemetry interval, default 300\n"

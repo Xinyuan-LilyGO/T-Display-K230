@@ -41,6 +41,10 @@
 #define K230_NRF9151_GNSS_RESTART_US (120ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_REFRESH_US (30ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
+#define K230_NRF9151_MANAGER_LOG "/tmp/k230_nrf9151_test.log"
+#define K230_NRF9151_GNSS_OWNER_LEGACY (1U << 0)
+#define K230_NRF9151_GNSS_OWNER_CELLULAR (1U << 1)
+#define K230_NRF9151_GNSS_OWNER_MESHTASTIC (1U << 2)
 
 typedef struct {
     int fd;
@@ -49,6 +53,7 @@ typedef struct {
     int active;
     int configured;
     int first_fix_reported;
+    unsigned int owners;
     uint64_t session_start_us;
     uint64_t last_fix_us;
     uint64_t last_nmea_us;
@@ -101,6 +106,53 @@ static uint64_t nrf9151_manager_monotonic_us(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ULL +
            (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+static void nrf9151_manager_debug_log(const char *fmt, ...)
+{
+    FILE *fp;
+    va_list ap;
+
+    if(!fmt) {
+        return;
+    }
+    fp = fopen(K230_NRF9151_MANAGER_LOG, "a");
+    if(!fp) {
+        return;
+    }
+    fprintf(fp, "%llu ",
+            (unsigned long long)nrf9151_manager_monotonic_us());
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+}
+
+static unsigned int nrf9151_manager_gnss_owner_bit(const char *owner)
+{
+    if(!owner || !owner[0]) {
+        return K230_NRF9151_GNSS_OWNER_LEGACY;
+    }
+    if(strcmp(owner, "cellular") == 0 || strcmp(owner, "lte") == 0) {
+        return K230_NRF9151_GNSS_OWNER_CELLULAR;
+    }
+    if(strcmp(owner, "meshtastic") == 0 || strcmp(owner, "mesh") == 0) {
+        return K230_NRF9151_GNSS_OWNER_MESHTASTIC;
+    }
+    return K230_NRF9151_GNSS_OWNER_LEGACY;
+}
+
+static const char *nrf9151_manager_gnss_owner_name(unsigned int bit)
+{
+    switch(bit) {
+    case K230_NRF9151_GNSS_OWNER_CELLULAR:
+        return "cellular";
+    case K230_NRF9151_GNSS_OWNER_MESHTASTIC:
+        return "meshtastic";
+    default:
+        return "legacy";
+    }
 }
 
 static void nrf9151_manager_trim_text(char *text)
@@ -2133,6 +2185,14 @@ static void nrf9151_manager_process_gnss_line(char *line)
         nrf9151_gnss_monitor.last_nmea_us = now_us;
         status.last_nmea_ms = 0;
         nrf9151_manager_process_nmea_sentence(&status, nmea);
+        if(status.nmea_rx_count <= 5U ||
+           status.nmea_rx_count % 20U == 0U) {
+            nrf9151_manager_debug_log(
+                "GNSS NMEA rx=%u valid=%u nofix=%u sats=%u fix=%d",
+                status.nmea_rx_count, status.nmea_valid_count,
+                status.nmea_nofix_count, status.satellites,
+                status.gnss_has_fix);
+        }
         if(!status.gnss_has_fix) {
             snprintf(status.gps_state, sizeof(status.gps_state), "%s",
                      "searching");
@@ -2152,6 +2212,24 @@ static void nrf9151_manager_process_gnss_line(char *line)
                             1000ULL);
     }
     nrf9151_manager_status_set_gnss_phase(&status);
+    status.epoch = time(NULL);
+    k230_nrf9151_write_status(&status);
+}
+
+static void nrf9151_manager_mark_gnss_off(const char *reason)
+{
+    k230_nrf9151_status_t status;
+
+    if(k230_nrf9151_read_status(&status, 0) != 0) {
+        k230_nrf9151_status_init(&status);
+    }
+    status.gnss_running = 0;
+    status.gnss_has_fix = 0;
+    status.last_nmea_ms = 0;
+    snprintf(status.gps_state, sizeof(status.gps_state), "%s", "off");
+    snprintf(status.gnss_phase, sizeof(status.gnss_phase), "%s", "off");
+    snprintf(status.gnss_status, sizeof(status.gnss_status), "%s",
+             reason && reason[0] ? reason : "Off");
     status.epoch = time(NULL);
     k230_nrf9151_write_status(&status);
 }
@@ -2289,13 +2367,19 @@ static void *nrf9151_manager_gnss_thread(void *arg)
     nrf9151_gnss_monitor.active = 1;
     nrf9151_gnss_monitor.stop = 0;
     pthread_mutex_unlock(&nrf9151_manager_lock);
+    nrf9151_manager_debug_log("GNSS thread enter owners=0x%x",
+                              nrf9151_gnss_monitor.owners);
 
     if(nrf9151_manager_open_session("nrf9151-gnss", 8000, &lock_fd, &fd,
                                     NULL, 0) != 0) {
+        nrf9151_manager_debug_log("GNSS session open failed: %s",
+                                  strerror(errno));
         pthread_mutex_lock(&nrf9151_manager_lock);
         nrf9151_manager_status_set_error_locked("GNSS UART unavailable");
         nrf9151_gnss_monitor.active = 0;
+        nrf9151_gnss_monitor.owners = 0;
         pthread_mutex_unlock(&nrf9151_manager_lock);
+        nrf9151_manager_mark_gnss_off("GNSS UART unavailable");
         return NULL;
     }
     nrf9151_gnss_monitor.fd = fd;
@@ -2303,14 +2387,19 @@ static void *nrf9151_manager_gnss_thread(void *arg)
     if(nrf9151_manager_exchange(fd, "AT", NULL, 0,
                                 K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL) != 0 ||
        nrf9151_manager_start_gnss_locked(fd) != 0) {
+        nrf9151_manager_debug_log("GNSS start failed after session open");
         nrf9151_manager_close_session(lock_fd, fd);
         pthread_mutex_lock(&nrf9151_manager_lock);
         nrf9151_gnss_monitor.fd = -1;
         nrf9151_gnss_monitor.lock_fd = -1;
         nrf9151_gnss_monitor.active = 0;
+        nrf9151_gnss_monitor.owners = 0;
         pthread_mutex_unlock(&nrf9151_manager_lock);
+        nrf9151_manager_mark_gnss_off("GNSS start failed");
         return NULL;
     }
+    nrf9151_manager_debug_log("GNSS configured owners=0x%x",
+                              nrf9151_gnss_monitor.owners);
 
     while(!nrf9151_manager_gnss_should_stop()) {
         fd_set rfds;
@@ -2342,6 +2431,11 @@ static void *nrf9151_manager_gnss_thread(void *arg)
             char resp[512];
 
             nrf9151_gnss_monitor.last_restart_us = now_us;
+            nrf9151_manager_debug_log("GNSS restart: no fix after %llums",
+                                      (unsigned long long)(
+                                          (now_us -
+                                           nrf9151_gnss_monitor.session_start_us) /
+                                          1000ULL));
             (void)nrf9151_manager_exchange(fd, "AT#XGNSS=0", resp,
                                            sizeof(resp),
                                            K230_NRF9151_CMD_TIMEOUT_US, NULL,
@@ -2354,6 +2448,8 @@ static void *nrf9151_manager_gnss_thread(void *arg)
             (void)nrf9151_manager_start_gnss_locked(fd);
         }
     }
+    nrf9151_manager_debug_log("GNSS thread stop requested owners=0x%x",
+                              nrf9151_gnss_monitor.owners);
     (void)nrf9151_manager_exchange(fd, "AT#XGNSS=0", NULL, 0,
                                    K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
     (void)nrf9151_manager_exchange(fd, "AT#XNMEA=0", NULL, 0,
@@ -2364,24 +2460,50 @@ static void *nrf9151_manager_gnss_thread(void *arg)
     nrf9151_gnss_monitor.lock_fd = -1;
     nrf9151_gnss_monitor.active = 0;
     nrf9151_gnss_monitor.configured = 0;
+    nrf9151_gnss_monitor.owners = 0;
     pthread_mutex_unlock(&nrf9151_manager_lock);
+    nrf9151_manager_mark_gnss_off("Off");
+    nrf9151_manager_debug_log("GNSS thread exit");
     return NULL;
 }
 
 int k230_nrf9151_start_gnss_monitor(void)
 {
+    return k230_nrf9151_start_gnss_monitor_for("legacy");
+}
+
+int k230_nrf9151_start_gnss_monitor_for(const char *owner)
+{
     pthread_t thread;
+    unsigned int owner_bit = nrf9151_manager_gnss_owner_bit(owner);
 
     pthread_mutex_lock(&nrf9151_manager_lock);
+    nrf9151_gnss_monitor.owners |= owner_bit;
     if(nrf9151_gnss_monitor.active) {
         nrf9151_gnss_monitor.stop = 0;
+        nrf9151_manager_debug_log("GNSS start owner=%s already active owners=0x%x",
+                                  nrf9151_manager_gnss_owner_name(owner_bit),
+                                  nrf9151_gnss_monitor.owners);
         pthread_mutex_unlock(&nrf9151_manager_lock);
         return 0;
     }
+    nrf9151_gnss_monitor.active = 1;
+    nrf9151_gnss_monitor.configured = 0;
+    nrf9151_gnss_monitor.fd = -1;
+    nrf9151_gnss_monitor.lock_fd = -1;
     nrf9151_gnss_monitor.stop = 0;
+    nrf9151_manager_debug_log("GNSS start owner=%s owners=0x%x",
+                              nrf9151_manager_gnss_owner_name(owner_bit),
+                              nrf9151_gnss_monitor.owners);
     pthread_mutex_unlock(&nrf9151_manager_lock);
 
     if(pthread_create(&thread, NULL, nrf9151_manager_gnss_thread, NULL) != 0) {
+        pthread_mutex_lock(&nrf9151_manager_lock);
+        nrf9151_gnss_monitor.owners &= ~owner_bit;
+        nrf9151_gnss_monitor.active = 0;
+        pthread_mutex_unlock(&nrf9151_manager_lock);
+        nrf9151_manager_debug_log("GNSS pthread_create failed owner=%s",
+                                  nrf9151_manager_gnss_owner_name(owner_bit));
         return -1;
     }
     pthread_detach(thread);
@@ -2392,10 +2514,35 @@ int k230_nrf9151_stop_gnss_monitor(void)
 {
     pthread_mutex_lock(&nrf9151_manager_lock);
     if(!nrf9151_gnss_monitor.active) {
+        nrf9151_gnss_monitor.owners = 0;
         pthread_mutex_unlock(&nrf9151_manager_lock);
+        nrf9151_manager_debug_log("GNSS force stop ignored: inactive");
         return 0;
     }
+    nrf9151_gnss_monitor.owners = 0;
     nrf9151_gnss_monitor.stop = 1;
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+    nrf9151_manager_debug_log("GNSS force stop requested");
+    return 0;
+}
+
+int k230_nrf9151_stop_gnss_monitor_for(const char *owner)
+{
+    unsigned int owner_bit = nrf9151_manager_gnss_owner_bit(owner);
+    int should_stop = 0;
+    int active;
+
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    active = nrf9151_gnss_monitor.active;
+    nrf9151_gnss_monitor.owners &= ~owner_bit;
+    if(active && nrf9151_gnss_monitor.owners == 0U) {
+        nrf9151_gnss_monitor.stop = 1;
+        should_stop = 1;
+    }
+    nrf9151_manager_debug_log(
+        "GNSS stop owner=%s active=%d owners=0x%x stop=%d",
+        nrf9151_manager_gnss_owner_name(owner_bit), active,
+        nrf9151_gnss_monitor.owners, should_stop);
     pthread_mutex_unlock(&nrf9151_manager_lock);
     return 0;
 }
@@ -2408,12 +2555,16 @@ int k230_nrf9151_stop_gnss_monitor_wait(int wait_ms)
     pthread_mutex_lock(&nrf9151_manager_lock);
     active = nrf9151_gnss_monitor.active;
     if(active) {
+        nrf9151_gnss_monitor.owners = 0;
         nrf9151_gnss_monitor.stop = 1;
     }
     pthread_mutex_unlock(&nrf9151_manager_lock);
     if(!active) {
+        nrf9151_manager_debug_log("GNSS stop wait ignored: inactive");
         return 0;
     }
+    nrf9151_manager_debug_log("GNSS force stop wait requested wait=%dms",
+                              wait_ms);
     if(wait_ms <= 0) {
         return 0;
     }
