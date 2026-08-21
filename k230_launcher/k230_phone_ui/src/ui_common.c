@@ -16,6 +16,9 @@
 #include <unistd.h>
 
 #define UI_FONT_SIZE_PREF_KEY "display.font_size"
+#define UI_PORTRAIT_SCROLL_REPAIR_INTERVAL_US 12000ULL
+#define UI_PORTRAIT_SCROLL_REPAIR_DEFAULT_PERCENT 38
+#define UI_PORTRAIT_SCROLL_REPAIR_EXTRA_PX 24
 
 typedef struct {
     const lv_font_t *fallback;
@@ -460,21 +463,66 @@ static void ui_portrait_scroll_refresh_cb(lv_event_t *event)
 {
     static uint64_t last_refresh_us;
     uint64_t now;
+    lv_event_code_t code;
     lv_obj_t *screen;
     lv_obj_t *target;
+    lv_area_t repair_area;
+    const char *enabled_env;
+    const char *percent_env;
+    int repair_percent = UI_PORTRAIT_SCROLL_REPAIR_DEFAULT_PERCENT;
+    int force_refresh;
+    int screen_w;
+    int screen_h;
+    int repair_h;
+    int y1;
 
     if(ui_is_landscape()) {
         return;
     }
+
+    enabled_env = getenv("K230_PORTRAIT_SCROLL_REPAIR");
+    if(enabled_env && strcmp(enabled_env, "0") == 0) {
+        return;
+    }
+
+    percent_env = getenv("K230_PORTRAIT_SCROLL_REPAIR_PERCENT");
+    if(percent_env && percent_env[0]) {
+        int value = atoi(percent_env);
+
+        if(value >= 20 && value <= 70) {
+            repair_percent = value;
+        }
+    }
+
+    code = lv_event_get_code(event);
+    force_refresh = (code == LV_EVENT_SCROLL_BEGIN ||
+                     code == LV_EVENT_SCROLL_END);
     now = ui_monotonic_us();
-    if(last_refresh_us != 0ULL && now - last_refresh_us < 8000ULL) {
+    if(!force_refresh && last_refresh_us != 0ULL &&
+       now - last_refresh_us < UI_PORTRAIT_SCROLL_REPAIR_INTERVAL_US) {
         return;
     }
     last_refresh_us = now;
 
     screen = lv_scr_act();
     target = lv_event_get_target(event);
-    lv_obj_invalidate(screen ? screen : target);
+    if(target) {
+        lv_obj_invalidate(target);
+    }
+    screen_w = ui_screen_width();
+    screen_h = ui_screen_height();
+    repair_h = screen_h * repair_percent / 100;
+    if(repair_h < 120) {
+        repair_h = 120;
+    }
+    y1 = screen_h - repair_h - UI_PORTRAIT_SCROLL_REPAIR_EXTRA_PX;
+    if(y1 < 0) {
+        y1 = 0;
+    }
+    if(screen && screen_w > 0 && screen_h > 0) {
+        lv_area_set(&repair_area, 0, y1, screen_w - 1, screen_h - 1);
+        lv_obj_invalidate_area(screen, &repair_area);
+    }
     app_request_fast_refresh();
 }
 
@@ -489,7 +537,11 @@ void ui_make_scrollable(lv_obj_t *obj, int bottom_pad)
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_bottom(obj, bottom_pad, 0);
     lv_obj_add_event_cb(obj, ui_portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(obj, ui_portrait_scroll_refresh_cb,
                         LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(obj, ui_portrait_scroll_refresh_cb,
+                        LV_EVENT_SCROLL_END, NULL);
 }
 
 lv_obj_t *ui_scroll_panel(lv_obj_t *parent, int x, int y, int w, int h)
