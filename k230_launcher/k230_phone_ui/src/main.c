@@ -121,6 +121,7 @@
 #define STATUS_BAR_ITEM_W 32
 #define STATUS_BAR_ITEM_H 30
 #define STATUS_BAR_ITEM_GAP 6
+#define STATUS_BAR_AUDIO_W 46
 #define STATUS_BAR_LTE_W 40
 #define STATUS_BAR_BATTERY_W 74
 #define STATUS_BATTERY_REFRESH_US 10000000ULL
@@ -143,6 +144,9 @@
 #define DISPLAY_TIMEOUT_PREF_KEY "display.timeout_s"
 #define DISPLAY_TIMEOUT_DEFAULT_S 60
 #define DISPLAY_TIMEOUT_MODE_COUNT 5
+#define PREF_AUDIO_OUTPUT "audio.output"
+#define AUDIO_OUTPUT_HEADPHONES "headphones"
+#define AUDIO_OUTPUT_EXTERNAL "external"
 #define PHONE_UI_BIN "/root/app/k230_phone_ui/k230_phone_ui"
 #define EDGE_BACK_PREF_KEY "nav.edge_back"
 #define EDGE_BACK_LOG_PATH "/tmp/k230_edge_back.log"
@@ -250,6 +254,8 @@ static lv_obj_t *ui_stage_obj;
 static lv_obj_t *page_root;
 static lv_obj_t *status_bar_obj;
 static lv_obj_t *status_group_obj;
+static lv_obj_t *status_audio_item_obj;
+static lv_obj_t *status_audio_label;
 static lv_obj_t *status_location_label;
 static lv_obj_t *status_lte_bars[4];
 static lv_obj_t *status_lte_x_label;
@@ -4177,6 +4183,33 @@ static lv_obj_t *status_icon_item(lv_obj_t *parent, const char *symbol,
     return item;
 }
 
+static lv_obj_t *status_audio_item(lv_obj_t *parent)
+{
+    lv_obj_t *item = lv_obj_create(parent);
+
+    lv_obj_set_size(item, STATUS_BAR_AUDIO_W, STATUS_BAR_ITEM_H);
+    lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(item, lv_color_hex(0x253040), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(item, LV_OPA_40, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(item, 10, 0);
+    lv_obj_set_style_border_width(item, 0, 0);
+    lv_obj_set_style_pad_all(item, 0, 0);
+    lv_obj_clear_flag(item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(item, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(item, app_event_cb, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)PAGE_AUDIO_SETTINGS);
+
+    status_audio_label = label(item, "INT", &lv_font_montserrat_14,
+                               0x3DA5FF);
+    lv_obj_set_width(status_audio_label, STATUS_BAR_AUDIO_W);
+    lv_label_set_long_mode(status_audio_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(status_audio_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(status_audio_label);
+    make_click_forwarder(status_audio_label);
+
+    return item;
+}
+
 static lv_obj_t *status_lte_item(lv_obj_t *parent)
 {
     const int bar_w = 4;
@@ -4330,6 +4363,28 @@ static uint32_t status_wifi_color(int wifi_present, int wifi_has_ip)
         return 0x3DA5FF;
     }
     return wifi_present ? 0xF5A524 : 0x8B949E;
+}
+
+static void status_update_audio_route(void)
+{
+    char output[24];
+    int external;
+
+    if(!status_audio_label || !lv_obj_is_valid(status_audio_label)) {
+        return;
+    }
+
+    output[0] = '\0';
+    ui_prefs_get(PREF_AUDIO_OUTPUT, output, sizeof(output), "");
+    if(output[0]) {
+        external = strcmp(output, AUDIO_OUTPUT_EXTERNAL) == 0;
+    } else {
+        external = ui_audio_output_is_external();
+    }
+
+    lv_label_set_text(status_audio_label, external ? "I2S" : "INT");
+    status_set_label_color(status_audio_label,
+                           external ? 0x25C281 : 0x3DA5FF);
 }
 
 static void *status_battery_probe_thread(void *arg)
@@ -4562,6 +4617,7 @@ static void status_bar_update(lv_timer_t *timer)
                            gnss_fix ? 0x25C281 :
                            (modem_present ? 0xF5A524 : 0x8B949E));
     status_set_label_color(status_ble_label, status_ble_color());
+    status_update_audio_route();
     status_update_battery();
 }
 
@@ -4575,6 +4631,10 @@ static void status_bar_relayout(void)
     lv_obj_set_size(status_bar_obj, display_logical_width(), STATUS_BAR_H);
     if(time_label && lv_obj_is_valid(time_label)) {
         lv_obj_align(time_label, LV_ALIGN_CENTER, 0, 0);
+    }
+    if(status_audio_item_obj && lv_obj_is_valid(status_audio_item_obj)) {
+        lv_obj_align(status_audio_item_obj, LV_ALIGN_LEFT_MID,
+                     STATUS_BAR_SAFE_SIDE, 0);
     }
     if(status_group_obj && lv_obj_is_valid(status_group_obj)) {
         lv_obj_set_size(status_group_obj, status_group_w, STATUS_BAR_ITEM_H);
@@ -4598,6 +4658,10 @@ static void create_status_bar(lv_obj_t *scr)
 
     time_label = label(bar, "--:--", &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_align(time_label, LV_ALIGN_CENTER, 0, 0);
+
+    status_audio_item_obj = status_audio_item(bar);
+    lv_obj_align(status_audio_item_obj, LV_ALIGN_LEFT_MID,
+                 STATUS_BAR_SAFE_SIDE, 0);
 
     status_group_obj = lv_obj_create(bar);
     lv_obj_set_size(status_group_obj, status_group_w, STATUS_BAR_ITEM_H);
@@ -4640,6 +4704,11 @@ void app_set_ble_status(const char *state)
 
     snprintf(status_ble_state, sizeof(status_ble_state), "%s", value);
     status_set_label_color(status_ble_label, status_ble_color());
+}
+
+void app_refresh_status_bar(void)
+{
+    status_bar_update(NULL);
 }
 
 static lv_obj_t *icon_tile(lv_obj_t *parent, const app_item_t *item, int x, int y,

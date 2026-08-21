@@ -3588,6 +3588,7 @@ static void keyboard_hotkey_toggle_audio_output(void)
 
     ui_prefs_set(PREF_AUDIO_OUTPUT, output);
     ui_audio_output_set_external(next_external);
+    app_refresh_status_bar();
     keyboard_hotkey_show_osd_text("Audio output", LV_SYMBOL_AUDIO, value,
                                   next_external ? 100 : 45, accent);
 }

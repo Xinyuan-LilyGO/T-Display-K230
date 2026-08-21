@@ -120,6 +120,7 @@ void app_refresh_current_page(void);
 int app_current_page_is(page_id_t page);
 void app_set_wifi_status(const char *state);
 void app_set_ble_status(const char *state);
+void app_refresh_status_bar(void);
 void app_note_user_activity(void);
 int app_edge_back_enabled(void);
 void app_set_edge_back_enabled(int enabled);
