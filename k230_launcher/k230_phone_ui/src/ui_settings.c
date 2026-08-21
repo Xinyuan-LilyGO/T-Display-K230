@@ -1,7 +1,9 @@
 #include "ui_settings.h"
 
 #include "ui_hardware.h"
+#include "ui_i18n.h"
 #include "ui_meshtastic.h"
+#include "ui_nrf9151_manager.h"
 
 static lv_obj_t *settings_notice_overlay;
 static lv_obj_t *settings_body;
@@ -121,6 +123,19 @@ static void meshtastic_autostart_switch_event_cb(lv_event_t *event)
     lv_obj_t *sw = lv_event_get_target(event);
     ui_meshtastic_set_autostart_enabled(lv_obj_has_state(sw,
                                                          LV_STATE_CHECKED));
+}
+
+static void nrf9151_location_switch_event_cb(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target(event);
+    int enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+
+    k230_nrf9151_set_location_autostart_enabled(enabled);
+    if(k230_nrf9151_apply_location_autostart() != 0 && enabled) {
+        settings_show_notice(ui_tr("nRF9151 location"),
+                             ui_tr("nRF9151 GNSS not detected"),
+                             ui_tr("Check the nRF9151 module before enabling background positioning."));
+    }
 }
 
 static int settings_section_header(lv_obj_t *parent, int y, const char *title,
@@ -321,10 +336,16 @@ void ui_startup_settings_create(lv_obj_t *scr)
                         "Start Mesh daemon when launcher opens", 0x10B981,
                         ui_meshtastic_autostart_enabled(),
                         meshtastic_autostart_switch_event_cb);
+    y = settings_next_row_y(y);
+    settings_switch_row(body, y, "GPS", "nRF9151 location",
+                        "Start background GNSS positioning at boot",
+                        0x3DA5FF,
+                        k230_nrf9151_location_autostart_enabled(),
+                        nrf9151_location_switch_event_cb);
     y = settings_next_row_y(y) + 14;
 
     label = ui_label(body,
-                     "Autostart keeps the mesh daemon online for Bluetooth and message notifications.",
+                     "Autostart keeps Mesh online and can keep nRF9151 positioning ready for maps and GNSS pages.",
                      &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_pos(label, 32, y);
     lv_obj_set_width(label, ui_fit_width(body, 32, 504));

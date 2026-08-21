@@ -14,6 +14,7 @@ extern "C" {
 #define K230_NRF9151_GNSS_FIX_CACHE_TMP "/tmp/k230_nrf9151_gnss_fix.cache.tmp"
 #define K230_NRF9151_STATUS_CACHE "/tmp/k230_nrf9151_status.cache"
 #define K230_NRF9151_STATUS_CACHE_TMP "/tmp/k230_nrf9151_status.cache.tmp"
+#define K230_NRF9151_LOCATION_OWNER "system-location"
 
 typedef enum {
     K230_NRF9151_HTTP_GET = 0,
@@ -124,6 +125,9 @@ int k230_nrf9151_stop_gnss_monitor(void);
 int k230_nrf9151_stop_gnss_monitor_for(const char *owner);
 int k230_nrf9151_stop_gnss_monitor_wait(int wait_ms);
 int k230_nrf9151_gnss_monitor_active(void);
+int k230_nrf9151_location_autostart_enabled(void);
+int k230_nrf9151_set_location_autostart_enabled(int enabled);
+int k230_nrf9151_apply_location_autostart(void);
 int k230_nrf9151_status_monitor_start(void);
 void k230_nrf9151_status_monitor_stop(void);
 void k230_nrf9151_status_monitor_request_refresh(void);

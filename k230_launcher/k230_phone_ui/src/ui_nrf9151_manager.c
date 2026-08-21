@@ -42,9 +42,13 @@
 #define K230_NRF9151_STATUS_REFRESH_US (30ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
 #define K230_NRF9151_MANAGER_LOG "/tmp/k230_nrf9151_test.log"
+#define K230_NRF9151_PREF_DIR "/root/.config/k230_phone_ui"
+#define K230_NRF9151_PREF_FILE K230_NRF9151_PREF_DIR "/settings.conf"
+#define K230_NRF9151_PREF_LOCATION_AUTOSTART "nrf9151.location.autostart"
 #define K230_NRF9151_GNSS_OWNER_LEGACY (1U << 0)
 #define K230_NRF9151_GNSS_OWNER_CELLULAR (1U << 1)
 #define K230_NRF9151_GNSS_OWNER_MESHTASTIC (1U << 2)
+#define K230_NRF9151_GNSS_OWNER_LOCATION (1U << 3)
 
 typedef struct {
     int fd;
@@ -140,6 +144,10 @@ static unsigned int nrf9151_manager_gnss_owner_bit(const char *owner)
     if(strcmp(owner, "meshtastic") == 0 || strcmp(owner, "mesh") == 0) {
         return K230_NRF9151_GNSS_OWNER_MESHTASTIC;
     }
+    if(strcmp(owner, K230_NRF9151_LOCATION_OWNER) == 0 ||
+       strcmp(owner, "location") == 0 || strcmp(owner, "system") == 0) {
+        return K230_NRF9151_GNSS_OWNER_LOCATION;
+    }
     return K230_NRF9151_GNSS_OWNER_LEGACY;
 }
 
@@ -150,6 +158,8 @@ static const char *nrf9151_manager_gnss_owner_name(unsigned int bit)
         return "cellular";
     case K230_NRF9151_GNSS_OWNER_MESHTASTIC:
         return "meshtastic";
+    case K230_NRF9151_GNSS_OWNER_LOCATION:
+        return "location";
     default:
         return "legacy";
     }
@@ -175,6 +185,115 @@ static void nrf9151_manager_trim_text(char *text)
     while(len > 0 && isspace((unsigned char)text[len - 1U])) {
         text[--len] = '\0';
     }
+}
+
+static int nrf9151_manager_pref_get(const char *key, char *value,
+                                    size_t value_len, const char *fallback)
+{
+    FILE *fp;
+    char line[256];
+
+    if(!key || !value || value_len == 0U) {
+        return -1;
+    }
+    snprintf(value, value_len, "%s", fallback ? fallback : "");
+    fp = fopen(K230_NRF9151_PREF_FILE, "r");
+    if(!fp) {
+        return -1;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        char *sep;
+
+        line[strcspn(line, "\r\n")] = '\0';
+        nrf9151_manager_trim_text(line);
+        if(!line[0] || line[0] == '#') {
+            continue;
+        }
+        sep = strchr(line, '=');
+        if(!sep) {
+            continue;
+        }
+        *sep++ = '\0';
+        nrf9151_manager_trim_text(line);
+        nrf9151_manager_trim_text(sep);
+        if(strcmp(line, key) == 0) {
+            snprintf(value, value_len, "%s", sep);
+            fclose(fp);
+            return 0;
+        }
+    }
+    fclose(fp);
+    return -1;
+}
+
+static int nrf9151_manager_pref_set(const char *key, const char *value)
+{
+    char lines[96][256];
+    char tmp_path[sizeof(K230_NRF9151_PREF_FILE) + 8];
+    FILE *fp;
+    int count = 0;
+    int replaced = 0;
+
+    if(!key || !value || !key[0]) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    fp = fopen(K230_NRF9151_PREF_FILE, "r");
+    if(fp) {
+        while(count < (int)(sizeof(lines) / sizeof(lines[0])) &&
+              fgets(lines[count], sizeof(lines[count]), fp)) {
+            char probe[256];
+            char *sep;
+
+            lines[count][strcspn(lines[count], "\r\n")] = '\0';
+            snprintf(probe, sizeof(probe), "%s", lines[count]);
+            nrf9151_manager_trim_text(probe);
+            sep = strchr(probe, '=');
+            if(sep) {
+                *sep = '\0';
+                nrf9151_manager_trim_text(probe);
+                if(strcmp(probe, key) == 0) {
+                    snprintf(lines[count], sizeof(lines[count]), "%s=%s",
+                             key, value);
+                    replaced = 1;
+                }
+            }
+            count++;
+        }
+        fclose(fp);
+    }
+    if(!replaced && count < (int)(sizeof(lines) / sizeof(lines[0]))) {
+        snprintf(lines[count++], sizeof(lines[0]), "%s=%s", key, value);
+    }
+
+    if(mkdir("/root/.config", 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    if(mkdir(K230_NRF9151_PREF_DIR, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", K230_NRF9151_PREF_FILE);
+    fp = fopen(tmp_path, "w");
+    if(!fp) {
+        return -1;
+    }
+    fprintf(fp, "# k230_phone_ui persistent settings\n");
+    for(int i = 0; i < count; i++) {
+        if(lines[i][0] &&
+           strcmp(lines[i], "# k230_phone_ui persistent settings") != 0) {
+            fprintf(fp, "%s\n", lines[i]);
+        }
+    }
+    if(fclose(fp) != 0) {
+        unlink(tmp_path);
+        return -1;
+    }
+    if(rename(tmp_path, K230_NRF9151_PREF_FILE) != 0) {
+        unlink(tmp_path);
+        return -1;
+    }
+    return 0;
 }
 
 static int nrf9151_manager_starts_with(const char *text, const char *prefix)
@@ -2301,28 +2420,41 @@ static int nrf9151_manager_start_gnss_locked(int fd)
     }
     rc = nrf9151_manager_exchange(fd, "AT#XGNSS?", resp, sizeof(resp),
                                   K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+    nrf9151_manager_debug_log("GNSS cmd AT#XGNSS? rc=%d resp=%s", rc, resp);
     if(rc == 0 && nrf9151_manager_response_gnss_active(resp) > 0) {
-        (void)nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
-                                       K230_NRF9151_CMD_TIMEOUT_US, NULL,
-                                       NULL);
+        rc = nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
+                                      K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                      NULL);
+        nrf9151_manager_debug_log("GNSS cmd AT#XNMEA=1 rc=%d resp=%s",
+                                  rc, resp);
     } else {
-        (void)nrf9151_manager_exchange(fd, "AT+CFUN=31", resp, sizeof(resp),
-                                       K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
-                                       NULL, NULL);
-        (void)nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
-                                       K230_NRF9151_CMD_TIMEOUT_US, NULL,
-                                       NULL);
+        rc = nrf9151_manager_exchange(fd, "AT+CFUN=1", resp, sizeof(resp),
+                                      K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
+                                      NULL, NULL);
+        nrf9151_manager_debug_log("GNSS cmd AT+CFUN=1 rc=%d resp=%s",
+                                  rc, resp);
+        rc = nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
+                                      K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                      NULL);
+        nrf9151_manager_debug_log("GNSS cmd AT#XNMEA=1 rc=%d resp=%s",
+                                  rc, resp);
         rc = nrf9151_manager_exchange(fd, "AT#XGNSS=1,0,0,0", resp,
                                       sizeof(resp),
                                       K230_NRF9151_CMD_TIMEOUT_US, NULL,
                                       NULL);
+        nrf9151_manager_debug_log(
+            "GNSS cmd AT#XGNSS=1,0,0,0 rc=%d resp=%s", rc, resp);
         if(rc != 0) {
             char status_resp[1024];
+            int status_rc;
 
-            if(nrf9151_manager_exchange(fd, "AT#XGNSS?", status_resp,
-                                        sizeof(status_resp),
-                                        K230_NRF9151_CMD_TIMEOUT_US, NULL,
-                                        NULL) != 0 ||
+            status_rc = nrf9151_manager_exchange(fd, "AT#XGNSS?", status_resp,
+                                                 sizeof(status_resp),
+                                                 K230_NRF9151_CMD_TIMEOUT_US,
+                                                 NULL, NULL);
+            nrf9151_manager_debug_log("GNSS cmd AT#XGNSS? rc=%d resp=%s",
+                                      status_rc, status_resp);
+            if(status_rc != 0 ||
                nrf9151_manager_response_gnss_active(status_resp) <= 0) {
                 snprintf(status.gnss_status, sizeof(status.gnss_status),
                          "%s", "GNSS start failed");
@@ -2593,6 +2725,43 @@ int k230_nrf9151_gnss_monitor_active(void)
     active = nrf9151_gnss_monitor.active;
     pthread_mutex_unlock(&nrf9151_manager_lock);
     return active;
+}
+
+int k230_nrf9151_location_autostart_enabled(void)
+{
+    char value[16];
+
+    if(nrf9151_manager_pref_get(K230_NRF9151_PREF_LOCATION_AUTOSTART, value,
+                                sizeof(value), "1") != 0) {
+        return 1;
+    }
+    return atoi(value) != 0;
+}
+
+int k230_nrf9151_set_location_autostart_enabled(int enabled)
+{
+    return nrf9151_manager_pref_set(K230_NRF9151_PREF_LOCATION_AUTOSTART,
+                                    enabled ? "1" : "0");
+}
+
+int k230_nrf9151_apply_location_autostart(void)
+{
+    int enabled = k230_nrf9151_location_autostart_enabled();
+
+    (void)k230_nrf9151_status_monitor_start();
+    if(!enabled) {
+        (void)k230_nrf9151_stop_gnss_monitor_for(K230_NRF9151_LOCATION_OWNER);
+        (void)k230_nrf9151_stop_gnss_monitor_for("meshtastic");
+        nrf9151_manager_debug_log("location autostart disabled");
+        return 0;
+    }
+    if(!k230_nrf9151_uart_present()) {
+        nrf9151_manager_debug_log("location autostart skipped: uart missing");
+        errno = ENODEV;
+        return -1;
+    }
+    nrf9151_manager_debug_log("location autostart enabled");
+    return k230_nrf9151_start_gnss_monitor_for(K230_NRF9151_LOCATION_OWNER);
 }
 
 static void nrf9151_manager_escape_at_string(const char *in, char *out,

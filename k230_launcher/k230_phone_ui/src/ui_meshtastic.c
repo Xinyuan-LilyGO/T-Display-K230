@@ -315,6 +315,7 @@ typedef enum {
     MESH_MAP_POS_GNSS_SEARCHING,
     MESH_MAP_POS_GNSS_ERROR,
     MESH_MAP_POS_COORD_UNAVAILABLE,
+    MESH_MAP_POS_LOCATION_DISABLED,
 } mesh_map_position_state_t;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
@@ -4203,6 +4204,18 @@ static void mesh_background_monitor_stop(void)
     }
 }
 
+static void mesh_request_gnss_if_enabled(void)
+{
+    if(!mesh_position_enabled) {
+        return;
+    }
+    if(!k230_nrf9151_location_autostart_enabled()) {
+        mesh_append_log("GNSS skipped: nRF9151 location autostart disabled");
+        return;
+    }
+    (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
+}
+
 static void mesh_start_event_cb(lv_event_t *event)
 {
     char region_arg[32];
@@ -4238,9 +4251,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     if(mesh_ipc_command("STATUS\n", mesh_status_text,
                         sizeof(mesh_status_text)) == 0) {
         mesh_append_log("daemon already running");
-        if(mesh_position_enabled) {
-            (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
-        }
+        mesh_request_gnss_if_enabled();
         mesh_background_monitor_start();
         mesh_refresh_status();
         return;
@@ -4350,9 +4361,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     rc = system(command);
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
                     MESHTASTIC_DAEMON_LOG);
-    if(mesh_position_enabled) {
-        (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
-    }
+    mesh_request_gnss_if_enabled();
     usleep(250000);
     mesh_background_monitor_start();
     mesh_refresh_status();
@@ -4436,9 +4445,7 @@ void ui_meshtastic_resume_after_radio_owner(void)
     mesh_append_log("resume after %s", owner);
     mesh_load_profile_prefs();
     mesh_start_event_cb(NULL);
-    if(mesh_position_enabled) {
-        (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
-    }
+    mesh_request_gnss_if_enabled();
     mesh_background_monitor_start();
 }
 
@@ -9048,6 +9055,16 @@ static int mesh_map_status_position(const char *status, double *lat,
     if(state) {
         *state = MESH_MAP_POS_GNSS_SEARCHING;
     }
+    if(!k230_nrf9151_location_autostart_enabled()) {
+        if(reason && reason_len > 0U) {
+            snprintf(reason, reason_len, "%s",
+                     ui_tr("Enable nRF9151 location in Startup apps"));
+        }
+        if(state) {
+            *state = MESH_MAP_POS_LOCATION_DISABLED;
+        }
+        return 0;
+    }
     if(!status || !mesh_status_is_online(status)) {
         if(reason && reason_len > 0U) {
             snprintf(reason, reason_len, "%s",
@@ -10444,6 +10461,8 @@ static const char *mesh_map_position_hint(mesh_map_position_state_t state)
         return ui_tr("Satellites are visible; keep antenna still.");
     case MESH_MAP_POS_GNSS_ERROR:
         return ui_tr("Open Cellular app to check GNSS.");
+    case MESH_MAP_POS_LOCATION_DISABLED:
+        return ui_tr("Open Settings > Startup apps to enable location.");
     case MESH_MAP_POS_COORD_UNAVAILABLE:
     case MESH_MAP_POS_GNSS_SEARCHING:
         return ui_tr("Open sky improves GNSS fix.");

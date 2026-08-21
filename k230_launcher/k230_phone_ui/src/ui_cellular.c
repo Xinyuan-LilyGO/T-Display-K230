@@ -843,14 +843,17 @@ static void cellular_set_ip(const char *ip)
 static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
 {
     uint64_t now_us;
+    int location_enabled;
 
     if(!status) {
         return;
     }
     now_us = ui_monotonic_us();
+    location_enabled = k230_nrf9151_location_autostart_enabled();
 
     pthread_mutex_lock(&cellular_lock);
-    cellular_cno_monitor_active = k230_nrf9151_gnss_monitor_active();
+    cellular_cno_monitor_active = location_enabled &&
+                                  k230_nrf9151_gnss_monitor_active();
     snprintf(cellular_link_status, sizeof(cellular_link_status), "%s",
              status->link_ok ?
              (status->firmware[0] && strcmp(status->firmware, "--") != 0 ?
@@ -879,6 +882,17 @@ static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
 
     cellular_nmea_count = status->nmea_rx_count;
     cellular_urc_count = status->nmea_valid_count;
+    if(!location_enabled) {
+        snprintf(cellular_gnss_status, sizeof(cellular_gnss_status), "%s",
+                 "GPS off");
+        snprintf(cellular_gps_status, sizeof(cellular_gps_status), "%s",
+                 "Enable nRF9151 location in Startup apps");
+        snprintf(cellular_sat_status, sizeof(cellular_sat_status), "%s",
+                 "NMEA rx=0 valid=0 nofix=0 sats=0 last=0ms");
+        cellular_gnss_fix_valid = 0;
+        pthread_mutex_unlock(&cellular_lock);
+        return;
+    }
     if(status->gnss_has_fix) {
         snprintf(cellular_gps_status, sizeof(cellular_gps_status),
                  "Lat %.6f  Lon %.6f  Sats %u",
@@ -939,6 +953,11 @@ void ui_cellular_startup(void)
     if(k230_nrf9151_status_monitor_start() == 0) {
         cellular_log_append("nRF9151 status manager started");
         k230_nrf9151_status_monitor_request_refresh();
+        if(k230_nrf9151_apply_location_autostart() == 0) {
+            cellular_log_append("nRF9151 location autostart applied");
+        } else if(k230_nrf9151_location_autostart_enabled()) {
+            cellular_log_append("nRF9151 location autostart waiting for modem");
+        }
         cellular_sync_manager_status();
     } else {
         cellular_log_append("nRF9151 status manager start failed: %s",
@@ -4555,6 +4574,9 @@ static void cellular_show_page(cellular_page_t page)
     case CELLULAR_PAGE_GNSS:
         if(cellular_gnss_page) {
             lv_obj_clear_flag(cellular_gnss_page, LV_OBJ_FLAG_HIDDEN);
+        }
+        if(k230_nrf9151_location_autostart_enabled()) {
+            (void)k230_nrf9151_apply_location_autostart();
         }
         cellular_sync_manager_status();
         break;

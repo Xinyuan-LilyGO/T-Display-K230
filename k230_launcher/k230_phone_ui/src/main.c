@@ -4646,20 +4646,26 @@ static lv_obj_t *status_battery_item(lv_obj_t *parent)
     return item;
 }
 
-static int status_gnss_has_recent_fix(void)
+static uint32_t status_gps_color(int modem_present)
 {
-    struct stat st;
-    time_t now;
+    k230_nrf9151_status_t status;
 
-    if(stat(k230_nrf9151_gnss_cache_path(), &st) != 0) {
-        return 0;
+    if(!k230_nrf9151_location_autostart_enabled()) {
+        return 0x8B949E;
     }
-    now = time(NULL);
-    if(now <= 0 || st.st_mtime <= 0) {
-        return 1;
+    if(!modem_present) {
+        return 0x8B949E;
     }
-
-    return now - st.st_mtime <= 600;
+    if(k230_nrf9151_read_status(&status, 300) != 0 || !status.present) {
+        return 0x8B949E;
+    }
+    if(status.gnss_has_fix) {
+        return 0x25C281;
+    }
+    if(status.gnss_running) {
+        return 0x3DA5FF;
+    }
+    return 0xF5A524;
 }
 
 static void status_set_label_color(lv_obj_t *obj, uint32_t color)
@@ -4926,7 +4932,6 @@ static void status_bar_update(lv_timer_t *timer)
     int wifi_present;
     int modem_present;
     int lte_level;
-    int gnss_fix;
 
     (void)timer;
 
@@ -4948,10 +4953,8 @@ static void status_bar_update(lv_timer_t *timer)
                         lte_level > 0 ? 0x25C281 :
                         (modem_present ? 0xEF4D5A : 0x8B949E));
 
-    gnss_fix = status_gnss_has_recent_fix();
     status_set_label_color(status_location_label,
-                           gnss_fix ? 0x25C281 :
-                           (modem_present ? 0xF5A524 : 0x8B949E));
+                           status_gps_color(modem_present));
     status_set_label_color(status_ble_label, status_ble_color());
     status_update_audio_route();
     status_update_battery();
