@@ -147,6 +147,8 @@
 #define PREF_AUDIO_OUTPUT "audio.output"
 #define AUDIO_OUTPUT_HEADPHONES "headphones"
 #define AUDIO_OUTPUT_EXTERNAL "external"
+#define STATUS_AUDIO_EARPHONE_ICON "/root/app/k230_phone_ui/icons/status/earphone.svg"
+#define STATUS_AUDIO_SPEAKER_ICON "/root/app/k230_phone_ui/icons/status/speaker.svg"
 #define PHONE_UI_BIN "/root/app/k230_phone_ui/k230_phone_ui"
 #define EDGE_BACK_PREF_KEY "nav.edge_back"
 #define EDGE_BACK_LOG_PATH "/tmp/k230_edge_back.log"
@@ -255,13 +257,8 @@ static lv_obj_t *page_root;
 static lv_obj_t *status_bar_obj;
 static lv_obj_t *status_group_obj;
 static lv_obj_t *status_audio_item_obj;
-static lv_obj_t *status_audio_headphone_line;
-static lv_obj_t *status_audio_headphone_pad_l;
-static lv_obj_t *status_audio_headphone_pad_r;
-static lv_obj_t *status_audio_speaker_box;
-static lv_obj_t *status_audio_speaker_line;
-static lv_obj_t *status_audio_speaker_wave_1;
-static lv_obj_t *status_audio_speaker_wave_2;
+static lv_obj_t *status_audio_earphone_img;
+static lv_obj_t *status_audio_speaker_img;
 static lv_obj_t *status_location_label;
 static lv_obj_t *status_lte_bars[4];
 static lv_obj_t *status_lte_x_label;
@@ -4189,41 +4186,6 @@ static lv_obj_t *status_icon_item(lv_obj_t *parent, const char *symbol,
     return item;
 }
 
-static lv_obj_t *status_audio_icon_box(lv_obj_t *parent, int x, int y,
-                                       int w, int h, int radius)
-{
-    lv_obj_t *obj = lv_obj_create(parent);
-
-    lv_obj_set_pos(obj, x, y);
-    lv_obj_set_size(obj, w, h);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(0x3DA5FF), 0);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(obj, 0, 0);
-    lv_obj_set_style_radius(obj, radius, 0);
-    lv_obj_set_style_pad_all(obj, 0, 0);
-    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
-    make_click_forwarder(obj);
-    return obj;
-}
-
-static lv_obj_t *status_audio_icon_line(lv_obj_t *parent,
-                                        const lv_point_precise_t *points,
-                                        uint32_t point_count,
-                                        int line_width)
-{
-    lv_obj_t *line = lv_line_create(parent);
-
-    lv_line_set_points(line, points, point_count);
-    lv_obj_set_size(line, STATUS_BAR_AUDIO_W, STATUS_BAR_ITEM_H);
-    lv_obj_set_pos(line, 0, 0);
-    lv_obj_set_style_line_width(line, line_width, 0);
-    lv_obj_set_style_line_rounded(line, true, 0);
-    lv_obj_set_style_line_color(line, lv_color_hex(0x3DA5FF), 0);
-    lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
-    make_click_forwarder(line);
-    return line;
-}
-
 static void status_audio_set_obj_visible(lv_obj_t *obj, int visible)
 {
     if(!obj || !lv_obj_is_valid(obj)) {
@@ -4236,35 +4198,29 @@ static void status_audio_set_obj_visible(lv_obj_t *obj, int visible)
     }
 }
 
-static void status_audio_set_obj_color(lv_obj_t *obj, uint32_t color,
-                                       int line)
+static void status_audio_set_image_color(lv_obj_t *obj, uint32_t color)
 {
     if(!obj || !lv_obj_is_valid(obj)) {
         return;
     }
-    if(line) {
-        lv_obj_set_style_line_color(obj, lv_color_hex(color), 0);
-    } else {
-        lv_obj_set_style_bg_color(obj, lv_color_hex(color), 0);
-    }
+    lv_obj_set_style_image_recolor(obj, lv_color_hex(color), 0);
+    lv_obj_set_style_image_recolor_opa(obj, LV_OPA_COVER, 0);
+}
+
+static lv_obj_t *status_audio_svg_image(lv_obj_t *parent, const char *path)
+{
+    lv_obj_t *img = lv_image_create(parent);
+
+    lv_image_set_src(img, path);
+    lv_image_set_scale(img, (28 * 256) / 80);
+    lv_obj_center(img);
+    lv_obj_clear_flag(img, LV_OBJ_FLAG_SCROLLABLE);
+    make_click_forwarder(img);
+    return img;
 }
 
 static lv_obj_t *status_audio_item(lv_obj_t *parent)
 {
-    static const lv_point_precise_t headphone_points[] = {
-        {10, 21}, {10, 13}, {13, 8}, {18, 5},
-        {28, 5}, {33, 8}, {36, 13}, {36, 21},
-    };
-    static const lv_point_precise_t speaker_points[] = {
-        {8, 17}, {13, 17}, {20, 11}, {20, 23},
-        {13, 17}, {13, 23}, {8, 23}, {8, 17},
-    };
-    static const lv_point_precise_t wave_1_points[] = {
-        {24, 14}, {27, 17}, {24, 20},
-    };
-    static const lv_point_precise_t wave_2_points[] = {
-        {29, 11}, {34, 17}, {29, 23},
-    };
     lv_obj_t *item = lv_obj_create(parent);
 
     lv_obj_set_size(item, STATUS_BAR_AUDIO_W, STATUS_BAR_ITEM_H);
@@ -4279,26 +4235,11 @@ static lv_obj_t *status_audio_item(lv_obj_t *parent)
     lv_obj_add_event_cb(item, app_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)PAGE_AUDIO_SETTINGS);
 
-    status_audio_headphone_line = status_audio_icon_line(
-        item, headphone_points,
-        sizeof(headphone_points) / sizeof(headphone_points[0]), 3);
-    status_audio_headphone_pad_l = status_audio_icon_box(item, 7, 17, 7, 9, 3);
-    status_audio_headphone_pad_r = status_audio_icon_box(item, 32, 17, 7, 9, 3);
-
-    status_audio_speaker_line = status_audio_icon_line(
-        item, speaker_points, sizeof(speaker_points) / sizeof(speaker_points[0]),
-        3);
-    status_audio_speaker_box = status_audio_icon_box(item, 7, 16, 6, 8, 2);
-    status_audio_speaker_wave_1 = status_audio_icon_line(
-        item, wave_1_points, sizeof(wave_1_points) / sizeof(wave_1_points[0]),
-        2);
-    status_audio_speaker_wave_2 = status_audio_icon_line(
-        item, wave_2_points, sizeof(wave_2_points) / sizeof(wave_2_points[0]),
-        2);
-    status_audio_set_obj_visible(status_audio_speaker_line, 0);
-    status_audio_set_obj_visible(status_audio_speaker_box, 0);
-    status_audio_set_obj_visible(status_audio_speaker_wave_1, 0);
-    status_audio_set_obj_visible(status_audio_speaker_wave_2, 0);
+    status_audio_earphone_img =
+        status_audio_svg_image(item, STATUS_AUDIO_EARPHONE_ICON);
+    status_audio_speaker_img =
+        status_audio_svg_image(item, STATUS_AUDIO_SPEAKER_ICON);
+    status_audio_set_obj_visible(status_audio_speaker_img, 0);
 
     return item;
 }
@@ -4478,21 +4419,10 @@ static void status_update_audio_route(void)
 
     color = external ? 0x25C281 : 0x3DA5FF;
 
-    status_audio_set_obj_visible(status_audio_headphone_line, !external);
-    status_audio_set_obj_visible(status_audio_headphone_pad_l, !external);
-    status_audio_set_obj_visible(status_audio_headphone_pad_r, !external);
-    status_audio_set_obj_visible(status_audio_speaker_line, external);
-    status_audio_set_obj_visible(status_audio_speaker_box, external);
-    status_audio_set_obj_visible(status_audio_speaker_wave_1, external);
-    status_audio_set_obj_visible(status_audio_speaker_wave_2, external);
-
-    status_audio_set_obj_color(status_audio_headphone_line, color, 1);
-    status_audio_set_obj_color(status_audio_headphone_pad_l, color, 0);
-    status_audio_set_obj_color(status_audio_headphone_pad_r, color, 0);
-    status_audio_set_obj_color(status_audio_speaker_line, color, 1);
-    status_audio_set_obj_color(status_audio_speaker_box, color, 0);
-    status_audio_set_obj_color(status_audio_speaker_wave_1, color, 1);
-    status_audio_set_obj_color(status_audio_speaker_wave_2, color, 1);
+    status_audio_set_obj_visible(status_audio_earphone_img, !external);
+    status_audio_set_obj_visible(status_audio_speaker_img, external);
+    status_audio_set_image_color(status_audio_earphone_img, color);
+    status_audio_set_image_color(status_audio_speaker_img, color);
 }
 
 static void *status_battery_probe_thread(void *arg)
