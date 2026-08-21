@@ -1785,11 +1785,11 @@ static void portrait_scroll_refresh_cb(lv_event_t *event)
         return;
     }
 
+    code = lv_event_get_code(event);
     enabled_env = getenv("K230_PORTRAIT_SCROLL_REPAIR");
-    if(enabled_env && strcmp(enabled_env, "0") == 0) {
+    if(!enabled_env || strcmp(enabled_env, "1") != 0) {
         return;
     }
-
     percent_env = getenv("K230_PORTRAIT_SCROLL_REPAIR_PERCENT");
     if(percent_env && percent_env[0]) {
         int value = atoi(percent_env);
@@ -1806,7 +1806,6 @@ static void portrait_scroll_refresh_cb(lv_event_t *event)
         config_logged = 1;
     }
 
-    code = lv_event_get_code(event);
     force_refresh = (code == LV_EVENT_SCROLL_BEGIN ||
                      code == LV_EVENT_SCROLL_END);
     now = monotonic_us();
@@ -10558,6 +10557,7 @@ int main(void)
     unlink(EDGE_BACK_LOG_PATH);
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
+    setenv("K230_LVGL_DRM_STAGING", "1", 0);
     touch_trace_verbose = getenv("K230_TOUCH_TRACE_VERBOSE") &&
                           strcmp(getenv("K230_TOUCH_TRACE_VERBOSE"), "0") != 0;
     touch_trace_log("APP_START trace_log=%s", TOUCH_TRACE_PATH);

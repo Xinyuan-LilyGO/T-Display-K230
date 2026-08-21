@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: T-Display K230 BSP <support@lilygo.cc>
+Date: Fri, 21 Aug 2026 06:20:00 +0000
+Subject: [PATCH] lvgl/drm: add K230 staging scanout buffer option
+
+The RM69A10 portrait path can flicker while LVGL scrolls if LVGL draws
+directly into the DRM dumb framebuffer that VO is scanning out. Add an
+environment-controlled staging mode for K230:
+
+  K230_LVGL_DRM_STAGING=1
+
+With staging enabled, LVGL renders into normal memory buffers. On the last
+flush of a frame the driver copies the complete staging buffer into the DRM
+scanout buffer and then performs the atomic page flip. This keeps DIRECT
+rendering while preventing VO from scanning a buffer while LVGL is actively
+modifying it.
+
+The default LVGL DRM behavior is unchanged unless the environment variable
+is set.
+---
+--- a/lvgl/src/drivers/display/drm/lv_linux_drm.c
++++ b/lvgl/src/drivers/display/drm/lv_linux_drm.c
+@@ -13,6 +13,7 @@
+ #include <fcntl.h>
+ #include <poll.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <sys/mman.h>
+ #include <time.h>
+ #include <unistd.h>
+@@ -53,6 +54,8 @@
+     uint32_t offset;
+     unsigned long int size;
+     uint8_t * map;
++    uint8_t * draw_map;
++    unsigned long int draw_size;
+     uint32_t fb_handle;
+ } drm_buffer_t;
+ 
+@@ -79,6 +82,7 @@
+     drmModePropertyPtr conn_props[128];
+     drm_buffer_t drm_bufs[BUFFER_CNT];
+     drm_buffer_t * act_buf;
++    int use_staging;
+ #if LV_USE_LINUX_DRM_GBM_BUFFERS
+     struct gbm_device * gbm_device;
+ #endif
+@@ -131,6 +135,16 @@
+     #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+ #endif
+ 
++static int drm_env_enabled(const char * name)
++{
++    const char * value = getenv(name);
++
++    if(value == NULL || value[0] == '\0' || strcmp(value, "0") == 0)
++        return 0;
++
++    return 1;
++}
++
+ /**********************
+  *   GLOBAL FUNCTIONS
+  **********************/
+@@ -178,7 +192,10 @@
+     if(drm_dev->act_buf == NULL) {
+ 
+         for(i = 0; i < BUFFER_CNT; i++) {
+-            if(act_buf->unaligned_data == drm_dev->drm_bufs[i].map) {
++            uint8_t * draw_map = drm_dev->use_staging && drm_dev->drm_bufs[i].draw_map ?
++                                  drm_dev->drm_bufs[i].draw_map : drm_dev->drm_bufs[i].map;
++
++            if(act_buf->unaligned_data == draw_map) {
+                 drm_dev->act_buf = &drm_dev->drm_bufs[i];
+                 LV_LOG_TRACE("Set active buffer idx: %d", i);
+                 break;
+@@ -231,12 +248,34 @@
+ 
+     size_t buf_size = LV_MIN(drm_dev->drm_bufs[1].size, drm_dev->drm_bufs[0].size);
+     uint32_t stride = drm_dev->drm_bufs[0].pitch;
++    uint8_t * draw_buf_0 = drm_dev->drm_bufs[1].map;
++    uint8_t * draw_buf_1 = drm_dev->drm_bufs[0].map;
++
++#if !LV_USE_LINUX_DRM_GBM_BUFFERS
++    drm_dev->use_staging = drm_env_enabled("K230_LVGL_DRM_STAGING");
++    if(drm_dev->use_staging) {
++        for(int i = 0; i < BUFFER_CNT; i++) {
++            drm_dev->drm_bufs[i].draw_map = lv_malloc(buf_size);
++            LV_ASSERT_MALLOC(drm_dev->drm_bufs[i].draw_map);
++            if(drm_dev->drm_bufs[i].draw_map == NULL) {
++                LV_LOG_ERROR("Failed to allocate K230 DRM staging buffer");
++                return LV_RESULT_INVALID;
++            }
++            drm_dev->drm_bufs[i].draw_size = buf_size;
++            lv_memzero(drm_dev->drm_bufs[i].draw_map, buf_size);
++        }
++        draw_buf_0 = drm_dev->drm_bufs[1].draw_map;
++        draw_buf_1 = drm_dev->drm_bufs[0].draw_map;
++        LV_LOG_INFO("K230 DRM staging buffers enabled, size=%zu stride=%u", buf_size, stride);
++    }
++#endif
++
+     /* Resolution must be set first because if the screen is smaller than the size passed
+      * to lv_display_create then the buffers aren't big enough for LV_DISPLAY_RENDER_MODE_DIRECT.
+      */
+     lv_display_set_resolution(disp, hor_res, ver_res);
+-    lv_display_set_buffers_with_stride(disp, drm_dev->drm_bufs[1].map, drm_dev->drm_bufs[0].map, buf_size,
+-                                       stride, LV_DISPLAY_RENDER_MODE_DIRECT);
++    lv_display_set_buffers_with_stride(disp, draw_buf_0, draw_buf_1, buf_size, stride,
++                                       LV_DISPLAY_RENDER_MODE_DIRECT);
+ 
+ 
+     /* Set the handler that is called before a redraw occurs to set the active buffer/plane
+@@ -1140,6 +1179,13 @@
+ 
+     LV_ASSERT(drm_dev->act_buf != NULL);
+ 
++#if !LV_USE_LINUX_DRM_GBM_BUFFERS
++    if(drm_dev->use_staging && drm_dev->act_buf->draw_map) {
++        memcpy(drm_dev->act_buf->map, drm_dev->act_buf->draw_map,
++               drm_dev->act_buf->draw_size);
++    }
++#endif
++
+     if(drm_dmabuf_set_plane(drm_dev, drm_dev->act_buf)) {
+         LV_LOG_ERROR("Flush fail");
+         return;
+@@ -1203,6 +1249,11 @@
+     for(int i = 0; i < BUFFER_CNT; ++i) {
+         drm_buffer_t * b = &drm_dev->drm_bufs[i];
+ 
++        if(b->draw_map) {
++            lv_free(b->draw_map);
++            b->draw_map = NULL;
++            b->draw_size = 0;
++        }
+         if(b->fb_handle) {
+             drmModeRmFB(drm_dev->fd, b->fb_handle);
+             b->fb_handle = 0;
+-- 
+2.43.0

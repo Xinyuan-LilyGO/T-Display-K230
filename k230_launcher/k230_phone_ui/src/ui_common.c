@@ -481,7 +481,7 @@ static void ui_portrait_scroll_refresh_cb(lv_event_t *event)
     }
 
     enabled_env = getenv("K230_PORTRAIT_SCROLL_REPAIR");
-    if(enabled_env && strcmp(enabled_env, "0") == 0) {
+    if(!enabled_env || strcmp(enabled_env, "1") != 0) {
         return;
     }
 
