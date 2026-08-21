@@ -499,6 +499,8 @@ static lv_obj_t *keyboard_settings_esc_back_switch;
 static lv_obj_t *keyboard_settings_interval_btn[3];
 static lv_obj_t *keyboard_settings_hotkey_btn[KEYBOARD_HOTKEY_FKEY_COUNT];
 static lv_obj_t *keyboard_hotkey_action_btn[KEYBOARD_HOTKEY_COUNT];
+static int keyboard_settings_hotkey_text_w[KEYBOARD_HOTKEY_FKEY_COUNT];
+static int keyboard_hotkey_action_text_w[KEYBOARD_HOTKEY_COUNT];
 static int keyboard_hotkey_edit_index;
 
 static void style_choice_button(lv_obj_t *btn, int selected, uint32_t accent);
@@ -4965,17 +4967,28 @@ static void keyboard_settings_update_hotkey_button(int f_index)
              ui_tr(keyboard_hotkey_action_label(action)));
     lbl = lv_obj_get_child(btn, 0);
     if(lbl && lv_obj_is_valid(lbl)) {
+        int label_w = keyboard_settings_hotkey_text_w[f_index];
+
+        if(label_w <= 0) {
+            lv_obj_update_layout(btn);
+            label_w = lv_obj_get_width(btn) - 18;
+        }
+        if(label_w < 48) {
+            label_w = 120;
+        }
         lv_label_set_text(lbl, text);
         lv_obj_set_style_text_font(lbl,
                                    ui_font_for_text(text,
                                                     &lv_font_montserrat_18),
                                    0);
-        lv_obj_set_width(lbl, lv_obj_get_width(btn) - 18);
+        lv_obj_set_width(lbl, label_w);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_center(lbl);
+        lv_obj_invalidate(lbl);
     }
     style_choice_button(btn, action != KEYBOARD_HOTKEY_NONE, 0x3DA5FF);
+    lv_obj_invalidate(btn);
 }
 
 static void keyboard_settings_update_ui(void)
@@ -5110,18 +5123,29 @@ static void keyboard_hotkey_action_update_button(int action_index)
 
     lbl = lv_obj_get_child(btn, 0);
     if(lbl && lv_obj_is_valid(lbl)) {
+        int label_w = keyboard_hotkey_action_text_w[action_index];
+
+        if(label_w <= 0) {
+            lv_obj_update_layout(btn);
+            label_w = lv_obj_get_width(btn) - 18;
+        }
+        if(label_w < 48) {
+            label_w = 120;
+        }
         lv_label_set_text(lbl, text);
         lv_obj_set_style_text_font(lbl,
                                    ui_font_for_text(text,
                                                     &lv_font_montserrat_18),
                                    0);
-        lv_obj_set_width(lbl, lv_obj_get_width(btn) - 18);
+        lv_obj_set_width(lbl, label_w);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_center(lbl);
+        lv_obj_invalidate(lbl);
     }
 
     style_choice_button(btn, action == selected_action, 0x3DA5FF);
+    lv_obj_invalidate(btn);
 }
 
 static void keyboard_hotkey_action_update_ui(void)
@@ -5166,6 +5190,8 @@ void ui_keyboard_settings_create(lv_obj_t *scr)
     }
     memset(keyboard_settings_hotkey_btn, 0, sizeof(keyboard_settings_hotkey_btn));
     memset(keyboard_hotkey_action_btn, 0, sizeof(keyboard_hotkey_action_btn));
+    memset(keyboard_settings_hotkey_text_w, 0, sizeof(keyboard_settings_hotkey_text_w));
+    memset(keyboard_hotkey_action_text_w, 0, sizeof(keyboard_hotkey_action_text_w));
 
     ui_create_header(scr, "Keyboard settings");
     body = ui_page_body(scr, 154);
@@ -5280,6 +5306,8 @@ void ui_keyboard_hotkeys_create(lv_obj_t *scr)
     panel_h = 102 + rows * 72;
     memset(keyboard_settings_hotkey_btn, 0, sizeof(keyboard_settings_hotkey_btn));
     memset(keyboard_hotkey_action_btn, 0, sizeof(keyboard_hotkey_action_btn));
+    memset(keyboard_settings_hotkey_text_w, 0, sizeof(keyboard_settings_hotkey_text_w));
+    memset(keyboard_hotkey_action_text_w, 0, sizeof(keyboard_hotkey_action_text_w));
 
     ui_create_header(scr, "F-key hotkeys");
     body = ui_page_body(scr, 154);
@@ -5308,11 +5336,13 @@ void ui_keyboard_hotkeys_create(lv_obj_t *scr)
         keyboard_settings_hotkey_btn[i] =
             ui_command_button(panel, x, y, cell_w,
                               keyboard_hotkey_fkeys[i].name, 0x3DA5FF);
+        keyboard_settings_hotkey_text_w[i] = cell_w - 18;
         lv_obj_add_event_cb(keyboard_settings_hotkey_btn[i],
                             keyboard_hotkey_list_event_cb,
                             LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
 
+    lv_obj_update_layout(panel);
     keyboard_hotkeys_update_ui();
 }
 
@@ -5346,6 +5376,7 @@ void ui_keyboard_hotkey_action_create(lv_obj_t *scr)
     rows = (action_count + cols - 1) / cols;
     panel_h = 132 + rows * 68;
     memset(keyboard_hotkey_action_btn, 0, sizeof(keyboard_hotkey_action_btn));
+    memset(keyboard_hotkey_action_text_w, 0, sizeof(keyboard_hotkey_action_text_w));
 
     snprintf(title, sizeof(title), "%s  %s",
              keyboard_hotkey_fkeys[keyboard_hotkey_edit_index].name,
@@ -5378,11 +5409,13 @@ void ui_keyboard_hotkey_action_create(lv_obj_t *scr)
         keyboard_hotkey_action_btn[i] =
             ui_command_button(panel, x, y, cell_w,
                               keyboard_hotkey_actions[i].label, 0x3DA5FF);
+        keyboard_hotkey_action_text_w[i] = cell_w - 18;
         lv_obj_add_event_cb(keyboard_hotkey_action_btn[i],
                             keyboard_hotkey_action_event_cb,
                             LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
 
+    lv_obj_update_layout(panel);
     keyboard_hotkey_action_update_ui();
 }
 
