@@ -311,6 +311,7 @@ static void cellular_process_response_lines(const char *resp);
 static int cellular_try_led_mode(int fd, int mode, const char *reason);
 static void cellular_apply_led_auto_if_pending(int fd);
 static void cellular_mqtt_refresh(void);
+static void cellular_sat_status_rebuild_locked(void);
 
 static void cellular_iomux_write(volatile uint32_t *base, unsigned int offset,
                                  uint32_t value, const char *name)
@@ -882,6 +883,25 @@ static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
 
     cellular_nmea_count = status->nmea_rx_count;
     cellular_urc_count = status->nmea_valid_count;
+    memset(cellular_sats, 0, sizeof(cellular_sats));
+    for(size_t i = 0, out = 0;
+        i < K230_NRF9151_MAX_GNSS_SATS && out < NRF9151_MAX_SATS; i++) {
+        const k230_nrf9151_satellite_t *src = &status->satellite_detail[i];
+        cellular_satellite_t *dst;
+
+        if(!src->valid || src->prn <= 0) {
+            continue;
+        }
+        dst = &cellular_sats[out++];
+        snprintf(dst->talker, sizeof(dst->talker), "%s",
+                 src->talker[0] ? src->talker : "--");
+        dst->prn = src->prn;
+        dst->elevation = src->elevation;
+        dst->azimuth = src->azimuth;
+        dst->cn0 = src->cn0;
+        dst->last_seen_us = now_us;
+        dst->valid = 1;
+    }
     if(!location_enabled) {
         snprintf(cellular_gnss_status, sizeof(cellular_gnss_status), "%s",
                  "GPS off");
@@ -889,6 +909,7 @@ static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
                  "Enable nRF9151 location in Startup apps");
         snprintf(cellular_sat_status, sizeof(cellular_sat_status), "%s",
                  "NMEA rx=0 valid=0 nofix=0 sats=0 last=0ms");
+        memset(cellular_sats, 0, sizeof(cellular_sats));
         cellular_gnss_fix_valid = 0;
         pthread_mutex_unlock(&cellular_lock);
         return;
@@ -918,11 +939,18 @@ static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
         }
         cellular_gnss_fix_valid = 0;
     }
-    snprintf(cellular_sat_status, sizeof(cellular_sat_status),
-             "NMEA rx=%u valid=%u nofix=%u sats=%u last=%lums",
-             status->nmea_rx_count, status->nmea_valid_count,
-             status->nmea_nofix_count, status->satellites,
-             status->last_nmea_ms);
+    if(status->satellite_detail_count > 0U) {
+        cellular_sat_status_rebuild_locked();
+        snprintf(cellular_gnss_status, sizeof(cellular_gnss_status), "%s",
+                 status->gnss_status[0] ? status->gnss_status :
+                 (status->gnss_running ? "GNSS running" : "Off"));
+    } else {
+        snprintf(cellular_sat_status, sizeof(cellular_sat_status),
+                 "NMEA rx=%u valid=%u nofix=%u sats=%u last=%lums",
+                 status->nmea_rx_count, status->nmea_valid_count,
+                 status->nmea_nofix_count, status->satellites,
+                 status->last_nmea_ms);
+    }
     pthread_mutex_unlock(&cellular_lock);
 }
 
@@ -1991,8 +2019,6 @@ static void cellular_sat_status_rebuild_locked(void)
     } else {
         snprintf(cellular_sat_status, sizeof(cellular_sat_status),
                  "%s", text);
-        snprintf(cellular_gnss_status, sizeof(cellular_gnss_status),
-                 "%s", "OK");
     }
 }
 
@@ -4841,6 +4867,8 @@ void ui_cellular_create(lv_obj_t *scr)
     int right_x = wide_layout ? margin + left_w + gap : margin;
     int sub_y = 82;
     int sub_h = body_h - sub_y - 18;
+    int gnss_sub_y = 18;
+    int gnss_sub_h = body_h - gnss_sub_y - 18;
     int btn_w;
     int chart_w;
 
@@ -4854,6 +4882,9 @@ void ui_cellular_create(lv_obj_t *scr)
     }
     if(sub_h < 320) {
         sub_h = 320;
+    }
+    if(gnss_sub_h < 360) {
+        gnss_sub_h = 360;
     }
 
     ui_create_header(scr, "Cellular");
@@ -4951,32 +4982,36 @@ void ui_cellular_create(lv_obj_t *scr)
 
     cellular_gnss_page = cellular_page_create(body, !wide_layout);
     lv_obj_add_flag(cellular_gnss_page, LV_OBJ_FLAG_HIDDEN);
-    cellular_subpage_title(cellular_gnss_page, "GNSS", 0xF97316);
 
-    panel = ui_panel(cellular_gnss_page, margin, sub_y, left_w, sub_h);
+    panel = ui_panel(cellular_gnss_page, margin, gnss_sub_y, left_w,
+                     gnss_sub_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x151B22), 0);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(panel, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
+    label = ui_label(panel, "GNSS", &lv_font_montserrat_26, 0xF97316);
+    lv_obj_set_width(label, left_w - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
     cellular_gps_label = ui_label(panel, "Waiting for NMEA",
                                   &lv_font_montserrat_16, 0xDCE5EE);
     lv_obj_set_width(cellular_gps_label, left_w - 32);
     lv_label_set_long_mode(cellular_gps_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(cellular_gps_label, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_align(cellular_gps_label, LV_ALIGN_TOP_LEFT, 0, 50);
     cellular_ttff_label = ui_label(panel, "TTFF: not started",
                                    &lv_font_montserrat_16, 0xF5A524);
     lv_obj_set_width(cellular_ttff_label, left_w - 32);
     lv_label_set_long_mode(cellular_ttff_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(cellular_ttff_label, LV_ALIGN_TOP_LEFT, 0, 104);
+    lv_obj_align(cellular_ttff_label, LV_ALIGN_TOP_LEFT, 0, 154);
     cellular_sat_label = ui_label(panel, "No satellite data",
                                   &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_width(cellular_sat_label, left_w - 32);
     lv_label_set_long_mode(cellular_sat_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(cellular_sat_label, LV_ALIGN_TOP_LEFT, 0, 150);
+    lv_obj_align(cellular_sat_label, LV_ALIGN_TOP_LEFT, 0, 202);
 
     panel = ui_panel(cellular_gnss_page, wide_layout ? right_x : margin,
-                     wide_layout ? sub_y : sub_y + sub_h + gap,
-                     wide_layout ? right_w : panel_w, sub_h);
+                     wide_layout ? gnss_sub_y : gnss_sub_y + gnss_sub_h + gap,
+                     wide_layout ? right_w : panel_w, gnss_sub_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(panel, LV_DIR_VER);

@@ -15,11 +15,21 @@ extern "C" {
 #define K230_NRF9151_STATUS_CACHE "/tmp/k230_nrf9151_status.cache"
 #define K230_NRF9151_STATUS_CACHE_TMP "/tmp/k230_nrf9151_status.cache.tmp"
 #define K230_NRF9151_LOCATION_OWNER "system-location"
+#define K230_NRF9151_MAX_GNSS_SATS 48
 
 typedef enum {
     K230_NRF9151_HTTP_GET = 0,
     K230_NRF9151_HTTP_POST = 1,
 } k230_nrf9151_http_method_t;
+
+typedef struct {
+    int valid;
+    char talker[3];
+    int prn;
+    int elevation;
+    int azimuth;
+    int cn0;
+} k230_nrf9151_satellite_t;
 
 typedef struct {
     int present;
@@ -35,6 +45,8 @@ typedef struct {
     unsigned int nmea_valid_count;
     unsigned int nmea_nofix_count;
     unsigned int satellites;
+    unsigned int satellite_detail_count;
+    k230_nrf9151_satellite_t satellite_detail[K230_NRF9151_MAX_GNSS_SATS];
     unsigned long ttff_ms;
     unsigned long last_nmea_ms;
     double latitude;

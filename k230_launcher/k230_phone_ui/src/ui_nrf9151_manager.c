@@ -330,6 +330,96 @@ static void nrf9151_manager_log_append(char *log, size_t log_len,
     }
 }
 
+static int nrf9151_manager_parse_int_field(const char *field)
+{
+    char *end = NULL;
+    long value;
+
+    if(!field || !field[0]) {
+        return -1;
+    }
+    errno = 0;
+    value = strtol(field, &end, 10);
+    if(end == field || errno == ERANGE) {
+        return -1;
+    }
+    return (int)value;
+}
+
+static void nrf9151_manager_clear_satellite_details(
+    k230_nrf9151_status_t *status)
+{
+    if(!status) {
+        return;
+    }
+    memset(status->satellite_detail, 0, sizeof(status->satellite_detail));
+    status->satellite_detail_count = 0;
+}
+
+static void nrf9151_manager_recount_satellite_details(
+    k230_nrf9151_status_t *status)
+{
+    unsigned int count = 0;
+
+    if(!status) {
+        return;
+    }
+    for(size_t i = 0; i < K230_NRF9151_MAX_GNSS_SATS; i++) {
+        if(status->satellite_detail[i].valid) {
+            count++;
+        }
+    }
+    status->satellite_detail_count = count;
+}
+
+static void nrf9151_manager_clear_satellite_talker(
+    k230_nrf9151_status_t *status, const char *talker)
+{
+    if(!status || !talker || !talker[0]) {
+        return;
+    }
+    for(size_t i = 0; i < K230_NRF9151_MAX_GNSS_SATS; i++) {
+        if(status->satellite_detail[i].valid &&
+           strncmp(status->satellite_detail[i].talker, talker, 2) == 0) {
+            memset(&status->satellite_detail[i], 0,
+                   sizeof(status->satellite_detail[i]));
+        }
+    }
+    nrf9151_manager_recount_satellite_details(status);
+}
+
+static void nrf9151_manager_upsert_satellite_detail(
+    k230_nrf9151_status_t *status, const char *talker, int prn, int elevation,
+    int azimuth, int cn0)
+{
+    k230_nrf9151_satellite_t *slot = NULL;
+
+    if(!status || !talker || prn <= 0) {
+        return;
+    }
+    for(size_t i = 0; i < K230_NRF9151_MAX_GNSS_SATS; i++) {
+        if(status->satellite_detail[i].valid) {
+            if(status->satellite_detail[i].prn == prn &&
+               strncmp(status->satellite_detail[i].talker, talker, 2) == 0) {
+                slot = &status->satellite_detail[i];
+                break;
+            }
+        } else if(!slot) {
+            slot = &status->satellite_detail[i];
+        }
+    }
+    if(!slot) {
+        return;
+    }
+    snprintf(slot->talker, sizeof(slot->talker), "%.2s", talker);
+    slot->prn = prn;
+    slot->elevation = elevation >= 0 ? elevation : 0;
+    slot->azimuth = azimuth >= 0 ? azimuth : 0;
+    slot->cn0 = cn0 >= 0 ? cn0 : 0;
+    slot->valid = 1;
+    nrf9151_manager_recount_satellite_details(status);
+}
+
 void k230_nrf9151_status_init(k230_nrf9151_status_t *status)
 {
     if(!status) {
@@ -425,6 +515,17 @@ int k230_nrf9151_write_status(const k230_nrf9151_status_t *status)
     fprintf(fp, "nmea_valid_count=%u\n", copy.nmea_valid_count);
     fprintf(fp, "nmea_nofix_count=%u\n", copy.nmea_nofix_count);
     fprintf(fp, "satellites=%u\n", copy.satellites);
+    fprintf(fp, "sat_detail_count=%u\n", copy.satellite_detail_count);
+    for(size_t i = 0, out = 0; i < K230_NRF9151_MAX_GNSS_SATS; i++) {
+        const k230_nrf9151_satellite_t *sat = &copy.satellite_detail[i];
+
+        if(!sat->valid) {
+            continue;
+        }
+        fprintf(fp, "sat_detail%zu=%s,%d,%d,%d,%d\n", out++,
+                sat->talker[0] ? sat->talker : "--", sat->prn,
+                sat->elevation, sat->azimuth, sat->cn0);
+    }
     fprintf(fp, "ttff_ms=%lu\n", copy.ttff_ms);
     fprintf(fp, "last_nmea_ms=%lu\n", copy.last_nmea_ms);
     fprintf(fp, "lat=%.7f\n", copy.latitude);
@@ -535,6 +636,23 @@ int k230_nrf9151_read_status(k230_nrf9151_status_t *status,
             status->nmea_nofix_count = (unsigned int)strtoul(eq, NULL, 10);
         } else if(strcmp(line, "satellites") == 0) {
             status->satellites = (unsigned int)strtoul(eq, NULL, 10);
+        } else if(strcmp(line, "sat_detail_count") == 0) {
+            status->satellite_detail_count =
+                (unsigned int)strtoul(eq, NULL, 10);
+        } else if(strncmp(line, "sat_detail", 10) == 0 &&
+                  isdigit((unsigned char)line[10])) {
+            char talker[8] = "";
+            int prn = 0;
+            int elevation = 0;
+            int azimuth = 0;
+            int cn0 = 0;
+
+            if(sscanf(eq, "%7[^,],%d,%d,%d,%d", talker, &prn, &elevation,
+                      &azimuth, &cn0) == 5) {
+                nrf9151_manager_upsert_satellite_detail(status, talker, prn,
+                                                        elevation, azimuth,
+                                                        cn0);
+            }
         } else if(strcmp(line, "ttff_ms") == 0) {
             status->ttff_ms = strtoul(eq, NULL, 10);
         } else if(strcmp(line, "last_nmea_ms") == 0) {
@@ -2211,6 +2329,7 @@ static void nrf9151_manager_process_nmea_sentence(
     k230_nrf9151_status_t *status, const char *line)
 {
     char body[256];
+    char talker[3] = "";
     char *fields[32];
     const char *star;
     const char *type;
@@ -2232,13 +2351,14 @@ static void nrf9151_manager_process_nmea_sentence(
     if(count <= 0 || strlen(fields[0]) < 5U) {
         return;
     }
+    snprintf(talker, sizeof(talker), "%.2s", fields[0]);
     type = fields[0] + strlen(fields[0]) - 3U;
     if(strcmp(type, "GGA") == 0) {
         double lat = 0.0;
         double lon = 0.0;
         double alt = 0.0;
-        int fix = count > 6 ? atoi(fields[6]) : 0;
-        int sats = count > 7 ? atoi(fields[7]) : 0;
+        int fix = count > 6 ? nrf9151_manager_parse_int_field(fields[6]) : 0;
+        int sats = count > 7 ? nrf9151_manager_parse_int_field(fields[7]) : 0;
 
         if(sats > 0) {
             status->satellites = (unsigned int)sats;
@@ -2251,6 +2371,7 @@ static void nrf9151_manager_process_nmea_sentence(
                                            fields[9] && fields[9][0], alt,
                                            status->satellites);
         } else {
+            status->gnss_has_fix = 0;
             status->nmea_nofix_count++;
         }
     } else if(strcmp(type, "RMC") == 0) {
@@ -2262,12 +2383,38 @@ static void nrf9151_manager_process_nmea_sentence(
            nrf9151_manager_coord_to_double(fields[5], fields[6], &lon)) {
             nrf9151_manager_apply_gnss_fix(status, lat, lon, 0, 0.0,
                                            status->satellites);
+        } else if(count > 2 && fields[2][0] == 'V') {
+            status->gnss_has_fix = 0;
         }
     } else if(strcmp(type, "GSV") == 0) {
-        int sats = count > 3 ? atoi(fields[3]) : 0;
+        int total_msgs = count > 1 ? nrf9151_manager_parse_int_field(fields[1]) : 0;
+        int msg_num = count > 2 ? nrf9151_manager_parse_int_field(fields[2]) : 0;
+        int sats = count > 3 ? nrf9151_manager_parse_int_field(fields[3]) : 0;
+        unsigned int before_count = status->satellite_detail_count;
 
         if(sats >= 0) {
             status->satellites = (unsigned int)sats;
+        }
+        if(msg_num == 1) {
+            nrf9151_manager_clear_satellite_talker(status, talker);
+        }
+        for(int i = 4; i + 3 < count; i += 4) {
+            int prn = nrf9151_manager_parse_int_field(fields[i]);
+            int elevation = nrf9151_manager_parse_int_field(fields[i + 1]);
+            int azimuth = nrf9151_manager_parse_int_field(fields[i + 2]);
+            int cn0 = nrf9151_manager_parse_int_field(fields[i + 3]);
+
+            if(prn > 0) {
+                nrf9151_manager_upsert_satellite_detail(status, talker, prn,
+                                                        elevation, azimuth,
+                                                        cn0);
+            }
+        }
+        if(status->satellite_detail_count != before_count ||
+           status->nmea_rx_count <= 10U || status->nmea_rx_count % 100U == 0U) {
+            nrf9151_manager_debug_log(
+                "GNSS GSV %s msg=%d/%d total=%d detail=%u",
+                talker, msg_num, total_msgs, sats, status->satellite_detail_count);
         }
     }
 }
@@ -2498,6 +2645,7 @@ static int nrf9151_manager_start_gnss_locked(int fd)
     status.nmea_valid_count = 0;
     status.nmea_nofix_count = 0;
     status.satellites = 0;
+    nrf9151_manager_clear_satellite_details(&status);
     status.ttff_ms = 0;
     status.last_nmea_ms = 0;
     snprintf(status.modem_state, sizeof(status.modem_state), "%s", "present");
