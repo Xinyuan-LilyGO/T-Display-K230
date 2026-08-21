@@ -22,6 +22,13 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef LV_SYMBOL_VOLUME_MAX
+#define LV_SYMBOL_VOLUME_MAX "VOL"
+#endif
+#ifndef LV_SYMBOL_EYE_OPEN
+#define LV_SYMBOL_EYE_OPEN "SUN"
+#endif
+
 #define PREF_AUDIO_OUTPUT "audio.output"
 #define PREF_FAN_MODE "fan.mode"
 #define PREF_FAN_DUTY "fan.duty"
@@ -36,6 +43,7 @@
 #define PREF_EXTENSION_KEYBOARD_AUTO_ROTATE "keyboard.auto_rotate_display"
 #define PREF_EXTENSION_KEYBOARD_ESC_BACK "keyboard.esc_back_enabled"
 #define PREF_EXTENSION_KEYBOARD_HOTKEY_PREFIX "keyboard.hotkey.f"
+#define PREF_DISPLAY_BRIGHTNESS "display.brightness"
 
 #define AUDIO_OUTPUT_HEADPHONES "headphones"
 #define AUDIO_OUTPUT_EXTERNAL "external"
@@ -58,6 +66,9 @@
 #define BOOT0_FADE_STEPS 12
 #define BOOT0_FADE_STEP_US 25000
 #define HARDWARE_BACKLIGHT_PATH_MAX 160
+#define HARDWARE_BACKLIGHT_MIN_VALUE 20
+#define HOTKEY_OSD_HIDE_MS 950
+#define HOTKEY_OSD_FADE_MS 160
 #define BUTTON_BOOT0_IOMUX_IO0_OFFSET 0U
 #define BUTTON_BOOT0_IOMUX_GPIO_INPUT_VALUE 0x00000344U
 #define BUTTON_INT0_PMU_IOMUX_BASE 0x91000080UL
@@ -325,6 +336,8 @@ typedef enum {
     KEYBOARD_HOTKEY_VOLUME_DOWN,
     KEYBOARD_HOTKEY_VOLUME_UP,
     KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT,
+    KEYBOARD_HOTKEY_BRIGHTNESS_DOWN,
+    KEYBOARD_HOTKEY_BRIGHTNESS_UP,
     KEYBOARD_HOTKEY_COUNT
 } keyboard_hotkey_action_t;
 
@@ -502,6 +515,12 @@ static lv_obj_t *keyboard_hotkey_action_btn[KEYBOARD_HOTKEY_COUNT];
 static int keyboard_settings_hotkey_text_w[KEYBOARD_HOTKEY_FKEY_COUNT];
 static int keyboard_hotkey_action_text_w[KEYBOARD_HOTKEY_COUNT];
 static int keyboard_hotkey_edit_index;
+static lv_obj_t *keyboard_hotkey_osd_obj;
+static lv_obj_t *keyboard_hotkey_osd_icon_label;
+static lv_obj_t *keyboard_hotkey_osd_title_label;
+static lv_obj_t *keyboard_hotkey_osd_value_label;
+static lv_obj_t *keyboard_hotkey_osd_bar;
+static lv_timer_t *keyboard_hotkey_osd_timer;
 
 static void style_choice_button(lv_obj_t *btn, int selected, uint32_t accent);
 static int keyboard_backlight_pref_frequency_hz(void);
@@ -524,8 +543,8 @@ static const keyboard_hotkey_fkey_t keyboard_hotkey_fkeys[] = {
     { 7, 65, "F7", KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT },
     { 8, 64, "F8", KEYBOARD_HOTKEY_TERMINAL },
     { 9, 63, "F9", KEYBOARD_HOTKEY_MESHTASTIC },
-    { 10, 62, "F10", KEYBOARD_HOTKEY_CAMERA },
-    { 11, 61, "F11", KEYBOARD_HOTKEY_NONE },
+    { 10, 62, "F10", KEYBOARD_HOTKEY_BRIGHTNESS_DOWN },
+    { 11, 61, "F11", KEYBOARD_HOTKEY_BRIGHTNESS_UP },
 };
 
 static const keyboard_hotkey_action_def_t keyboard_hotkey_actions[] = {
@@ -544,6 +563,8 @@ static const keyboard_hotkey_action_def_t keyboard_hotkey_actions[] = {
     { KEYBOARD_HOTKEY_VOLUME_DOWN, "Volume down" },
     { KEYBOARD_HOTKEY_VOLUME_UP, "Volume up" },
     { KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT, "Keyboard backlight" },
+    { KEYBOARD_HOTKEY_BRIGHTNESS_DOWN, "Brightness down" },
+    { KEYBOARD_HOTKEY_BRIGHTNESS_UP, "Brightness up" },
 };
 
 static void extension_keyboard_refresh_async(void *user_data)
@@ -1114,6 +1135,37 @@ static int hardware_write_backlight_raw(int value)
     fprintf(fp, "%d\n", value);
     fclose(fp);
     return 0;
+}
+
+static int hardware_read_backlight_max_raw(void)
+{
+    char brightness_path[HARDWARE_BACKLIGHT_PATH_MAX];
+    char max_path[HARDWARE_BACKLIGHT_PATH_MAX];
+    char text[32];
+    char *suffix;
+    int value;
+
+    if(hardware_find_backlight(brightness_path, sizeof(brightness_path)) != 0) {
+        return 255;
+    }
+
+    snprintf(max_path, sizeof(max_path), "%s", brightness_path);
+    suffix = strrchr(max_path, '/');
+    if(!suffix) {
+        return 255;
+    }
+    snprintf(suffix + 1, sizeof(max_path) - (size_t)(suffix + 1 - max_path),
+             "max_brightness");
+
+    if(ui_read_file_first_line(max_path, text, sizeof(text)) != 0) {
+        return 255;
+    }
+
+    value = atoi(text);
+    if(value <= 0) {
+        value = 255;
+    }
+    return value;
 }
 
 static int keyboard_backlight_current_or_pref(void)
@@ -3273,11 +3325,180 @@ static int keyboard_hotkey_next_rotation(int degrees)
     }
 }
 
+static void keyboard_hotkey_osd_opa_anim_cb(void *obj, int32_t value)
+{
+    if(obj && lv_obj_is_valid((lv_obj_t *)obj)) {
+        lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
+    }
+}
+
+static void keyboard_hotkey_osd_fade_done_cb(lv_anim_t *anim)
+{
+    lv_obj_t *obj = anim ? (lv_obj_t *)anim->var : NULL;
+
+    if(obj && lv_obj_is_valid(obj)) {
+        lv_obj_delete_async(obj);
+    }
+    if(obj == keyboard_hotkey_osd_obj) {
+        keyboard_hotkey_osd_obj = NULL;
+        keyboard_hotkey_osd_icon_label = NULL;
+        keyboard_hotkey_osd_title_label = NULL;
+        keyboard_hotkey_osd_value_label = NULL;
+        keyboard_hotkey_osd_bar = NULL;
+    }
+}
+
+static void keyboard_hotkey_osd_start_fade(lv_obj_t *obj)
+{
+    lv_anim_t anim;
+
+    if(!obj || !lv_obj_is_valid(obj)) {
+        return;
+    }
+
+    lv_anim_delete(obj, keyboard_hotkey_osd_opa_anim_cb);
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, obj);
+    lv_anim_set_exec_cb(&anim, keyboard_hotkey_osd_opa_anim_cb);
+    lv_anim_set_values(&anim, LV_OPA_COVER, LV_OPA_TRANSP);
+    lv_anim_set_duration(&anim, HOTKEY_OSD_FADE_MS);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, keyboard_hotkey_osd_fade_done_cb);
+    lv_anim_start(&anim);
+}
+
+static void keyboard_hotkey_osd_hide_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+
+    keyboard_hotkey_osd_timer = NULL;
+    keyboard_hotkey_osd_start_fade(keyboard_hotkey_osd_obj);
+}
+
+static void keyboard_hotkey_osd_reposition(void)
+{
+    int w = ui_screen_width();
+    int h = ui_screen_height();
+    int box_w = ui_is_landscape() ? 430 : 436;
+    int box_h = 142;
+    int x;
+    int y;
+
+    if(!keyboard_hotkey_osd_obj || !lv_obj_is_valid(keyboard_hotkey_osd_obj)) {
+        return;
+    }
+
+    if(box_w > w - 64) {
+        box_w = w - 64;
+    }
+    if(box_w < 260) {
+        box_w = w > 300 ? 260 : w - 40;
+    }
+    x = (w - box_w) / 2;
+    y = (h - box_h) / 2;
+    if(y < 72) {
+        y = 72;
+    }
+
+    lv_obj_set_pos(keyboard_hotkey_osd_obj, x, y);
+    lv_obj_set_size(keyboard_hotkey_osd_obj, box_w, box_h);
+    if(keyboard_hotkey_osd_icon_label) {
+        lv_obj_align(keyboard_hotkey_osd_icon_label, LV_ALIGN_TOP_LEFT, 0, 0);
+    }
+    if(keyboard_hotkey_osd_title_label) {
+        lv_obj_set_width(keyboard_hotkey_osd_title_label, box_w - 126);
+        lv_obj_align(keyboard_hotkey_osd_title_label, LV_ALIGN_TOP_LEFT, 54, 2);
+    }
+    if(keyboard_hotkey_osd_value_label) {
+        lv_obj_set_width(keyboard_hotkey_osd_value_label, 72);
+        lv_obj_align(keyboard_hotkey_osd_value_label, LV_ALIGN_TOP_RIGHT, 0, 4);
+    }
+    if(keyboard_hotkey_osd_bar) {
+        lv_obj_set_width(keyboard_hotkey_osd_bar, box_w - 32);
+        lv_obj_align(keyboard_hotkey_osd_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+    }
+}
+
+static void keyboard_hotkey_show_osd(const char *title, const char *icon,
+                                     int percent, uint32_t accent)
+{
+    char value_text[24];
+
+    percent = clamp_int(percent, 0, 100);
+
+    if(keyboard_hotkey_osd_timer) {
+        lv_timer_delete(keyboard_hotkey_osd_timer);
+        keyboard_hotkey_osd_timer = NULL;
+    }
+
+    if(!keyboard_hotkey_osd_obj || !lv_obj_is_valid(keyboard_hotkey_osd_obj)) {
+        keyboard_hotkey_osd_obj = lv_obj_create(lv_layer_top());
+        lv_obj_set_style_bg_color(keyboard_hotkey_osd_obj,
+                                  lv_color_hex(0x0F1720), 0);
+        lv_obj_set_style_bg_opa(keyboard_hotkey_osd_obj, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(keyboard_hotkey_osd_obj, 10, 0);
+        lv_obj_set_style_border_width(keyboard_hotkey_osd_obj, 1, 0);
+        lv_obj_set_style_shadow_width(keyboard_hotkey_osd_obj, 20, 0);
+        lv_obj_set_style_shadow_color(keyboard_hotkey_osd_obj,
+                                      lv_color_hex(0x000000), 0);
+        lv_obj_set_style_shadow_opa(keyboard_hotkey_osd_obj, LV_OPA_50, 0);
+        lv_obj_set_style_pad_all(keyboard_hotkey_osd_obj, 16, 0);
+        lv_obj_clear_flag(keyboard_hotkey_osd_obj, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(keyboard_hotkey_osd_obj, LV_OBJ_FLAG_CLICKABLE);
+
+        keyboard_hotkey_osd_icon_label =
+            ui_label(keyboard_hotkey_osd_obj, icon, &lv_font_montserrat_28,
+                     accent);
+        keyboard_hotkey_osd_title_label =
+            ui_label(keyboard_hotkey_osd_obj, title, &lv_font_montserrat_22,
+                     0xF8FAFC);
+        keyboard_hotkey_osd_value_label =
+            ui_label(keyboard_hotkey_osd_obj, "--", &lv_font_montserrat_20,
+                     accent);
+        keyboard_hotkey_osd_bar = lv_bar_create(keyboard_hotkey_osd_obj);
+        lv_bar_set_range(keyboard_hotkey_osd_bar, 0, 100);
+        lv_obj_set_height(keyboard_hotkey_osd_bar, 16);
+        lv_obj_set_style_radius(keyboard_hotkey_osd_bar, 8, LV_PART_MAIN);
+        lv_obj_set_style_radius(keyboard_hotkey_osd_bar, 8, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(keyboard_hotkey_osd_bar,
+                                  lv_color_hex(0x27313D), LV_PART_MAIN);
+    }
+
+    lv_anim_delete(keyboard_hotkey_osd_obj, keyboard_hotkey_osd_opa_anim_cb);
+    lv_obj_set_style_opa(keyboard_hotkey_osd_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(keyboard_hotkey_osd_obj, lv_color_hex(accent),
+                                  0);
+    lv_obj_set_style_bg_color(keyboard_hotkey_osd_bar, lv_color_hex(accent),
+                              LV_PART_INDICATOR);
+    lv_obj_set_style_text_color(keyboard_hotkey_osd_icon_label,
+                                lv_color_hex(accent), 0);
+    lv_obj_set_style_text_color(keyboard_hotkey_osd_value_label,
+                                lv_color_hex(accent), 0);
+    lv_label_set_text(keyboard_hotkey_osd_icon_label, icon);
+    lv_label_set_text(keyboard_hotkey_osd_title_label, ui_tr(title));
+    snprintf(value_text, sizeof(value_text), "%d%%", percent);
+    lv_label_set_text(keyboard_hotkey_osd_value_label, value_text);
+    keyboard_hotkey_osd_reposition();
+    lv_obj_move_foreground(keyboard_hotkey_osd_obj);
+    lv_bar_set_value(keyboard_hotkey_osd_bar, percent, LV_ANIM_ON);
+    lv_obj_invalidate(keyboard_hotkey_osd_obj);
+
+    keyboard_hotkey_osd_timer =
+        lv_timer_create(keyboard_hotkey_osd_hide_timer_cb, HOTKEY_OSD_HIDE_MS,
+                        NULL);
+    if(keyboard_hotkey_osd_timer) {
+        lv_timer_set_repeat_count(keyboard_hotkey_osd_timer, 1);
+    }
+    app_request_fast_refresh();
+}
+
 static void keyboard_hotkey_adjust_volume(int delta)
 {
     int value = ui_audio_get_volume_value();
     int max_value = ui_audio_get_volume_max();
     int step;
+    int next_value;
+    int percent;
 
     if(max_value <= 0) {
         max_value = 100;
@@ -3286,8 +3507,49 @@ static void keyboard_hotkey_adjust_volume(int delta)
     if(step < 1) {
         step = 1;
     }
-    ui_audio_set_volume_value(clamp_int(value + delta * step, 0, max_value),
-                              1);
+    next_value = clamp_int(value + delta * step, 0, max_value);
+    ui_audio_set_volume_value(next_value, 1);
+    percent = max_value > 0 ? (next_value * 100 + max_value / 2) / max_value : 0;
+    keyboard_hotkey_show_osd("Volume", LV_SYMBOL_VOLUME_MAX, percent, 0x3DA5FF);
+}
+
+static void keyboard_hotkey_adjust_screen_brightness(int delta)
+{
+    int value = hardware_read_backlight_raw();
+    int max_value = hardware_read_backlight_max_raw();
+    int min_value = max_value < HARDWARE_BACKLIGHT_MIN_VALUE ?
+                    max_value : HARDWARE_BACKLIGHT_MIN_VALUE;
+    int step;
+    int next_value;
+    int percent;
+    char pref_value[24];
+
+    if(max_value <= 0) {
+        max_value = 255;
+    }
+    if(min_value < 1) {
+        min_value = 1;
+    }
+    if(value < 0) {
+        value = min_value;
+    }
+
+    step = max_value / 12;
+    if(step < 4) {
+        step = 4;
+    }
+    next_value = clamp_int(value + delta * step, min_value, max_value);
+    if(hardware_write_backlight_raw(next_value) != 0) {
+        keyboard_hotkey_show_osd("Brightness", LV_SYMBOL_EYE_OPEN, 0, 0xF5A524);
+        return;
+    }
+
+    snprintf(pref_value, sizeof(pref_value), "%d", next_value);
+    ui_prefs_set(PREF_DISPLAY_BRIGHTNESS, pref_value);
+    percent = max_value > 0 ?
+              (next_value * 100 + max_value / 2) / max_value : 0;
+    keyboard_hotkey_show_osd("Brightness", LV_SYMBOL_EYE_OPEN, percent,
+                             0xF5A524);
 }
 
 static int keyboard_hotkey_run_action(int f_index,
@@ -3346,6 +3608,12 @@ static int keyboard_hotkey_run_action(int f_index,
         return 1;
     case KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT:
         extension_keyboard_toggle_backlight();
+        return 1;
+    case KEYBOARD_HOTKEY_BRIGHTNESS_DOWN:
+        keyboard_hotkey_adjust_screen_brightness(-1);
+        return 1;
+    case KEYBOARD_HOTKEY_BRIGHTNESS_UP:
+        keyboard_hotkey_adjust_screen_brightness(1);
         return 1;
     case KEYBOARD_HOTKEY_NONE:
     case KEYBOARD_HOTKEY_COUNT:
@@ -7578,6 +7846,18 @@ void ui_hardware_cleanup(void)
         lv_timer_delete(hardware_page_timer);
         hardware_page_timer = NULL;
     }
+    if(keyboard_hotkey_osd_timer) {
+        lv_timer_delete(keyboard_hotkey_osd_timer);
+        keyboard_hotkey_osd_timer = NULL;
+    }
+    if(keyboard_hotkey_osd_obj && lv_obj_is_valid(keyboard_hotkey_osd_obj)) {
+        lv_obj_delete_async(keyboard_hotkey_osd_obj);
+    }
+    keyboard_hotkey_osd_obj = NULL;
+    keyboard_hotkey_osd_icon_label = NULL;
+    keyboard_hotkey_osd_title_label = NULL;
+    keyboard_hotkey_osd_value_label = NULL;
+    keyboard_hotkey_osd_bar = NULL;
     int0_pmu_unmap();
 
     audio_status_label = NULL;

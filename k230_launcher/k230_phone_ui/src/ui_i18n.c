@@ -386,6 +386,8 @@ static const ui_translation_t ui_translations[] = {
     { "Rotate 270", "旋转 270 度", "270 度回転" },
     { "Volume down", "音量减小", "音量を下げる" },
     { "Volume up", "音量增大", "音量を上げる" },
+    { "Brightness down", "亮度减小", "明るさを下げる" },
+    { "Brightness up", "亮度增大", "明るさを上げる" },
     { "3 sec", "3 秒", "3 秒" },
     { "10 sec", "10 秒", "10 秒" },
     { "30 sec", "30 秒", "30 秒" },
