@@ -31,6 +31,9 @@
 #ifndef LV_SYMBOL_AUDIO
 #define LV_SYMBOL_AUDIO "AUD"
 #endif
+#ifndef LV_SYMBOL_KEYBOARD
+#define LV_SYMBOL_KEYBOARD "KBD"
+#endif
 
 #define PREF_AUDIO_OUTPUT "audio.output"
 #define PREF_FAN_MODE "fan.mode"
@@ -343,6 +346,8 @@ typedef enum {
     KEYBOARD_HOTKEY_BRIGHTNESS_DOWN,
     KEYBOARD_HOTKEY_BRIGHTNESS_UP,
     KEYBOARD_HOTKEY_AUDIO_OUTPUT_TOGGLE,
+    KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT_DOWN,
+    KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT_UP,
     KEYBOARD_HOTKEY_COUNT
 } keyboard_hotkey_action_t;
 
@@ -585,6 +590,8 @@ static const keyboard_hotkey_action_def_t keyboard_hotkey_actions[] = {
     { KEYBOARD_HOTKEY_VOLUME_DOWN, "Volume down" },
     { KEYBOARD_HOTKEY_VOLUME_UP, "Volume up" },
     { KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT, "Keyboard backlight" },
+    { KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT_DOWN, "Keyboard backlight down" },
+    { KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT_UP, "Keyboard backlight up" },
     { KEYBOARD_HOTKEY_BRIGHTNESS_DOWN, "Brightness down" },
     { KEYBOARD_HOTKEY_BRIGHTNESS_UP, "Brightness up" },
     { KEYBOARD_HOTKEY_AUDIO_OUTPUT_TOGGLE, "Toggle audio output" },
@@ -3596,6 +3603,18 @@ static void keyboard_hotkey_adjust_screen_brightness(int delta)
                              0xF5A524);
 }
 
+static void keyboard_hotkey_adjust_keyboard_backlight(int delta)
+{
+    int value = keyboard_backlight_current_or_pref();
+    int step = 10;
+    int next_value = clamp_int(value + delta * step, 0, 100);
+
+    keyboard_backlight_apply(next_value, keyboard_backlight_pref_frequency_hz(),
+                             1);
+    keyboard_hotkey_show_osd("Keyboard backlight", LV_SYMBOL_KEYBOARD,
+                             next_value, 0xA855F7);
+}
+
 static void keyboard_hotkey_toggle_audio_output(void)
 {
     int next_external = ui_audio_output_is_external() ? 0 : 1;
@@ -3667,6 +3686,12 @@ static int keyboard_hotkey_run_action(int f_index,
         return 1;
     case KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT:
         extension_keyboard_toggle_backlight();
+        return 1;
+    case KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT_DOWN:
+        keyboard_hotkey_adjust_keyboard_backlight(-1);
+        return 1;
+    case KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT_UP:
+        keyboard_hotkey_adjust_keyboard_backlight(1);
         return 1;
     case KEYBOARD_HOTKEY_BRIGHTNESS_DOWN:
         keyboard_hotkey_adjust_screen_brightness(-1);

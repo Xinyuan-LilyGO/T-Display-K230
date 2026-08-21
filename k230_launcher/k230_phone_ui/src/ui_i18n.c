@@ -356,6 +356,8 @@ static const ui_translation_t ui_translations[] = {
     { "Drop", "丢包", "欠落" },
     { "Keyboard test", "键盘测试", "キーボードテスト" },
     { "Keyboard backlight", "键盘背光", "キーボードバックライト" },
+    { "Keyboard backlight down", "键盘背光减小", "キーボードバックライトを下げる" },
+    { "Keyboard backlight up", "键盘背光增大", "キーボードバックライトを上げる" },
     { "Keyboard PWM frequency", "键盘 PWM 频率", "キーボードPWM周波数" },
     { "Extension keyboard", "扩展键盘", "拡張キーボード" },
     { "Use TCA8418 hardware keyboard", "使用 TCA8418 硬件键盘", "TCA8418 ハードウェアキーボードを使用" },
