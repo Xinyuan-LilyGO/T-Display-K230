@@ -8329,6 +8329,85 @@ static void camera_apply_canvas(lv_obj_t *canvas, lv_obj_t *hint,
     }
 }
 
+static int camera_write_thumb_file(const char *path)
+{
+    FILE *fp;
+    size_t written;
+
+    if(!path || !path[0]) {
+        return -1;
+    }
+
+    fp = fopen(path, "wb");
+    if(!fp) {
+        return -1;
+    }
+
+    written = fwrite(camera_stored_thumb_buf, 1, CAMERA_STORED_THUMB_BYTES, fp);
+    if(fclose(fp) != 0 || written != CAMERA_STORED_THUMB_BYTES) {
+        unlink(path);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int camera_make_screenshot_thumb_path(const char *png_path,
+                                             char *thumb_path,
+                                             size_t thumb_len)
+{
+    size_t path_len;
+
+    if(!png_path || !thumb_path || thumb_len == 0) {
+        return -1;
+    }
+
+    path_len = strlen(png_path);
+    if(path_len < 5 || strcmp(png_path + path_len - 4, ".png") != 0) {
+        return -1;
+    }
+
+    if(path_len - 4 + strlen(".thumb.rgb565") + 1 > thumb_len) {
+        return -1;
+    }
+
+    snprintf(thumb_path, thumb_len, "%.*s.thumb.rgb565",
+             (int)(path_len - 4), png_path);
+    return 0;
+}
+
+static int camera_ensure_screenshot_thumb(const char *png_path,
+                                          const struct stat *png_st,
+                                          char *thumb_path,
+                                          size_t thumb_len)
+{
+    struct stat thumb_st;
+    int rebuild = 0;
+
+    if(camera_make_screenshot_thumb_path(png_path, thumb_path, thumb_len) != 0) {
+        return -1;
+    }
+
+    if(stat(thumb_path, &thumb_st) != 0 ||
+       !S_ISREG(thumb_st.st_mode) ||
+       thumb_st.st_size != (off_t)CAMERA_STORED_THUMB_BYTES ||
+       (png_st && thumb_st.st_mtime < png_st->st_mtime)) {
+        rebuild = 1;
+    }
+
+    if(!rebuild) {
+        return 0;
+    }
+
+    if(camera_decode_png_to_rgb565(png_path, camera_stored_thumb_buf,
+                                   CAMERA_STORED_THUMB_W,
+                                   CAMERA_STORED_THUMB_H, 1) != 0) {
+        return -1;
+    }
+
+    return camera_write_thumb_file(thumb_path);
+}
+
 static void camera_apply_preview_placeholder(lv_obj_t *canvas, lv_obj_t *hint,
                                              uint8_t *buf, unsigned width,
                                              unsigned height)
@@ -8519,7 +8598,10 @@ static void camera_gallery_scan_dir(const char *dir_path, int screenshot_dir)
         }
 
         if(screenshot_dir) {
-            snprintf(thumb_path, sizeof(thumb_path), "%s", path);
+            if(camera_ensure_screenshot_thumb(path, &st, thumb_path,
+                                              sizeof(thumb_path)) != 0) {
+                snprintf(thumb_path, sizeof(thumb_path), "%s", path);
+            }
         } else {
             snprintf(thumb_path, sizeof(thumb_path), "%s/%.*s.thumb.rgb565",
                      dir_path, (int)(len - 4), ent->d_name);
