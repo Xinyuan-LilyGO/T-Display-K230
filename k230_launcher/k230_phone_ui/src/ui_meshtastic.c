@@ -5055,6 +5055,8 @@ static void mesh_channel_profile_add_card(lv_obj_t *panel, const char *path,
     lv_obj_t *btn;
     int button_gap = 8;
     int button_w = (w - 28 - button_gap * 2) / 3;
+    int button_total_w;
+    int button_x;
     int button_y = h - 46;
     char name[64];
     char region[24];
@@ -5105,17 +5107,26 @@ static void mesh_channel_profile_add_card(lv_obj_t *panel, const char *path,
     if(button_w < 64) {
         button_w = 64;
     }
-    btn = ui_command_button(card, 14, button_y, button_w,
+    button_total_w = button_w * 3 + button_gap * 2;
+    if(button_total_w > w - 28) {
+        button_w = (w - 28 - button_gap * 2) / 3;
+        if(button_w < 56) {
+            button_w = 56;
+        }
+        button_total_w = button_w * 3 + button_gap * 2;
+    }
+    button_x = 14 + ((w - 28) - button_total_w) / 2;
+    btn = ui_command_button(card, button_x, button_y, button_w,
                             ui_tr("Load"), 0x25C281);
     lv_obj_set_height(btn, 38);
     lv_obj_add_event_cb(btn, mesh_channel_profile_load_event_cb,
                         LV_EVENT_CLICKED, mesh_channel_profile_paths[index]);
-    btn = ui_command_button(card, 14 + button_w + button_gap, button_y,
+    btn = ui_command_button(card, button_x + button_w + button_gap, button_y,
                             button_w, ui_tr("Edit"), 0x3DA5FF);
     lv_obj_set_height(btn, 38);
     lv_obj_add_event_cb(btn, mesh_channel_profile_edit_event_cb,
                         LV_EVENT_CLICKED, mesh_channel_profile_paths[index]);
-    btn = ui_command_button(card, 14 + (button_w + button_gap) * 2,
+    btn = ui_command_button(card, button_x + (button_w + button_gap) * 2,
                             button_y, button_w, ui_tr("Delete"), 0xEF4D5A);
     lv_obj_set_height(btn, 38);
     lv_obj_add_event_cb(btn, mesh_channel_profile_delete_event_cb,
@@ -7564,7 +7575,7 @@ static void mesh_channel_edit_open(int index, const char *role,
     int screen_w = ui_screen_width();
     int screen_h = ui_screen_height();
     int dialog_w = ui_is_landscape() ? 620 : 500;
-    int dialog_h = ui_is_landscape() ? 360 : 430;
+    int dialog_h = ui_is_landscape() ? 468 : 520;
     int pad = 24;
     int button_gap = 10;
     int role_w;
@@ -7576,11 +7587,11 @@ static void mesh_channel_edit_open(int index, const char *role,
     if(dialog_w < 320) {
         dialog_w = 320;
     }
-    if(dialog_h > screen_h - 48) {
-        dialog_h = screen_h - 48;
+    if(dialog_h > screen_h - 32) {
+        dialog_h = screen_h - 32;
     }
-    if(dialog_h < 300) {
-        dialog_h = 300;
+    if(dialog_h < 360) {
+        dialog_h = 360;
     }
 
     mesh_channel_edit_close();
@@ -7674,7 +7685,7 @@ static void mesh_channel_edit_open(int index, const char *role,
 
     mesh_channel_edit_status_label =
         ui_label(dialog, "", &lv_font_montserrat_14, 0xFCA5A5);
-    lv_obj_set_pos(mesh_channel_edit_status_label, pad, dialog_h - pad - 98);
+    lv_obj_set_pos(mesh_channel_edit_status_label, pad, dialog_h - pad - 106);
     lv_obj_set_width(mesh_channel_edit_status_label, dialog_w - pad * 2);
     lv_label_set_long_mode(mesh_channel_edit_status_label, LV_LABEL_LONG_DOT);
 
@@ -7773,7 +7784,7 @@ static void mesh_channels_event_cb(lv_event_t *event)
     int columns = landscape ? 2 : 1;
     int gap = 12;
     int card_w = columns == 2 ? (content_w - gap) / 2 : content_w;
-    int card_h = landscape ? 116 : 126;
+    int card_h = landscape ? 142 : 136;
     int y = 96;
     int count = 0;
 
@@ -7875,7 +7886,7 @@ static void mesh_channels_event_cb(lv_event_t *event)
                 label = ui_label(card, meta, &lv_font_montserrat_14, accent);
                 lv_obj_set_pos(label, 14, 44);
                 lv_obj_set_width(label, card_w - 28);
-                lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+                lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
                 if(!disabled) {
                     lv_obj_t *use_btn =
                         ui_command_button(card, 14, card_h - 44,
@@ -7888,9 +7899,13 @@ static void mesh_channels_event_cb(lv_event_t *event)
                                         (void *)(intptr_t)index_value);
                 }
                 {
-                    int edit_x = disabled ? 14 : 24 + (card_w - 38) / 2;
-                    int edit_w = disabled ? card_w - 28 :
-                                 (card_w - 38) / 2;
+                    int edit_w = disabled ? 116 : (card_w - 38) / 2;
+                    int edit_x = disabled ? card_w - 14 - edit_w :
+                                 24 + (card_w - 38) / 2;
+                    if(edit_w > card_w - 28) {
+                        edit_w = card_w - 28;
+                        edit_x = 14;
+                    }
                     lv_obj_t *edit_btn =
                         ui_command_button(card, edit_x, card_h - 44, edit_w,
                                           ui_tr("Edit"), 0x3DA5FF);
