@@ -7888,29 +7888,47 @@ static void mesh_channels_event_cb(lv_event_t *event)
                 lv_obj_set_width(label, card_w - 28);
                 lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
                 if(!disabled) {
+                    int slot_button_gap = 10;
+                    int slot_button_y = card_h - 54;
+                    int slot_button_w = (card_w - 28 - slot_button_gap) / 2;
+
+                    if(slot_button_w < 72) {
+                        slot_button_w = 72;
+                    }
+                    if(slot_button_w * 2 + slot_button_gap > card_w - 28) {
+                        slot_button_w = (card_w - 28 - slot_button_gap) / 2;
+                    }
                     lv_obj_t *use_btn =
-                        ui_command_button(card, 14, card_h - 44,
-                                          (card_w - 38) / 2,
+                        ui_command_button(card, 14, slot_button_y,
+                                          slot_button_w,
                                           ui_tr("Use"), 0x25C281);
                     lv_obj_set_height(use_btn, 34);
                     lv_obj_add_event_cb(use_btn,
                                         mesh_select_tx_channel_event_cb,
                                         LV_EVENT_CLICKED,
                                         (void *)(intptr_t)index_value);
-                }
-                {
-                    int edit_w = disabled ? 116 : (card_w - 38) / 2;
-                    int edit_x = disabled ? card_w - 14 - edit_w :
-                                 24 + (card_w - 38) / 2;
+                    btn = ui_command_button(card,
+                                            14 + slot_button_w +
+                                            slot_button_gap,
+                                            slot_button_y, slot_button_w,
+                                            ui_tr("Edit"), 0x3DA5FF);
+                    lv_obj_set_height(btn, 34);
+                    lv_obj_add_event_cb(btn,
+                                        mesh_channel_slot_edit_event_cb,
+                                        LV_EVENT_CLICKED,
+                                        (void *)(intptr_t)index_value);
+                } else {
+                    int edit_w = card_w > 220 ? 128 : 112;
+                    int edit_x;
+
                     if(edit_w > card_w - 28) {
                         edit_w = card_w - 28;
-                        edit_x = 14;
                     }
-                    lv_obj_t *edit_btn =
-                        ui_command_button(card, edit_x, card_h - 44, edit_w,
-                                          ui_tr("Edit"), 0x3DA5FF);
-                    lv_obj_set_height(edit_btn, 34);
-                    lv_obj_add_event_cb(edit_btn,
+                    edit_x = (card_w - edit_w) / 2;
+                    btn = ui_command_button(card, edit_x, card_h - 54, edit_w,
+                                            ui_tr("Edit"), 0x3DA5FF);
+                    lv_obj_set_height(btn, 34);
+                    lv_obj_add_event_cb(btn,
                                         mesh_channel_slot_edit_event_cb,
                                         LV_EVENT_CLICKED,
                                         (void *)(intptr_t)index_value);
