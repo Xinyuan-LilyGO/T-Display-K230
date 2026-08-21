@@ -7991,6 +7991,24 @@ static int camera_read_stored_thumb(const char *path)
     return total == CAMERA_STORED_THUMB_BYTES ? 0 : -1;
 }
 
+static int camera_path_has_suffix(const char *path, const char *suffix)
+{
+    size_t path_len;
+    size_t suffix_len;
+
+    if(!path || !suffix) {
+        return 0;
+    }
+
+    path_len = strlen(path);
+    suffix_len = strlen(suffix);
+    if(path_len < suffix_len) {
+        return 0;
+    }
+
+    return strcmp(path + path_len - suffix_len, suffix) == 0;
+}
+
 static void camera_fill_rgb565(uint8_t *dst, unsigned width, unsigned height,
                                uint32_t color)
 {
@@ -8004,6 +8022,19 @@ static void camera_fill_rgb565(uint8_t *dst, unsigned width, unsigned height,
             dst[off + 1] = (uint8_t)(rgb565 >> 8);
         }
     }
+}
+
+static void camera_write_rgb565(uint8_t *dst, unsigned dst_w,
+                                unsigned x, unsigned y,
+                                unsigned r, unsigned g, unsigned b)
+{
+    uint16_t rgb565 = (uint16_t)(((r & 0xF8U) << 8) |
+                                 ((g & 0xFCU) << 3) |
+                                 (b >> 3));
+    size_t off = ((size_t)y * dst_w + (size_t)x) * 2U;
+
+    dst[off + 0] = (uint8_t)(rgb565 & 0xFFU);
+    dst[off + 1] = (uint8_t)(rgb565 >> 8);
 }
 
 static void camera_scale_stored_thumb_cover(uint8_t *dst, unsigned dst_w,
@@ -8091,31 +8122,167 @@ static void camera_scale_stored_thumb_contain(uint8_t *dst, unsigned dst_w,
     }
 }
 
+static int camera_decode_png_to_rgb565(const char *path, uint8_t *dst,
+                                       unsigned dst_w, unsigned dst_h,
+                                       int contain)
+{
+    unsigned char *rgba = NULL;
+    unsigned src_w = 0;
+    unsigned src_h = 0;
+    unsigned png_error;
+
+    if(!path || !dst || dst_w == 0 || dst_h == 0) {
+        return -1;
+    }
+
+    png_error = lodepng_decode32_file(&rgba, &src_w, &src_h, path);
+    if(png_error || !rgba || src_w == 0 || src_h == 0) {
+        free(rgba);
+        return -1;
+    }
+
+    if(contain) {
+        unsigned draw_w = dst_w;
+        unsigned draw_h = dst_h;
+        unsigned offset_x;
+        unsigned offset_y;
+
+        camera_fill_rgb565(dst, dst_w, dst_h, 0x05070A);
+
+        if((uint64_t)src_w * dst_h > (uint64_t)src_h * dst_w) {
+            draw_h = (unsigned)(((uint64_t)src_h * dst_w) / src_w);
+            if(draw_h < 1U) {
+                draw_h = 1U;
+            }
+        } else {
+            draw_w = (unsigned)(((uint64_t)src_w * dst_h) / src_h);
+            if(draw_w < 1U) {
+                draw_w = 1U;
+            }
+        }
+
+        offset_x = (dst_w - draw_w) / 2U;
+        offset_y = (dst_h - draw_h) / 2U;
+
+        for(unsigned y = 0; y < draw_h; y++) {
+            unsigned src_y = (unsigned)(((uint64_t)y * src_h) / draw_h);
+
+            if(src_y >= src_h) {
+                src_y = src_h - 1U;
+            }
+
+            for(unsigned x = 0; x < draw_w; x++) {
+                unsigned src_x = (unsigned)(((uint64_t)x * src_w) / draw_w);
+                const unsigned char *p;
+                unsigned a;
+                unsigned r;
+                unsigned g;
+                unsigned b;
+
+                if(src_x >= src_w) {
+                    src_x = src_w - 1U;
+                }
+
+                p = rgba + ((size_t)src_y * src_w + (size_t)src_x) * 4U;
+                a = p[3];
+                r = ((unsigned)p[0] * a) / 255U;
+                g = ((unsigned)p[1] * a) / 255U;
+                b = ((unsigned)p[2] * a) / 255U;
+                camera_write_rgb565(dst, dst_w, offset_x + x, offset_y + y,
+                                    r, g, b);
+            }
+        }
+    } else {
+        unsigned src_x0 = 0;
+        unsigned src_y0 = 0;
+        unsigned visible_w = src_w;
+        unsigned visible_h = src_h;
+
+        if((uint64_t)src_w * dst_h > (uint64_t)src_h * dst_w) {
+            visible_w = (unsigned)(((uint64_t)src_h * dst_w) / dst_h);
+            if(visible_w < 1U) {
+                visible_w = 1U;
+            }
+            if(visible_w > src_w) {
+                visible_w = src_w;
+            }
+            src_x0 = (src_w - visible_w) / 2U;
+        } else {
+            visible_h = (unsigned)(((uint64_t)src_w * dst_h) / dst_w);
+            if(visible_h < 1U) {
+                visible_h = 1U;
+            }
+            if(visible_h > src_h) {
+                visible_h = src_h;
+            }
+            src_y0 = (src_h - visible_h) / 2U;
+        }
+
+        for(unsigned y = 0; y < dst_h; y++) {
+            unsigned src_y = src_y0 +
+                             (unsigned)(((uint64_t)y * visible_h) / dst_h);
+
+            if(src_y >= src_h) {
+                src_y = src_h - 1U;
+            }
+
+            for(unsigned x = 0; x < dst_w; x++) {
+                unsigned src_x = src_x0 +
+                                 (unsigned)(((uint64_t)x * visible_w) / dst_w);
+                const unsigned char *p;
+                unsigned a;
+                unsigned r;
+                unsigned g;
+                unsigned b;
+
+                if(src_x >= src_w) {
+                    src_x = src_w - 1U;
+                }
+
+                p = rgba + ((size_t)src_y * src_w + (size_t)src_x) * 4U;
+                a = p[3];
+                r = ((unsigned)p[0] * a) / 255U;
+                g = ((unsigned)p[1] * a) / 255U;
+                b = ((unsigned)p[2] * a) / 255U;
+                camera_write_rgb565(dst, dst_w, x, y, r, g, b);
+            }
+        }
+    }
+
+    free(rgba);
+    return 0;
+}
+
 static void camera_apply_canvas(lv_obj_t *canvas, lv_obj_t *hint,
                                 const char *thumb_path, uint8_t *buf,
                                 unsigned width, unsigned height,
                                 int contain)
 {
-    int has_thumb;
+    int has_image;
+    int is_png;
 
     if(!canvas) {
         return;
     }
 
-    has_thumb = camera_read_stored_thumb(thumb_path) == 0;
-    if(!has_thumb) {
-        camera_fill_placeholder(buf, width, height);
-    } else if(contain) {
+    is_png = camera_path_has_suffix(thumb_path, ".png");
+    has_image = !is_png && camera_read_stored_thumb(thumb_path) == 0;
+    if(has_image && contain) {
         camera_scale_stored_thumb_contain(buf, width, height);
-    } else {
+    } else if(has_image) {
         camera_scale_stored_thumb_cover(buf, width, height);
+    } else if(is_png && camera_decode_png_to_rgb565(thumb_path, buf, width,
+                                                    height, contain) == 0) {
+        has_image = 1;
+    } else {
+        camera_fill_placeholder(buf, width, height);
     }
 
     lv_canvas_set_buffer(canvas, buf, width, height, LV_COLOR_FORMAT_RGB565);
     lv_obj_invalidate(canvas);
 
     if(hint) {
-        if(has_thumb) {
+        if(has_image) {
             lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_clear_flag(hint, LV_OBJ_FLAG_HIDDEN);
@@ -8251,53 +8418,86 @@ static int camera_find_latest_capture(char *photo, size_t photo_len,
     return 0;
 }
 
-static void camera_gallery_scan(void)
+static void camera_gallery_insert_item(const char *photo, const char *thumb,
+                                       time_t mtime)
 {
-    DIR *dir = opendir(CAMERA_PHOTO_DIR);
+    int insert_at = camera_gallery_count;
 
-    camera_gallery_count = 0;
+    if(!photo || !photo[0] || !thumb || !thumb[0]) {
+        return;
+    }
+
+    while(insert_at > 0 &&
+          camera_gallery_items[insert_at - 1].mtime < mtime) {
+        if(insert_at < CAMERA_GALLERY_MAX_ITEMS) {
+            camera_gallery_items[insert_at] =
+                camera_gallery_items[insert_at - 1];
+        }
+        insert_at--;
+    }
+
+    if(insert_at >= CAMERA_GALLERY_MAX_ITEMS) {
+        return;
+    }
+
+    snprintf(camera_gallery_items[insert_at].photo,
+             sizeof(camera_gallery_items[insert_at].photo), "%s", photo);
+    snprintf(camera_gallery_items[insert_at].thumb,
+             sizeof(camera_gallery_items[insert_at].thumb), "%s", thumb);
+    camera_gallery_items[insert_at].mtime = mtime;
+    if(camera_gallery_count < CAMERA_GALLERY_MAX_ITEMS) {
+        camera_gallery_count++;
+    }
+}
+
+static void camera_gallery_scan_dir(const char *dir_path, int screenshot_dir)
+{
+    DIR *dir = opendir(dir_path);
+    struct dirent *ent;
+
     if(!dir) {
         return;
     }
 
-    while(camera_gallery_count < CAMERA_GALLERY_MAX_ITEMS) {
-        struct dirent *ent = readdir(dir);
+    while((ent = readdir(dir)) != NULL) {
         char path[192];
         char thumb_path[192];
         struct stat st;
         size_t len;
-        int insert_at;
 
-        if(!ent) {
-            break;
-        }
         len = strlen(ent->d_name);
-        if(len < 5 || strcmp(ent->d_name + len - 4, ".ppm") != 0) {
+        if(screenshot_dir) {
+            if(len < 5 || strcmp(ent->d_name + len - 4, ".png") != 0) {
+                continue;
+            }
+        } else if(len < 5 || strcmp(ent->d_name + len - 4, ".ppm") != 0) {
             continue;
         }
 
-        snprintf(path, sizeof(path), "%s/%s", CAMERA_PHOTO_DIR, ent->d_name);
+        snprintf(path, sizeof(path), "%s/%s", dir_path, ent->d_name);
         if(stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
             continue;
         }
-        snprintf(thumb_path, sizeof(thumb_path), "%s/%.*s.thumb.rgb565",
-                 CAMERA_PHOTO_DIR, (int)(len - 4), ent->d_name);
 
-        insert_at = camera_gallery_count;
-        while(insert_at > 0 &&
-              camera_gallery_items[insert_at - 1].mtime < st.st_mtime) {
-            camera_gallery_items[insert_at] = camera_gallery_items[insert_at - 1];
-            insert_at--;
+        if(screenshot_dir) {
+            snprintf(thumb_path, sizeof(thumb_path), "%s", path);
+        } else {
+            snprintf(thumb_path, sizeof(thumb_path), "%s/%.*s.thumb.rgb565",
+                     dir_path, (int)(len - 4), ent->d_name);
         }
-        snprintf(camera_gallery_items[insert_at].photo,
-                 sizeof(camera_gallery_items[insert_at].photo), "%s", path);
-        snprintf(camera_gallery_items[insert_at].thumb,
-                 sizeof(camera_gallery_items[insert_at].thumb), "%s", thumb_path);
-        camera_gallery_items[insert_at].mtime = st.st_mtime;
-        camera_gallery_count++;
+
+        camera_gallery_insert_item(path, thumb_path, st.st_mtime);
     }
 
     closedir(dir);
+}
+
+static void camera_gallery_scan(void)
+{
+    camera_gallery_count = 0;
+    camera_gallery_scan_dir(CAMERA_PHOTO_DIR, 0);
+    camera_gallery_scan_dir(SCREENSHOT_DIR, 1);
+
     if(camera_gallery_count == 0) {
         camera_gallery_selected = 0;
     } else if(camera_gallery_selected >= camera_gallery_count) {
@@ -8864,7 +9064,7 @@ static void camera_delete_photo_event_cb(lv_event_t *event)
     if(photo[0]) {
         unlink(photo);
     }
-    if(thumb[0]) {
+    if(thumb[0] && strcmp(thumb, photo) != 0) {
         unlink(thumb);
     }
 
