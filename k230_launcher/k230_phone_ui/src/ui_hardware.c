@@ -28,6 +28,9 @@
 #ifndef LV_SYMBOL_EYE_OPEN
 #define LV_SYMBOL_EYE_OPEN "SUN"
 #endif
+#ifndef LV_SYMBOL_AUDIO
+#define LV_SYMBOL_AUDIO "AUD"
+#endif
 
 #define PREF_AUDIO_OUTPUT "audio.output"
 #define PREF_FAN_MODE "fan.mode"
@@ -338,6 +341,7 @@ typedef enum {
     KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT,
     KEYBOARD_HOTKEY_BRIGHTNESS_DOWN,
     KEYBOARD_HOTKEY_BRIGHTNESS_UP,
+    KEYBOARD_HOTKEY_AUDIO_OUTPUT_TOGGLE,
     KEYBOARD_HOTKEY_COUNT
 } keyboard_hotkey_action_t;
 
@@ -565,6 +569,7 @@ static const keyboard_hotkey_action_def_t keyboard_hotkey_actions[] = {
     { KEYBOARD_HOTKEY_KEYBOARD_BACKLIGHT, "Keyboard backlight" },
     { KEYBOARD_HOTKEY_BRIGHTNESS_DOWN, "Brightness down" },
     { KEYBOARD_HOTKEY_BRIGHTNESS_UP, "Brightness up" },
+    { KEYBOARD_HOTKEY_AUDIO_OUTPUT_TOGGLE, "Toggle audio output" },
 };
 
 static void extension_keyboard_refresh_async(void *user_data)
@@ -3381,6 +3386,8 @@ static void keyboard_hotkey_osd_reposition(void)
     int h = ui_screen_height();
     int box_w = ui_is_landscape() ? 430 : 436;
     int box_h = 142;
+    int value_w;
+    int title_w;
     int x;
     int y;
 
@@ -3399,6 +3406,11 @@ static void keyboard_hotkey_osd_reposition(void)
     if(y < 72) {
         y = 72;
     }
+    value_w = box_w > 360 ? 138 : 112;
+    title_w = box_w - 54 - value_w - 14;
+    if(title_w < 80) {
+        title_w = 80;
+    }
 
     lv_obj_set_pos(keyboard_hotkey_osd_obj, x, y);
     lv_obj_set_size(keyboard_hotkey_osd_obj, box_w, box_h);
@@ -3406,11 +3418,11 @@ static void keyboard_hotkey_osd_reposition(void)
         lv_obj_align(keyboard_hotkey_osd_icon_label, LV_ALIGN_TOP_LEFT, 0, 0);
     }
     if(keyboard_hotkey_osd_title_label) {
-        lv_obj_set_width(keyboard_hotkey_osd_title_label, box_w - 126);
+        lv_obj_set_width(keyboard_hotkey_osd_title_label, title_w);
         lv_obj_align(keyboard_hotkey_osd_title_label, LV_ALIGN_TOP_LEFT, 54, 2);
     }
     if(keyboard_hotkey_osd_value_label) {
-        lv_obj_set_width(keyboard_hotkey_osd_value_label, 72);
+        lv_obj_set_width(keyboard_hotkey_osd_value_label, value_w);
         lv_obj_align(keyboard_hotkey_osd_value_label, LV_ALIGN_TOP_RIGHT, 0, 4);
     }
     if(keyboard_hotkey_osd_bar) {
@@ -3419,12 +3431,17 @@ static void keyboard_hotkey_osd_reposition(void)
     }
 }
 
-static void keyboard_hotkey_show_osd(const char *title, const char *icon,
-                                     int percent, uint32_t accent)
+static void keyboard_hotkey_show_osd_text(const char *title, const char *icon,
+                                          const char *value_text, int percent,
+                                          uint32_t accent)
 {
-    char value_text[24];
-
     percent = clamp_int(percent, 0, 100);
+    if(!icon) {
+        icon = "";
+    }
+    if(!value_text) {
+        value_text = "";
+    }
 
     if(keyboard_hotkey_osd_timer) {
         lv_timer_delete(keyboard_hotkey_osd_timer);
@@ -3476,8 +3493,7 @@ static void keyboard_hotkey_show_osd(const char *title, const char *icon,
                                 lv_color_hex(accent), 0);
     lv_label_set_text(keyboard_hotkey_osd_icon_label, icon);
     lv_label_set_text(keyboard_hotkey_osd_title_label, ui_tr(title));
-    snprintf(value_text, sizeof(value_text), "%d%%", percent);
-    lv_label_set_text(keyboard_hotkey_osd_value_label, value_text);
+    lv_label_set_text(keyboard_hotkey_osd_value_label, ui_tr(value_text));
     keyboard_hotkey_osd_reposition();
     lv_obj_move_foreground(keyboard_hotkey_osd_obj);
     lv_bar_set_value(keyboard_hotkey_osd_bar, percent, LV_ANIM_ON);
@@ -3490,6 +3506,16 @@ static void keyboard_hotkey_show_osd(const char *title, const char *icon,
         lv_timer_set_repeat_count(keyboard_hotkey_osd_timer, 1);
     }
     app_request_fast_refresh();
+}
+
+static void keyboard_hotkey_show_osd(const char *title, const char *icon,
+                                     int percent, uint32_t accent)
+{
+    char value_text[24];
+
+    percent = clamp_int(percent, 0, 100);
+    snprintf(value_text, sizeof(value_text), "%d%%", percent);
+    keyboard_hotkey_show_osd_text(title, icon, value_text, percent, accent);
 }
 
 static void keyboard_hotkey_adjust_volume(int delta)
@@ -3550,6 +3576,20 @@ static void keyboard_hotkey_adjust_screen_brightness(int delta)
               (next_value * 100 + max_value / 2) / max_value : 0;
     keyboard_hotkey_show_osd("Brightness", LV_SYMBOL_EYE_OPEN, percent,
                              0xF5A524);
+}
+
+static void keyboard_hotkey_toggle_audio_output(void)
+{
+    int next_external = ui_audio_output_is_external() ? 0 : 1;
+    const char *output = next_external ? AUDIO_OUTPUT_EXTERNAL :
+                                        AUDIO_OUTPUT_HEADPHONES;
+    const char *value = next_external ? "External I2S" : "Headphones";
+    uint32_t accent = next_external ? 0x25C281 : 0x3DA5FF;
+
+    ui_prefs_set(PREF_AUDIO_OUTPUT, output);
+    ui_audio_output_set_external(next_external);
+    keyboard_hotkey_show_osd_text("Audio output", LV_SYMBOL_AUDIO, value,
+                                  next_external ? 100 : 45, accent);
 }
 
 static int keyboard_hotkey_run_action(int f_index,
@@ -3614,6 +3654,9 @@ static int keyboard_hotkey_run_action(int f_index,
         return 1;
     case KEYBOARD_HOTKEY_BRIGHTNESS_UP:
         keyboard_hotkey_adjust_screen_brightness(1);
+        return 1;
+    case KEYBOARD_HOTKEY_AUDIO_OUTPUT_TOGGLE:
+        keyboard_hotkey_toggle_audio_output();
         return 1;
     case KEYBOARD_HOTKEY_NONE:
     case KEYBOARD_HOTKEY_COUNT:
