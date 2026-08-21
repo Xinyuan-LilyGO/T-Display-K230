@@ -600,6 +600,7 @@ static const app_item_t app_items[] = {
 static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
                         uint32_t anim_ms);
 static void cleanup_page_state(void);
+static int camera_gallery_handle_back(void);
 static void edge_back_load_pref(void);
 static void edge_back_event_cb(lv_event_t *event);
 static int display_logical_width(void);
@@ -3834,6 +3835,9 @@ static void nav_to(page_id_t page)
     if(current_page == PAGE_HOME) {
         home_capture_scroll();
     }
+    if(page == PAGE_GALLERY) {
+        camera_gallery_view_open = 0;
+    }
     if(page == PAGE_SETTINGS) {
         ui_settings_prepare_open(0);
     }
@@ -3853,9 +3857,25 @@ static void nav_to(page_id_t page)
     transition_to_page(page, LV_SCREEN_LOAD_ANIM_OVER_LEFT);
 }
 
+static int camera_gallery_handle_back(void)
+{
+    if(current_page != PAGE_GALLERY || !camera_gallery_view_open) {
+        return 0;
+    }
+
+    camera_gallery_view_open = 0;
+    touch_trace_log("GALLERY_BACK_TO_GRID selected=%d count=%d",
+                    camera_gallery_selected, camera_gallery_count);
+    render_page(PAGE_GALLERY, LV_SCREEN_LOAD_ANIM_NONE, 0);
+    return 1;
+}
+
 static void nav_back(void)
 {
     if(current_page == PAGE_NRF52840_DFU && ui_nrf52840_dfu_is_running()) {
+        return;
+    }
+    if(camera_gallery_handle_back()) {
         return;
     }
     if(current_page == PAGE_NES && ui_nes_handle_back()) {
@@ -4161,6 +4181,11 @@ static void edge_back_event_cb(lv_event_t *event)
             edge_back_direction = 0;
             return;
         }
+        if(camera_gallery_handle_back()) {
+            trace_ui_action("LVGL_EDGE_BACK_INNER", PAGE_GALLERY);
+            edge_back_direction = 0;
+            return;
+        }
         trace_ui_action("LVGL_EDGE_BACK", page_stack_len > 0 ?
                         page_stack[page_stack_len - 1] : PAGE_HOME);
         nav_back();
@@ -4246,6 +4271,12 @@ static void edge_back_consume_raw_pending(void)
         edge_back_hint_hide();
         return;
     }
+    if(camera_gallery_handle_back()) {
+        trace_ui_action("RAW_EDGE_BACK_INNER", PAGE_GALLERY);
+        edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
+        edge_back_hint_hide();
+        return;
+    }
     trace_ui_action("RAW_EDGE_BACK", page_stack_len > 0 ?
                     page_stack[page_stack_len - 1] : PAGE_HOME);
     edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
@@ -4274,6 +4305,10 @@ static void back_event_cb(lv_event_t *event)
         trace_ui_action("LVGL_CLICKED_BACK_INNER", PAGE_CELLULAR);
         return;
     }
+    if(camera_gallery_handle_back()) {
+        trace_ui_action("LVGL_CLICKED_BACK_INNER", PAGE_GALLERY);
+        return;
+    }
     trace_ui_action("LVGL_CLICKED_BACK", page_stack_len > 0 ?
                     page_stack[page_stack_len - 1] : PAGE_HOME);
     nav_back();
@@ -4298,6 +4333,10 @@ void app_nav_back(void)
 {
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
         trace_ui_action("APP_BACK_INNER", PAGE_CELLULAR);
+        return;
+    }
+    if(camera_gallery_handle_back()) {
+        trace_ui_action("APP_BACK_INNER", PAGE_GALLERY);
         return;
     }
     trace_ui_action("LVGL_CLICKED_BACK", page_stack_len > 0 ?
