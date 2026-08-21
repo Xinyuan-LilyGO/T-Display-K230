@@ -38,7 +38,7 @@
 #define K230_NRF9151_LONG_TIMEOUT_US 12000000ULL
 #define K230_NRF9151_HTTP_TIMEOUT_US 60000000ULL
 #define K230_NRF9151_MQTT_TIMEOUT_US 30000000ULL
-#define K230_NRF9151_GNSS_RESTART_US (120ULL * 1000000ULL)
+#define K230_NRF9151_GNSS_NMEA_RESTART_US (15ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_REFRESH_US (30ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
 #define K230_NRF9151_MANAGER_LOG "/tmp/k230_nrf9151_test.log"
@@ -2415,6 +2415,7 @@ static int nrf9151_manager_start_gnss_locked(int fd)
 {
     char resp[1024];
     int rc;
+    int active;
     k230_nrf9151_status_t status;
 
     if(k230_nrf9151_read_status(&status, 0) != 0) {
@@ -2423,54 +2424,72 @@ static int nrf9151_manager_start_gnss_locked(int fd)
     rc = nrf9151_manager_exchange(fd, "AT#XGNSS?", resp, sizeof(resp),
                                   K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
     nrf9151_manager_debug_log("GNSS cmd AT#XGNSS? rc=%d resp=%s", rc, resp);
-    if(rc == 0 && nrf9151_manager_response_gnss_active(resp) > 0) {
-        rc = nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
+    active = rc == 0 ? nrf9151_manager_response_gnss_active(resp) : -1;
+    if(active > 0) {
+        rc = nrf9151_manager_exchange(fd, "AT#XGNSS=0", resp, sizeof(resp),
                                       K230_NRF9151_CMD_TIMEOUT_US, NULL,
                                       NULL);
-        nrf9151_manager_debug_log("GNSS cmd AT#XNMEA=1 rc=%d resp=%s",
+        nrf9151_manager_debug_log("GNSS cmd AT#XGNSS=0 rc=%d resp=%s",
                                   rc, resp);
-    } else {
-        rc = nrf9151_manager_exchange(fd, "AT+CFUN=1", resp, sizeof(resp),
-                                      K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
-                                      NULL, NULL);
-        nrf9151_manager_debug_log("GNSS cmd AT+CFUN=1 rc=%d resp=%s",
-                                  rc, resp);
-        rc = nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
+        rc = nrf9151_manager_exchange(fd, "AT#XNMEA=0", resp, sizeof(resp),
                                       K230_NRF9151_CMD_TIMEOUT_US, NULL,
                                       NULL);
-        nrf9151_manager_debug_log("GNSS cmd AT#XNMEA=1 rc=%d resp=%s",
+        nrf9151_manager_debug_log("GNSS cmd AT#XNMEA=0 rc=%d resp=%s",
                                   rc, resp);
+        usleep(120000);
+    }
+
+    rc = nrf9151_manager_exchange(fd, "AT%XSYSTEMMODE=1,0,1,0", resp,
+                                  sizeof(resp), K230_NRF9151_CMD_TIMEOUT_US,
+                                  NULL, NULL);
+    nrf9151_manager_debug_log(
+        "GNSS cmd AT%%XSYSTEMMODE=1,0,1,0 rc=%d resp=%s", rc, resp);
+    rc = nrf9151_manager_exchange(fd, "AT+CFUN=1", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
+                                  NULL, NULL);
+    nrf9151_manager_debug_log("GNSS cmd AT+CFUN=1 rc=%d resp=%s", rc, resp);
+    rc = nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                  NULL);
+    nrf9151_manager_debug_log("GNSS cmd AT#XNMEA=1 rc=%d resp=%s", rc, resp);
+    rc = nrf9151_manager_exchange(fd, "AT#XGNSS=1,0,1", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+    nrf9151_manager_debug_log("GNSS cmd AT#XGNSS=1,0,1 rc=%d resp=%s",
+                              rc, resp);
+    if(rc != 0) {
         rc = nrf9151_manager_exchange(fd, "AT#XGNSS=1,0,0,0", resp,
                                       sizeof(resp),
                                       K230_NRF9151_CMD_TIMEOUT_US, NULL,
                                       NULL);
         nrf9151_manager_debug_log(
             "GNSS cmd AT#XGNSS=1,0,0,0 rc=%d resp=%s", rc, resp);
-        if(rc != 0) {
-            char status_resp[1024];
-            int status_rc;
+    }
+    if(rc != 0) {
+        char status_resp[1024];
+        int status_rc;
 
-            status_rc = nrf9151_manager_exchange(fd, "AT#XGNSS?", status_resp,
-                                                 sizeof(status_resp),
-                                                 K230_NRF9151_CMD_TIMEOUT_US,
-                                                 NULL, NULL);
-            nrf9151_manager_debug_log("GNSS cmd AT#XGNSS? rc=%d resp=%s",
-                                      status_rc, status_resp);
-            if(status_rc != 0 ||
-               nrf9151_manager_response_gnss_active(status_resp) <= 0) {
-                snprintf(status.gnss_status, sizeof(status.gnss_status),
-                         "%s", "GNSS start failed");
-                snprintf(status.gps_state, sizeof(status.gps_state), "%s",
-                         "error");
-                status.gnss_running = 0;
-                k230_nrf9151_write_status(&status);
-                return -1;
-            }
+        status_rc = nrf9151_manager_exchange(fd, "AT#XGNSS?", status_resp,
+                                             sizeof(status_resp),
+                                             K230_NRF9151_CMD_TIMEOUT_US,
+                                             NULL, NULL);
+        nrf9151_manager_debug_log("GNSS cmd AT#XGNSS? rc=%d resp=%s",
+                                  status_rc, status_resp);
+        if(status_rc != 0 ||
+           nrf9151_manager_response_gnss_active(status_resp) <= 0) {
+            snprintf(status.gnss_status, sizeof(status.gnss_status),
+                     "%s", "GNSS start failed");
+            snprintf(status.gps_state, sizeof(status.gps_state), "%s",
+                     "error");
+            status.gnss_running = 0;
+            k230_nrf9151_write_status(&status);
+            return -1;
         }
     }
     nrf9151_gnss_monitor.configured = 1;
     nrf9151_gnss_monitor.session_start_us = nrf9151_manager_monotonic_us();
     nrf9151_gnss_monitor.first_fix_reported = 0;
+    nrf9151_gnss_monitor.last_fix_us = 0;
+    nrf9151_gnss_monitor.last_nmea_us = 0;
     status.present = 1;
     status.link_ok = 1;
     status.gnss_running = 1;
@@ -2555,17 +2574,17 @@ static void *nrf9151_manager_gnss_thread(void *arg)
         }
         now_us = nrf9151_manager_monotonic_us();
         if(nrf9151_gnss_monitor.configured &&
-           nrf9151_gnss_monitor.last_fix_us == 0ULL &&
            nrf9151_gnss_monitor.session_start_us > 0ULL &&
+           nrf9151_gnss_monitor.last_nmea_us == 0ULL &&
            now_us - nrf9151_gnss_monitor.session_start_us >
-           K230_NRF9151_GNSS_RESTART_US &&
+           K230_NRF9151_GNSS_NMEA_RESTART_US &&
            (nrf9151_gnss_monitor.last_restart_us == 0ULL ||
             now_us - nrf9151_gnss_monitor.last_restart_us >
-            K230_NRF9151_GNSS_RESTART_US)) {
+            K230_NRF9151_GNSS_NMEA_RESTART_US)) {
             char resp[512];
 
             nrf9151_gnss_monitor.last_restart_us = now_us;
-            nrf9151_manager_debug_log("GNSS restart: no fix after %llums",
+            nrf9151_manager_debug_log("GNSS restart: no NMEA after %llums",
                                       (unsigned long long)(
                                           (now_us -
                                            nrf9151_gnss_monitor.session_start_us) /
