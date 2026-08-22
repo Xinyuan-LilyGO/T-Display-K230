@@ -1122,7 +1122,7 @@ static void nes_create_library(lv_obj_t *parent)
     int list_w = landscape ? screen_w - list_x - margin : 520;
     int list_h = landscape ? body_h - 40 : body_h - list_y - 24;
     int cover_w = landscape ? left_w : 188;
-    int cover_h = landscape ? nes_clamp_int(body_h * 42 / 100, 170, 260) : 250;
+    int cover_h = landscape ? nes_clamp_int(body_h * 42 / 100, 170, 260) : 260;
     int cover_img_w = landscape ? cover_w - 32 : 170;
     int cover_img_h = landscape ? cover_h - 32 : 230;
     int info_x = landscape ? 24 : 226;

@@ -630,7 +630,7 @@ void ui_mic_spectrum_create(lv_obj_t *scr)
     if(info_h < 310) {
         info_h = 310;
     }
-    gain_y = landscape ? 318 : info_h - 104;
+    gain_y = landscape ? 318 : 224;
     if(gain_y < 224) {
         gain_y = 224;
     }
