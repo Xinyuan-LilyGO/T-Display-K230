@@ -28,6 +28,11 @@ void ui_extension_keyboard_set_auto_detect_interval_s(int seconds);
 int ui_extension_keyboard_auto_rotate_enabled(void);
 void ui_extension_keyboard_set_auto_rotate_enabled(int enabled);
 int ui_extension_keyboard_probe_now(void);
+int ui_hardware_keyboard_base_detected(void);
+int ui_hardware_tca8418_detected(void);
+int ui_hardware_xl9555_detected(void);
+int ui_hardware_bq25896_detected(void);
+int ui_hardware_bq27220_detected(void);
 const char *ui_extension_keyboard_status(void);
 void ui_extension_keyboard_focus_obj(lv_obj_t *obj);
 void ui_extension_keyboard_set_key_cb(ui_extension_keyboard_key_cb_t cb,

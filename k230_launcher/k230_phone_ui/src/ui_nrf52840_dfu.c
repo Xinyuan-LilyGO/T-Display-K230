@@ -422,6 +422,61 @@ static int nrf_dfu_query_current_version(char *out, size_t out_len,
     return nrf_dfu_extract_at_version(resp, out, out_len);
 }
 
+static int nrf_dfu_query_help(char *response, size_t response_len)
+{
+    char *argv[] = {
+        (char *)NRF_DFU_TOOL,
+        (char *)"--at", (char *)"AT+HELP",
+        (char *)"--at-read-ms", (char *)"1600",
+        (char *)"-p", (char *)NRF_DFU_PORT,
+        NULL
+    };
+
+    if(!response || response_len == 0U) {
+        return -1;
+    }
+    response[0] = '\0';
+    return nrf_dfu_run_argv(argv, 0, response, response_len);
+}
+
+int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
+{
+    char version[96];
+    char response[768];
+    int rc;
+
+    if(message && message_len > 0U) {
+        message[0] = '\0';
+    }
+
+    if(access(NRF_DFU_TOOL, X_OK) != 0) {
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s", "DFU tool missing");
+        }
+        return -1;
+    }
+
+    if(nrf_dfu_query_current_version(version, sizeof(version), response,
+                                     sizeof(response)) != 0) {
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s",
+                     "nRF52840 AT response unavailable");
+        }
+        return -1;
+    }
+
+    rc = nrf_dfu_query_help(response, sizeof(response));
+    if(rc != 0 || strstr(response, "AT+DFU") == NULL) {
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s",
+                     "Update the nRF52840 bootloader before using DFU.");
+        }
+        return -2;
+    }
+
+    return 0;
+}
+
 static int nrf_dfu_query_package_version(const char *path,
                                          char *out, size_t out_len)
 {

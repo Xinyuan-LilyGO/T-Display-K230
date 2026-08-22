@@ -5388,6 +5388,51 @@ int ui_extension_keyboard_base_available(void)
     return extension_keyboard_active;
 }
 
+int ui_hardware_keyboard_base_detected(void)
+{
+    keyboard_base_state_t base;
+
+    keyboard_base_probe();
+    keyboard_base_get_state(&base);
+    return base.bq25896 || base.bq27220 || base.tca8418 || base.xl9555;
+}
+
+int ui_hardware_tca8418_detected(void)
+{
+    keyboard_base_state_t base;
+
+    keyboard_base_probe();
+    keyboard_base_get_state(&base);
+    return base.tca8418;
+}
+
+int ui_hardware_xl9555_detected(void)
+{
+    keyboard_base_state_t base;
+
+    keyboard_base_probe();
+    keyboard_base_get_state(&base);
+    return base.xl9555;
+}
+
+int ui_hardware_bq25896_detected(void)
+{
+    keyboard_base_state_t base;
+
+    keyboard_base_probe();
+    keyboard_base_get_state(&base);
+    return base.bq25896;
+}
+
+int ui_hardware_bq27220_detected(void)
+{
+    keyboard_base_state_t base;
+
+    keyboard_base_probe();
+    keyboard_base_get_state(&base);
+    return base.bq27220;
+}
+
 const char *ui_extension_keyboard_status(void)
 {
     return extension_keyboard_status;

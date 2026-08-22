@@ -528,6 +528,7 @@ static lv_obj_t *shutdown_progress_arc;
 static lv_obj_t *shutdown_detail_label;
 static lv_obj_t *shutdown_hint_label;
 static lv_obj_t *screenshot_toast_obj;
+static lv_obj_t *entry_block_dialog;
 static lv_obj_t *reboot_status_label;
 static lv_obj_t *reboot_confirm_btn;
 static int reboot_confirm_started;
@@ -4380,6 +4381,143 @@ static void edge_back_consume_raw_pending(void)
     nav_back();
 }
 
+static void entry_block_dialog_close_cb(lv_event_t *event)
+{
+    lv_obj_t *overlay = (lv_obj_t *)lv_event_get_user_data(event);
+
+    if(overlay && lv_obj_is_valid(overlay)) {
+        lv_obj_delete(overlay);
+    }
+    entry_block_dialog = NULL;
+}
+
+static void entry_block_dialog_delete_cb(lv_event_t *event)
+{
+    (void)event;
+    entry_block_dialog = NULL;
+}
+
+static void show_entry_block_dialog(const char *title, const char *message)
+{
+    int w = display_logical_width();
+    int h = display_logical_height();
+    int card_w = display_orientation_is_landscape() ? 520 : 456;
+    int card_h = 242;
+    lv_obj_t *card;
+    lv_obj_t *title_label;
+    lv_obj_t *message_label;
+    lv_obj_t *ok_btn;
+
+    if(entry_block_dialog && lv_obj_is_valid(entry_block_dialog)) {
+        lv_obj_delete(entry_block_dialog);
+        entry_block_dialog = NULL;
+    }
+
+    if(card_w > w - 48) {
+        card_w = w - 48;
+    }
+    if(card_w < 300) {
+        card_w = w - 24;
+    }
+    if(card_h > h - 48) {
+        card_h = h - 48;
+    }
+
+    entry_block_dialog = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(entry_block_dialog);
+    lv_obj_set_style_bg_color(entry_block_dialog, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(entry_block_dialog, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(entry_block_dialog, 0, 0);
+    lv_obj_set_style_pad_all(entry_block_dialog, 0, 0);
+    lv_obj_clear_flag(entry_block_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(entry_block_dialog, entry_block_dialog_delete_cb,
+                        LV_EVENT_DELETE, NULL);
+
+    card = lv_obj_create(entry_block_dialog);
+    lv_obj_set_size(card, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101720), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x314154), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    title_label = ui_label(card, title ? title : "Hardware not detected",
+                           &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_width(title_label, card_w - 48);
+    lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(title_label, 24, 24);
+
+    message_label = ui_label(card, message ? message : "Hardware not detected",
+                             &lv_font_montserrat_18, 0xCBD5E1);
+    lv_obj_set_width(message_label, card_w - 48);
+    lv_label_set_long_mode(message_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(message_label, 24, 76);
+
+    ok_btn = ui_command_button(card, (card_w - 176) / 2, card_h - 78,
+                               176, "OK", 0x25C281);
+    lv_obj_add_event_cb(ok_btn, entry_block_dialog_close_cb,
+                        LV_EVENT_CLICKED, entry_block_dialog);
+}
+
+static int page_entry_allowed(page_id_t page)
+{
+    char message[192];
+    const char *title = "Hardware not detected";
+    const char *reason = NULL;
+    int dfu_rc;
+
+    switch(page) {
+    case PAGE_NRF52840_DFU:
+        dfu_rc = ui_nrf52840_dfu_preflight(message, sizeof(message));
+        if(dfu_rc == 0) {
+            return 1;
+        }
+        title = dfu_rc == -2 ? "nRF52840 UART DFU unsupported" :
+                "nRF52840 not detected";
+        reason = message[0] ? message :
+                 "Connect nRF52840 AT firmware and try again.";
+        break;
+    case PAGE_CELLULAR:
+        if(!ui_hardware_keyboard_base_detected()) {
+            reason = "This feature requires nRF9151 extension board.";
+        }
+        break;
+    case PAGE_KEYBOARD_TEST:
+        if(!ui_hardware_tca8418_detected()) {
+            reason = "This feature requires TCA8418 keyboard controller.";
+        }
+        break;
+    case PAGE_XL9555_TEST:
+        if(!ui_hardware_xl9555_detected()) {
+            reason = "This feature requires XL9555 GPIO expander.";
+        }
+        break;
+    case PAGE_BATTERY:
+        if(!ui_hardware_bq27220_detected()) {
+            reason = "This feature requires BQ27220 battery gauge.";
+        }
+        break;
+    case PAGE_BQ25896:
+        if(!ui_hardware_bq25896_detected()) {
+            reason = "This feature requires BQ25896 charger.";
+        }
+        break;
+    default:
+        return 1;
+    }
+
+    if(!reason) {
+        return 1;
+    }
+
+    touch_trace_log("NAV_BLOCKED page=%s reason=%s", page_name(page), reason);
+    show_entry_block_dialog(title, reason);
+    return 0;
+}
+
 static void app_event_cb(lv_event_t *event)
 {
     page_id_t page = (page_id_t)(intptr_t)lv_event_get_user_data(event);
@@ -4391,6 +4529,9 @@ static void app_event_cb(lv_event_t *event)
     }
 
     trace_ui_action("LVGL_CLICKED_NAV", page);
+    if(!page_entry_allowed(page)) {
+        return;
+    }
     nav_to(page);
 }
 
@@ -4413,6 +4554,9 @@ static void back_event_cb(lv_event_t *event)
 void app_nav_to_page(page_id_t page)
 {
     trace_ui_action("LVGL_CLICKED_NAV", page);
+    if(!page_entry_allowed(page)) {
+        return;
+    }
     nav_to(page);
 }
 
@@ -4422,6 +4566,10 @@ void app_nav_to_settings_page(page_id_t page)
     touch_trace_log("SETTINGS_NAV page=%s current=%s stack_len=%d",
                     page_name(page), page_name(current_page), page_stack_len);
     trace_ui_action("LVGL_CLICKED_SETTINGS_NAV", page);
+    if(!page_entry_allowed(page)) {
+        settings_subpage_context = 0;
+        return;
+    }
     nav_to(page);
 }
 
@@ -10398,7 +10546,7 @@ static void create_reboot_page(lv_obj_t *scr)
     int body_w = page_body_width();
     int body_h = page_body_height_from(154);
     int landscape = display_orientation_is_landscape();
-    int card_h = landscape ? body_h : 420;
+    int card_h = body_h;
     int icon_size = landscape ? 82 : 96;
     int content_x;
     int content_y;
@@ -10411,9 +10559,6 @@ static void create_reboot_page(lv_obj_t *scr)
     reboot_confirm_btn = NULL;
     reboot_confirm_started = 0;
 
-    if(card_h > body_h) {
-        card_h = body_h;
-    }
     if(card_h < 330) {
         card_h = 330;
     }
