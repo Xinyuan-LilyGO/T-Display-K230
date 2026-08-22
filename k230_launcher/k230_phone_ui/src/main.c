@@ -4004,6 +4004,9 @@ static void nav_back(void)
     if(current_page == PAGE_NRF52840_DFU && ui_nrf52840_dfu_is_running()) {
         return;
     }
+    if(ui_input_handle_back()) {
+        return;
+    }
     if(camera_gallery_handle_back()) {
         return;
     }
@@ -4302,6 +4305,11 @@ static void edge_back_event_cb(lv_event_t *event)
         edge_back_log("LVGL_TRIGGER page=%s edge=%s dx=%d dy=%d",
                       page_name(current_page),
                       edge_back_edge_name(edge_back_direction), dx, dy);
+        if(ui_input_handle_back()) {
+            trace_ui_action("LVGL_EDGE_BACK_INPUT", current_page);
+            edge_back_direction = 0;
+            return;
+        }
         if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
             trace_ui_action("LVGL_EDGE_BACK_INNER", PAGE_CELLULAR);
             edge_back_direction = 0;
@@ -4391,6 +4399,12 @@ static void edge_back_consume_raw_pending(void)
     edge_back_tracking = 0;
     edge_back_direction = 0;
     edge_back_lvgl_suppress_until_us = ui_monotonic_us() + 250000ULL;
+    if(ui_input_handle_back()) {
+        trace_ui_action("RAW_EDGE_BACK_INPUT", current_page);
+        edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
+        edge_back_hint_hide();
+        return;
+    }
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
         trace_ui_action("RAW_EDGE_BACK_INNER", PAGE_CELLULAR);
         edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
@@ -4746,6 +4760,10 @@ static void app_event_cb(lv_event_t *event)
 static void back_event_cb(lv_event_t *event)
 {
     (void)event;
+    if(ui_input_handle_back()) {
+        trace_ui_action("LVGL_CLICKED_BACK_INPUT", current_page);
+        return;
+    }
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
         trace_ui_action("LVGL_CLICKED_BACK_INNER", PAGE_CELLULAR);
         return;
@@ -4790,6 +4808,10 @@ void app_nav_to_settings_page(page_id_t page)
 
 void app_nav_back(void)
 {
+    if(ui_input_handle_back()) {
+        trace_ui_action("APP_BACK_INPUT", current_page);
+        return;
+    }
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
         trace_ui_action("APP_BACK_INNER", PAGE_CELLULAR);
         return;

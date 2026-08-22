@@ -53,11 +53,13 @@ typedef struct ui_input_inline ui_input_dialog_state_t;
 
 static ui_input_dialog_state_t *active_dialog;
 static ui_input_dialog_state_t *active_inline;
+static ui_input_dialog_state_t *known_inline;
 static int soft_keyboard_enabled = 1;
 
 static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state);
 static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
                                      void *user_data);
+static void ui_input_inline_hide_state(ui_input_dialog_state_t *state);
 
 static const char *const ui_input_kbd_lower_map[] = {
     "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "\n",
@@ -211,6 +213,42 @@ void ui_input_dialog_close_active(void)
     app_request_fast_refresh();
 }
 
+static int ui_input_inline_keyboard_visible(ui_input_dialog_state_t *state)
+{
+    if(!state || !state->inline_mode) {
+        return 0;
+    }
+    if(state->keyboard && lv_obj_is_valid(state->keyboard) &&
+       !lv_obj_has_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN)) {
+        return 1;
+    }
+    if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar) &&
+       !lv_obj_has_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN)) {
+        return 1;
+    }
+    return 0;
+}
+
+int ui_input_handle_back(void)
+{
+    if(active_dialog) {
+        ui_input_log("back consume dialog");
+        ui_input_dialog_close_active();
+        return 1;
+    }
+    if(active_inline) {
+        ui_input_log("back consume inline-active");
+        ui_input_inline_hide_state(active_inline);
+        return 1;
+    }
+    if(ui_input_inline_keyboard_visible(known_inline)) {
+        ui_input_log("back consume inline-visible");
+        ui_input_inline_hide_state(known_inline);
+        return 1;
+    }
+    return 0;
+}
+
 static int ui_input_inline_reserved_h(ui_input_dialog_state_t *state)
 {
     int reserved_h = 0;
@@ -259,9 +297,9 @@ static void ui_input_inline_hide_state(ui_input_dialog_state_t *state)
     }
     if(active_inline == state) {
         active_inline = NULL;
-        if(state->hardware_keyboard) {
-            ui_extension_keyboard_set_key_cb(NULL, NULL);
-        }
+    }
+    if(state->hardware_keyboard) {
+        ui_extension_keyboard_set_key_cb(NULL, NULL);
     }
     state->pinyin_comp[0] = '\0';
     ui_input_inline_apply_layout(state, 0);
@@ -1545,6 +1583,7 @@ ui_input_inline_t *ui_input_inline_create(lv_obj_t *textarea,
         ui_input_hardware_sync_pinyin_mode(state);
     }
 
+    known_inline = state;
     ui_input_log("inline create soft=%d hw_active=%d",
                  use_soft_keyboard, ui_extension_keyboard_active());
     return state;
@@ -1568,6 +1607,9 @@ void ui_input_inline_destroy(ui_input_inline_t *state)
     }
     if(active_inline == state) {
         active_inline = NULL;
+    }
+    if(known_inline == state) {
+        known_inline = NULL;
     }
     free(state);
     app_request_fast_refresh();
@@ -1599,5 +1641,7 @@ void ui_input_hide_inline_active(void)
 {
     if(active_inline) {
         ui_input_inline_hide_state(active_inline);
+    } else if(ui_input_inline_keyboard_visible(known_inline)) {
+        ui_input_inline_hide_state(known_inline);
     }
 }

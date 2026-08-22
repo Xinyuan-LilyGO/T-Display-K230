@@ -28,6 +28,7 @@ typedef struct {
 
 void ui_input_dialog_open(const ui_input_dialog_config_t *config);
 void ui_input_dialog_close_active(void);
+int ui_input_handle_back(void);
 void ui_input_set_soft_keyboard_enabled(int enabled);
 int ui_input_soft_keyboard_enabled(void);
 ui_input_inline_t *ui_input_inline_create(lv_obj_t *textarea,
