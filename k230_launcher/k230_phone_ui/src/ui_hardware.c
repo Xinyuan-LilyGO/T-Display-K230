@@ -41,6 +41,7 @@
 #define PREF_FAN_ON_TEMP "fan.on_temp_c"
 #define PREF_FAN_OFF_TEMP "fan.off_temp_c"
 #define PREF_BQ25896_ICHG_MA "bq25896.ichg_ma"
+#define PREF_BQ25896_VREG_MV "bq25896.vreg_mv"
 #define PREF_BATTERY_CAPACITY_MAH "battery.capacity_mah"
 #define PREF_KEYBOARD_BACKLIGHT "keyboard.backlight_pct"
 #define PREF_KEYBOARD_BACKLIGHT_PWM_HZ "keyboard.backlight_pwm_hz"
@@ -69,6 +70,7 @@
 #define BUTTON_TEST_LOG "/tmp/k230_button_test.log"
 #define REBOOT_DIAG_LOG "/tmp/k230_reboot_diag.log"
 #define BQ25896_LOG "/tmp/k230_bq25896.log"
+#define BQ27220_LOG "/tmp/k230_bq27220.log"
 #define KEYBOARD_BACKLIGHT_LOG "/tmp/k230_keyboard_backlight.log"
 #define KEYBOARD_HOTKEY_LOG "/tmp/k230_keyboard_hotkey.log"
 #define BOOT0_TOGGLE_DEBOUNCE_US 500000ULL
@@ -161,6 +163,9 @@
 #define BQ25896_INPUT_CURRENT_STEP_MA 50
 #define BQ25896_CHG_VOLT_BASE_MV 3840
 #define BQ25896_CHG_VOLT_STEP_MV 16
+#define BQ25896_CHG_VOLT_DEFAULT_MV 4288
+#define BQ25896_CHG_VOLT_MAX_MV 4608
+#define BQ25896_CHG_VOLT_OPTION_COUNT 4
 #define BQ25896_ADC_VOLT_BASE_MV 2304
 #define BQ25896_ADC_VBAT_STEP_MV 20
 #define BQ25896_ADC_VSYS_STEP_MV 20
@@ -189,6 +194,22 @@
 #define BQ27220_REG_CHARGING_CURRENT 0x32
 #define BQ27220_REG_OPERATION_STATUS 0x3A
 #define BQ27220_REG_DESIGN_CAPACITY 0x3C
+#define BQ27220_REG_ROM_START 0x3E
+#define BQ27220_REG_MAC_BUFFER_START 0x40
+#define BQ27220_REG_MAC_DATA_SUM 0x60
+#define BQ27220_REG_MAC_DATA_LEN 0x61
+#define BQ27220_SUB_CMD_SEALED 0x0030
+#define BQ27220_SUB_CMD_ENTER_CFG_UPDATE 0x0090
+#define BQ27220_SUB_CMD_EXIT_CFG_UPDATE_REINIT 0x0091
+#define BQ27220_ROM_FULL_CHARGE_CAPACITY 0x929D
+#define BQ27220_ROM_DESIGN_CAPACITY 0x929F
+#define BQ27220_OP_STATUS_CFGUPDATE 0x0400
+#define BQ27220_OP_STATUS_SEC_SHIFT 1
+#define BQ27220_OP_STATUS_SEC_MASK 0x03
+#define BQ27220_ACCESS_FULL 1
+#define BQ27220_ACCESS_SEALED 3
+#define BQ27220_CFGUPDATE_ENTER_TIMEOUT_MS 1500
+#define BQ27220_CFGUPDATE_EXIT_TIMEOUT_MS 3000
 #define BATTERY_CAPACITY_DEFAULT_MAH 6000
 #define BATTERY_CAPACITY_MIN_MAH 500
 #define BATTERY_CAPACITY_MAX_MAH 20000
@@ -436,6 +457,7 @@ static lv_obj_t *bq25896_fault_label;
 static lv_obj_t *bq25896_charge_on_btn;
 static lv_obj_t *bq25896_charge_off_btn;
 static lv_obj_t *bq25896_current_slider;
+static lv_obj_t *bq25896_voltage_btn[BQ25896_CHG_VOLT_OPTION_COUNT];
 static lv_obj_t *battery_status_label;
 static lv_obj_t *battery_base_label;
 static lv_obj_t *battery_soc_label;
@@ -543,6 +565,10 @@ static lv_obj_t *keyboard_hotkey_osd_title_label;
 static lv_obj_t *keyboard_hotkey_osd_value_label;
 static lv_obj_t *keyboard_hotkey_osd_bar;
 static lv_timer_t *keyboard_hotkey_osd_timer;
+
+static const int bq25896_voltage_options_mv[BQ25896_CHG_VOLT_OPTION_COUNT] = {
+    4208, 4288, 4352, 4416
+};
 
 static void keyboard_hotkey_log(const char *fmt, ...)
 {
@@ -784,6 +810,23 @@ static void bq25896_log(const char *fmt, ...)
     va_list ap;
 
     fp = fopen(BQ25896_LOG, "a");
+    if(!fp) {
+        return;
+    }
+    va_start(ap, fmt);
+    fprintf(fp, "%llu ", (unsigned long long)ui_monotonic_us());
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fprintf(fp, "\n");
+    fclose(fp);
+}
+
+static void bq27220_log(const char *fmt, ...)
+{
+    FILE *fp;
+    va_list ap;
+
+    fp = fopen(BQ27220_LOG, "a");
     if(!fp) {
         return;
     }
@@ -2609,6 +2652,40 @@ out_unlock:
     return ret;
 }
 
+static int keyboard_i2c_write_block(uint8_t addr, const uint8_t *buf,
+                                    size_t len)
+{
+    sensor_gpio_i2c_t bus;
+    int ret = -1;
+
+    if(!buf || len == 0) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&sensor_aht20_lock);
+    if(keyboard_i2c_begin(&bus) != 0) {
+        goto out_unlock;
+    }
+
+    sensor_gpio_i2c_start(&bus);
+    if(sensor_gpio_i2c_write_byte(&bus, (uint8_t)(addr << 1)) != 0) {
+        goto out_stop;
+    }
+    for(size_t i = 0; i < len; i++) {
+        if(sensor_gpio_i2c_write_byte(&bus, buf[i]) != 0) {
+            goto out_stop;
+        }
+    }
+    ret = 0;
+
+out_stop:
+    sensor_gpio_i2c_stop(&bus);
+    keyboard_i2c_end(&bus);
+out_unlock:
+    pthread_mutex_unlock(&sensor_aht20_lock);
+    return ret;
+}
+
 static int keyboard_i2c_update_bits(uint8_t addr, uint8_t reg, uint8_t mask,
                                     uint8_t value)
 {
@@ -2769,6 +2846,7 @@ static const char *bq25896_bus_state_name(uint8_t status_reg)
 }
 
 static int bq25896_round_fast_charge_current(int ma);
+static int bq25896_round_charge_voltage(int mv);
 
 static int bq25896_watchdog_seconds(uint8_t timer_reg)
 {
@@ -2798,6 +2876,21 @@ static int bq25896_saved_fast_charge_current(int *ma)
         return 0;
     }
     *ma = bq25896_round_fast_charge_current(atoi(value));
+    return 1;
+}
+
+static int bq25896_saved_charge_voltage(int *mv)
+{
+    int value;
+
+    if(!mv) {
+        return 0;
+    }
+    value = read_pref_int(PREF_BQ25896_VREG_MV,
+                          BQ25896_CHG_VOLT_DEFAULT_MV,
+                          BQ25896_CHG_VOLT_BASE_MV,
+                          BQ25896_CHG_VOLT_MAX_MV);
+    *mv = bq25896_round_charge_voltage(value);
     return 1;
 }
 
@@ -2935,6 +3028,30 @@ static int bq25896_round_fast_charge_current(int ma)
     return clamp_int(closest, 0, BQ25896_FAST_CHG_MAX_MA);
 }
 
+static int bq25896_round_charge_voltage(int mv)
+{
+    int best = bq25896_voltage_options_mv[0];
+    int best_diff = abs(mv - best);
+
+    for(int i = 1; i < BQ25896_CHG_VOLT_OPTION_COUNT; i++) {
+        int diff = abs(mv - bq25896_voltage_options_mv[i]);
+        if(diff < best_diff) {
+            best = bq25896_voltage_options_mv[i];
+            best_diff = diff;
+        }
+    }
+    return best;
+}
+
+static uint8_t bq25896_charge_voltage_reg_value(int mv)
+{
+    int rounded = bq25896_round_charge_voltage(mv);
+    int index = (rounded - BQ25896_CHG_VOLT_BASE_MV) /
+                BQ25896_CHG_VOLT_STEP_MV;
+
+    return (uint8_t)((index << 2) & BQ25896_MASK_VREG);
+}
+
 static int bq25896_apply_fast_charge_current(int ma)
 {
     int closest = bq25896_round_fast_charge_current(ma);
@@ -2958,6 +3075,29 @@ static int bq25896_apply_fast_charge_current(int ma)
     return rc;
 }
 
+static int bq25896_apply_charge_voltage(int mv)
+{
+    int closest = bq25896_round_charge_voltage(mv);
+    uint8_t value = bq25896_charge_voltage_reg_value(closest);
+    uint8_t reg6 = 0;
+    uint8_t reg7 = 0;
+    int wd_rc;
+    int rc;
+    int rd6_rc;
+    int rd7_rc;
+
+    wd_rc = bq25896_disable_watchdog("apply-voltage");
+    rc = keyboard_i2c_update_bits(BQ25896_ADDR, BQ25896_REG_CHG_VOLT,
+                                  BQ25896_MASK_VREG, value);
+    rd6_rc = keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_CHG_VOLT,
+                                   &reg6);
+    rd7_rc = keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_TIMER_CTRL,
+                                   &reg7);
+    bq25896_log("apply-voltage request=%d rounded=%d reg06=0x%02X reg07=0x%02X wd_rc=%d rc=%d rd6=%d rd7=%d",
+                mv, closest, reg6, reg7, wd_rc, rc, rd6_rc, rd7_rc);
+    return rc;
+}
+
 static int bq25896_set_fast_charge_current(int ma)
 {
     int closest = bq25896_round_fast_charge_current(ma);
@@ -2965,6 +3105,17 @@ static int bq25896_set_fast_charge_current(int ma)
 
     if(rc == 0) {
         write_pref_int(PREF_BQ25896_ICHG_MA, closest);
+    }
+    return rc;
+}
+
+static int bq25896_set_charge_voltage(int mv)
+{
+    int closest = bq25896_round_charge_voltage(mv);
+    int rc = bq25896_apply_charge_voltage(closest);
+
+    if(rc == 0) {
+        write_pref_int(PREF_BQ25896_VREG_MV, closest);
     }
     return rc;
 }
@@ -2987,6 +3138,7 @@ static int bq25896_ensure_runtime_config(const bq25896_reading_t *reading,
                                          const char *reason)
 {
     int pref_ma;
+    int pref_mv;
     int has_pref;
     int changed = 0;
 
@@ -3014,27 +3166,46 @@ static int bq25896_ensure_runtime_config(const bq25896_reading_t *reading,
         }
     }
 
+    if(bq25896_saved_charge_voltage(&pref_mv) &&
+       reading->charge_voltage_mv != pref_mv) {
+        bq25896_log("runtime voltage mismatch reason=%s chip=%dmV pref=%dmV reg07=0x%02X",
+                    reason ? reason : "unknown", reading->charge_voltage_mv,
+                    pref_mv, reading->timer_reg);
+        if(bq25896_apply_charge_voltage(pref_mv) == 0) {
+            changed = 1;
+        }
+    }
+
     return changed;
 }
 
 static void bq25896_apply_startup_pref(void)
 {
     int ma;
+    int mv;
     int has_pref;
     int wd_rc;
-    int rc;
+    int current_rc = 0;
+    int voltage_rc;
 
     wd_rc = bq25896_disable_watchdog("startup");
     has_pref = bq25896_saved_fast_charge_current(&ma);
     if(!has_pref) {
         button_test_log("BQ25896 startup charge current pref=missing skip");
         bq25896_log("startup pref=missing wd_rc=%d skip-current", wd_rc);
-        return;
+    } else {
+        current_rc = bq25896_apply_fast_charge_current(ma);
+        button_test_log("BQ25896 startup charge current pref=%dmA rc=%d",
+                        ma, current_rc);
     }
 
-    rc = bq25896_apply_fast_charge_current(ma);
-    button_test_log("BQ25896 startup charge current pref=%dmA rc=%d", ma, rc);
-    bq25896_log("startup pref=%dmA wd_rc=%d rc=%d", ma, wd_rc, rc);
+    bq25896_saved_charge_voltage(&mv);
+    voltage_rc = bq25896_apply_charge_voltage(mv);
+    button_test_log("BQ25896 startup charge voltage pref=%dmV rc=%d",
+                    mv, voltage_rc);
+    bq25896_log("startup current_pref=%s current=%dmA voltage=%dmV wd_rc=%d current_rc=%d voltage_rc=%d",
+                has_pref ? "yes" : "missing", has_pref ? ma : -1, mv,
+                wd_rc, current_rc, voltage_rc);
 }
 
 static const char *bq27220_flow_state(const bq27220_reading_t *reading)
@@ -3054,6 +3225,173 @@ static const char *bq27220_flow_state(const bq27220_reading_t *reading)
 static int bq27220_read_word(uint8_t reg, uint16_t *value)
 {
     return keyboard_i2c_read_word_le(BQ27220_ADDR, reg, value);
+}
+
+static int bq27220_write_command(uint16_t cmd)
+{
+    uint8_t buf[3] = {
+        0x00,
+        (uint8_t)(cmd & 0xFF),
+        (uint8_t)((cmd >> 8) & 0xFF)
+    };
+    int rc = keyboard_i2c_write_block(BQ27220_ADDR, buf, sizeof(buf));
+
+    usleep(10000);
+    return rc;
+}
+
+static int bq27220_operation_status_now(uint16_t *status)
+{
+    return bq27220_read_word(BQ27220_REG_OPERATION_STATUS, status);
+}
+
+static int bq27220_unseal_safe(void)
+{
+    uint8_t key_a[3] = {0x00, 0x14, 0x04};
+    uint8_t key_b[3] = {0x00, 0x72, 0x36};
+    int rc;
+
+    rc = keyboard_i2c_write_block(BQ27220_ADDR, key_a, sizeof(key_a));
+    usleep(10000);
+    if(rc == 0) {
+        rc = keyboard_i2c_write_block(BQ27220_ADDR, key_b, sizeof(key_b));
+    }
+    usleep(10000);
+    return rc;
+}
+
+static int bq27220_unseal_full_access(void)
+{
+    uint8_t key[3] = {0x00, 0xFF, 0xFF};
+    int rc;
+
+    rc = keyboard_i2c_write_block(BQ27220_ADDR, key, sizeof(key));
+    usleep(10000);
+    if(rc == 0) {
+        rc = keyboard_i2c_write_block(BQ27220_ADDR, key, sizeof(key));
+    }
+    usleep(10000);
+    return rc;
+}
+
+static int bq27220_wait_config_update(int expected, int timeout_ms)
+{
+    const int step_ms = 50;
+    int elapsed = 0;
+
+    while(elapsed <= timeout_ms) {
+        uint16_t status = 0;
+        int in_cfg;
+
+        if(bq27220_operation_status_now(&status) == 0) {
+            in_cfg = (status & BQ27220_OP_STATUS_CFGUPDATE) ? 1 : 0;
+            if(in_cfg == expected) {
+                return 0;
+            }
+        }
+        usleep(step_ms * 1000);
+        elapsed += step_ms;
+    }
+    return -1;
+}
+
+static int bq27220_write_capacity_word(uint16_t rom_addr,
+                                       uint16_t capacity_mah)
+{
+    uint8_t addr_lo = (uint8_t)(rom_addr & 0xFF);
+    uint8_t addr_hi = (uint8_t)((rom_addr >> 8) & 0xFF);
+    uint8_t cap_hi = (uint8_t)((capacity_mah >> 8) & 0xFF);
+    uint8_t cap_lo = (uint8_t)(capacity_mah & 0xFF);
+    uint8_t addr_buf[3] = {BQ27220_REG_ROM_START, addr_lo, addr_hi};
+    uint8_t data_buf[3] = {BQ27220_REG_MAC_BUFFER_START, cap_hi, cap_lo};
+    uint8_t checksum;
+    int sum;
+    int rc;
+
+    rc = keyboard_i2c_write_block(BQ27220_ADDR, addr_buf, sizeof(addr_buf));
+    if(rc != 0) {
+        return rc;
+    }
+    usleep(10000);
+    rc = keyboard_i2c_write_block(BQ27220_ADDR, data_buf, sizeof(data_buf));
+    if(rc != 0) {
+        return rc;
+    }
+    usleep(10000);
+
+    sum = addr_lo + addr_hi + cap_hi + cap_lo;
+    checksum = (uint8_t)(0xFF - (sum & 0xFF));
+    if(keyboard_i2c_write_reg(BQ27220_ADDR, BQ27220_REG_MAC_DATA_SUM,
+                              checksum) != 0) {
+        return -1;
+    }
+    usleep(10000);
+    if(keyboard_i2c_write_reg(BQ27220_ADDR, BQ27220_REG_MAC_DATA_LEN,
+                              0x06) != 0) {
+        return -1;
+    }
+    usleep(10000);
+    bq27220_log("write-capacity rom=0x%04X capacity=%umAh checksum=0x%02X",
+                rom_addr, capacity_mah, checksum);
+    return 0;
+}
+
+static int bq27220_set_new_capacity(uint16_t design_mah,
+                                    uint16_t full_charge_mah)
+{
+    uint16_t status = 0;
+    int access;
+    int was_sealed = 0;
+    int rc = -1;
+
+    if(bq27220_operation_status_now(&status) != 0) {
+        bq27220_log("capacity-sync failed read-operation-status");
+        return -1;
+    }
+
+    access = (status >> BQ27220_OP_STATUS_SEC_SHIFT) &
+             BQ27220_OP_STATUS_SEC_MASK;
+    was_sealed = access == BQ27220_ACCESS_SEALED;
+    bq27220_log("capacity-sync begin design=%umAh full=%umAh op=0x%04X access=%d",
+                design_mah, full_charge_mah, status, access);
+
+    if(was_sealed && bq27220_unseal_safe() != 0) {
+        bq27220_log("capacity-sync failed unseal-safe");
+        return -1;
+    }
+    if(access != BQ27220_ACCESS_FULL &&
+       bq27220_unseal_full_access() != 0) {
+        bq27220_log("capacity-sync failed full-access");
+        goto out_reseal;
+    }
+
+    if(bq27220_write_command(BQ27220_SUB_CMD_ENTER_CFG_UPDATE) != 0 ||
+       bq27220_wait_config_update(1, BQ27220_CFGUPDATE_ENTER_TIMEOUT_MS) != 0) {
+        bq27220_log("capacity-sync failed enter-config-update");
+        goto out_reseal;
+    }
+
+    if(bq27220_write_capacity_word(BQ27220_ROM_DESIGN_CAPACITY,
+                                   design_mah) != 0 ||
+       bq27220_write_capacity_word(BQ27220_ROM_FULL_CHARGE_CAPACITY,
+                                   full_charge_mah) != 0) {
+        bq27220_log("capacity-sync failed write-data");
+        goto out_exit_cfg;
+    }
+    rc = 0;
+
+out_exit_cfg:
+    if(bq27220_write_command(BQ27220_SUB_CMD_EXIT_CFG_UPDATE_REINIT) != 0 ||
+       bq27220_wait_config_update(0, BQ27220_CFGUPDATE_EXIT_TIMEOUT_MS) != 0) {
+        bq27220_log("capacity-sync exit-config-update warning");
+    }
+
+out_reseal:
+    if(was_sealed) {
+        (void)bq27220_write_command(BQ27220_SUB_CMD_SEALED);
+    }
+    bq27220_log("capacity-sync done rc=%d", rc);
+    return rc;
 }
 
 static int bq27220_read(bq27220_reading_t *reading)
@@ -6509,6 +6847,13 @@ static void bq25896_update_page(void)
                             0x25C281);
         style_choice_button(bq25896_charge_off_btn, !reading.charge_enabled,
                             0xEF4D5A);
+        for(int i = 0; i < BQ25896_CHG_VOLT_OPTION_COUNT; i++) {
+            style_choice_button(
+                bq25896_voltage_btn[i],
+                bq25896_round_charge_voltage(reading.charge_voltage_mv) ==
+                    bq25896_voltage_options_mv[i],
+                0x3DA5FF);
+        }
     } else {
         if(bq25896_status_label) {
             lv_label_set_text(bq25896_status_label, ui_tr("BQ25896 not detected"));
@@ -6547,6 +6892,9 @@ static void bq25896_update_page(void)
         }
         style_choice_button(bq25896_charge_on_btn, 0, 0x25C281);
         style_choice_button(bq25896_charge_off_btn, 0, 0xEF4D5A);
+        for(int i = 0; i < BQ25896_CHG_VOLT_OPTION_COUNT; i++) {
+            style_choice_button(bq25896_voltage_btn[i], 0, 0x3DA5FF);
+        }
     }
 }
 
@@ -6592,6 +6940,25 @@ static void bq25896_current_event_cb(lv_event_t *event)
         bq25896_update_page();
         app_request_fast_refresh();
     }
+}
+
+static void bq25896_voltage_event_cb(lv_event_t *event)
+{
+    int mv = (int)(intptr_t)lv_event_get_user_data(event);
+    int rc;
+
+    rc = bq25896_set_charge_voltage(mv);
+    if(bq25896_status_label) {
+        lv_label_set_text(bq25896_status_label,
+                          ui_tr(rc == 0 ? "Charge voltage saved" :
+                                          "BQ25896 not detected"));
+        lv_obj_set_style_text_color(bq25896_status_label,
+                                    lv_color_hex(rc == 0 ? 0x25C281 :
+                                                          0xF5A524),
+                                    0);
+    }
+    bq25896_update_page();
+    app_request_fast_refresh();
 }
 
 static void battery_format_minutes(char *buf, size_t len, int minutes)
@@ -6645,8 +7012,13 @@ static int battery_parse_capacity(const char *text, int *capacity_mah)
 
 static void battery_capacity_submit_cb(const char *text, void *user_data)
 {
+    keyboard_base_state_t base;
+    bq27220_reading_t probe;
     char status[96];
     int capacity;
+    int sync_rc = -1;
+    int has_gauge = 0;
+    int status_ok;
 
     (void)user_data;
     if(battery_parse_capacity(text, &capacity) != 0) {
@@ -6660,13 +7032,26 @@ static void battery_capacity_submit_cb(const char *text, void *user_data)
         return;
     }
     write_pref_int(PREF_BATTERY_CAPACITY_MAH, capacity);
-    if(battery_status_label) {
-        snprintf(status, sizeof(status), "%s", ui_tr("Capacity saved"));
-        lv_label_set_text(battery_status_label, status);
-        lv_obj_set_style_text_color(battery_status_label,
-                                    lv_color_hex(0x25C281), 0);
+    keyboard_base_get_state(&base);
+    has_gauge = base.bq27220 || bq27220_read(&probe) == 0;
+    if(has_gauge) {
+        sync_rc = bq27220_set_new_capacity((uint16_t)capacity,
+                                           (uint16_t)capacity);
     }
     battery_update_page();
+    status_ok = sync_rc == 0 || !has_gauge;
+    if(battery_status_label) {
+        snprintf(status, sizeof(status), "%s",
+                 ui_tr(sync_rc == 0 ? "Capacity saved, gauge updated" :
+                                      has_gauge ?
+                                      "Capacity saved, gauge sync failed" :
+                                      "Capacity saved"));
+        lv_label_set_text(battery_status_label, status);
+        lv_obj_set_style_text_color(battery_status_label,
+                                    lv_color_hex(status_ok ? 0x25C281 :
+                                                            0xF5A524),
+                                    0);
+    }
     app_request_fast_refresh();
 }
 
@@ -6698,8 +7083,17 @@ static void battery_update_page(void)
 
     keyboard_base_get_state(&base);
     if(battery_base_label) {
-        lv_label_set_text(battery_base_label, base.scanned ?
-                          base.status : "Keyboard base not scanned");
+        if(base.bq27220) {
+            lv_label_set_text(battery_base_label, ui_tr("BQ27220 Detected"));
+            lv_obj_set_style_text_color(battery_base_label,
+                                        lv_color_hex(0x25C281), 0);
+        } else {
+            lv_label_set_text(battery_base_label,
+                              ui_tr(base.scanned ? "BQ27220 not detected" :
+                                                "Keyboard base not scanned"));
+            lv_obj_set_style_text_color(battery_base_label,
+                                        lv_color_hex(0xF5A524), 0);
+        }
     }
     if(battery_capacity_label) {
         snprintf(text, sizeof(text), "%s  %d mAh", ui_tr("Capacity"),
@@ -7163,11 +7557,14 @@ void ui_bq25896_create(lv_obj_t *scr)
 {
     lv_obj_t *body;
     lv_obj_t *current_title;
+    lv_obj_t *voltage_title;
     int last_current;
     int inset = 20;
     int content_w;
     int button_gap = 16;
     int button_w;
+    int voltage_gap = 10;
+    int voltage_btn_w;
     int group_x;
     int group_w;
     int slider_x;
@@ -7196,6 +7593,10 @@ void ui_bq25896_create(lv_obj_t *scr)
     button_w = (content_w - button_gap) / 2;
     if(button_w > 280) {
         button_w = 280;
+    }
+    voltage_btn_w = (group_w - voltage_gap * 3) / BQ25896_CHG_VOLT_OPTION_COUNT;
+    if(voltage_btn_w < 86) {
+        voltage_btn_w = 86;
     }
 
     ui_label(body, "BQ25896", &lv_font_montserrat_24, 0xF2F5F8);
@@ -7261,28 +7662,44 @@ void ui_bq25896_create(lv_obj_t *scr)
     lv_obj_add_event_cb(bq25896_current_slider, bq25896_current_event_cb,
                         LV_EVENT_RELEASED, NULL);
 
-    ui_info_row_inset(body, 430, "Input limit", "--", 0xF2F5F8, inset);
+    voltage_title = ui_label(body, "Charge voltage",
+                             &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_pos(voltage_title, group_x, 428);
+    lv_obj_set_width(voltage_title, group_w);
+    lv_label_set_long_mode(voltage_title, LV_LABEL_LONG_DOT);
+    for(int i = 0; i < BQ25896_CHG_VOLT_OPTION_COUNT; i++) {
+        char label[16];
+        snprintf(label, sizeof(label), "%dmV", bq25896_voltage_options_mv[i]);
+        bq25896_voltage_btn[i] = ui_command_button(
+            body, group_x + i * (voltage_btn_w + voltage_gap), 482,
+            voltage_btn_w, label, 0x3DA5FF);
+        lv_obj_add_event_cb(bq25896_voltage_btn[i],
+                            bq25896_voltage_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)bq25896_voltage_options_mv[i]);
+    }
+
+    ui_info_row_inset(body, 570, "Input limit", "--", 0xF2F5F8, inset);
     bq25896_input_label = lv_obj_get_child(body,
                                            lv_obj_get_child_count(body) - 1);
-    ui_info_row_inset(body, 484, "Charge voltage", "--", 0xF2F5F8, inset);
+    ui_info_row_inset(body, 624, "Charge voltage", "--", 0xF2F5F8, inset);
     bq25896_voltage_label = lv_obj_get_child(body,
                                              lv_obj_get_child_count(body) - 1);
-    ui_info_row_inset(body, 558, "VBAT", "--", 0x25C281, inset);
+    ui_info_row_inset(body, 698, "VBAT", "--", 0x25C281, inset);
     bq25896_vbat_label = lv_obj_get_child(body,
                                           lv_obj_get_child_count(body) - 1);
-    ui_info_row_inset(body, 612, "VSYS", "--", 0x3DA5FF, inset);
+    ui_info_row_inset(body, 752, "VSYS", "--", 0x3DA5FF, inset);
     bq25896_vsys_label = lv_obj_get_child(body,
                                           lv_obj_get_child_count(body) - 1);
-    ui_info_row_inset(body, 666, "VBUS", "--", 0xF5A524, inset);
+    ui_info_row_inset(body, 806, "VBUS", "--", 0xF5A524, inset);
     bq25896_vbus_label = lv_obj_get_child(body,
                                           lv_obj_get_child_count(body) - 1);
-    ui_info_row_inset(body, 720, "Charge ADC", "--", 0xF97316, inset);
+    ui_info_row_inset(body, 860, "Charge ADC", "--", 0xF97316, inset);
     bq25896_ichg_label = lv_obj_get_child(body,
                                           lv_obj_get_child_count(body) - 1);
-    ui_info_row_inset(body, 774, "NTC", "--", 0x22D3EE, inset);
+    ui_info_row_inset(body, 914, "NTC", "--", 0x22D3EE, inset);
     bq25896_ntc_label = lv_obj_get_child(body,
                                          lv_obj_get_child_count(body) - 1);
-    ui_info_row_inset(body, 828, "Fault", "--", 0xEF4D5A, inset);
+    ui_info_row_inset(body, 968, "Fault", "--", 0xEF4D5A, inset);
     bq25896_fault_label = lv_obj_get_child(body,
                                            lv_obj_get_child_count(body) - 1);
 
@@ -8299,6 +8716,9 @@ void ui_hardware_cleanup(void)
     bq25896_charge_on_btn = NULL;
     bq25896_charge_off_btn = NULL;
     bq25896_current_slider = NULL;
+    for(int i = 0; i < BQ25896_CHG_VOLT_OPTION_COUNT; i++) {
+        bq25896_voltage_btn[i] = NULL;
+    }
     battery_status_label = NULL;
     battery_base_label = NULL;
     battery_soc_label = NULL;
