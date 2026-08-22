@@ -73,6 +73,10 @@ static char nrf_dfu_mode_text[96] = "Idle";
 static char nrf_dfu_current_version[96] = "--";
 static char nrf_dfu_target_version[96] = "--";
 static char nrf_dfu_log_text[NRF_DFU_LOG_TEXT_MAX] = "No log yet";
+static int nrf_dfu_preflight_cache_valid;
+static int nrf_dfu_preflight_cache_rc;
+static char nrf_dfu_preflight_cache_message[192];
+static char nrf_dfu_preflight_cache_version[96];
 
 static void nrf_dfu_update_ui(void);
 
@@ -448,14 +452,55 @@ static int nrf_dfu_version_reports_uart_dfu(const char *version)
     return strstr(lower, "dfu") != NULL;
 }
 
+static int nrf_dfu_preflight_cache_get(char *message, size_t message_len)
+{
+    int rc = 999;
+
+    pthread_mutex_lock(&nrf_dfu_lock);
+    if(nrf_dfu_preflight_cache_valid) {
+        rc = nrf_dfu_preflight_cache_rc;
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s",
+                     nrf_dfu_preflight_cache_message);
+        }
+    }
+    pthread_mutex_unlock(&nrf_dfu_lock);
+    return rc;
+}
+
+static void nrf_dfu_preflight_cache_set(int rc, const char *message,
+                                        const char *version)
+{
+    pthread_mutex_lock(&nrf_dfu_lock);
+    nrf_dfu_preflight_cache_valid = 1;
+    nrf_dfu_preflight_cache_rc = rc;
+    snprintf(nrf_dfu_preflight_cache_message,
+             sizeof(nrf_dfu_preflight_cache_message), "%s",
+             message ? message : "");
+    snprintf(nrf_dfu_preflight_cache_version,
+             sizeof(nrf_dfu_preflight_cache_version), "%s",
+             version ? version : "");
+    if(version && version[0]) {
+        snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version),
+                 "%s", version);
+    }
+    pthread_mutex_unlock(&nrf_dfu_lock);
+}
+
 int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
 {
     char version[96];
     char response[768];
     int attempt;
+    int cached_rc;
 
     if(message && message_len > 0U) {
         message[0] = '\0';
+    }
+
+    cached_rc = nrf_dfu_preflight_cache_get(message, message_len);
+    if(cached_rc != 999) {
+        return cached_rc;
     }
 
     if(access(NRF_DFU_TOOL, X_OK) != 0) {
@@ -488,9 +533,13 @@ int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
             snprintf(message, message_len, "%s",
                      "Update the nRF52840 bootloader before using DFU.");
         }
+        nrf_dfu_preflight_cache_set(-2,
+                                    "Update the nRF52840 bootloader before using DFU.",
+                                    version);
         return -2;
     }
 
+    nrf_dfu_preflight_cache_set(0, "", version);
     return 0;
 }
 
