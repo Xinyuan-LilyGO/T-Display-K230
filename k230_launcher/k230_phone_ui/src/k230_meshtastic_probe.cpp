@@ -136,6 +136,7 @@
 #define MESHTASTIC_FLRC_VOICE_TX_START_DELAY_US 220000ULL
 #define MESHTASTIC_FLRC_VOICE_PACKET_GAP_US 2500U
 #define MESHTASTIC_FLRC_VOICE_START_REPEAT 3U
+#define MESHTASTIC_FLRC_VOICE_DATA_REPEAT 2U
 #define MESHTASTIC_FLRC_VOICE_DONE_REPEAT 3U
 #define MESHTASTIC_FLRC_MEDIA_KIND_PHOTO_JPEG 0x81U
 #define MESHTASTIC_FLRC_PHOTO_MAX_W 680U
@@ -14874,14 +14875,18 @@ static bool mesh_flrc_voice_tx_session(PhysicalLayer *radio, chip_type_t chip,
                                     payload_len,
                                     frame.flrc_voice_duration_ms,
                                     frame.flrc_voice_codec_mode);
-        state = mesh_flrc_voice_fast_transmit(lr2021, packet, sizeof(packet));
-        if(state != RADIOLIB_ERR_NONE) {
-            ok = false;
-            daemon_event("FLRC voice TX data seq=%u/%u failed state=%d %s",
-                         seq + 1U, total, state, error_name(state));
-            break;
+        for(unsigned r = 0; r < MESHTASTIC_FLRC_VOICE_DATA_REPEAT; r++) {
+            state = mesh_flrc_voice_fast_transmit(lr2021, packet,
+                                                  sizeof(packet));
+            if(state != RADIOLIB_ERR_NONE) {
+                ok = false;
+                daemon_event("FLRC voice TX data seq=%u/%u repeat=%u failed state=%d %s",
+                             seq + 1U, total, r + 1U, state,
+                             error_name(state));
+                break;
+            }
+            usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
         }
-        usleep(MESHTASTIC_FLRC_VOICE_PACKET_GAP_US);
     }
     for(unsigned r = 0; ok && r < MESHTASTIC_FLRC_VOICE_DONE_REPEAT; r++) {
         mesh_flrc_voice_make_packet(packet, sizeof(packet),
@@ -19291,17 +19296,106 @@ static void default_node_name(std::string *name)
     *name = buf;
 }
 
-static void default_from_node(probe_options_t *opts)
+static bool default_mesh_node_name_is_auto(const std::string &name)
+{
+    if(name.empty() || name == "k230-t-display" ||
+       name == "nRF52840" || name == "K230 nRF52840 AT") {
+        return true;
+    }
+    if(name.size() == 9U && name.compare(0, 5, "k230-") == 0) {
+        for(size_t i = 5U; i < 9U; i++) {
+            if(!isxdigit((unsigned char)name[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+static uint32_t default_from_node_from_identity(void)
 {
     uint32_t value;
 
-    if(!opts || opts->from_node != 0U) {
+    if(!mesh_pki_public_key_available()) {
+        return 0U;
+    }
+    value = ((uint32_t)mesh_pki_identity.public_key[28] << 24U) |
+            ((uint32_t)mesh_pki_identity.public_key[29] << 16U) |
+            ((uint32_t)mesh_pki_identity.public_key[30] << 8U) |
+            (uint32_t)mesh_pki_identity.public_key[31];
+    value |= 0x80000000U;
+    if(value == 0U || value == MESHTASTIC_NODENUM_BROADCAST) {
+        return 0U;
+    }
+    return value;
+}
+
+static uint32_t default_from_node_from_netdev(const char *ifname)
+{
+    char path[96];
+    char line[96];
+    unsigned octets[6];
+    FILE *fp;
+    uint32_t value;
+
+    if(!ifname) {
+        return 0U;
+    }
+    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
+    fp = fopen(path, "r");
+    if(!fp) {
+        return 0U;
+    }
+    if(!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return 0U;
+    }
+    fclose(fp);
+    if(sscanf(line, "%x:%x:%x:%x:%x:%x",
+              &octets[0], &octets[1], &octets[2],
+              &octets[3], &octets[4], &octets[5]) != 6) {
+        return 0U;
+    }
+    value = 0x80000000U |
+            ((octets[2] & 0xffU) << 24U) |
+            ((octets[3] & 0xffU) << 16U) |
+            ((octets[4] & 0xffU) << 8U) |
+            (octets[5] & 0xffU);
+    if(value == 0U || value == MESHTASTIC_NODENUM_BROADCAST) {
+        return 0U;
+    }
+    return value;
+}
+
+static void default_from_node(probe_options_t *opts)
+{
+    uint32_t value;
+    bool force_auto;
+
+    if(!opts) {
         return;
     }
-    value = djb2_hash(opts->node_name.c_str());
-    value ^= 0x4b230000U;
+    force_auto = default_mesh_node_name_is_auto(opts->node_name);
+    if(opts->from_node != 0U && !force_auto) {
+        return;
+    }
+    value = default_from_node_from_identity();
+    if(value == 0U) {
+        value = default_from_node_from_netdev("wlan0");
+    }
+    if(value == 0U) {
+        value = default_from_node_from_netdev("eth0");
+    }
+    if(value == 0U) {
+        value = djb2_hash(opts->node_name.c_str()) ^ 0x4b230000U;
+    }
     if(value == 0U || value == MESHTASTIC_NODENUM_BROADCAST) {
         value = 0x4b230001U;
+    }
+    if(opts->from_node != 0U && opts->from_node != value) {
+        daemon_event("Meshtastic default node id migrated node=%s old=0x%08x new=0x%08x",
+                     opts->node_name.c_str(), opts->from_node, value);
     }
     opts->from_node = value;
 }
@@ -19834,13 +19928,13 @@ int main(int argc, char **argv)
             return run_daemon_client(opts);
         }
     }
-    phoneapi_load_meshtastic_channel_slots(&opts);
-    default_node_name(&opts.node_name);
-    default_from_node(&opts);
     if(opts.mesh_mode && !mesh_pki_load_or_create_identity()) {
         fprintf(stderr, "Meshtastic PKI identity unavailable\n");
         return 2;
     }
+    phoneapi_load_meshtastic_channel_slots(&opts);
+    default_node_name(&opts.node_name);
+    default_from_node(&opts);
     if(opts.mesh_mode) {
         if(meshtastic_node_is_broadcast(opts.to_node)) {
             opts.want_ack = false;

@@ -673,6 +673,112 @@ static int mesh_read_first_line(const char *path, char *buf, size_t len)
     return buf[0] ? 0 : -1;
 }
 
+static int mesh_hex_nibble(int c)
+{
+    if(c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if(c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if(c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static int mesh_auto_from_node_from_identity(char *buf, size_t len)
+{
+    char line[192];
+    char public_hex[80] = "";
+    FILE *fp;
+    size_t hex_len;
+    uint32_t value = 0;
+
+    if(!buf || len == 0U) {
+        return -1;
+    }
+    fp = fopen("/root/.config/k230_phone_ui/meshtastic_identity.tsv", "r");
+    if(!fp) {
+        return -1;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        char *value_text;
+
+        line[strcspn(line, "\r\n")] = '\0';
+        if(strncmp(line, "public\t", 7) != 0) {
+            continue;
+        }
+        value_text = line + 7;
+        snprintf(public_hex, sizeof(public_hex), "%s", value_text);
+        break;
+    }
+    fclose(fp);
+    hex_len = strlen(public_hex);
+    if(hex_len < 8U) {
+        return -1;
+    }
+    for(size_t i = hex_len - 8U; i < hex_len; i++) {
+        int nibble = mesh_hex_nibble((unsigned char)public_hex[i]);
+        if(nibble < 0) {
+            return -1;
+        }
+        value = (value << 4U) | (uint32_t)nibble;
+    }
+    value |= 0x80000000U;
+    if(value == 0U || value == 0xffffffffU) {
+        return -1;
+    }
+    snprintf(buf, len, "0x%08x", value);
+    return 0;
+}
+
+static int mesh_auto_from_node_from_netdev(const char *ifname, char *buf,
+                                           size_t len)
+{
+    char path[96];
+    char mac[64];
+    unsigned octets[6];
+    uint32_t value;
+
+    if(!ifname || !buf || len == 0U) {
+        return -1;
+    }
+    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
+    if(mesh_read_first_line(path, mac, sizeof(mac)) != 0) {
+        return -1;
+    }
+    if(sscanf(mac, "%x:%x:%x:%x:%x:%x",
+              &octets[0], &octets[1], &octets[2],
+              &octets[3], &octets[4], &octets[5]) != 6) {
+        return -1;
+    }
+    value = 0x80000000U |
+            ((octets[2] & 0xffU) << 24U) |
+            ((octets[3] & 0xffU) << 16U) |
+            ((octets[4] & 0xffU) << 8U) |
+            (octets[5] & 0xffU);
+    if(value == 0U || value == 0xffffffffU) {
+        return -1;
+    }
+    snprintf(buf, len, "0x%08x", value);
+    return 0;
+}
+
+static int mesh_auto_from_node(char *buf, size_t len)
+{
+    if(mesh_auto_from_node_from_identity(buf, len) == 0) {
+        return 0;
+    }
+    if(mesh_auto_from_node_from_netdev("wlan0", buf, len) == 0 ||
+       mesh_auto_from_node_from_netdev("eth0", buf, len) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
+static int mesh_node_name_is_default(const char *name);
+
 static void mesh_auto_node_name(char *buf, size_t len)
 {
     char mac[64];
@@ -699,6 +805,18 @@ static void mesh_auto_node_name(char *buf, size_t len)
         snprintf(buf, len, "k230-%s", compact + out - 4U);
     } else {
         snprintf(buf, len, "k230-t-display");
+    }
+}
+
+static void mesh_apply_default_auto_from_node(void)
+{
+    char auto_from[24];
+
+    if(!mesh_node_name_is_default(mesh_node_name)) {
+        return;
+    }
+    if(mesh_auto_from_node(auto_from, sizeof(auto_from)) == 0) {
+        snprintf(mesh_from_node, sizeof(mesh_from_node), "%s", auto_from);
     }
 }
 
@@ -1533,6 +1651,7 @@ static void mesh_load_profile_prefs(void)
     }
     ui_prefs_get(MESHTASTIC_PREF_FROM, mesh_from_node,
                  sizeof(mesh_from_node), "0");
+    mesh_apply_default_auto_from_node();
     ui_prefs_get(MESHTASTIC_PREF_TO, mesh_to_node,
                  sizeof(mesh_to_node), "0xffffffff");
     ui_prefs_get(MESHTASTIC_PREF_HOP, mesh_hop_limit,
@@ -4800,6 +4919,7 @@ static int mesh_channel_profile_apply_file_ex(const char *path,
             snprintf(mesh_from_node, sizeof(mesh_from_node), "0");
         }
     }
+    mesh_apply_default_auto_from_node();
     if(mesh_channel_profile_read_value(path, "to", value, sizeof(value),
                                        "0xffffffff") == 0) {
         if(mesh_normalize_to_node_text(value, mesh_to_node,
