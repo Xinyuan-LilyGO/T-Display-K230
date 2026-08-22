@@ -63,7 +63,8 @@ static void usage(const char *argv0)
 {
     fprintf(stderr,
             "Usage: %s [-d video] [-w width] [-h height] [-f NV12|NV16] "
-            "-o photo.ppm [-t thumb.rgb565] [--thumb-width N] [--thumb-height N]\n"
+            "-o photo.ppm|photo.jpg [-t thumb.rgb565] "
+            "[--thumb-width N] [--thumb-height N]\n"
             "       %s ... --stream-dir DIR [--stream-count N] [--stream-duration SEC]\n",
             argv0,
             argv0);
@@ -601,6 +602,72 @@ static int save_thumb_jpeg_rotated(const char *path, const uint8_t *frame,
     return 0;
 }
 
+static int save_jpeg_rotated(const char *path, const uint8_t *frame,
+                             const capture_options_t *opts)
+{
+    FILE *fp = fopen(path, "wb");
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    unsigned out_w = (opts->rotate_degrees == 90 ||
+                      opts->rotate_degrees == 270) ? opts->height :
+                                                     opts->width;
+    unsigned out_h = (opts->rotate_degrees == 90 ||
+                      opts->rotate_degrees == 270) ? opts->width :
+                                                     opts->height;
+    uint8_t *row;
+
+    if(!fp) {
+        fprintf(stderr, "open %s failed: %s\n", path, strerror(errno));
+        return -1;
+    }
+    row = (uint8_t *)malloc((size_t)out_w * 3U);
+    if(!row) {
+        fclose(fp);
+        return -1;
+    }
+
+    memset(&cinfo, 0, sizeof(cinfo));
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    jpeg_stdio_dest(&cinfo, fp);
+    cinfo.image_width = out_w;
+    cinfo.image_height = out_h;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, (int)opts->jpeg_quality, TRUE);
+    cinfo.optimize_coding = TRUE;
+    jpeg_start_compress(&cinfo, TRUE);
+
+    while(cinfo.next_scanline < cinfo.image_height) {
+        unsigned y = cinfo.next_scanline;
+        JSAMPROW row_pointer[1];
+
+        for(unsigned x = 0; x < out_w; x++) {
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+
+            sample_transformed_yuv(frame, opts, out_w, out_h, x, y,
+                                   &r, &g, &b);
+            row[x * 3U + 0U] = r;
+            row[x * 3U + 1U] = g;
+            row[x * 3U + 2U] = b;
+        }
+        row_pointer[0] = row;
+        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+    }
+
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
+    free(row);
+    if(fclose(fp) != 0) {
+        fprintf(stderr, "close %s failed: %s\n", path, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 static int ends_with(const char *text, const char *suffix)
 {
     size_t text_len;
@@ -764,7 +831,12 @@ static int capture_frame(const capture_options_t *opts)
         }
 
         frame = (const uint8_t *)ctx.buffers[ctx.vbuffer.index].mmap;
-        if(save_ppm_rotated(opts->output_path, frame, opts) != 0) {
+        if(ends_with(opts->output_path, ".jpg") ||
+           ends_with(opts->output_path, ".jpeg")) {
+            if(save_jpeg_rotated(opts->output_path, frame, opts) != 0) {
+                goto out_release;
+            }
+        } else if(save_ppm_rotated(opts->output_path, frame, opts) != 0) {
             goto out_release;
         }
         if(opts->thumb_path &&

@@ -12707,6 +12707,24 @@ static void mesh_photo_apply_thumb(lv_obj_t *canvas, const char *thumb_path,
     lv_obj_invalidate(canvas);
 }
 
+static size_t mesh_photo_source_ext_len(const char *name)
+{
+    size_t len;
+
+    if(!name) {
+        return 0U;
+    }
+    len = strlen(name);
+    if((len >= 4U && strcmp(name + len - 4U, ".ppm") == 0) ||
+       (len >= 4U && strcmp(name + len - 4U, ".jpg") == 0)) {
+        return 4U;
+    }
+    if(len >= 5U && strcmp(name + len - 5U, ".jpeg") == 0) {
+        return 5U;
+    }
+    return 0U;
+}
+
 static int mesh_photo_picker_scan(void)
 {
     DIR *dir = opendir(MESHTASTIC_PHOTO_DIR);
@@ -12721,13 +12739,15 @@ static int mesh_photo_picker_scan(void)
         char thumb_path[192];
         struct stat st;
         size_t len;
+        size_t ext_len;
         int insert_at;
 
         if(!ent) {
             break;
         }
         len = strlen(ent->d_name);
-        if(len < 5U || strcmp(ent->d_name + len - 4U, ".ppm") != 0) {
+        ext_len = mesh_photo_source_ext_len(ent->d_name);
+        if(ext_len == 0U) {
             continue;
         }
         snprintf(path, sizeof(path), "%s/%s", MESHTASTIC_PHOTO_DIR,
@@ -12736,7 +12756,7 @@ static int mesh_photo_picker_scan(void)
             continue;
         }
         snprintf(thumb_path, sizeof(thumb_path), "%s/%.*s.thumb.rgb565",
-                 MESHTASTIC_PHOTO_DIR, (int)(len - 4U), ent->d_name);
+                 MESHTASTIC_PHOTO_DIR, (int)(len - ext_len), ent->d_name);
         insert_at = mesh_photo_item_count;
         while(insert_at > 0 &&
               mesh_photo_items[insert_at - 1].mtime < st.st_mtime) {

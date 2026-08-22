@@ -5,6 +5,7 @@
 #include <linux/input.h>
 #include <pthread.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -32,6 +33,7 @@
 #if LV_USE_FFMPEG
 #include <lvgl/src/libs/ffmpeg/lv_ffmpeg.h>
 #endif
+#include <jpeglib.h>
 #include <png.h>
 #include <v4l2-drm.h>
 
@@ -430,6 +432,7 @@ static uint32_t motion_update_count;
 static uint8_t camera_stored_thumb_buf[CAMERA_STORED_THUMB_BYTES];
 static uint8_t camera_preview_buf[CAMERA_PREVIEW_VIEW_BYTES];
 static uint8_t camera_preview_frame_buf[CAMERA_PREVIEW_VIEW_BYTES];
+static uint8_t camera_capture_frame_buf[CAMERA_PREVIEW_VIEW_BYTES];
 static uint8_t camera_gallery_buf[CAMERA_GALLERY_VIEW_BYTES];
 static uint8_t camera_gallery_thumb_buf[CAMERA_GALLERY_MAX_ITEMS][CAMERA_GALLERY_THUMB_BYTES];
 static camera_gallery_item_t camera_gallery_items[CAMERA_GALLERY_MAX_ITEMS];
@@ -462,6 +465,9 @@ static volatile int camera_busy;
 static volatile int camera_result_ready;
 static int camera_preview_frame_ready;
 static int camera_preview_have_frame;
+static int camera_capture_frame_valid;
+static unsigned camera_capture_frame_w;
+static unsigned camera_capture_frame_h;
 static int camera_preview_active;
 static int camera_preview_last_result;
 static uint32_t camera_preview_frame_count;
@@ -8532,6 +8538,18 @@ static int camera_path_has_suffix(const char *path, const char *suffix)
     return strcmp(path + path_len - suffix_len, suffix) == 0;
 }
 
+static size_t camera_photo_ext_len(const char *name)
+{
+    if(camera_path_has_suffix(name, ".ppm") ||
+       camera_path_has_suffix(name, ".jpg")) {
+        return 4U;
+    }
+    if(camera_path_has_suffix(name, ".jpeg")) {
+        return 5U;
+    }
+    return 0U;
+}
+
 static void camera_fill_rgb565(uint8_t *dst, unsigned width, unsigned height,
                                uint32_t color)
 {
@@ -8643,6 +8661,163 @@ static void camera_scale_stored_thumb_contain(uint8_t *dst, unsigned dst_w,
             dst[dst_off + 1] = camera_stored_thumb_buf[src_off + 1];
         }
     }
+}
+
+typedef struct {
+    struct jpeg_error_mgr pub;
+    jmp_buf setjmp_buffer;
+} camera_jpeg_error_mgr_t;
+
+static void camera_jpeg_error_exit(j_common_ptr cinfo)
+{
+    camera_jpeg_error_mgr_t *err = (camera_jpeg_error_mgr_t *)cinfo->err;
+    longjmp(err->setjmp_buffer, 1);
+}
+
+static int camera_save_rgb565_jpeg(const char *path, const uint8_t *src,
+                                   unsigned width, unsigned height,
+                                   int quality)
+{
+    FILE *fp = NULL;
+    struct jpeg_compress_struct cinfo;
+    camera_jpeg_error_mgr_t jerr;
+    uint8_t *row = NULL;
+    int rc = -1;
+
+    if(!path || !src || width == 0U || height == 0U) {
+        return -1;
+    }
+
+    fp = fopen(path, "wb");
+    if(!fp) {
+        return -1;
+    }
+    row = malloc((size_t)width * 3U);
+    if(!row) {
+        goto out_close;
+    }
+
+    memset(&cinfo, 0, sizeof(cinfo));
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = camera_jpeg_error_exit;
+    if(setjmp(jerr.setjmp_buffer)) {
+        jpeg_destroy_compress(&cinfo);
+        goto out_close;
+    }
+
+    jpeg_create_compress(&cinfo);
+    jpeg_stdio_dest(&cinfo, fp);
+    cinfo.image_width = width;
+    cinfo.image_height = height;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, quality, TRUE);
+    cinfo.optimize_coding = TRUE;
+    jpeg_start_compress(&cinfo, TRUE);
+
+    while(cinfo.next_scanline < cinfo.image_height) {
+        unsigned y = cinfo.next_scanline;
+        JSAMPROW row_pointer[1];
+
+        for(unsigned x = 0; x < width; x++) {
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+
+            camera_rgb565_to_rgb(src, width, x, y, &r, &g, &b);
+            row[x * 3U + 0U] = r;
+            row[x * 3U + 1U] = g;
+            row[x * 3U + 2U] = b;
+        }
+        row_pointer[0] = row;
+        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+    }
+
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
+    rc = 0;
+
+out_close:
+    free(row);
+    if(fclose(fp) != 0) {
+        rc = -1;
+    }
+    if(rc != 0) {
+        unlink(path);
+    }
+    return rc;
+}
+
+static int camera_save_rgb565_thumb_contain(const char *path,
+                                            const uint8_t *src,
+                                            unsigned src_w,
+                                            unsigned src_h,
+                                            unsigned dst_w,
+                                            unsigned dst_h)
+{
+    FILE *fp;
+    unsigned draw_w = dst_w;
+    unsigned draw_h = dst_h;
+    unsigned offset_x;
+    unsigned offset_y;
+    uint8_t black[2] = {0, 0};
+
+    if(!path || !src || src_w == 0U || src_h == 0U ||
+       dst_w == 0U || dst_h == 0U) {
+        return -1;
+    }
+    fp = fopen(path, "wb");
+    if(!fp) {
+        return -1;
+    }
+
+    if((uint64_t)src_w * dst_h > (uint64_t)src_h * dst_w) {
+        draw_h = (unsigned)(((uint64_t)src_h * dst_w) / src_w);
+        if(draw_h < 1U) {
+            draw_h = 1U;
+        }
+    } else {
+        draw_w = (unsigned)(((uint64_t)src_w * dst_h) / src_h);
+        if(draw_w < 1U) {
+            draw_w = 1U;
+        }
+    }
+    offset_x = (dst_w - draw_w) / 2U;
+    offset_y = (dst_h - draw_h) / 2U;
+
+    for(unsigned y = 0; y < dst_h; y++) {
+        for(unsigned x = 0; x < dst_w; x++) {
+            const uint8_t *pixel = black;
+
+            if(x >= offset_x && x < offset_x + draw_w &&
+               y >= offset_y && y < offset_y + draw_h) {
+                unsigned sx = (unsigned)(((uint64_t)(x - offset_x) *
+                                           src_w) / draw_w);
+                unsigned sy = (unsigned)(((uint64_t)(y - offset_y) *
+                                           src_h) / draw_h);
+
+                if(sx >= src_w) {
+                    sx = src_w - 1U;
+                }
+                if(sy >= src_h) {
+                    sy = src_h - 1U;
+                }
+                pixel = src + ((size_t)sy * src_w + sx) * 2U;
+            }
+            if(fwrite(pixel, 1, 2, fp) != 2) {
+                fclose(fp);
+                unlink(path);
+                return -1;
+            }
+        }
+    }
+
+    if(fclose(fp) != 0) {
+        unlink(path);
+        return -1;
+    }
+    return 0;
 }
 
 static int camera_decode_png_to_rgb565(const char *path, uint8_t *dst,
@@ -8855,6 +9030,162 @@ out:
     return rc;
 }
 
+static int camera_decode_jpeg_to_rgb565(const char *path, uint8_t *dst,
+                                        unsigned dst_w, unsigned dst_h,
+                                        int contain)
+{
+    FILE *fp = NULL;
+    struct jpeg_decompress_struct cinfo;
+    camera_jpeg_error_mgr_t jerr;
+    uint8_t *image = NULL;
+    int created = 0;
+    int rc = -1;
+
+    if(!path || !dst || dst_w == 0 || dst_h == 0) {
+        return -1;
+    }
+
+    fp = fopen(path, "rb");
+    if(!fp) {
+        return -1;
+    }
+
+    memset(&cinfo, 0, sizeof(cinfo));
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = camera_jpeg_error_exit;
+    if(setjmp(jerr.setjmp_buffer)) {
+        goto out;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    created = 1;
+    jpeg_stdio_src(&cinfo, fp);
+    jpeg_read_header(&cinfo, TRUE);
+    cinfo.out_color_space = JCS_RGB;
+    jpeg_start_decompress(&cinfo);
+
+    if(cinfo.output_width == 0 || cinfo.output_height == 0 ||
+       cinfo.output_width > 8192U || cinfo.output_height > 8192U ||
+       cinfo.output_components != 3) {
+        goto out;
+    }
+
+    image = malloc((size_t)cinfo.output_width * cinfo.output_height * 3U);
+    if(!image) {
+        goto out;
+    }
+    while(cinfo.output_scanline < cinfo.output_height) {
+        JSAMPROW row[1];
+
+        row[0] = image + (size_t)cinfo.output_scanline *
+                 cinfo.output_width * 3U;
+        jpeg_read_scanlines(&cinfo, row, 1);
+    }
+    jpeg_finish_decompress(&cinfo);
+
+    if(contain) {
+        unsigned src_w = cinfo.output_width;
+        unsigned src_h = cinfo.output_height;
+        unsigned draw_w = dst_w;
+        unsigned draw_h = dst_h;
+        unsigned offset_x;
+        unsigned offset_y;
+
+        camera_fill_rgb565(dst, dst_w, dst_h, 0x05070A);
+        if((uint64_t)src_w * dst_h > (uint64_t)src_h * dst_w) {
+            draw_h = (unsigned)(((uint64_t)src_h * dst_w) / src_w);
+            if(draw_h < 1U) {
+                draw_h = 1U;
+            }
+        } else {
+            draw_w = (unsigned)(((uint64_t)src_w * dst_h) / src_h);
+            if(draw_w < 1U) {
+                draw_w = 1U;
+            }
+        }
+        offset_x = (dst_w - draw_w) / 2U;
+        offset_y = (dst_h - draw_h) / 2U;
+
+        for(unsigned y = 0; y < draw_h; y++) {
+            unsigned src_y = (unsigned)(((uint64_t)y * src_h) / draw_h);
+
+            if(src_y >= src_h) {
+                src_y = src_h - 1U;
+            }
+            for(unsigned x = 0; x < draw_w; x++) {
+                unsigned src_x = (unsigned)(((uint64_t)x * src_w) / draw_w);
+                const uint8_t *p;
+
+                if(src_x >= src_w) {
+                    src_x = src_w - 1U;
+                }
+                p = image + ((size_t)src_y * src_w + src_x) * 3U;
+                camera_write_rgb565(dst, dst_w, offset_x + x, offset_y + y,
+                                    p[0], p[1], p[2]);
+            }
+        }
+    } else {
+        unsigned src_w = cinfo.output_width;
+        unsigned src_h = cinfo.output_height;
+        unsigned src_x0 = 0;
+        unsigned src_y0 = 0;
+        unsigned visible_w = src_w;
+        unsigned visible_h = src_h;
+
+        if((uint64_t)src_w * dst_h > (uint64_t)src_h * dst_w) {
+            visible_w = (unsigned)(((uint64_t)src_h * dst_w) / dst_h);
+            if(visible_w < 1U) {
+                visible_w = 1U;
+            }
+            if(visible_w > src_w) {
+                visible_w = src_w;
+            }
+            src_x0 = (src_w - visible_w) / 2U;
+        } else {
+            visible_h = (unsigned)(((uint64_t)src_w * dst_h) / dst_w);
+            if(visible_h < 1U) {
+                visible_h = 1U;
+            }
+            if(visible_h > src_h) {
+                visible_h = src_h;
+            }
+            src_y0 = (src_h - visible_h) / 2U;
+        }
+
+        for(unsigned y = 0; y < dst_h; y++) {
+            unsigned src_y = src_y0 +
+                             (unsigned)(((uint64_t)y * visible_h) / dst_h);
+
+            if(src_y >= src_h) {
+                src_y = src_h - 1U;
+            }
+            for(unsigned x = 0; x < dst_w; x++) {
+                unsigned src_x = src_x0 +
+                                 (unsigned)(((uint64_t)x * visible_w) / dst_w);
+                const uint8_t *p;
+
+                if(src_x >= src_w) {
+                    src_x = src_w - 1U;
+                }
+                p = image + ((size_t)src_y * src_w + src_x) * 3U;
+                camera_write_rgb565(dst, dst_w, x, y, p[0], p[1], p[2]);
+            }
+        }
+    }
+
+    rc = 0;
+
+out:
+    free(image);
+    if(created) {
+        jpeg_destroy_decompress(&cinfo);
+    }
+    if(fp) {
+        fclose(fp);
+    }
+    return rc;
+}
+
 static void camera_apply_canvas(lv_obj_t *canvas, lv_obj_t *hint,
                                 const char *thumb_path, uint8_t *buf,
                                 unsigned width, unsigned height,
@@ -8862,17 +9193,23 @@ static void camera_apply_canvas(lv_obj_t *canvas, lv_obj_t *hint,
 {
     int has_image;
     int is_png;
+    int is_jpeg;
 
     if(!canvas) {
         return;
     }
 
     is_png = camera_path_has_suffix(thumb_path, ".png");
-    has_image = !is_png && camera_read_stored_thumb(thumb_path) == 0;
+    is_jpeg = camera_path_has_suffix(thumb_path, ".jpg") ||
+              camera_path_has_suffix(thumb_path, ".jpeg");
+    has_image = !is_png && !is_jpeg && camera_read_stored_thumb(thumb_path) == 0;
     if(has_image && contain) {
         camera_scale_stored_thumb_contain(buf, width, height);
     } else if(has_image) {
         camera_scale_stored_thumb_cover(buf, width, height);
+    } else if(is_jpeg && camera_decode_jpeg_to_rgb565(thumb_path, buf, width,
+                                                      height, contain) == 0) {
+        has_image = 1;
     } else if(is_png && camera_decode_png_to_rgb565(thumb_path, buf, width,
                                                     height, contain) == 0) {
         has_image = 1;
@@ -8989,8 +9326,9 @@ static int camera_find_latest_capture(char *photo, size_t photo_len,
         char thumb_path[192];
         struct stat st;
         size_t len = strlen(ent->d_name);
+        size_t ext_len = camera_photo_ext_len(ent->d_name);
 
-        if(len < 5 || strcmp(ent->d_name + len - 4, ".ppm") != 0) {
+        if(ext_len == 0U) {
             continue;
         }
 
@@ -9000,7 +9338,7 @@ static int camera_find_latest_capture(char *photo, size_t photo_len,
         }
 
         snprintf(thumb_path, sizeof(thumb_path), "%s/%.*s.thumb.rgb565",
-                 CAMERA_PHOTO_DIR, (int)(len - 4), ent->d_name);
+                 CAMERA_PHOTO_DIR, (int)(len - ext_len), ent->d_name);
 
         if(st.st_mtime >= best_time) {
             best_time = st.st_mtime;
@@ -9072,7 +9410,7 @@ static void camera_gallery_scan_dir(const char *dir_path, int screenshot_dir)
             if(len < 5 || strcmp(ent->d_name + len - 4, ".png") != 0) {
                 continue;
             }
-        } else if(len < 5 || strcmp(ent->d_name + len - 4, ".ppm") != 0) {
+        } else if(camera_photo_ext_len(ent->d_name) == 0U) {
             continue;
         }
 
@@ -9084,8 +9422,9 @@ static void camera_gallery_scan_dir(const char *dir_path, int screenshot_dir)
         if(screenshot_dir) {
             snprintf(thumb_path, sizeof(thumb_path), "%s", path);
         } else {
+            size_t ext_len = camera_photo_ext_len(ent->d_name);
             snprintf(thumb_path, sizeof(thumb_path), "%s/%.*s.thumb.rgb565",
-                     dir_path, (int)(len - 4), ent->d_name);
+                     dir_path, (int)(len - ext_len), ent->d_name);
         }
 
         camera_gallery_insert_item(path, thumb_path, st.st_mtime);
@@ -9251,6 +9590,13 @@ static void *camera_preview_thread_cb(void *arg)
                 (const uint8_t *)ctx.buffers[ctx.vbuffer.index].mmap,
                 CAMERA_PREVIEW_W, CAMERA_PREVIEW_H, 0,
                 local_buf, view_w, view_h, rotate_preview, flip_h, flip_v);
+            pthread_mutex_lock(&camera_lock);
+            memcpy(camera_capture_frame_buf, local_buf, view_bytes);
+            camera_capture_frame_w = view_w;
+            camera_capture_frame_h = view_h;
+            camera_capture_frame_valid = 1;
+            pthread_mutex_unlock(&camera_lock);
+
             camera_face_submit_frame(local_buf, view_w, view_h);
             detected_faces = camera_overlay_cached_face_boxes(local_buf, view_w,
                                                               view_h);
@@ -9330,6 +9676,9 @@ static void camera_start_preview(void)
     camera_preview_active = 0;
     camera_preview_last_result = -1;
     camera_preview_frame_count = 0;
+    camera_capture_frame_valid = 0;
+    camera_capture_frame_w = 0;
+    camera_capture_frame_h = 0;
     snprintf(camera_preview_status_text, sizeof(camera_preview_status_text),
              "Starting live preview");
     camera_result_ready = 1;
@@ -9427,9 +9776,18 @@ static void camera_update_visible_state(void)
     if(camera_gallery_canvas) {
         unsigned gallery_w = camera_gallery_view_width();
         unsigned gallery_h = camera_gallery_view_height();
+        const char *gallery_image = thumb;
 
-        camera_apply_canvas(camera_gallery_canvas, camera_gallery_hint_label, thumb,
-                            camera_gallery_buf, gallery_w, gallery_h, 1);
+        if(camera_gallery_view_open &&
+           (camera_path_has_suffix(photo, ".jpg") ||
+            camera_path_has_suffix(photo, ".jpeg") ||
+            camera_path_has_suffix(photo, ".png"))) {
+            gallery_image = photo;
+        }
+
+        camera_apply_canvas(camera_gallery_canvas, camera_gallery_hint_label,
+                            gallery_image, camera_gallery_buf, gallery_w,
+                            gallery_h, 1);
     }
 }
 
@@ -9458,74 +9816,127 @@ static void camera_make_capture_paths(char *photo, size_t photo_len,
 
     localtime_r(&now, &tm_now);
     strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tm_now);
-    snprintf(photo, photo_len, "%s/IMG_%s.ppm", CAMERA_PHOTO_DIR, stamp);
+    snprintf(photo, photo_len, "%s/IMG_%s.jpg", CAMERA_PHOTO_DIR, stamp);
     snprintf(thumb, thumb_len, "%s/IMG_%s.thumb.rgb565", CAMERA_PHOTO_DIR, stamp);
+}
+
+static int camera_copy_latest_capture_frame(uint8_t **frame,
+                                            unsigned *width,
+                                            unsigned *height)
+{
+    if(!frame || !width || !height) {
+        return -1;
+    }
+    *frame = NULL;
+    *width = 0;
+    *height = 0;
+
+    for(unsigned attempt = 0; attempt < 24U; attempt++) {
+        unsigned w;
+        unsigned h;
+        size_t bytes;
+        uint8_t *copy;
+
+        pthread_mutex_lock(&camera_lock);
+        w = camera_capture_frame_w;
+        h = camera_capture_frame_h;
+        if(!camera_capture_frame_valid || w == 0U || h == 0U ||
+           (size_t)w * h * 2U > CAMERA_PREVIEW_VIEW_BYTES) {
+            pthread_mutex_unlock(&camera_lock);
+            usleep(50000);
+            continue;
+        }
+        bytes = (size_t)w * h * 2U;
+        copy = malloc(bytes);
+        if(!copy) {
+            pthread_mutex_unlock(&camera_lock);
+            return -1;
+        }
+        memcpy(copy, camera_capture_frame_buf, bytes);
+        pthread_mutex_unlock(&camera_lock);
+
+        *frame = copy;
+        *width = w;
+        *height = h;
+        return 0;
+    }
+    return -1;
 }
 
 static void *camera_capture_thread_cb(void *arg)
 {
     char photo[192];
     char thumb[192];
-    char cmd[640];
-    int rc;
-    int code;
+    char photo_tmp[224];
+    char thumb_tmp[224];
+    uint8_t *frame = NULL;
+    unsigned frame_w = 0;
+    unsigned frame_h = 0;
+    uint64_t start_us;
+    uint64_t elapsed_ms;
+    int code = 1;
 
     (void)arg;
-
-    camera_stop_preview();
+    start_us = monotonic_us();
 
     if(camera_ensure_photo_dir() != 0) {
         camera_set_status("Photo directory error", 1);
         pthread_mutex_lock(&camera_lock);
         camera_busy = 0;
         pthread_mutex_unlock(&camera_lock);
-        if(current_page == PAGE_CAMERA) {
-            camera_start_preview();
-        }
         return NULL;
     }
 
     camera_make_capture_paths(photo, sizeof(photo), thumb, sizeof(thumb));
-    snprintf(cmd, sizeof(cmd),
-             "%s -d %u -w %u -h %u -f NV16 -o %s -t %s "
-             "--thumb-width %u --thumb-height %u "
-             ">/tmp/k230_camera_capture.log 2>&1",
-             CAMERA_CAPTURE_BIN, CAMERA_CAPTURE_DEVICE, CAMERA_CAPTURE_W,
-             CAMERA_CAPTURE_H, photo, thumb, CAMERA_STORED_THUMB_W,
-             CAMERA_STORED_THUMB_H);
+    snprintf(photo_tmp, sizeof(photo_tmp), "%s.tmp", photo);
+    snprintf(thumb_tmp, sizeof(thumb_tmp), "%s.tmp", thumb);
+    unlink(photo_tmp);
+    unlink(thumb_tmp);
 
-    rc = system(cmd);
-    code = shell_exit_code(rc);
-    if(code != 0) {
-        snprintf(cmd, sizeof(cmd),
-                 "%s -d %u -w %u -h %u -f NV12 -o %s -t %s "
-                 "--thumb-width %u --thumb-height %u "
-                 ">>/tmp/k230_camera_capture.log 2>&1",
-                 CAMERA_CAPTURE_BIN, CAMERA_CAPTURE_DEVICE, CAMERA_CAPTURE_W,
-                 CAMERA_CAPTURE_H, photo, thumb, CAMERA_STORED_THUMB_W,
-                 CAMERA_STORED_THUMB_H);
-        rc = system(cmd);
-        code = shell_exit_code(rc);
+    if(camera_copy_latest_capture_frame(&frame, &frame_w, &frame_h) != 0) {
+        code = 2;
+    } else if(camera_save_rgb565_jpeg(photo_tmp, frame, frame_w, frame_h,
+                                      88) != 0) {
+        code = 3;
+    } else if(camera_save_rgb565_thumb_contain(thumb_tmp, frame, frame_w,
+                                               frame_h,
+                                               CAMERA_STORED_THUMB_W,
+                                               CAMERA_STORED_THUMB_H) != 0) {
+        code = 4;
+    } else if(rename(photo_tmp, photo) != 0) {
+        code = 5;
+    } else if(rename(thumb_tmp, thumb) != 0) {
+        unlink(photo);
+        code = 5;
+    } else {
+        code = 0;
     }
+    free(frame);
+    if(code != 0) {
+        unlink(photo_tmp);
+        unlink(thumb_tmp);
+    }
+    elapsed_ms = (monotonic_us() - start_us) / 1000ULL;
+    touch_trace_log("CAMERA_CAPTURE_SAVE result=%d path=%s frame=%ux%u elapsed=%llums",
+                    code, photo, frame_w, frame_h,
+                    (unsigned long long)elapsed_ms);
 
     pthread_mutex_lock(&camera_lock);
     if(code == 0) {
         snprintf(camera_last_photo_path, sizeof(camera_last_photo_path), "%s", photo);
         snprintf(camera_last_thumb_path, sizeof(camera_last_thumb_path), "%s", thumb);
-        snprintf(camera_status_text, sizeof(camera_status_text), "Saved to /root/photos");
+        snprintf(camera_status_text, sizeof(camera_status_text),
+                 "Saved JPEG to /root/photos");
         camera_last_result = 0;
     } else {
         snprintf(camera_status_text, sizeof(camera_status_text),
-                 "Capture failed, see /tmp/k230_camera_capture.log");
+                 code == 2 ? "Preview frame not ready" :
+                             "JPEG capture failed");
         camera_last_result = code;
     }
     camera_busy = 0;
     camera_result_ready = 1;
     pthread_mutex_unlock(&camera_lock);
-
-    if(current_page == PAGE_CAMERA) {
-        camera_start_preview();
-    }
 
     return NULL;
 }

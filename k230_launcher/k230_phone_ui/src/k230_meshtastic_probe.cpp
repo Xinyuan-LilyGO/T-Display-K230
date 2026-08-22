@@ -14000,7 +14000,23 @@ static bool mesh_photo_source_path_allowed(const std::string &path)
        path.find("/./") != std::string::npos) {
         return false;
     }
-    return len > 4U && strcasecmp(path.c_str() + len - 4U, ".ppm") == 0;
+    return (len > 4U && strcasecmp(path.c_str() + len - 4U, ".ppm") == 0) ||
+           (len > 4U && strcasecmp(path.c_str() + len - 4U, ".jpg") == 0) ||
+           (len > 5U && strcasecmp(path.c_str() + len - 5U, ".jpeg") == 0);
+}
+
+static bool mesh_photo_path_has_suffix(const char *path, const char *suffix)
+{
+    size_t path_len;
+    size_t suffix_len;
+
+    if(!path || !suffix) {
+        return false;
+    }
+    path_len = strlen(path);
+    suffix_len = strlen(suffix);
+    return path_len >= suffix_len &&
+           strcasecmp(path + path_len - suffix_len, suffix) == 0;
 }
 
 static bool mesh_photo_read_ppm_token(FILE *fp, char *token,
@@ -14111,6 +14127,100 @@ static bool mesh_photo_read_ppm_rgb(const char *path,
     *width = w;
     *height = h;
     return true;
+}
+
+static bool mesh_photo_read_jpeg_rgb(const char *path,
+                                     std::vector<uint8_t> *rgb,
+                                     unsigned *width, unsigned *height,
+                                     char *errbuf, size_t errbuf_len)
+{
+    FILE *fp = nullptr;
+    struct jpeg_decompress_struct cinfo;
+    mesh_jpeg_error_mgr_t jerr;
+    uint8_t *row = nullptr;
+    bool created = false;
+    bool ok = false;
+
+    if(!path || !rgb || !width || !height) {
+        mesh_photo_set_error(errbuf, errbuf_len, "invalid jpeg argument");
+        return false;
+    }
+    fp = fopen(path, "rb");
+    if(!fp) {
+        mesh_photo_set_error(errbuf, errbuf_len, "open failed: %s",
+                             strerror(errno));
+        return false;
+    }
+
+    memset(&cinfo, 0, sizeof(cinfo));
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = mesh_jpeg_error_exit;
+    if(setjmp(jerr.setjmp_buffer)) {
+        mesh_photo_set_error(errbuf, errbuf_len, "jpeg decode failed");
+        goto out;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    created = true;
+    jpeg_stdio_src(&cinfo, fp);
+    jpeg_read_header(&cinfo, TRUE);
+    jpeg_start_decompress(&cinfo);
+
+    if(cinfo.output_width == 0U || cinfo.output_height == 0U ||
+       cinfo.output_width > 8192U || cinfo.output_height > 8192U ||
+       (cinfo.output_components != 1 && cinfo.output_components != 3 &&
+        cinfo.output_components != 4)) {
+        mesh_photo_set_error(errbuf, errbuf_len,
+                             "unsupported jpeg %ux%u components=%u",
+                             cinfo.output_width, cinfo.output_height,
+                             cinfo.output_components);
+        goto out;
+    }
+
+    row = (uint8_t *)malloc((size_t)cinfo.output_width *
+                            cinfo.output_components);
+    if(!row) {
+        mesh_photo_set_error(errbuf, errbuf_len, "jpeg row alloc failed");
+        goto out;
+    }
+    rgb->assign((size_t)cinfo.output_width * cinfo.output_height * 3U, 0U);
+    while(cinfo.output_scanline < cinfo.output_height) {
+        JSAMPROW row_ptr[1] = { row };
+        unsigned y = cinfo.output_scanline;
+
+        jpeg_read_scanlines(&cinfo, row_ptr, 1);
+        for(unsigned x = 0; x < cinfo.output_width; x++) {
+            size_t dst = ((size_t)y * cinfo.output_width + x) * 3U;
+            size_t src = (size_t)x * cinfo.output_components;
+
+            if(cinfo.output_components == 1) {
+                (*rgb)[dst + 0U] = row[src];
+                (*rgb)[dst + 1U] = row[src];
+                (*rgb)[dst + 2U] = row[src];
+            } else {
+                (*rgb)[dst + 0U] = row[src + 0U];
+                (*rgb)[dst + 1U] = row[src + 1U];
+                (*rgb)[dst + 2U] = row[src + 2U];
+            }
+        }
+    }
+    jpeg_finish_decompress(&cinfo);
+    *width = cinfo.output_width;
+    *height = cinfo.output_height;
+    ok = true;
+
+out:
+    free(row);
+    if(created) {
+        jpeg_destroy_decompress(&cinfo);
+    }
+    if(fp) {
+        fclose(fp);
+    }
+    if(!ok) {
+        rgb->clear();
+    }
+    return ok;
 }
 
 static void mesh_photo_scale_to_canvas(const std::vector<uint8_t> &src,
@@ -14268,11 +14378,16 @@ static bool mesh_photo_prepare_jpeg(const char *path, uint32_t stream_id,
     }
     if(!mesh_photo_source_path_allowed(path)) {
         mesh_photo_set_error(errbuf, errbuf_len,
-                             "photo path must be /root/photos/*.ppm");
+                             "photo path must be /root/photos/*.ppm or *.jpg");
         return false;
     }
-    if(!mesh_photo_read_ppm_rgb(path, &src, &src_w, &src_h, errbuf,
-                                errbuf_len)) {
+    if(mesh_photo_path_has_suffix(path, ".ppm")) {
+        if(!mesh_photo_read_ppm_rgb(path, &src, &src_w, &src_h, errbuf,
+                                    errbuf_len)) {
+            return false;
+        }
+    } else if(!mesh_photo_read_jpeg_rgb(path, &src, &src_w, &src_h, errbuf,
+                                        errbuf_len)) {
         return false;
     }
     mesh_photo_scale_to_canvas(src, src_w, src_h, &canvas,
