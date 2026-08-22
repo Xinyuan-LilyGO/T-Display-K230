@@ -529,6 +529,15 @@ static lv_obj_t *shutdown_detail_label;
 static lv_obj_t *shutdown_hint_label;
 static lv_obj_t *screenshot_toast_obj;
 static lv_obj_t *entry_block_dialog;
+static lv_obj_t *entry_probe_dialog;
+static lv_timer_t *entry_probe_timer;
+static pthread_mutex_t entry_probe_lock = PTHREAD_MUTEX_INITIALIZER;
+static int entry_probe_active;
+static int entry_probe_done;
+static int entry_probe_allowed;
+static page_id_t entry_probe_page;
+static char entry_probe_title[128];
+static char entry_probe_reason[192];
 static lv_obj_t *reboot_status_label;
 static lv_obj_t *reboot_confirm_btn;
 static int reboot_confirm_started;
@@ -4462,24 +4471,202 @@ static void show_entry_block_dialog(const char *title, const char *message)
                         LV_EVENT_CLICKED, entry_block_dialog);
 }
 
+static void entry_probe_dialog_close(void)
+{
+    if(entry_probe_dialog && lv_obj_is_valid(entry_probe_dialog)) {
+        lv_obj_delete(entry_probe_dialog);
+    }
+    entry_probe_dialog = NULL;
+}
+
+static void entry_probe_timer_cb(lv_timer_t *timer)
+{
+    page_id_t page;
+    int done;
+    int allowed;
+    char title[128];
+    char reason[192];
+
+    (void)timer;
+
+    pthread_mutex_lock(&entry_probe_lock);
+    done = entry_probe_done;
+    allowed = entry_probe_allowed;
+    page = entry_probe_page;
+    snprintf(title, sizeof(title), "%s", entry_probe_title);
+    snprintf(reason, sizeof(reason), "%s", entry_probe_reason);
+    if(done) {
+        entry_probe_active = 0;
+        entry_probe_done = 0;
+    }
+    pthread_mutex_unlock(&entry_probe_lock);
+
+    if(!done) {
+        return;
+    }
+
+    if(entry_probe_timer) {
+        lv_timer_delete(entry_probe_timer);
+        entry_probe_timer = NULL;
+    }
+    entry_probe_dialog_close();
+
+    if(allowed) {
+        touch_trace_log("NAV_ASYNC_PROBE_OK page=%s", page_name(page));
+        nav_to(page);
+    } else {
+        touch_trace_log("NAV_ASYNC_PROBE_BLOCKED page=%s reason=%s",
+                        page_name(page), reason);
+        show_entry_block_dialog(title[0] ? title : "Hardware not detected",
+                                reason[0] ? reason :
+                                "Connect hardware and try again.");
+    }
+}
+
+static void *entry_probe_worker(void *arg)
+{
+    page_id_t page = (page_id_t)(intptr_t)arg;
+    char message[192] = "";
+    char title[128] = "Hardware not detected";
+    int allowed = 0;
+
+    if(page == PAGE_NRF52840_DFU) {
+        int rc = ui_nrf52840_dfu_preflight(message, sizeof(message));
+
+        allowed = rc == 0;
+        snprintf(title, sizeof(title), "%s",
+                 rc == -2 ? "nRF52840 UART DFU unsupported" :
+                 "nRF52840 not detected");
+        if(!message[0]) {
+            snprintf(message, sizeof(message), "%s",
+                     rc == -2 ?
+                     "Update the nRF52840 bootloader before using DFU." :
+                     "Connect nRF52840 AT firmware and try again.");
+        }
+    }
+
+    pthread_mutex_lock(&entry_probe_lock);
+    entry_probe_allowed = allowed;
+    snprintf(entry_probe_title, sizeof(entry_probe_title), "%s", title);
+    snprintf(entry_probe_reason, sizeof(entry_probe_reason), "%s", message);
+    entry_probe_done = 1;
+    pthread_mutex_unlock(&entry_probe_lock);
+
+    app_request_fast_refresh();
+    return NULL;
+}
+
+static int start_entry_probe(page_id_t page)
+{
+    lv_obj_t *card;
+    lv_obj_t *spinner;
+    lv_obj_t *title;
+    lv_obj_t *hint;
+    pthread_t thread;
+    int w = display_logical_width();
+    int h = display_logical_height();
+    int card_w = display_orientation_is_landscape() ? 420 : 360;
+    int card_h = 210;
+
+    if(page != PAGE_NRF52840_DFU) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&entry_probe_lock);
+    if(entry_probe_active) {
+        pthread_mutex_unlock(&entry_probe_lock);
+        return 1;
+    }
+    entry_probe_active = 1;
+    entry_probe_done = 0;
+    entry_probe_allowed = 0;
+    entry_probe_page = page;
+    entry_probe_title[0] = '\0';
+    entry_probe_reason[0] = '\0';
+    pthread_mutex_unlock(&entry_probe_lock);
+
+    if(card_w > w - 48) {
+        card_w = w - 48;
+    }
+    if(card_w < 300) {
+        card_w = w - 24;
+    }
+
+    entry_probe_dialog_close();
+    entry_probe_dialog = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(entry_probe_dialog);
+    lv_obj_set_style_bg_color(entry_probe_dialog, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(entry_probe_dialog, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(entry_probe_dialog, 0, 0);
+    lv_obj_set_style_pad_all(entry_probe_dialog, 0, 0);
+    lv_obj_clear_flag(entry_probe_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(entry_probe_dialog, LV_OBJ_FLAG_CLICKABLE);
+
+    card = lv_obj_create(entry_probe_dialog);
+    lv_obj_set_size(card, card_w, card_h > h - 48 ? h - 48 : card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101720), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x314154), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    spinner = lv_spinner_create(card);
+    lv_obj_set_size(spinner, 64, 64);
+    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x263342),
+                               LV_PART_MAIN);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x3DA5FF),
+                               LV_PART_INDICATOR);
+
+    title = label(card, "Checking nRF52840...", &lv_font_montserrat_20,
+                  0xF2F5F8);
+    lv_obj_set_width(title, card_w - 48);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 104);
+
+    hint = label(card, "Connect nRF52840 AT firmware and try again.",
+                 &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(hint, card_w - 48);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 144);
+
+    if(entry_probe_timer) {
+        lv_timer_delete(entry_probe_timer);
+    }
+    entry_probe_timer = lv_timer_create(entry_probe_timer_cb, 80, NULL);
+
+    if(pthread_create(&thread, NULL, entry_probe_worker,
+                      (void *)(intptr_t)page) == 0) {
+        pthread_detach(thread);
+    } else {
+        pthread_mutex_lock(&entry_probe_lock);
+        entry_probe_allowed = 0;
+        snprintf(entry_probe_title, sizeof(entry_probe_title), "%s",
+                 "Hardware not detected");
+        snprintf(entry_probe_reason, sizeof(entry_probe_reason), "%s",
+                 "Thread failed");
+        entry_probe_done = 1;
+        pthread_mutex_unlock(&entry_probe_lock);
+    }
+
+    touch_trace_log("NAV_ASYNC_PROBE_START page=%s", page_name(page));
+    app_request_fast_refresh();
+    return 1;
+}
+
 static int page_entry_allowed(page_id_t page)
 {
-    char message[192];
     const char *title = "Hardware not detected";
     const char *reason = NULL;
-    int dfu_rc;
 
     switch(page) {
     case PAGE_NRF52840_DFU:
-        dfu_rc = ui_nrf52840_dfu_preflight(message, sizeof(message));
-        if(dfu_rc == 0) {
-            return 1;
-        }
-        title = dfu_rc == -2 ? "nRF52840 UART DFU unsupported" :
-                "nRF52840 not detected";
-        reason = message[0] ? message :
-                 "Connect nRF52840 AT firmware and try again.";
-        break;
+        return 1;
     case PAGE_CELLULAR:
         if(!ui_hardware_keyboard_base_detected()) {
             reason = "This feature requires nRF9151 extension board.";
@@ -4529,6 +4716,9 @@ static void app_event_cb(lv_event_t *event)
     }
 
     trace_ui_action("LVGL_CLICKED_NAV", page);
+    if(start_entry_probe(page)) {
+        return;
+    }
     if(!page_entry_allowed(page)) {
         return;
     }
@@ -4554,6 +4744,9 @@ static void back_event_cb(lv_event_t *event)
 void app_nav_to_page(page_id_t page)
 {
     trace_ui_action("LVGL_CLICKED_NAV", page);
+    if(start_entry_probe(page)) {
+        return;
+    }
     if(!page_entry_allowed(page)) {
         return;
     }
@@ -4566,6 +4759,10 @@ void app_nav_to_settings_page(page_id_t page)
     touch_trace_log("SETTINGS_NAV page=%s current=%s stack_len=%d",
                     page_name(page), page_name(current_page), page_stack_len);
     trace_ui_action("LVGL_CLICKED_SETTINGS_NAV", page);
+    if(start_entry_probe(page)) {
+        settings_subpage_context = 0;
+        return;
+    }
     if(!page_entry_allowed(page)) {
         settings_subpage_context = 0;
         return;
@@ -10542,9 +10739,9 @@ static void reboot_cancel_event_cb(lv_event_t *event)
 
 static void create_reboot_page(lv_obj_t *scr)
 {
-    int body_y = page_content_top_y(154);
-    int body_w = page_body_width();
-    int body_h = page_body_height_from(154);
+    int body_y = ui_page_top_y(144);
+    int body_w = ui_page_panel_width();
+    int body_h = ui_body_height(body_y) - 42;
     int landscape = display_orientation_is_landscape();
     int card_h = body_h;
     int icon_size = landscape ? 82 : 96;
@@ -10554,6 +10751,7 @@ static void create_reboot_page(lv_obj_t *scr)
     int button_y;
     int button_gap = 18;
     int button_w;
+    lv_obj_t *page_body;
 
     reboot_status_label = NULL;
     reboot_confirm_btn = NULL;
@@ -10565,7 +10763,8 @@ static void create_reboot_page(lv_obj_t *scr)
 
     create_header(scr, "Reboot");
 
-    lv_obj_t *body = panel(scr, 24, body_y, body_w, card_h);
+    page_body = ui_page_body(scr, 144);
+    lv_obj_t *body = panel(page_body, ui_page_panel_x(), 18, body_w, card_h);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x111820), 0);
 
     lv_obj_t *icon_box = lv_obj_create(body);
@@ -10618,17 +10817,20 @@ static void create_reboot_page(lv_obj_t *scr)
     lv_obj_set_width(reboot_status_label, content_w);
     lv_label_set_long_mode(reboot_status_label, LV_LABEL_LONG_DOT);
 
-    button_y = card_h - 84;
-    button_w = (body_w - 40 - button_gap) / 2;
-    if(button_w > 240) {
-        button_w = 240;
+    button_y = landscape ? content_y + 214 : content_y + 252;
+    if(button_y > card_h - 88) {
+        button_y = card_h - 88;
+    }
+    button_w = landscape ? 180 : 204;
+    if(button_w * 2 + button_gap > body_w - 48) {
+        button_w = (body_w - 48 - button_gap) / 2;
     }
     {
         int buttons_total = button_w * 2 + button_gap;
         int button_x = (body_w - buttons_total) / 2;
 
-        if(button_x < 20) {
-            button_x = 20;
+        if(button_x < 24) {
+            button_x = 24;
         }
 
         lv_obj_t *cancel = command_button(body, button_x, button_y,

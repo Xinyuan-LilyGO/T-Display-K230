@@ -54,6 +54,7 @@ static lv_obj_t *nrf_dfu_select_dialog;
 static lv_obj_t *nrf_dfu_log_dialog;
 static lv_obj_t *nrf_dfu_confirm_dialog;
 static lv_obj_t *nrf_dfu_overlay;
+static lv_obj_t *nrf_dfu_overlay_spinner;
 static lv_obj_t *nrf_dfu_overlay_status;
 static lv_obj_t *nrf_dfu_overlay_bar;
 static lv_obj_t *nrf_dfu_overlay_percent;
@@ -1069,8 +1070,10 @@ static void nrf_dfu_start_confirmed(void)
     nrf_dfu_overlay_hold = 0;
     nrf_dfu_progress = 0;
     nrf_dfu_last_rc = 0;
-    nrf_dfu_set_status_locked("Starting update...", "Starting", 0, 0);
+    nrf_dfu_set_status_locked("Checking nRF52840...", "Probing", 0, 0);
     pthread_mutex_unlock(&nrf_dfu_lock);
+    nrf_dfu_update_ui();
+    app_request_fast_refresh();
 
     req = (nrf_dfu_request_t *)calloc(1, sizeof(*req));
     if(!req) {
@@ -1078,6 +1081,7 @@ static void nrf_dfu_start_confirmed(void)
         nrf_dfu_running = 0;
         nrf_dfu_set_status_locked("Out of memory", "Failed", -1, -1);
         pthread_mutex_unlock(&nrf_dfu_lock);
+        nrf_dfu_update_ui();
         return;
     }
     snprintf(req->package_path, sizeof(req->package_path), "%s",
@@ -1290,6 +1294,15 @@ static void nrf_dfu_update_ui(void)
             if(nrf_dfu_overlay_status) {
                 lv_label_set_text(nrf_dfu_overlay_status, ui_tr(status));
             }
+            if(nrf_dfu_overlay_spinner) {
+                if(running && progress < 100) {
+                    lv_obj_clear_flag(nrf_dfu_overlay_spinner,
+                                      LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(nrf_dfu_overlay_spinner,
+                                    LV_OBJ_FLAG_HIDDEN);
+                }
+            }
             if(nrf_dfu_overlay_bar) {
                 lv_bar_set_value(nrf_dfu_overlay_bar, progress, LV_ANIM_ON);
             }
@@ -1359,7 +1372,7 @@ static void nrf_dfu_create_overlay(lv_obj_t *scr)
     int w;
     int h;
     int card_w = ui_is_landscape() ? 560 : 472;
-    int card_h = 330;
+    int card_h = 360;
 
     (void)scr;
     nrf_dfu_screen_metrics(&w, &h);
@@ -1389,16 +1402,24 @@ static void nrf_dfu_create_overlay(lv_obj_t *scr)
                      0xF2F5F8);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 26);
 
+    nrf_dfu_overlay_spinner = lv_spinner_create(card);
+    lv_obj_set_size(nrf_dfu_overlay_spinner, 58, 58);
+    lv_obj_align(nrf_dfu_overlay_spinner, LV_ALIGN_TOP_MID, 0, 82);
+    lv_obj_set_style_arc_color(nrf_dfu_overlay_spinner,
+                               lv_color_hex(0x263342), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(nrf_dfu_overlay_spinner,
+                               lv_color_hex(0x3DA5FF), LV_PART_INDICATOR);
+
     nrf_dfu_overlay_status = ui_label(card, "Preparing update...",
                                       &lv_font_montserrat_18, 0x9AA4AF);
     lv_obj_set_width(nrf_dfu_overlay_status, card_w - 48);
     lv_label_set_long_mode(nrf_dfu_overlay_status, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(nrf_dfu_overlay_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(nrf_dfu_overlay_status, LV_ALIGN_TOP_MID, 0, 78);
+    lv_obj_align(nrf_dfu_overlay_status, LV_ALIGN_TOP_MID, 0, 154);
 
     nrf_dfu_overlay_bar = lv_bar_create(card);
     lv_obj_set_size(nrf_dfu_overlay_bar, card_w - 80, 22);
-    lv_obj_align(nrf_dfu_overlay_bar, LV_ALIGN_TOP_MID, 0, 130);
+    lv_obj_align(nrf_dfu_overlay_bar, LV_ALIGN_TOP_MID, 0, 204);
     lv_bar_set_range(nrf_dfu_overlay_bar, 0, 100);
     lv_bar_set_value(nrf_dfu_overlay_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(nrf_dfu_overlay_bar, lv_color_hex(0x27313C),
@@ -1408,14 +1429,14 @@ static void nrf_dfu_create_overlay(lv_obj_t *scr)
 
     nrf_dfu_overlay_percent = ui_label(card, "0%", &lv_font_montserrat_20,
                                        0xF2F5F8);
-    lv_obj_align(nrf_dfu_overlay_percent, LV_ALIGN_TOP_MID, 0, 164);
+    lv_obj_align(nrf_dfu_overlay_percent, LV_ALIGN_TOP_MID, 0, 238);
 
     hint = ui_label(card, "Do not touch the screen or power off the board.",
                     &lv_font_montserrat_16, 0xF5A524);
     lv_obj_set_width(hint, card_w - 48);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 214);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 280);
 
     nrf_dfu_overlay_close_btn = lv_obj_create(card);
     lv_obj_set_size(nrf_dfu_overlay_close_btn, 160, 46);
@@ -1592,6 +1613,7 @@ void ui_nrf52840_dfu_cleanup(void)
         lv_obj_delete(nrf_dfu_overlay);
     }
     nrf_dfu_overlay = NULL;
+    nrf_dfu_overlay_spinner = NULL;
     nrf_dfu_overlay_status = NULL;
     nrf_dfu_overlay_bar = NULL;
     nrf_dfu_overlay_percent = NULL;
