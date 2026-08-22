@@ -289,19 +289,26 @@ static void ui_input_inline_hide_state(ui_input_dialog_state_t *state)
     if(!state || !state->inline_mode) {
         return;
     }
+    if(state->textarea && lv_obj_is_valid(state->textarea)) {
+        lv_obj_remove_state(state->textarea, LV_STATE_FOCUSED);
+    }
+    state->pinyin_comp[0] = '\0';
+    state->pinyin_page = 0;
     if(state->keyboard && lv_obj_is_valid(state->keyboard)) {
         lv_obj_add_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(state->keyboard);
     }
     if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar)) {
         lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(state->candidate_bar);
     }
     if(active_inline == state) {
         active_inline = NULL;
     }
     if(state->hardware_keyboard) {
         ui_extension_keyboard_set_key_cb(NULL, NULL);
+        state->hardware_keyboard = 0;
     }
-    state->pinyin_comp[0] = '\0';
     ui_input_inline_apply_layout(state, 0);
 }
 

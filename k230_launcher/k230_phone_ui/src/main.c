@@ -5034,17 +5034,15 @@ static lv_obj_t *status_battery_item(lv_obj_t *parent)
     return item;
 }
 
-static uint32_t status_gps_color(int modem_present)
+static uint32_t status_gps_color(void)
 {
     k230_nrf9151_status_t status;
 
     if(!k230_nrf9151_location_autostart_enabled()) {
         return 0x8B949E;
     }
-    if(!modem_present) {
-        return 0x8B949E;
-    }
-    if(k230_nrf9151_read_status(&status, 300) != 0 || !status.present) {
+    if(k230_nrf9151_read_status(&status, 90) != 0 ||
+       !status.present || !status.link_ok) {
         return 0x8B949E;
     }
     if(status.gnss_has_fix) {
@@ -5334,6 +5332,7 @@ static void status_bar_update(lv_timer_t *timer)
     int wifi_present;
     int modem_present;
     int lte_level;
+    k230_nrf9151_status_t modem_status;
 
     (void)timer;
 
@@ -5349,14 +5348,16 @@ static void status_bar_update(lv_timer_t *timer)
     status_set_label_color(status_wifi_label,
                            status_wifi_color(wifi_present, wifi_has_ip));
 
-    modem_present = k230_nrf9151_uart_present();
+    modem_present =
+        k230_nrf9151_read_status(&modem_status, 90) == 0 &&
+        modem_status.present && modem_status.link_ok;
     lte_level = modem_present ? ui_cellular_lte_signal_level() : 0;
     status_set_lte_bars(lte_level,
                         lte_level > 0 ? 0x25C281 :
                         (modem_present ? 0xEF4D5A : 0x8B949E));
 
     status_set_label_color(status_location_label,
-                           status_gps_color(modem_present));
+                           status_gps_color());
     status_set_label_color(status_ble_label, status_ble_color());
     status_update_audio_route();
     status_update_battery();

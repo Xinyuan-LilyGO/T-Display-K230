@@ -1794,11 +1794,15 @@ static void nrf9151_manager_update_lte_from_response(
     k230_nrf9151_status_t *status, const char *cmd, const char *resp, int rc)
 {
     char line[256];
+    int has_response;
 
     if(!status || !cmd) {
         return;
     }
-    status->present = 1;
+    has_response = resp && resp[0];
+    if(rc == 0 || has_response) {
+        status->present = 1;
+    }
     if(strcmp(cmd, "AT") == 0 && rc == 0) {
         status->link_ok = 1;
         snprintf(status->modem_state, sizeof(status->modem_state), "%s",
@@ -1965,6 +1969,7 @@ static int nrf9151_manager_run_lte_check_common(
     int fd = -1;
     int failures = 0;
     int saved_errno;
+    int uart_node_present;
 
     if(log && log_len > 0U) {
         log[0] = '\0';
@@ -1972,12 +1977,13 @@ static int nrf9151_manager_run_lte_check_common(
     if(k230_nrf9151_read_status(&local, 0) != 0) {
         k230_nrf9151_status_init(&local);
     }
-    local.present = k230_nrf9151_uart_present();
+    uart_node_present = k230_nrf9151_uart_present();
+    local.present = 0;
+    local.link_ok = 0;
     local.epoch = time(NULL);
     snprintf(local.modem_state, sizeof(local.modem_state), "%s",
-             local.present ? "present" : "missing");
-    if(!local.present) {
-        local.link_ok = 0;
+             uart_node_present ? "probing" : "missing");
+    if(!uart_node_present) {
         local.sim_ready = 0;
         local.lte_registered = 0;
         local.packet_attached = 0;
@@ -2015,6 +2021,7 @@ static int nrf9151_manager_run_lte_check_common(
         return -1;
     }
 
+    local.present = 0;
     local.link_ok = 0;
     local.sim_ready = 0;
     local.lte_registered = 0;
@@ -2166,7 +2173,8 @@ static void nrf9151_manager_seed_status_monitor_cache(void)
         return;
     }
     k230_nrf9151_status_init(&status);
-    status.present = present;
+    status.present = 0;
+    status.link_ok = 0;
     status.epoch = time(NULL);
     snprintf(status.modem_state, sizeof(status.modem_state), "%s",
              present ? "probing" : "missing");

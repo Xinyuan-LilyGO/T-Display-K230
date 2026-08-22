@@ -2168,7 +2168,7 @@ int ui_cellular_lte_signal_level(void)
     if(transient_refresh && last_valid_level > 0) {
         return last_valid_level;
     }
-    if(!status.present || !status.sim_ready) {
+    if(!status.present || !status.link_ok || !status.sim_ready) {
         last_valid_level = 0;
         return 0;
     }
