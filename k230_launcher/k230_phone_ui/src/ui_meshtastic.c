@@ -4248,14 +4248,12 @@ static void mesh_start_event_cb(lv_event_t *event)
         mesh_refresh_status();
         return;
     }
-    if(mesh_ipc_command("STATUS\n", mesh_status_text,
-                        sizeof(mesh_status_text)) == 0) {
-        mesh_append_log("daemon already running");
-        mesh_request_gnss_if_enabled();
-        mesh_background_monitor_start();
-        mesh_refresh_status();
-        return;
+    mesh_background_monitor_stop();
+    if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
+        mesh_append_log("failed to stop previous daemon");
     }
+    unlink(MESHTASTIC_SOCKET_PATH);
+    usleep(220000);
 
     mesh_safe_arg(region_arg, sizeof(region_arg), mesh_region);
     mesh_safe_arg(preset_arg, sizeof(preset_arg), mesh_preset);

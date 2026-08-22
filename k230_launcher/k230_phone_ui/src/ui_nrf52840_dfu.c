@@ -2,6 +2,7 @@
 
 #include "ui_common.h"
 #include "ui_i18n.h"
+#include "ui_meshtastic.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -423,28 +424,35 @@ static int nrf_dfu_query_current_version(char *out, size_t out_len,
     return nrf_dfu_extract_at_version(resp, out, out_len);
 }
 
-static int nrf_dfu_query_help(char *response, size_t response_len)
+static void nrf_dfu_prepare_exclusive_uart(void)
 {
-    char *argv[] = {
-        (char *)NRF_DFU_TOOL,
-        (char *)"--at", (char *)"AT+HELP",
-        (char *)"--at-read-ms", (char *)"1600",
-        (char *)"-p", (char *)NRF_DFU_PORT,
-        NULL
-    };
-
-    if(!response || response_len == 0U) {
-        return -1;
+    if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
+        nrf_dfu_append_log("failed to stop Meshtastic worker for DFU preflight");
     }
-    response[0] = '\0';
-    return nrf_dfu_run_argv(argv, 0, response, response_len);
+    usleep(300000);
+}
+
+static int nrf_dfu_version_reports_uart_dfu(const char *version)
+{
+    char lower[96];
+    size_t i;
+
+    if(!version || !version[0]) {
+        return 0;
+    }
+    for(i = 0; version[i] && i + 1U < sizeof(lower); ++i) {
+        char ch = version[i];
+        lower[i] = (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a') : ch;
+    }
+    lower[i] = '\0';
+    return strstr(lower, "dfu") != NULL;
 }
 
 int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
 {
     char version[96];
     char response[768];
-    int rc;
+    int attempt;
 
     if(message && message_len > 0U) {
         message[0] = '\0';
@@ -457,8 +465,17 @@ int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
         return -1;
     }
 
-    if(nrf_dfu_query_current_version(version, sizeof(version), response,
-                                     sizeof(response)) != 0) {
+    nrf_dfu_prepare_exclusive_uart();
+    response[0] = '\0';
+    version[0] = '\0';
+    for(attempt = 1; attempt <= 4; ++attempt) {
+        if(nrf_dfu_query_current_version(version, sizeof(version), response,
+                                         sizeof(response)) == 0) {
+            break;
+        }
+        usleep(250000);
+    }
+    if(!version[0]) {
         if(message && message_len > 0U) {
             snprintf(message, message_len, "%s",
                      "nRF52840 AT response unavailable");
@@ -466,8 +483,7 @@ int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
         return -1;
     }
 
-    rc = nrf_dfu_query_help(response, sizeof(response));
-    if(rc != 0 || strstr(response, "AT+DFU") == NULL) {
+    if(!nrf_dfu_version_reports_uart_dfu(version)) {
         if(message && message_len > 0U) {
             snprintf(message, message_len, "%s",
                      "Update the nRF52840 bootloader before using DFU.");
@@ -1619,6 +1635,9 @@ void ui_nrf52840_dfu_cleanup(void)
     nrf_dfu_overlay_percent = NULL;
     nrf_dfu_overlay_close_btn = NULL;
     nrf_dfu_overlay_hold = 0;
+    if(!nrf_dfu_running) {
+        ui_meshtastic_startup();
+    }
 }
 
 int ui_nrf52840_dfu_is_running(void)
