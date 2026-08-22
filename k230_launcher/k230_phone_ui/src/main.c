@@ -36,6 +36,7 @@
 #include <v4l2-drm.h>
 
 #include "ui_nrf9151_manager.h"
+#include "ui_nrf52840_manager.h"
 
 #ifndef LV_SYMBOL_WIFI
 #define LV_SYMBOL_WIFI "WiFi"
@@ -5025,6 +5026,20 @@ static void status_set_label_color(lv_obj_t *obj, uint32_t color)
 
 static uint32_t status_ble_color(void)
 {
+    nrf52840_status_t nrf_status;
+
+    if(ui_nrf52840_get_status(&nrf_status) == 0 && nrf_status.known) {
+        if(nrf_status.mode == NRF52840_MODE_OFF) {
+            return 0x8B949E;
+        }
+        if(nrf_status.phoneapi_connected) {
+            return 0x25C281;
+        }
+        if(nrf_status.at_ok) {
+            return 0x3DA5FF;
+        }
+        return 0x8B949E;
+    }
     if(strcmp(status_ble_state, "connected") == 0) {
         return 0x25C281;
     }
@@ -11464,6 +11479,7 @@ int main(void)
     ui_fonts_init();
     ui_i18n_init();
     ui_time_settings_apply_startup();
+    ui_nrf52840_manager_startup();
     ui_hardware_startup();
     ui_hardware_reboot_diag_dump("app-start-after-hardware-startup");
     apply_display_brightness_pref();
@@ -11567,6 +11583,7 @@ int main(void)
     ui_multitouch_stop();
     ui_hardware_reboot_diag_dump("app-stop-before-hardware-shutdown");
     ui_hardware_shutdown();
+    ui_nrf52840_manager_shutdown();
     ui_hardware_reboot_diag_dump("app-stop-after-hardware-shutdown");
     touch_trace_log("APP_STOP");
     return 0;

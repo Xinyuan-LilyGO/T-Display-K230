@@ -3,6 +3,7 @@
 #include "ui_common.h"
 #include "ui_i18n.h"
 #include "ui_meshtastic.h"
+#include "ui_nrf52840_manager.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -407,55 +408,6 @@ static int nrf_dfu_run_argv(char *const argv[], int parse_progress,
     return -1;
 }
 
-static int nrf_dfu_query_current_version(char *out, size_t out_len,
-                                         char *response, size_t response_len)
-{
-    char *argv[] = {
-        (char *)NRF_DFU_TOOL,
-        (char *)"--at", (char *)"AT+VER?",
-        (char *)"--at-read-ms", (char *)"1200",
-        (char *)"-p", (char *)NRF_DFU_PORT,
-        NULL
-    };
-    char local_response[512];
-    char *resp = response ? response : local_response;
-    size_t resp_len = response ? response_len : sizeof(local_response);
-    int rc;
-
-    rc = nrf_dfu_run_argv(argv, 0, resp, resp_len);
-    if(rc != 0 || !strstr(resp, "OK")) {
-        return -1;
-    }
-    return nrf_dfu_extract_at_version(resp, out, out_len);
-}
-
-static void nrf_dfu_prepare_exclusive_uart(void)
-{
-    pthread_mutex_lock(&nrf_dfu_lock);
-    nrf_dfu_restore_meshtastic_on_leave = 1;
-    pthread_mutex_unlock(&nrf_dfu_lock);
-    if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
-        nrf_dfu_append_log("failed to stop Meshtastic worker for DFU preflight");
-    }
-    usleep(300000);
-}
-
-static int nrf_dfu_version_reports_uart_dfu(const char *version)
-{
-    char lower[96];
-    size_t i;
-
-    if(!version || !version[0]) {
-        return 0;
-    }
-    for(i = 0; version[i] && i + 1U < sizeof(lower); ++i) {
-        char ch = version[i];
-        lower[i] = (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a') : ch;
-    }
-    lower[i] = '\0';
-    return strstr(lower, "dfu") != NULL;
-}
-
 static int nrf_dfu_preflight_cache_get(char *message, size_t message_len)
 {
     int rc = 999;
@@ -493,10 +445,9 @@ static void nrf_dfu_preflight_cache_set(int rc, const char *message,
 
 int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
 {
-    char version[96];
-    char response[768];
-    int attempt;
+    nrf52840_status_t manager_status;
     int cached_rc;
+    int rc;
 
     if(message && message_len > 0U) {
         message[0] = '\0';
@@ -514,37 +465,22 @@ int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
         return -1;
     }
 
-    nrf_dfu_prepare_exclusive_uart();
-    response[0] = '\0';
-    version[0] = '\0';
-    for(attempt = 1; attempt <= 4; ++attempt) {
-        if(nrf_dfu_query_current_version(version, sizeof(version), response,
-                                         sizeof(response)) == 0) {
-            break;
+    rc = ui_nrf52840_prepare_dfu(message, message_len);
+    if(ui_nrf52840_get_status(&manager_status) == 0) {
+        if(manager_status.version[0]) {
+            pthread_mutex_lock(&nrf_dfu_lock);
+            snprintf(nrf_dfu_current_version, sizeof(nrf_dfu_current_version),
+                     "%s", manager_status.version);
+            pthread_mutex_unlock(&nrf_dfu_lock);
         }
-        usleep(250000);
-    }
-    if(!version[0]) {
-        if(message && message_len > 0U) {
-            snprintf(message, message_len, "%s",
-                     "nRF52840 AT response unavailable");
+        if(rc == 0 || rc == -2) {
+            nrf_dfu_preflight_cache_set(rc, message ? message : "",
+                                        manager_status.version);
         }
-        return -1;
     }
 
-    if(!nrf_dfu_version_reports_uart_dfu(version)) {
-        if(message && message_len > 0U) {
-            snprintf(message, message_len, "%s",
-                     "Update the nRF52840 bootloader before using DFU.");
-        }
-        nrf_dfu_preflight_cache_set(-2,
-                                    "Update the nRF52840 bootloader before using DFU.",
-                                    version);
-        return -2;
-    }
-
-    nrf_dfu_preflight_cache_set(0, "", version);
-    return 0;
+    ui_meshtastic_startup();
+    return rc;
 }
 
 static int nrf_dfu_query_package_version(const char *path,
@@ -1017,13 +953,21 @@ static void *nrf_dfu_worker(void *arg)
              target_version);
     pthread_mutex_unlock(&nrf_dfu_lock);
 
+    if(ui_nrf52840_begin_dfu(3000, msg, sizeof(msg)) != 0) {
+        pthread_mutex_lock(&nrf_dfu_lock);
+        nrf_dfu_set_status_locked(msg[0] ? msg : "nRF52840 is busy",
+                                  "Failed", 0, -1);
+        nrf_dfu_overlay_hold = 1;
+        nrf_dfu_running = 0;
+        pthread_mutex_unlock(&nrf_dfu_lock);
+        free(req);
+        app_request_fast_refresh();
+        return NULL;
+    }
     pthread_mutex_lock(&nrf_dfu_lock);
     nrf_dfu_restore_meshtastic_on_leave = 1;
     pthread_mutex_unlock(&nrf_dfu_lock);
-    if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
-        nrf_dfu_append_log("failed to stop Meshtastic worker");
-    }
-    usleep(600000);
+    usleep(300000);
 
     pthread_mutex_lock(&nrf_dfu_lock);
     nrf_dfu_set_status_locked("Checking nRF52840...", "Probing", 2, 0);
@@ -1060,6 +1004,7 @@ static void *nrf_dfu_worker(void *arg)
             nrf_dfu_overlay_hold = 1;
             nrf_dfu_running = 0;
             pthread_mutex_unlock(&nrf_dfu_lock);
+            ui_nrf52840_note_dfu_finished(0);
             free(req);
             app_request_fast_refresh();
             return NULL;
@@ -1072,6 +1017,7 @@ static void *nrf_dfu_worker(void *arg)
         nrf_dfu_overlay_hold = 1;
         nrf_dfu_running = 0;
         pthread_mutex_unlock(&nrf_dfu_lock);
+        ui_nrf52840_note_dfu_finished(-1);
         free(req);
         app_request_fast_refresh();
         return NULL;
@@ -1117,6 +1063,7 @@ static void *nrf_dfu_worker(void *arg)
     nrf_dfu_running = 0;
     nrf_dfu_last_rc = rc;
     pthread_mutex_unlock(&nrf_dfu_lock);
+    ui_nrf52840_note_dfu_finished(rc);
 
     free(req);
     app_request_fast_refresh();

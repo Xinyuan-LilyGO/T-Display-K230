@@ -6,6 +6,7 @@
 #include "ui_i18n.h"
 #include "ui_input.h"
 #include "ui_multitouch.h"
+#include "ui_nrf52840_manager.h"
 #include "ui_nrf9151_manager.h"
 #include "ui_prefs.h"
 
@@ -1024,6 +1025,7 @@ static void mesh_apply_ble_status(const char *status, int online)
     if(!online) {
         snprintf(ble_state, sizeof(ble_state), "%s", "offline");
     }
+    ui_nrf52840_note_phoneapi_state(ble_state);
     app_set_ble_status(ble_state);
     if(strcmp(mesh_last_ble_state, ble_state) != 0) {
         mesh_append_log("BLE bridge: %s", ble_state);
@@ -4363,6 +4365,25 @@ static void mesh_start_event_cb(lv_event_t *event)
     usleep(250000);
     mesh_background_monitor_start();
     mesh_refresh_status();
+}
+
+static void mesh_start_if_needed(const char *reason)
+{
+    char response[4096];
+
+    if(mesh_ipc_command("STATUS\n", response, sizeof(response)) == 0 &&
+       mesh_status_is_online(response)) {
+        ui_trim_text(response);
+        snprintf(mesh_status_text, sizeof(mesh_status_text), "%s", response);
+        mesh_append_log("reuse daemon for %s", reason ? reason : "open");
+        mesh_background_monitor_start();
+        mesh_refresh_status();
+        ui_nrf52840_switch_mode(NRF52840_MODE_MESHTASTIC);
+        return;
+    }
+
+    mesh_append_log("start daemon for %s", reason ? reason : "open");
+    mesh_start_event_cb(NULL);
 }
 
 static void mesh_stop_event_cb(lv_event_t *event)
@@ -13480,8 +13501,7 @@ void ui_meshtastic_startup(void)
     }
 
     mesh_load_profile_prefs();
-    mesh_start_event_cb(NULL);
-    mesh_background_monitor_start();
+    mesh_start_if_needed("startup");
 }
 
 void ui_meshtastic_create(lv_obj_t *scr)
@@ -13492,8 +13512,10 @@ void ui_meshtastic_create(lv_obj_t *scr)
     int content_w = ui_page_panel_width();
     int landscape = ui_is_landscape();
     int send_w = landscape ? 90 : 82;
+    int cached_online;
 
     mesh_load_profile_prefs();
+    cached_online = mesh_status_is_online(mesh_status_text);
     ui_create_header(scr, "Meshtastic");
     mesh_body = ui_page_body(scr, top_y);
     lv_obj_set_scrollbar_mode(mesh_body, LV_SCROLLBAR_MODE_OFF);
@@ -13508,8 +13530,13 @@ void ui_meshtastic_create(lv_obj_t *scr)
     lv_obj_set_style_bg_color(mesh_status_panel, lv_color_hex(0x0F172A), 0);
     lv_obj_set_style_pad_all(mesh_status_panel, 0, 0);
 
-    mesh_status_label = ui_label(mesh_status_panel, "Daemon offline",
-                                 &lv_font_montserrat_20, 0xF5A524);
+    mesh_status_label = ui_label(mesh_status_panel,
+                                 cached_online ?
+                                 (landscape ? "Daemon online" : "Online") :
+                                 (ui_meshtastic_autostart_enabled() ?
+                                  "Starting..." : "Daemon offline"),
+                                 &lv_font_montserrat_20,
+                                 cached_online ? 0x25C281 : 0xF5A524);
     lv_obj_set_pos(mesh_status_label, 0, 0);
     lv_obj_set_width(mesh_status_label, content_w);
     lv_label_set_long_mode(mesh_status_label, LV_LABEL_LONG_DOT);
@@ -13661,7 +13688,7 @@ void ui_meshtastic_create(lv_obj_t *scr)
 
     mesh_layout_main();
     mesh_focus_input_if_hardware_keyboard();
-    mesh_start_event_cb(NULL);
+    mesh_start_if_needed("foreground");
     mesh_timer = lv_timer_create(mesh_timer_cb, 2000, NULL);
 }
 

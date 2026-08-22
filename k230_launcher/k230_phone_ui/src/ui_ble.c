@@ -2,6 +2,7 @@
 
 #include "ui_i18n.h"
 #include "ui_meshtastic.h"
+#include "ui_nrf52840_manager.h"
 #include "ui_prefs.h"
 
 #include <ctype.h>
@@ -1073,6 +1074,7 @@ static int ble_ensure_adapter(void)
         ble_backend = BLE_BACKEND_NRF_AT;
         snprintf(ble_adapter_name, sizeof(ble_adapter_name), "%s", "nrf52840");
         pthread_mutex_unlock(&ble_lock);
+        ui_nrf52840_note_custom_ble_state(1, 0, "nRF52840 AT ready");
         ble_log("nrf backend ready dev=%s", BLE_NRF_UART_DEV);
         return 0;
     }
@@ -1625,6 +1627,8 @@ static void *ble_scan_thread_cb(void *arg)
     ble_backend_t backend;
     ble_mode_t mode;
     int enabled;
+    int final_ready;
+    char final_status[BLE_STATUS_MAX];
 
     (void)arg;
     pthread_mutex_lock(&ble_lock);
@@ -1651,6 +1655,16 @@ static void *ble_scan_thread_cb(void *arg)
     snprintf(ble_status, sizeof(ble_status), "%s", "Scanning...");
     pthread_mutex_unlock(&ble_lock);
 
+    if(ui_nrf52840_request(NRF52840_OWNER_BLE_SCAN, 1200) != 0) {
+        pthread_mutex_lock(&ble_lock);
+        ble_scanning = 0;
+        ble_busy = 0;
+        snprintf(ble_status, sizeof(ble_status), "%s",
+                 "nRF52840 busy");
+        pthread_mutex_unlock(&ble_lock);
+        return NULL;
+    }
+    ui_nrf52840_switch_mode(NRF52840_MODE_USER_BLE);
     rc = ble_ensure_adapter();
     if(rc == 0 && ble_adapter_ready) {
         pthread_mutex_lock(&ble_lock);
@@ -1679,7 +1693,11 @@ static void *ble_scan_thread_cb(void *arg)
         snprintf(ble_status, sizeof(ble_status), "%d %s",
                  ble_device_count, ui_tr("devices"));
     }
+    final_ready = ble_adapter_ready;
+    snprintf(final_status, sizeof(final_status), "%s", ble_status);
     pthread_mutex_unlock(&ble_lock);
+    ui_nrf52840_note_custom_ble_state(final_ready, 0, final_status);
+    ui_nrf52840_release(NRF52840_OWNER_BLE_SCAN);
     return NULL;
 }
 
@@ -1689,6 +1707,8 @@ static void *ble_gatt_thread_cb(void *arg)
     char adapter[sizeof(ble_adapter_name)] = "hci0";
     ble_backend_t backend = BLE_BACKEND_HCI;
     char result[BLE_GATT_TEXT_MAX];
+    char final_status[BLE_STATUS_MAX];
+    int final_ready;
     int rc = -1;
 
     result[0] = '\0';
@@ -1704,6 +1724,19 @@ static void *ble_gatt_thread_cb(void *arg)
     snprintf(ble_gatt_text, sizeof(ble_gatt_text), "%s", "Discovering GATT...");
     pthread_mutex_unlock(&ble_lock);
 
+    if(ui_nrf52840_request(NRF52840_OWNER_BLE_CONNECT, 2000) != 0) {
+        ble_text_append(result, sizeof(result), "%s\n", "nRF52840 busy");
+        ble_gatt_store_result(result);
+        pthread_mutex_lock(&ble_lock);
+        ble_busy = 0;
+        ble_gatt_busy = 0;
+        ble_connected = 0;
+        snprintf(ble_status, sizeof(ble_status), "%s", "nRF52840 busy");
+        pthread_mutex_unlock(&ble_lock);
+        free(req);
+        return NULL;
+    }
+    ui_nrf52840_switch_mode(NRF52840_MODE_USER_BLE);
     if(ble_ensure_adapter() == 0 && ble_adapter_ready) {
         pthread_mutex_lock(&ble_lock);
         snprintf(adapter, sizeof(adapter), "%s", ble_adapter_name);
@@ -1736,7 +1769,11 @@ static void *ble_gatt_thread_cb(void *arg)
     ble_connected = rc == 0;
     snprintf(ble_status, sizeof(ble_status), "%s %s",
              rc == 0 ? "GATT ready" : "GATT discovery failed", req->addr);
+    final_ready = ble_adapter_ready;
+    snprintf(final_status, sizeof(final_status), "%s", ble_status);
     pthread_mutex_unlock(&ble_lock);
+    ui_nrf52840_note_custom_ble_state(final_ready, rc == 0, final_status);
+    ui_nrf52840_release(NRF52840_OWNER_BLE_CONNECT);
 
     free(req);
     return NULL;
@@ -1793,6 +1830,10 @@ static void ble_scan_switch_event_cb(lv_event_t *event)
               "Bluetooth on"));
     pthread_mutex_unlock(&ble_lock);
     ble_save_enabled(enabled);
+    ui_nrf52840_switch_mode(!enabled ? NRF52840_MODE_OFF :
+                            (mode == BLE_MODE_MESH_EXCLUSIVE ?
+                             NRF52840_MODE_MESHTASTIC :
+                             NRF52840_MODE_USER_BLE));
     ui_meshtastic_apply_ble_setting();
 
     ble_log("bluetooth switch %s mode=%s", enabled ? "on" : "off",
@@ -1844,6 +1885,10 @@ static void ble_mode_event_cb(lv_event_t *event)
     pthread_mutex_unlock(&ble_lock);
 
     ble_save_mode(mode);
+    ui_nrf52840_switch_mode(!enabled ? NRF52840_MODE_OFF :
+                            (mode == BLE_MODE_MESH_EXCLUSIVE ?
+                             NRF52840_MODE_MESHTASTIC :
+                             NRF52840_MODE_USER_BLE));
     ble_log("mode changed to %s", ble_mode_pref_value(mode));
     ui_meshtastic_apply_ble_setting();
     if(enabled && mode == BLE_MODE_CUSTOM) {
