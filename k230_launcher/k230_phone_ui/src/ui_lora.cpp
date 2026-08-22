@@ -5563,9 +5563,6 @@ static lv_obj_t *lorawan_source_card(lv_obj_t *parent, int x, int y, int w,
 {
     char detail[128];
     int content_w = w - 24;
-    int state_w;
-    int title_w;
-    int detail_y;
     int selected = (lorawan_config.upload_sources ?
                     lorawan_config.upload_sources :
                     LORAWAN_SOURCE_DEFAULT) & source;
@@ -5588,15 +5585,9 @@ static lv_obj_t *lorawan_source_card(lv_obj_t *parent, int x, int y, int w,
     lv_obj_add_event_cb(card, lorawan_source_event_cb, LV_EVENT_CLICKED,
                         (void *)(uintptr_t)source);
 
-    state_w = content_w >= 210 ? 92 : 78;
-    title_w = content_w - state_w - 8;
-    if(title_w < content_w / 2) {
-        title_w = content_w;
-    }
-
     label = ui_label(card, lorawan_source_title(source), &lv_font_montserrat_18,
                      available ? 0xF2F5F8 : 0x7B8490);
-    lv_obj_set_width(label, title_w);
+    lv_obj_set_size(label, content_w, 24);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(label, 0, 0);
 
@@ -5605,23 +5596,16 @@ static lv_obj_t *lorawan_source_card(lv_obj_t *parent, int x, int y, int w,
                            &lv_font_montserrat_14,
                            selected ? color :
                            (available ? 0x9AA4AF : 0x6B7280));
-    lv_obj_set_width(state_label, state_w);
+    lv_obj_set_size(state_label, content_w, 20);
     lv_label_set_long_mode(state_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(state_label, LV_TEXT_ALIGN_RIGHT, 0);
-    if(title_w < content_w) {
-        lv_obj_align(state_label, LV_ALIGN_TOP_RIGHT, 0, 3);
-        detail_y = 36;
-    } else {
-        lv_obj_set_pos(state_label, 0, 28);
-        detail_y = 54;
-    }
+    lv_obj_set_pos(state_label, 0, 30);
 
     lorawan_source_detail(source, detail, sizeof(detail));
     label = ui_label(card, detail, &lv_font_montserrat_14,
                      available ? 0x9AA4AF : 0x6B7280);
-    lv_obj_set_width(label, content_w);
+    lv_obj_set_size(label, content_w, 22);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(label, 0, detail_y);
+    lv_obj_set_pos(label, 0, 62);
 
     return card;
 }
@@ -6898,7 +6882,7 @@ static void lorawan_home_view(lv_obj_t *body, int landscape)
     y += 42;
     source_cols = work_w >= 620 ? 3 : (work_w >= 430 ? 2 : 1);
     source_w = (work_w - 12 * (source_cols - 1)) / source_cols;
-    source_h = landscape ? 104 : 96;
+    source_h = landscape ? 112 : 108;
     lorawan_source_card(panel, work_x, y, source_w, source_h,
                         LORAWAN_SOURCE_K230, 0x25C281);
     lorawan_source_card(panel,
