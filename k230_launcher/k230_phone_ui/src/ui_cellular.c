@@ -56,7 +56,9 @@
 #define NRF9151_MAX_SATS 48
 #define NRF9151_SAT_TEXT_MAX 2048
 #define NRF9151_CN0_BAR_MAX 32
+#define NRF9151_SKY_DOT_MAX 24
 #define NRF9151_CN0_MAX 60
+#define NRF9151_PI 3.14159265358979323846
 
 typedef enum {
     CELLULAR_ACTION_LINK = 0,
@@ -109,6 +111,11 @@ typedef struct {
     lv_obj_t *fill;
     lv_obj_t *label;
 } cellular_cn0_bar_t;
+
+typedef struct {
+    lv_obj_t *dot;
+    lv_obj_t *label;
+} cellular_sky_dot_t;
 
 typedef struct {
     int gps;
@@ -232,9 +239,12 @@ static lv_obj_t *cellular_sat_label;
 static lv_obj_t *cellular_gnss_position_label;
 static lv_obj_t *cellular_gnss_precision_label;
 static lv_obj_t *cellular_gnss_motion_label;
-static lv_obj_t *cellular_gnss_satellites_label;
+static lv_obj_t *cellular_gnss_time_label;
 static lv_obj_t *cellular_gnss_signal_summary_label;
 static lv_obj_t *cellular_gnss_cno_stats_label;
+static lv_obj_t *cellular_sky_plot_panel;
+static lv_obj_t *cellular_sky_plot_disc;
+static lv_obj_t *cellular_sky_plot_empty_label;
 static lv_obj_t *cellular_log_label;
 static lv_obj_t *cellular_cno_button;
 static lv_obj_t *cellular_check_panel;
@@ -249,6 +259,7 @@ static lv_obj_t *cellular_mqtt_topic_label;
 static lv_obj_t *cellular_mqtt_payload_label;
 static lv_obj_t *cellular_mqtt_log_label;
 static cellular_cn0_bar_t cellular_cn0_bars[NRF9151_CN0_BAR_MAX];
+static cellular_sky_dot_t cellular_sky_dots[NRF9151_SKY_DOT_MAX];
 static lv_timer_t *cellular_timer;
 
 static pthread_mutex_t cellular_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1273,6 +1284,122 @@ static void cellular_cn0_chart_refresh(const cellular_satellite_t *sats,
     }
 }
 
+static int cellular_sky_plot_collect(const cellular_satellite_t *sats,
+                                     size_t sat_count,
+                                     const cellular_satellite_t **out,
+                                     size_t out_count)
+{
+    size_t used = 0;
+
+    if(!sats || !out || out_count == 0U) {
+        return 0;
+    }
+    for(size_t pass = 0; pass < 2U && used < out_count; pass++) {
+        for(size_t i = 0; i < sat_count && used < out_count; i++) {
+            if(!sats[i].valid || sats[i].prn <= 0) {
+                continue;
+            }
+            if(pass == 0 && sats[i].cn0 <= 0) {
+                continue;
+            }
+            if(pass == 1 && sats[i].cn0 > 0) {
+                continue;
+            }
+            out[used++] = &sats[i];
+        }
+    }
+    return (int)used;
+}
+
+static void cellular_sky_plot_refresh(const cellular_satellite_t *sats,
+                                      size_t sat_count)
+{
+    const cellular_satellite_t *visible[NRF9151_SKY_DOT_MAX];
+    int count;
+    int disc_w;
+    int center;
+    int plot_radius;
+
+    if(!cellular_sky_plot_disc || !sats) {
+        return;
+    }
+    count = cellular_sky_plot_collect(sats, sat_count, visible,
+                                      NRF9151_SKY_DOT_MAX);
+    disc_w = lv_obj_get_width(cellular_sky_plot_disc);
+    if(disc_w <= 0) {
+        disc_w = 260;
+    }
+    center = disc_w / 2;
+    plot_radius = center - 18;
+    if(plot_radius < 60) {
+        plot_radius = 60;
+    }
+    if(cellular_sky_plot_empty_label) {
+        if(count > 0) {
+            lv_obj_add_flag(cellular_sky_plot_empty_label,
+                            LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(cellular_sky_plot_empty_label,
+                              LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    for(size_t i = 0; i < NRF9151_SKY_DOT_MAX; i++) {
+        cellular_sky_dot_t *dot = &cellular_sky_dots[i];
+        const cellular_satellite_t *sat;
+        int dot_size;
+        int elev;
+        int az;
+        double angle;
+        double radius;
+        int x;
+        int y;
+
+        if(!dot->dot || !dot->label) {
+            continue;
+        }
+        if((int)i >= count) {
+            lv_obj_add_flag(dot->dot, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        sat = visible[i];
+        elev = sat->elevation;
+        az = sat->azimuth;
+        if(elev < 0) {
+            elev = 0;
+        }
+        if(elev > 90) {
+            elev = 90;
+        }
+        if(az < 0 || az >= 360) {
+            az %= 360;
+            if(az < 0) {
+                az += 360;
+            }
+        }
+        if((sat->elevation == 0 && sat->azimuth == 0) || count == 1) {
+            az = count > 0 ? (int)((360U * (unsigned int)i) /
+                                   (unsigned int)count) : 0;
+        }
+        radius = ((double)(90 - elev) / 90.0) * (double)plot_radius;
+        angle = ((double)az * NRF9151_PI) / 180.0;
+        dot_size = sat->cn0 >= 35 ? 24 : sat->cn0 >= 20 ? 21 : 18;
+        x = center + (int)(sin(angle) * radius) - dot_size / 2;
+        y = center - (int)(cos(angle) * radius) - dot_size / 2;
+        lv_obj_set_size(dot->dot, dot_size, dot_size);
+        lv_obj_set_pos(dot->dot, x, y);
+        lv_obj_set_style_radius(dot->dot, dot_size / 2, 0);
+        lv_obj_set_style_bg_color(dot->dot,
+                                  lv_color_hex(cellular_sat_color(sat->talker)),
+                                  0);
+        lv_obj_set_style_bg_opa(dot->dot, sat->cn0 > 0 ? LV_OPA_COVER :
+                                LV_OPA_60, 0);
+        lv_label_set_text_fmt(dot->label, "%02d", sat->prn);
+        lv_obj_set_size(dot->label, dot_size, dot_size);
+        lv_obj_center(dot->label);
+        lv_obj_clear_flag(dot->dot, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void cellular_cn0_bar_create(lv_obj_t *parent, cellular_cn0_bar_t *bar)
 {
     const lv_coord_t col_w = 32;
@@ -1347,6 +1474,113 @@ static lv_obj_t *cellular_cn0_chart_create(lv_obj_t *parent, int width)
         cellular_cn0_bar_create(chart, &cellular_cn0_bars[i]);
     }
     return chart;
+}
+
+static lv_obj_t *cellular_sky_plot_create(lv_obj_t *parent, int width)
+{
+    lv_obj_t *panel;
+    lv_obj_t *label;
+    lv_obj_t *disc;
+    lv_obj_t *ring;
+    lv_obj_t *line;
+    int plot_size = width - 32;
+
+    if(plot_size > 330) {
+        plot_size = 330;
+    }
+    if(plot_size < 230) {
+        plot_size = 230;
+    }
+    panel = lv_obj_create(parent);
+    lv_obj_set_pos(panel, 0, 350);
+    lv_obj_set_size(panel, width, plot_size + 82);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x0B1117), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x25303A), 0);
+    lv_obj_set_style_radius(panel, 10, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    label = ui_label(panel, "Constellation sky", &lv_font_montserrat_20,
+                     0xF2F5F8);
+    lv_obj_set_width(label, width - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 16, 12);
+
+    label = ui_label(panel, "N", &lv_font_montserrat_14, 0x94A3B8);
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 42);
+
+    disc = lv_obj_create(panel);
+    cellular_sky_plot_disc = disc;
+    lv_obj_set_size(disc, plot_size, plot_size);
+    lv_obj_set_style_bg_color(disc, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(disc, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(disc, 2, 0);
+    lv_obj_set_style_border_color(disc, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_radius(disc, plot_size / 2, 0);
+    lv_obj_set_style_pad_all(disc, 0, 0);
+    lv_obj_clear_flag(disc, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(disc, LV_ALIGN_TOP_MID, 0, 62);
+
+    for(int i = 1; i <= 3; i++) {
+        int size = (plot_size * i) / 4;
+
+        ring = lv_obj_create(disc);
+        lv_obj_set_size(ring, size, size);
+        lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(ring, 1, 0);
+        lv_obj_set_style_border_color(ring, lv_color_hex(0x243244), 0);
+        lv_obj_set_style_radius(ring, size / 2, 0);
+        lv_obj_set_style_pad_all(ring, 0, 0);
+        lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_center(ring);
+    }
+
+    line = lv_obj_create(disc);
+    lv_obj_set_size(line, plot_size - 28, 1);
+    lv_obj_set_style_bg_color(line, lv_color_hex(0x243244), 0);
+    lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(line, 0, 0);
+    lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(line);
+
+    line = lv_obj_create(disc);
+    lv_obj_set_size(line, 1, plot_size - 28);
+    lv_obj_set_style_bg_color(line, lv_color_hex(0x243244), 0);
+    lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(line, 0, 0);
+    lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(line);
+
+    cellular_sky_plot_empty_label =
+        ui_label(disc, "Waiting for satellite geometry",
+                 &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_width(cellular_sky_plot_empty_label, plot_size - 44);
+    lv_obj_set_style_text_align(cellular_sky_plot_empty_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(cellular_sky_plot_empty_label, LV_LABEL_LONG_WRAP);
+    lv_obj_center(cellular_sky_plot_empty_label);
+
+    for(size_t i = 0; i < NRF9151_SKY_DOT_MAX; i++) {
+        cellular_sky_dot_t *dot = &cellular_sky_dots[i];
+
+        dot->dot = lv_obj_create(disc);
+        lv_obj_set_size(dot->dot, 20, 20);
+        lv_obj_set_style_bg_color(dot->dot, lv_color_hex(0x25C281), 0);
+        lv_obj_set_style_bg_opa(dot->dot, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(dot->dot, 1, 0);
+        lv_obj_set_style_border_color(dot->dot, lv_color_hex(0xF8FAFC), 0);
+        lv_obj_set_style_radius(dot->dot, 10, 0);
+        lv_obj_set_style_pad_all(dot->dot, 0, 0);
+        lv_obj_clear_flag(dot->dot, LV_OBJ_FLAG_SCROLLABLE);
+        dot->label = ui_label(dot->dot, "--", &lv_font_montserrat_12,
+                              0x071018);
+        lv_obj_set_style_text_align(dot->label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(dot->label);
+        lv_obj_add_flag(dot->dot, LV_OBJ_FLAG_HIDDEN);
+    }
+    return panel;
 }
 
 static void cellular_log_refresh(void)
@@ -1833,6 +2067,7 @@ static void cellular_status_refresh(void)
                                     0);
     }
     cellular_cn0_chart_refresh(sats_copy, NRF9151_MAX_SATS);
+    cellular_sky_plot_refresh(sats_copy, NRF9151_MAX_SATS);
     if(cellular_sat_label) {
         char text[160];
 
@@ -1865,8 +2100,8 @@ static void cellular_status_refresh(void)
         char text[192];
 
         snprintf(text, sizeof(text),
-                 "PDOP %s\nHDOP %s\nVDOP %s\nSats %u",
-                 gnss_pdop, gnss_hdop, gnss_vdop, satellite_count);
+                 "PDOP %s\nHDOP %s\nVDOP %s",
+                 gnss_pdop, gnss_hdop, gnss_vdop);
         lv_label_set_text(cellular_gnss_precision_label, text);
     }
     if(cellular_gnss_motion_label) {
@@ -1887,17 +2122,15 @@ static void cellular_status_refresh(void)
                  speed_text, course_text, ttff_value);
         lv_label_set_text(cellular_gnss_motion_label, text);
     }
-    if(cellular_gnss_satellites_label) {
+    if(cellular_gnss_time_label) {
         char text[224];
 
         snprintf(text, sizeof(text),
-                 "Date %s\nUTC  %s\nRX   %u\nGPS %d  BDS %d\nGAL %d  GLO %d\nQZS %d  NAV %d  MIX %d",
-                 gnss_date, gnss_utc, nmea_rx_count,
-                 constellations.gps, constellations.beidou,
-                 constellations.galileo, constellations.glonass,
-                 constellations.qzss, constellations.navic,
-                 constellations.mixed);
-        lv_label_set_text(cellular_gnss_satellites_label, text);
+                 "Date  %s\nUTC   %s\nAge   %lds\nState %s",
+                 gnss_date, gnss_utc, manager_status.age_seconds,
+                 gnss_has_fix ? "Fix" :
+                 (manager_status.gnss_running ? "Search" : "Off"));
+        lv_label_set_text(cellular_gnss_time_label, text);
     }
     if(cellular_gnss_signal_summary_label) {
         lv_label_set_text_fmt(cellular_gnss_signal_summary_label, "%s",
@@ -5315,8 +5548,8 @@ void ui_cellular_create(lv_obj_t *scr)
                     &cellular_gnss_precision_label);
         GNSS_METRIC(2, "Navigation", 0x38BDF8,
                     &cellular_gnss_motion_label);
-        GNSS_METRIC(3, "Satellites", 0xA78BFA,
-                    &cellular_gnss_satellites_label);
+        GNSS_METRIC(3, "Time", 0xA78BFA,
+                    &cellular_gnss_time_label);
 #undef GNSS_METRIC
     }
 
@@ -5324,8 +5557,9 @@ void ui_cellular_create(lv_obj_t *scr)
                      gnss_right_y, wide_layout ? right_w : panel_w,
                      gnss_right_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x0E1720), 0);
-    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(panel, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
     label = ui_label(panel, "Signal radar", &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_width(label, (wide_layout ? right_w : panel_w) - 32);
@@ -5353,6 +5587,7 @@ void ui_cellular_create(lv_obj_t *scr)
     chart_w = (wide_layout ? right_w : panel_w) - 32;
     cellular_sat_chart = cellular_cn0_chart_create(panel, chart_w);
     lv_obj_align(cellular_sat_chart, LV_ALIGN_TOP_LEFT, 0, 136);
+    cellular_sky_plot_panel = cellular_sky_plot_create(panel, chart_w);
 
     cellular_http_page = cellular_page_create(body, !wide_layout);
     lv_obj_add_flag(cellular_http_page, LV_OBJ_FLAG_HIDDEN);
@@ -5498,9 +5733,13 @@ void ui_cellular_cleanup(void)
     cellular_gnss_position_label = NULL;
     cellular_gnss_precision_label = NULL;
     cellular_gnss_motion_label = NULL;
-    cellular_gnss_satellites_label = NULL;
+    cellular_gnss_time_label = NULL;
     cellular_gnss_signal_summary_label = NULL;
     cellular_gnss_cno_stats_label = NULL;
+    cellular_sky_plot_panel = NULL;
+    cellular_sky_plot_disc = NULL;
+    cellular_sky_plot_empty_label = NULL;
+    memset(cellular_sky_dots, 0, sizeof(cellular_sky_dots));
     cellular_log_label = NULL;
     cellular_cno_button = NULL;
     if(cellular_check_panel) {

@@ -650,6 +650,8 @@ static const ui_translation_t ui_translations[] = {
     { "Date", "日期", "日付" },
     { "Navigation", "导航", "ナビゲーション" },
     { "Signal radar", "信号雷达", "信号レーダー" },
+    { "Constellation sky", "星系图", "衛星天空図" },
+    { "Waiting for satellite geometry", "等待卫星方位数据", "衛星ジオメトリ待ち" },
     { "Time zone", "时区", "タイムゾーン" },
     { "Local time", "本地时间", "ローカル時刻" },
     { "NTP server", "NTP 服务器", "NTP サーバー" },
