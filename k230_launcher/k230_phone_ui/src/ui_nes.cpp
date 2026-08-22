@@ -1113,22 +1113,24 @@ static void nes_create_library(lv_obj_t *parent)
     int landscape = ui_is_landscape();
     int body_h = nes_parent_body_height(parent);
     int screen_w = ui_screen_width();
-    int margin = 24;
-    int gap = 24;
-    int left_w = landscape ? nes_clamp_int(screen_w * 34 / 100, 320, 460) : 520;
+    int panel_x = landscape ? 0 : ui_page_panel_x();
+    int panel_w = landscape ? screen_w : ui_page_panel_width();
+    int margin = landscape ? 24 : 0;
+    int gap = landscape ? 24 : 16;
+    int left_w = landscape ? nes_clamp_int(screen_w * 34 / 100, 320, 460) : panel_w;
     int min_list_w = landscape ? 360 : 420;
-    int list_x = landscape ? margin + left_w + gap : 24;
+    int list_x = landscape ? margin + left_w + gap : margin;
     int list_y = landscape ? 20 : 360;
-    int list_w = landscape ? screen_w - list_x - margin : 520;
+    int list_w = landscape ? screen_w - list_x - margin : panel_w;
     int list_h = landscape ? body_h - 40 : body_h - list_y - 24;
-    int cover_w = landscape ? left_w : 188;
+    int cover_w = landscape ? left_w : (panel_w - gap) / 2;
     int cover_h = landscape ? nes_clamp_int(body_h * 42 / 100, 170, 260) : 260;
-    int cover_img_w = landscape ? cover_w - 32 : 170;
-    int cover_img_h = landscape ? cover_h - 32 : 230;
-    int info_x = landscape ? 24 : 226;
+    int cover_img_w = landscape ? cover_w - 32 : cover_w - 28;
+    int cover_img_h = landscape ? cover_h - 32 : cover_h - 30;
+    int info_x = landscape ? margin : margin + cover_w + gap;
     int info_y = landscape ? 20 + cover_h + 16 : 22;
-    int info_w = landscape ? left_w : 318;
-    int info_h = landscape ? body_h - info_y - 54 : 290;
+    int info_w = landscape ? left_w : cover_w;
+    int info_h = landscape ? body_h - info_y - 54 : cover_h;
     int info_text_w = info_w - 32;
 
     if(landscape && list_w < min_list_w) {
@@ -1143,7 +1145,7 @@ static void nes_create_library(lv_obj_t *parent)
         info_w = left_w;
         info_text_w = info_w - 32;
     }
-    if(list_w < min_list_w) {
+    if(landscape && list_w < min_list_w) {
         list_w = min_list_w;
     }
     if(list_h < 260) {
@@ -1157,26 +1159,23 @@ static void nes_create_library(lv_obj_t *parent)
         cover_img_h = cover_h - 32;
         info_y = 20 + cover_h + 16;
         info_h = body_h - info_y - 54;
-    } else if(!landscape && cover_h < 260) {
-        cover_h = 260;
-        cover_img_h = cover_h - 32;
-        info_y = cover_h + 34;
-        info_h = body_h - info_y - 20;
     }
     if(info_h < 112) {
         info_h = 112;
     }
 
-    nes_library_panel = ui_scroll_panel(parent, 0, 0, screen_w, body_h);
+    nes_library_panel = ui_scroll_panel(parent, panel_x, 0, panel_w, body_h);
     lv_obj_set_style_bg_color(nes_library_panel, lv_color_hex(0x101418), 0);
     lv_obj_set_style_radius(nes_library_panel, 0, 0);
     lv_obj_set_style_border_width(nes_library_panel, 0, 0);
+    lv_obj_set_style_pad_all(nes_library_panel, 0, 0);
+    lv_obj_set_style_pad_bottom(nes_library_panel, 48, 0);
+    lv_obj_set_scrollbar_mode(nes_library_panel, LV_SCROLLBAR_MODE_OFF);
     if(landscape) {
         lv_obj_clear_flag(nes_library_panel, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scrollbar_mode(nes_library_panel, LV_SCROLLBAR_MODE_OFF);
     }
 
-    cover = ui_panel(nes_library_panel, 24, landscape ? 20 : 22,
+    cover = ui_panel(nes_library_panel, margin, landscape ? 20 : 22,
                      cover_w, cover_h);
     lv_obj_set_style_bg_color(cover, lv_color_hex(0x182331), 0);
     lv_obj_set_style_border_color(cover, lv_color_hex(0x2A3B4F), 0);
@@ -1214,16 +1213,16 @@ static void nes_create_library(lv_obj_t *parent)
                               0xD3DAE3);
     lv_obj_set_width(nes_meta_label, info_text_w);
     lv_label_set_long_mode(nes_meta_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(nes_meta_label, 0, landscape ? 40 : 58);
+    lv_obj_set_pos(nes_meta_label, 0, landscape ? 40 : 48);
     nes_path_label = ui_label(info, NES_ROM_DIR_PRIMARY, &lv_font_montserrat_14,
                               0x9AA4AF);
     lv_obj_set_width(nes_path_label, info_text_w);
     lv_label_set_long_mode(nes_path_label,
-                           landscape ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(nes_path_label, 0, landscape ? 78 : 132);
+                           LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(nes_path_label, 0, landscape ? 78 : 108);
 
     scan_btn = nes_button(info, landscape ? info_w - 164 : 0,
-                          landscape ? 0 : 214, 132, 46,
+                          landscape ? 0 : 162, 132, 46,
                           LV_SYMBOL_REFRESH, 0x3DA5FF);
     lv_obj_add_event_cb(scan_btn, nes_scan_event, LV_EVENT_CLICKED, NULL);
     folder_label = ui_label(info, "ROMs", &lv_font_montserrat_16, 0x9AA4AF);
@@ -1233,9 +1232,9 @@ static void nes_create_library(lv_obj_t *parent)
 
     nes_status_label = ui_label(nes_library_panel, "Ready",
                                 &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(nes_status_label, landscape ? left_w : 520);
+    lv_obj_set_width(nes_status_label, landscape ? left_w : panel_w);
     lv_label_set_long_mode(nes_status_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(nes_status_label, 24,
+    lv_obj_set_pos(nes_status_label, landscape ? 24 : 0,
                    landscape ? body_h - 30 : list_y - 34);
 
     nes_list_panel = ui_panel(nes_library_panel, list_x, list_y, list_w, list_h);
@@ -1243,7 +1242,7 @@ static void nes_create_library(lv_obj_t *parent)
     lv_obj_set_style_border_color(nes_list_panel, lv_color_hex(0x243244), 0);
     lv_obj_set_style_pad_all(nes_list_panel, 0, 0);
     lv_obj_set_scroll_dir(nes_list_panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(nes_list_panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(nes_list_panel, LV_SCROLLBAR_MODE_OFF);
 }
 
 static void nes_create_game(lv_obj_t *parent)
@@ -1307,6 +1306,7 @@ static void nes_create_game(lv_obj_t *parent)
     lv_obj_set_style_radius(nes_game_panel, 0, 0);
     lv_obj_set_style_border_width(nes_game_panel, 0, 0);
     lv_obj_add_flag(nes_game_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_scrollbar_mode(nes_game_panel, LV_SCROLLBAR_MODE_OFF);
     if(landscape) {
         lv_obj_clear_flag(nes_game_panel, LV_OBJ_FLAG_SCROLLABLE);
     }
