@@ -350,6 +350,9 @@ static lv_obj_t *camera_preview_hint_label;
 static lv_obj_t *camera_status_label;
 static lv_obj_t *camera_meta_label;
 static lv_obj_t *camera_last_label;
+static lv_obj_t *camera_capture_flash_obj;
+static lv_obj_t *camera_capture_toast_obj;
+static lv_obj_t *camera_capture_toast_label;
 static lv_obj_t *camera_gallery_canvas;
 static lv_obj_t *camera_gallery_hint_label;
 static lv_obj_t *camera_flip_h_btn;
@@ -468,6 +471,9 @@ static int camera_preview_have_frame;
 static int camera_capture_frame_valid;
 static unsigned camera_capture_frame_w;
 static unsigned camera_capture_frame_h;
+static int camera_capture_feedback_seq;
+static int camera_capture_feedback_seen_seq;
+static uint32_t camera_capture_toast_until;
 static int camera_preview_active;
 static int camera_preview_last_result;
 static uint32_t camera_preview_frame_count;
@@ -9495,6 +9501,89 @@ static void camera_set_preview_status(const char *text, int result, int active)
     pthread_mutex_unlock(&camera_lock);
 }
 
+static void camera_capture_flash_done_cb(lv_anim_t *anim)
+{
+    lv_obj_t *obj = anim ? (lv_obj_t *)anim->var : NULL;
+
+    if(obj && lv_obj_is_valid(obj)) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_opa(obj, LV_OPA_TRANSP, 0);
+    }
+}
+
+static void camera_capture_flash_start(void)
+{
+    lv_anim_t anim;
+
+    if(!camera_capture_flash_obj ||
+       !lv_obj_is_valid(camera_capture_flash_obj)) {
+        return;
+    }
+
+    lv_anim_delete(camera_capture_flash_obj, set_opa_anim_cb);
+    lv_obj_clear_flag(camera_capture_flash_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(camera_capture_flash_obj);
+    lv_obj_set_style_opa(camera_capture_flash_obj, LV_OPA_70, 0);
+
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, camera_capture_flash_obj);
+    lv_anim_set_exec_cb(&anim, set_opa_anim_cb);
+    lv_anim_set_values(&anim, LV_OPA_70, LV_OPA_TRANSP);
+    lv_anim_set_duration(&anim, 170);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, camera_capture_flash_done_cb);
+    lv_anim_start(&anim);
+}
+
+static void camera_capture_toast_hide(void)
+{
+    if(camera_capture_toast_obj &&
+       lv_obj_is_valid(camera_capture_toast_obj)) {
+        lv_obj_add_flag(camera_capture_toast_obj, LV_OBJ_FLAG_HIDDEN);
+    }
+    camera_capture_toast_until = 0;
+}
+
+static void camera_capture_toast_show(const char *text, uint32_t color,
+                                      uint32_t duration_ms)
+{
+    if(!camera_capture_toast_obj ||
+       !lv_obj_is_valid(camera_capture_toast_obj) ||
+       !camera_capture_toast_label ||
+       !lv_obj_is_valid(camera_capture_toast_label)) {
+        return;
+    }
+
+    lv_label_set_text(camera_capture_toast_label, text ? text : "");
+    lv_obj_set_style_text_color(camera_capture_toast_label,
+                                lv_color_hex(color), 0);
+    lv_obj_clear_flag(camera_capture_toast_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(camera_capture_toast_obj);
+    lv_obj_center(camera_capture_toast_label);
+    lv_obj_align(camera_capture_toast_obj, LV_ALIGN_CENTER, 0, 0);
+    camera_capture_toast_until = duration_ms ? lv_tick_get() + duration_ms : 0;
+}
+
+static void camera_capture_toast_update(int busy, int result, int feedback_seq)
+{
+    if(busy) {
+        camera_capture_toast_show("Saving...", 0xF5A524, 0);
+        return;
+    }
+
+    if(feedback_seq != camera_capture_feedback_seen_seq) {
+        camera_capture_feedback_seen_seq = feedback_seq;
+        camera_capture_toast_show(result == 0 ? LV_SYMBOL_OK "  Saved" :
+                                               LV_SYMBOL_WARNING "  Failed",
+                                  result == 0 ? 0x25C281 : 0xEF4D5A, 900);
+    }
+
+    if(camera_capture_toast_until &&
+       (int32_t)(lv_tick_get() - camera_capture_toast_until) >= 0) {
+        camera_capture_toast_hide();
+    }
+}
+
 static void *camera_preview_thread_cb(void *arg)
 {
     struct v4l2_drm_context ctx;
@@ -9706,6 +9795,7 @@ static void camera_update_visible_state(void)
     int preview_have_frame;
     int preview_frame_ready;
     int preview_result;
+    int feedback_seq;
     const char *base;
     unsigned preview_w = camera_preview_view_width();
     unsigned preview_h = camera_preview_view_height();
@@ -9722,6 +9812,7 @@ static void camera_update_visible_state(void)
     preview_have_frame = camera_preview_have_frame;
     preview_frame_ready = camera_preview_frame_ready;
     preview_result = camera_preview_last_result;
+    feedback_seq = camera_capture_feedback_seq;
     if(preview_frame_ready) {
         memcpy(camera_preview_buf, camera_preview_frame_buf, preview_bytes);
         camera_preview_frame_ready = 0;
@@ -9741,6 +9832,7 @@ static void camera_update_visible_state(void)
                                                    result < 0 ? 0x9AA4AF : 0xEF4D5A))),
                                     0);
     }
+    camera_capture_toast_update(busy, result, feedback_seq);
 
     if(camera_meta_label) {
         lv_label_set_text(camera_meta_label,
@@ -9934,6 +10026,7 @@ static void *camera_capture_thread_cb(void *arg)
                              "JPEG capture failed");
         camera_last_result = code;
     }
+    camera_capture_feedback_seq++;
     camera_busy = 0;
     camera_result_ready = 1;
     pthread_mutex_unlock(&camera_lock);
@@ -9959,10 +10052,13 @@ static void camera_capture_event_cb(lv_event_t *event)
     pthread_mutex_unlock(&camera_lock);
 
     if(busy) {
+        camera_capture_toast_show("Saving...", 0xF5A524, 0);
         camera_update_visible_state();
         return;
     }
 
+    camera_capture_flash_start();
+    camera_capture_toast_show("Saving...", 0xF5A524, 0);
     touch_trace_log("CAMERA_CAPTURE_START");
     if(pthread_create(&thread, NULL, camera_capture_thread_cb, NULL) != 0) {
         camera_set_status("Capture thread error", 1);
@@ -10263,6 +10359,8 @@ static void create_camera_page(lv_obj_t *scr)
 
     create_header(scr, "Camera");
     camera_refresh_latest_from_disk();
+    camera_capture_feedback_seen_seq = camera_capture_feedback_seq;
+    camera_capture_toast_until = 0;
 
     body = camera_fixed_region(scr, 0, body_y, display_logical_width(),
                                page_body_height_from(144) + 24);
@@ -10295,6 +10393,39 @@ static void create_camera_page(lv_obj_t *scr)
     lv_obj_set_width(camera_meta_label, (int)preview_w - 32);
     lv_label_set_long_mode(camera_meta_label, LV_LABEL_LONG_DOT);
     lv_obj_align(camera_meta_label, LV_ALIGN_BOTTOM_LEFT, 16, -24);
+
+    camera_capture_flash_obj = lv_obj_create(viewfinder);
+    lv_obj_set_pos(camera_capture_flash_obj, 0, 0);
+    lv_obj_set_size(camera_capture_flash_obj, (int)preview_w, (int)preview_h);
+    lv_obj_set_style_radius(camera_capture_flash_obj, 8, 0);
+    lv_obj_set_style_bg_color(camera_capture_flash_obj, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(camera_capture_flash_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(camera_capture_flash_obj, 0, 0);
+    lv_obj_set_style_pad_all(camera_capture_flash_obj, 0, 0);
+    lv_obj_set_style_opa(camera_capture_flash_obj, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(camera_capture_flash_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(camera_capture_flash_obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(camera_capture_flash_obj, LV_OBJ_FLAG_CLICKABLE);
+
+    camera_capture_toast_obj = lv_obj_create(viewfinder);
+    lv_obj_set_size(camera_capture_toast_obj,
+                    (int)(preview_w > 380U ? 320U : preview_w - 64U), 64);
+    lv_obj_set_style_radius(camera_capture_toast_obj, 18, 0);
+    lv_obj_set_style_bg_color(camera_capture_toast_obj, lv_color_hex(0x0B1118), 0);
+    lv_obj_set_style_bg_opa(camera_capture_toast_obj, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(camera_capture_toast_obj, lv_color_hex(0x263241), 0);
+    lv_obj_set_style_border_width(camera_capture_toast_obj, 1, 0);
+    lv_obj_set_style_pad_all(camera_capture_toast_obj, 0, 0);
+    lv_obj_add_flag(camera_capture_toast_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(camera_capture_toast_obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(camera_capture_toast_obj, LV_OBJ_FLAG_CLICKABLE);
+
+    camera_capture_toast_label = label(camera_capture_toast_obj, "Saving...",
+                                       &lv_font_montserrat_22, 0xF5A524);
+    lv_obj_set_width(camera_capture_toast_label,
+                     (int)(preview_w > 380U ? 288U : preview_w - 96U));
+    lv_label_set_long_mode(camera_capture_toast_label, LV_LABEL_LONG_DOT);
+    lv_obj_center(camera_capture_toast_label);
 
     controls = panel(body, landscape ? 24 + (int)preview_w + 20 : 24,
                      landscape ? 0 : 910,
@@ -10548,6 +10679,10 @@ static void cleanup_page_state(void)
     camera_status_label = NULL;
     camera_meta_label = NULL;
     camera_last_label = NULL;
+    camera_capture_flash_obj = NULL;
+    camera_capture_toast_obj = NULL;
+    camera_capture_toast_label = NULL;
+    camera_capture_toast_until = 0;
     camera_gallery_canvas = NULL;
     camera_gallery_hint_label = NULL;
     camera_flip_h_btn = NULL;
