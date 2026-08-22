@@ -621,14 +621,18 @@ void ui_mic_spectrum_create(lv_obj_t *scr)
     int info_x = landscape ? plot_x + plot_w + 24 : 24;
     int info_y = landscape ? plot_y : 668;
     int info_w = landscape ? content_w - plot_w - 24 : 520;
-    int info_h = landscape ? plot_h : 310;
-    int gain_y = landscape ? 318 : 224;
+    int info_h = landscape ? plot_h : body_h - info_y - 24;
+    int gain_y;
 
     if(plot_h < 260) {
         plot_h = 260;
     }
     if(info_h < 310) {
         info_h = 310;
+    }
+    gain_y = landscape ? 318 : info_h - 104;
+    if(gain_y < 224) {
+        gain_y = 224;
     }
     mic_fft_load_gain_x10();
 
@@ -664,6 +668,7 @@ void ui_mic_spectrum_create(lv_obj_t *scr)
     info = ui_panel(body, info_x, info_y, info_w, info_h);
     lv_obj_set_style_bg_color(info, lv_color_hex(0x151B22), 0);
     lv_obj_set_style_border_color(info, lv_color_hex(0x25303A), 0);
+    lv_obj_set_scrollbar_mode(info, LV_SCROLLBAR_MODE_OFF);
 
     title = ui_label(info, "Live microphone spectrum",
                      &lv_font_montserrat_24, 0xF2F5F8);

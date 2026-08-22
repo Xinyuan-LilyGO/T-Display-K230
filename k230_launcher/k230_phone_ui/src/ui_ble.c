@@ -1920,6 +1920,9 @@ static lv_obj_t *ble_mode_button_create(lv_obj_t *parent, int x, int y, int w,
                         (void *)(intptr_t)mode);
 
     label = ui_label(btn, text, &lv_font_montserrat_16, 0xC9D3DF);
+    lv_obj_set_width(label, w > 24 ? w - 24 : w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label);
     ui_make_click_forwarder(label);
     return btn;
@@ -2394,9 +2397,7 @@ static void ble_refresh_ui(void)
         snprintf(text, sizeof(text), "%s  %d", ui_tr("Available BLE devices"),
                  count);
         lv_label_set_text(ble_list_title_label,
-                          !scan_enabled ? ui_tr("Bluetooth is off") :
-                          (mode == BLE_MODE_MESH_EXCLUSIVE ?
-                           ui_tr("Meshtastic BLE exclusive") : text));
+                          !scan_enabled ? ui_tr("Bluetooth is off") : text);
     }
     if(ble_device_list) {
         if(detail_mode) {
@@ -2598,12 +2599,13 @@ void ui_ble_create(lv_obj_t *scr)
     int row_x = 0;
     int row_inner_shift = landscape ? 12 : 0;
     int row_right_shift = landscape ? 12 : 0;
-    int summary_h = 206;
-    int list_y = summary_h + 46;
+    int summary_h = 184;
+    int list_y = summary_h + 30;
     int list_h = landscape ?
                  ui_screen_height() - ui_page_top_y(144) - list_y - 24 : 820;
+    int summary_inner_w;
 
-    if(panel_w < 520) {
+    if(landscape && panel_w < 520) {
         panel_w = 520;
     }
     if(list_h < 360) {
@@ -2625,6 +2627,7 @@ void ui_ble_create(lv_obj_t *scr)
     summary = ui_panel(body, panel_x, 20, panel_w, summary_h);
     ble_summary_panel = summary;
     lv_obj_set_style_bg_color(summary, lv_color_hex(0x151B22), 0);
+    summary_inner_w = ui_safe_content_width(summary, panel_w - 32);
 
     ui_label(summary, "BLE devices", &lv_font_montserrat_24, 0xF2F5F8);
     lv_obj_align(lv_obj_get_child(summary, lv_obj_get_child_count(summary) - 1),
@@ -2634,7 +2637,7 @@ void ui_ble_create(lv_obj_t *scr)
     lv_obj_align(ble_state_label, LV_ALIGN_TOP_LEFT, 0, 44);
 
     ble_status_label = ui_label(summary, "Ready", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(ble_status_label, ui_inner_width());
+    lv_obj_set_width(ble_status_label, summary_inner_w);
     lv_label_set_long_mode(ble_status_label, LV_LABEL_LONG_DOT);
     lv_obj_align(ble_status_label, LV_ALIGN_TOP_LEFT, 0, 78);
 
@@ -2645,10 +2648,10 @@ void ui_ble_create(lv_obj_t *scr)
                         LV_EVENT_VALUE_CHANGED, NULL);
 
     {
-        int mode_gap = 12;
-        int mode_w = (panel_w - mode_gap) / 2;
+        int mode_gap = landscape ? 12 : 10;
+        int mode_w = (summary_inner_w - mode_gap) / 2;
 
-        if(mode_w > 250) {
+        if(landscape && mode_w > 250) {
             mode_w = 250;
         }
         ble_mode_mesh_btn = ble_mode_button_create(summary, 0, 116, mode_w,
@@ -2659,16 +2662,6 @@ void ui_ble_create(lv_obj_t *scr)
                                                      "Scan BLE",
                                                      BLE_MODE_CUSTOM);
     }
-
-    ui_label(summary, "Tap a device name to connect and inspect GATT.",
-             &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(lv_obj_get_child(summary, lv_obj_get_child_count(summary) - 1),
-                     panel_w - 32);
-    lv_label_set_long_mode(lv_obj_get_child(summary,
-                                            lv_obj_get_child_count(summary) - 1),
-                           LV_LABEL_LONG_WRAP);
-    lv_obj_align(lv_obj_get_child(summary, lv_obj_get_child_count(summary) - 1),
-                 LV_ALIGN_TOP_LEFT, 0, 172);
 
     list = ui_panel(body, panel_x, list_y, panel_w, list_h);
     ble_device_list = list;

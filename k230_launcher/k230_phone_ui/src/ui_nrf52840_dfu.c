@@ -1374,7 +1374,9 @@ static lv_obj_t *nrf_dfu_info_pair(lv_obj_t *parent, int x, int y, int w,
     lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
     lv_obj_set_width(value, value_w);
     lv_label_set_long_mode(value, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_align(value,
+                                ui_is_landscape() ?
+                                LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_set_pos(value, x + label_w + gap, y - 2);
     if(value_out) {
         *value_out = value;
@@ -1500,26 +1502,29 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     int info_w;
     int info_label_w;
     int row_step;
+    int safe_w;
     int y;
 
     ui_create_header(scr, "nRF52840 DFU");
     body = ui_scroll_panel(scr, body_x, top_y, body_w, body_h);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x121820), 0);
+    lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
+    safe_w = ui_safe_content_width(body, body_w - 32);
 
     if(card_h < (landscape ? 330 : 540)) {
         card_h = landscape ? 330 : 540;
     }
 
-    margin = landscape ? 56 : 34;
-    if(body_w - margin * 2 < 320) {
-        margin = (body_w - 320) / 2;
+    margin = landscape ? 56 : 0;
+    if(safe_w - margin * 2 < 320) {
+        margin = (safe_w - 320) / 2;
         if(margin < 24) {
-            margin = 24;
+            margin = landscape ? 24 : 0;
         }
     }
     icon_size = landscape ? 68 : 84;
     content_x = margin;
-    content_w = body_w - margin * 2;
+    content_w = safe_w - margin * 2;
     info_x = content_x;
     info_w = content_w;
     info_label_w = landscape ? (content_w >= 680 ? 210 : 176) :
@@ -1529,7 +1534,7 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     if(action_w > content_w) {
         action_w = content_w;
     }
-    action_x = (body_w - action_w) / 2;
+    action_x = content_x + (content_w - action_w) / 2;
     button_y = card_h - 76;
 
     icon_box = lv_obj_create(body);
@@ -1574,6 +1579,12 @@ void ui_nrf52840_dfu_create(lv_obj_t *scr)
     y += row_step;
     nrf_dfu_info_pair(body, info_x, y, info_w, info_label_w,
                       "Mode", &nrf_dfu_mode_label);
+    if(!landscape) {
+        button_y = y + row_step + 28;
+        if(button_y > card_h - 76) {
+            button_y = card_h - 76;
+        }
+    }
 
     nrf_dfu_bar = lv_bar_create(body);
     lv_obj_set_pos(nrf_dfu_bar, action_x, button_y - 42);

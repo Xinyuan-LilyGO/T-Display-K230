@@ -4572,7 +4572,6 @@ static void *entry_probe_worker(void *arg)
     entry_probe_done = 1;
     pthread_mutex_unlock(&entry_probe_lock);
 
-    app_request_fast_refresh();
     return NULL;
 }
 
@@ -4675,7 +4674,6 @@ static int start_entry_probe(page_id_t page)
     }
 
     touch_trace_log("NAV_ASYNC_PROBE_START page=%s", page_name(page));
-    app_request_fast_refresh();
     return 1;
 }
 
@@ -11332,8 +11330,10 @@ static void create_reboot_page(lv_obj_t *scr)
     create_header(scr, "Reboot");
 
     page_body = ui_page_body(scr, 144);
+    lv_obj_set_scrollbar_mode(page_body, LV_SCROLLBAR_MODE_OFF);
     lv_obj_t *body = panel(page_body, ui_page_panel_x(), 18, body_w, card_h);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x111820), 0);
+    lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *icon_box = lv_obj_create(body);
     lv_obj_set_size(icon_box, icon_size, icon_size);
