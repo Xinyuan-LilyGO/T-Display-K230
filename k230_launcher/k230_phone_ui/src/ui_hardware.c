@@ -41,6 +41,7 @@
 #define PREF_FAN_ON_TEMP "fan.on_temp_c"
 #define PREF_FAN_OFF_TEMP "fan.off_temp_c"
 #define PREF_BQ25896_ICHG_MA "bq25896.ichg_ma"
+#define PREF_BATTERY_CAPACITY_MAH "battery.capacity_mah"
 #define PREF_KEYBOARD_BACKLIGHT "keyboard.backlight_pct"
 #define PREF_KEYBOARD_BACKLIGHT_PWM_HZ "keyboard.backlight_pwm_hz"
 #define PREF_EXTENSION_KEYBOARD "keyboard.extension_enabled"
@@ -184,6 +185,9 @@
 #define BQ27220_REG_CHARGING_CURRENT 0x32
 #define BQ27220_REG_OPERATION_STATUS 0x3A
 #define BQ27220_REG_DESIGN_CAPACITY 0x3C
+#define BATTERY_CAPACITY_DEFAULT_MAH 6000
+#define BATTERY_CAPACITY_MIN_MAH 500
+#define BATTERY_CAPACITY_MAX_MAH 20000
 #define TCA8418_ADDR 0x34
 #define TCA8418_ROWS 7
 #define TCA8418_COLS 10
@@ -434,6 +438,7 @@ static lv_obj_t *battery_current_label;
 static lv_obj_t *battery_remaining_label;
 static lv_obj_t *battery_full_label;
 static lv_obj_t *battery_design_label;
+static lv_obj_t *battery_user_capacity_label;
 static lv_obj_t *battery_temp_label;
 static lv_obj_t *battery_internal_temp_label;
 static lv_obj_t *battery_time_empty_label;
@@ -6413,6 +6418,88 @@ static void battery_format_minutes(char *buf, size_t len, int minutes)
     snprintf(buf, len, "%dh %02dm", minutes / 60, minutes % 60);
 }
 
+static void battery_update_page(void);
+
+static int battery_user_capacity_mah(void)
+{
+    return read_pref_int(PREF_BATTERY_CAPACITY_MAH,
+                         BATTERY_CAPACITY_DEFAULT_MAH,
+                         BATTERY_CAPACITY_MIN_MAH,
+                         BATTERY_CAPACITY_MAX_MAH);
+}
+
+static int battery_parse_capacity(const char *text, int *capacity_mah)
+{
+    char *end = NULL;
+    long value;
+
+    if(!text || !capacity_mah) {
+        return -1;
+    }
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if(errno != 0 || end == text) {
+        return -1;
+    }
+    while(end && *end == ' ') {
+        end++;
+    }
+    if(end && *end != '\0') {
+        return -1;
+    }
+    if(value < BATTERY_CAPACITY_MIN_MAH ||
+       value > BATTERY_CAPACITY_MAX_MAH) {
+        return -1;
+    }
+    *capacity_mah = (int)value;
+    return 0;
+}
+
+static void battery_capacity_submit_cb(const char *text, void *user_data)
+{
+    char status[96];
+    int capacity;
+
+    (void)user_data;
+    if(battery_parse_capacity(text, &capacity) != 0) {
+        if(battery_status_label) {
+            snprintf(status, sizeof(status), "%s",
+                     ui_tr("Capacity must be 500-20000 mAh"));
+            lv_label_set_text(battery_status_label, status);
+            lv_obj_set_style_text_color(battery_status_label,
+                                        lv_color_hex(0xF5A524), 0);
+        }
+        return;
+    }
+    write_pref_int(PREF_BATTERY_CAPACITY_MAH, capacity);
+    if(battery_status_label) {
+        snprintf(status, sizeof(status), "%s", ui_tr("Capacity saved"));
+        lv_label_set_text(battery_status_label, status);
+        lv_obj_set_style_text_color(battery_status_label,
+                                    lv_color_hex(0x25C281), 0);
+    }
+    battery_update_page();
+    app_request_fast_refresh();
+}
+
+static void battery_capacity_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+    char value[16];
+
+    (void)event;
+    snprintf(value, sizeof(value), "%d", battery_user_capacity_mah());
+    memset(&config, 0, sizeof(config));
+    config.title = "Battery capacity";
+    config.placeholder = "500-20000 mAh";
+    config.initial_text = value;
+    config.max_length = 5;
+    config.submit_cb = battery_capacity_submit_cb;
+    config.submit_text = "Save";
+    config.cancel_text = "Cancel";
+    ui_input_dialog_open(&config);
+}
+
 static void battery_update_page(void)
 {
     keyboard_base_state_t base;
@@ -6425,6 +6512,10 @@ static void battery_update_page(void)
     if(battery_base_label) {
         lv_label_set_text(battery_base_label, base.scanned ?
                           base.status : "Keyboard base not scanned");
+    }
+    if(battery_user_capacity_label) {
+        snprintf(text, sizeof(text), "%d mAh", battery_user_capacity_mah());
+        lv_label_set_text(battery_user_capacity_label, text);
     }
 
     if(bq27220_read(&reading) == 0) {
@@ -6596,6 +6687,56 @@ static void battery_info_row(lv_obj_t *parent, int y, const char *name,
     lv_label_set_long_mode(right, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(right, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(right, LV_ALIGN_TOP_RIGHT, -side_pad, y - 2);
+}
+
+static lv_obj_t *battery_action_row(lv_obj_t *parent, int y, const char *name,
+                                    const char *value, uint32_t value_color)
+{
+    int row_w = parent ? lv_obj_get_content_width(parent) : 0;
+    int side_pad = ui_is_landscape() ? 26 : 20;
+    int value_w = 170;
+    lv_obj_t *row;
+    lv_obj_t *left;
+    lv_obj_t *right;
+
+    if(row_w <= 0) {
+        row_w = ui_fit_width(parent, 0, 488);
+    }
+    if(value_w > row_w / 2) {
+        value_w = row_w / 2;
+    }
+
+    row = lv_obj_create(parent);
+    lv_obj_set_pos(row, 0, y - 10);
+    lv_obj_set_size(row, row_w, 50);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x151C23), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(0x27313B), 0);
+    lv_obj_set_style_radius(row, 8, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(row, battery_capacity_event_cb, LV_EVENT_CLICKED, NULL);
+
+    left = ui_label(row, name, &lv_font_montserrat_18, 0xF2F5F8);
+    lv_obj_set_width(left, row_w - value_w - side_pad * 2 - 16);
+    lv_label_set_long_mode(left, LV_LABEL_LONG_DOT);
+    lv_obj_align(left, LV_ALIGN_LEFT_MID, side_pad, 0);
+    lv_obj_add_flag(left, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(left, battery_capacity_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    right = ui_label(row, value, &lv_font_montserrat_20, value_color);
+    lv_obj_set_width(right, value_w);
+    lv_label_set_long_mode(right, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(right, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(right, LV_ALIGN_RIGHT_MID, -side_pad, 0);
+    lv_obj_add_flag(right, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(right, battery_capacity_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    return right;
 }
 
 static void keyboard_update_grid(void)
@@ -7021,6 +7162,8 @@ void ui_battery_monitor_create(lv_obj_t *scr)
     int left_w = landscape ? 300 : 520;
     int details_x = landscape ? left_w + 24 : 0;
     int details_w = landscape ? body_w - details_x : 520;
+    int metrics_y;
+    const int metrics_step = 54;
 
     if(details_w < 320) {
         details_w = body_w - details_x;
@@ -7088,47 +7231,61 @@ void ui_battery_monitor_create(lv_obj_t *scr)
     lv_obj_set_style_radius(battery_soc_bar, 8, LV_PART_MAIN);
     lv_obj_set_style_radius(battery_soc_bar, 8, LV_PART_INDICATOR);
 
-    battery_info_row(metrics_a, landscape ? 16 : 310, "Voltage", "--", 0xA3E635);
+    metrics_y = landscape ? 16 : 310;
+    battery_user_capacity_label =
+        battery_action_row(metrics_a, metrics_y, "User capacity", "--",
+                           0xA3E635);
+    metrics_y += metrics_step + 8;
+
+    battery_info_row(metrics_a, metrics_y, "Voltage", "--", 0xA3E635);
     battery_voltage_label = lv_obj_get_child(metrics_a,
                                              lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 70 : 364, "Current", "--", 0x3DA5FF);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Current", "--", 0x3DA5FF);
     battery_current_label = lv_obj_get_child(metrics_a,
                                              lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 124 : 418, "Remaining", "--", 0x25C281);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Remaining", "--", 0x25C281);
     battery_remaining_label = lv_obj_get_child(metrics_a,
                                                lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 178 : 472, "Full capacity", "--", 0x25C281);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Full capacity", "--", 0x25C281);
     battery_full_label = lv_obj_get_child(metrics_a,
                                           lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 232 : 526, "Design capacity", "--", 0x9AA4AF);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Design capacity", "--", 0x9AA4AF);
     battery_design_label = lv_obj_get_child(metrics_a,
                                             lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 286 : 580, "Temperature", "--", 0xF5A524);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Temperature", "--", 0xF5A524);
     battery_temp_label = lv_obj_get_child(metrics_a,
                                           lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 340 : 634, "Internal temp", "--",
-                     0xF5A524);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Internal temp", "--", 0xF5A524);
     battery_internal_temp_label = lv_obj_get_child(
         metrics_a, lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 394 : 688, "Time to empty", "--",
-                     0xF2F5F8);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Time to empty", "--", 0xF2F5F8);
     battery_time_empty_label = lv_obj_get_child(
         metrics_a, lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 448 : 742, "Time to full", "--",
-                     0xF2F5F8);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Time to full", "--", 0xF2F5F8);
     battery_time_full_label = lv_obj_get_child(
         metrics_a, lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 502 : 796, "State of health", "--",
-                     0xA3E635);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "State of health", "--", 0xA3E635);
     battery_health_label = lv_obj_get_child(metrics_a,
                                             lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 556 : 850, "Cycle count", "--", 0x9AA4AF);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Cycle count", "--", 0x9AA4AF);
     battery_cycle_label = lv_obj_get_child(metrics_a,
                                            lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 610 : 904, "Average power", "--", 0x22D3EE);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Average power", "--", 0x22D3EE);
     battery_power_label = lv_obj_get_child(metrics_a,
                                            lv_obj_get_child_count(metrics_a) - 1);
-    battery_info_row(metrics_a, landscape ? 664 : 958, "Status", "--", 0xEF4D5A);
+    metrics_y += metrics_step;
+    battery_info_row(metrics_a, metrics_y, "Status", "--", 0xEF4D5A);
     battery_status_reg_label = lv_obj_get_child(
         metrics_a, lv_obj_get_child_count(metrics_a) - 1);
 
@@ -8001,6 +8158,7 @@ void ui_hardware_cleanup(void)
     battery_remaining_label = NULL;
     battery_full_label = NULL;
     battery_design_label = NULL;
+    battery_user_capacity_label = NULL;
     battery_temp_label = NULL;
     battery_internal_temp_label = NULL;
     battery_time_empty_label = NULL;
