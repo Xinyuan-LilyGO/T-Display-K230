@@ -29,6 +29,9 @@ if [ "${CURRENT_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
 fi
 
 echo "[1/3] Copy BSP overlay"
+echo "Prune stale test-only patch overlay"
+rm -f "${SDK_DIR}"/buildroot-overlay/linux/*ov5647*camera-profile*.patch
+rm -f "${SDK_DIR}"/buildroot-overlay/linux/*imx219*camera-profile*.patch
 rsync -a "${BSP_DIR}/overlay/" "${SDK_DIR}/"
 
 echo "[2/3] Invalidate generated Buildroot overlay sync stamps"
