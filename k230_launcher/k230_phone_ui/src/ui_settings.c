@@ -112,12 +112,6 @@ static void settings_show_notice(const char *title, const char *detail,
     app_request_fast_refresh();
 }
 
-static void edge_back_switch_event_cb(lv_event_t *event)
-{
-    lv_obj_t *sw = lv_event_get_target(event);
-    app_set_edge_back_enabled(lv_obj_has_state(sw, LV_STATE_CHECKED));
-}
-
 static void meshtastic_autostart_switch_event_cb(lv_event_t *event)
 {
     lv_obj_t *sw = lv_event_get_target(event);
@@ -263,10 +257,6 @@ void ui_settings_create(lv_obj_t *scr)
     ui_settings_nav_row(body, y, "KEY", "Keyboard settings",
                         "Auto detect, interval and key test", 0xF97316,
                         PAGE_KEYBOARD_SETTINGS);
-    y = settings_next_row_y(y);
-    settings_switch_row(body, y, LV_SYMBOL_LEFT, "Edge back",
-                        "Swipe from either edge to go back", 0x60A5FA,
-                        app_edge_back_enabled(), edge_back_switch_event_cb);
     y = settings_next_row_y(y) + 14;
 
     y = settings_section_header(body, y, "Sound & hardware",

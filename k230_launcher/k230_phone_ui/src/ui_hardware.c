@@ -6772,8 +6772,12 @@ static void bq25896_update_page(void)
     keyboard_base_get_state(&base);
 
     if(bq25896_base_label) {
-        lv_label_set_text(bq25896_base_label, base.scanned ?
-                          base.status : "Keyboard base not scanned");
+        lv_label_set_text(bq25896_base_label,
+                          ui_tr(base.bq25896 ? "Detected" : "Not detected"));
+        lv_obj_set_style_text_color(bq25896_base_label,
+                                    lv_color_hex(base.bq25896 ? 0x25C281 :
+                                                               0xF5A524),
+                                    0);
     }
 
     if(bq25896_read(&reading) == 0) {
@@ -6856,7 +6860,7 @@ static void bq25896_update_page(void)
         }
     } else {
         if(bq25896_status_label) {
-            lv_label_set_text(bq25896_status_label, ui_tr("BQ25896 not detected"));
+            lv_label_set_text(bq25896_status_label, ui_tr("Not detected"));
             lv_obj_set_style_text_color(bq25896_status_label,
                                         lv_color_hex(0xF5A524), 0);
         }
@@ -6951,7 +6955,7 @@ static void bq25896_voltage_event_cb(lv_event_t *event)
     if(bq25896_status_label) {
         lv_label_set_text(bq25896_status_label,
                           ui_tr(rc == 0 ? "Charge voltage saved" :
-                                          "BQ25896 not detected"));
+                                          "Not detected"));
         lv_obj_set_style_text_color(bq25896_status_label,
                                     lv_color_hex(rc == 0 ? 0x25C281 :
                                                           0xF5A524),
@@ -7083,17 +7087,12 @@ static void battery_update_page(void)
 
     keyboard_base_get_state(&base);
     if(battery_base_label) {
-        if(base.bq27220) {
-            lv_label_set_text(battery_base_label, ui_tr("BQ27220 Detected"));
-            lv_obj_set_style_text_color(battery_base_label,
-                                        lv_color_hex(0x25C281), 0);
-        } else {
-            lv_label_set_text(battery_base_label,
-                              ui_tr(base.scanned ? "BQ27220 not detected" :
-                                                "Keyboard base not scanned"));
-            lv_obj_set_style_text_color(battery_base_label,
-                                        lv_color_hex(0xF5A524), 0);
-        }
+        lv_label_set_text(battery_base_label,
+                          ui_tr(base.bq27220 ? "Detected" : "Not detected"));
+        lv_obj_set_style_text_color(battery_base_label,
+                                    lv_color_hex(base.bq27220 ? 0x25C281 :
+                                                               0xF5A524),
+                                    0);
     }
     if(battery_capacity_label) {
         snprintf(text, sizeof(text), "%s  %d mAh", ui_tr("Capacity"),
@@ -7175,7 +7174,7 @@ static void battery_update_page(void)
         }
     } else {
         if(battery_status_label) {
-            lv_label_set_text(battery_status_label, ui_tr("BQ27220 not detected"));
+            lv_label_set_text(battery_status_label, ui_tr("Not detected"));
             lv_obj_set_style_text_color(battery_status_label,
                                         lv_color_hex(0xF5A524), 0);
         }

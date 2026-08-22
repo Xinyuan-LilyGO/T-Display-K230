@@ -156,7 +156,6 @@
 #define STATUS_AUDIO_EARPHONE_ICON "/root/app/k230_phone_ui/icons/status/earphone.png"
 #define STATUS_AUDIO_SPEAKER_ICON "/root/app/k230_phone_ui/icons/status/speaker.png"
 #define PHONE_UI_BIN "/root/app/k230_phone_ui/k230_phone_ui"
-#define EDGE_BACK_PREF_KEY "nav.edge_back"
 #define EDGE_BACK_LOG_PATH "/tmp/k230_edge_back.log"
 #define EDGE_BACK_START_PX 36
 #define EDGE_BACK_TRIGGER_PX 120
@@ -4042,13 +4041,10 @@ static void nav_back(void)
 
 static void edge_back_load_pref(void)
 {
-    char value[8];
-
     if(edge_back_pref_loaded) {
         return;
     }
-    ui_prefs_get(EDGE_BACK_PREF_KEY, value, sizeof(value), "1");
-    edge_back_enabled = atoi(value) != 0;
+    edge_back_enabled = 1;
     edge_back_pref_loaded = 1;
 }
 
@@ -4060,10 +4056,10 @@ int app_edge_back_enabled(void)
 
 void app_set_edge_back_enabled(int enabled)
 {
-    edge_back_load_pref();
-    edge_back_enabled = enabled ? 1 : 0;
-    ui_prefs_set(EDGE_BACK_PREF_KEY, edge_back_enabled ? "1" : "0");
-    edge_back_log("SET enabled=%d", edge_back_enabled);
+    (void)enabled;
+    edge_back_enabled = 1;
+    edge_back_pref_loaded = 1;
+    edge_back_log("SET ignored always_on=1");
 }
 
 static int edge_back_clamp(int value, int min_value, int max_value)
