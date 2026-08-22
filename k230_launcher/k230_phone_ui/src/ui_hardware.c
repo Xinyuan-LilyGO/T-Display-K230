@@ -2830,10 +2830,9 @@ static int bq25896_read(bq25896_reading_t *reading)
     return 0;
 }
 
-static int bq25896_set_fast_charge_current(int ma)
+static int bq25896_round_fast_charge_current(int ma)
 {
     int closest;
-    uint8_t value;
 
     if(ma <= BQ25896_FAST_CHG_STEP_MA / 2) {
         closest = 0;
@@ -2842,11 +2841,27 @@ static int bq25896_set_fast_charge_current(int ma)
                    BQ25896_FAST_CHG_STEP_MA) *
                   BQ25896_FAST_CHG_STEP_MA;
     }
-    closest = clamp_int(closest, 0, BQ25896_FAST_CHG_MAX_MA);
-    value = (uint8_t)(closest / BQ25896_FAST_CHG_STEP_MA);
-    write_pref_int(PREF_BQ25896_ICHG_MA, closest);
+    return clamp_int(closest, 0, BQ25896_FAST_CHG_MAX_MA);
+}
+
+static int bq25896_apply_fast_charge_current(int ma)
+{
+    int closest = bq25896_round_fast_charge_current(ma);
+    uint8_t value = (uint8_t)(closest / BQ25896_FAST_CHG_STEP_MA);
+
     return keyboard_i2c_update_bits(BQ25896_ADDR, BQ25896_REG_CHG_CURRENT,
                                     BQ25896_MASK_ICHG, value);
+}
+
+static int bq25896_set_fast_charge_current(int ma)
+{
+    int closest = bq25896_round_fast_charge_current(ma);
+    int rc = bq25896_apply_fast_charge_current(closest);
+
+    if(rc == 0) {
+        write_pref_int(PREF_BQ25896_ICHG_MA, closest);
+    }
+    return rc;
 }
 
 static int bq25896_set_charge_enabled(int enabled)
@@ -2858,10 +2873,18 @@ static int bq25896_set_charge_enabled(int enabled)
 
 static void bq25896_apply_startup_pref(void)
 {
-    int ma = read_pref_int(PREF_BQ25896_ICHG_MA, 512, 0,
-                           BQ25896_FAST_CHG_MAX_MA);
-    int rc = bq25896_set_fast_charge_current(ma);
+    char value[32];
+    int ma;
+    int rc;
 
+    if(ui_prefs_get(PREF_BQ25896_ICHG_MA, value, sizeof(value), "") != 0 ||
+       !value[0]) {
+        button_test_log("BQ25896 startup charge current pref=missing skip");
+        return;
+    }
+
+    ma = bq25896_round_fast_charge_current(atoi(value));
+    rc = bq25896_apply_fast_charge_current(ma);
     button_test_log("BQ25896 startup charge current pref=%dmA rc=%d", ma, rc);
 }
 

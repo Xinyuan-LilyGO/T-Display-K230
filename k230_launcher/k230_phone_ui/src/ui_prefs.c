@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define UI_PREFS_MAX_ITEMS 64
+#define UI_PREFS_MAX_ITEMS 256
 #define UI_PREFS_KEY_MAX 64
 #define UI_PREFS_VALUE_MAX 160
 
