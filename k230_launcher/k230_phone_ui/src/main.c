@@ -178,6 +178,9 @@
 #ifndef K230_CAMERA_FACE_KPU
 #define K230_CAMERA_FACE_KPU 0
 #endif
+#ifndef K230_ENABLE_DEV_APPS
+#define K230_ENABLE_DEV_APPS 0
+#endif
 
 #include "ui_common.h"
 #include "ui_icons.h"
@@ -577,14 +580,18 @@ static const app_item_t app_items[] = {
     {"Mic FFT", LV_SYMBOL_BARS, 0x22D3EE, PAGE_MIC_FFT},
     {"LoRa", LV_SYMBOL_UPLOAD, 0x7C3AED, PAGE_LORA},
     {"Meshtastic", "MESH", 0x10B981, PAGE_MESHTASTIC},
+#if K230_ENABLE_DEV_APPS
     {"LoRa FLRC", "FLRC", 0xA855F7, PAGE_LORA_FLRC},
     {"Halow", "Ha", 0x25C281, PAGE_HALOW},
+#endif
     {"LoRaWAN", "WAN", 0x14B8A6, PAGE_LORAWAN},
     {"NES", "NES", 0xF97316, PAGE_NES},
     {"AI", LV_SYMBOL_BARS, 0xFF6B6B, PAGE_AI},
     {"RTSP", LV_SYMBOL_VIDEO, 0x22C55E, PAGE_RTSP},
     {"Wi-Fi", "WiFi", 0x25C281, PAGE_WIFI},
+#if K230_ENABLE_DEV_APPS
     {"WiFi Test", "iperf", 0x10B981, PAGE_WIFI_IPERF},
+#endif
     {"Bluetooth", "BT", 0x3B82F6, PAGE_BLE},
     {"nRF DFU", "DFU", 0x3B82F6, PAGE_NRF52840_DFU},
     {"MTP", "MTP", 0x41C7C7, PAGE_FILES},

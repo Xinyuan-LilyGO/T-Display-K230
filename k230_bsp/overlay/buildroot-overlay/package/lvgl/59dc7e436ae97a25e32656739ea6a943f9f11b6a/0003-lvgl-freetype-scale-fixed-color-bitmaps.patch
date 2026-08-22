@@ -7,7 +7,7 @@ diff -u -r a/lvgl/src/libs/freetype/lv_freetype_glyph.c b/lvgl/src/libs/freetype
          FT_Bitmap * glyph_bitmap = &face->glyph->bitmap;
 +        uint32_t bitmap_w = glyph_bitmap->width;
 +        uint32_t bitmap_h = glyph_bitmap->rows;
- 
+
 -        dsc_out->adv_w = FT_F26DOT6_TO_INT(glyph->advance.x);        /*Width of the glyph in [pf]*/
 -        dsc_out->box_h = glyph_bitmap->rows;                         /*Height of the bitmap in [px]*/
 -        dsc_out->box_w = glyph_bitmap->width;                        /*Width of the bitmap in [px]*/
@@ -49,16 +49,16 @@ diff -u -r a/lvgl/src/libs/freetype/lv_freetype_image.c b/lvgl/src/libs/freetype
 --- a/lvgl/src/libs/freetype/lv_freetype_image.c	2026-08-15 16:16:03.039971842 +0000
 +++ b/lvgl/src/libs/freetype/lv_freetype_image.c	2026-08-15 16:16:49.198141340 +0000
 @@ -174,8 +174,10 @@
- 
+
      FT_BitmapGlyph glyph_bitmap = (FT_BitmapGlyph)glyph;
- 
+
 -    uint16_t box_h = glyph_bitmap->bitmap.rows;         /*Height of the bitmap in [px]*/
 -    uint16_t box_w = glyph_bitmap->bitmap.width;        /*Width of the bitmap in [px]*/
 +    uint32_t src_h = glyph_bitmap->bitmap.rows;         /*Height of the bitmap in [px]*/
 +    uint32_t src_w = glyph_bitmap->bitmap.width;        /*Width of the bitmap in [px]*/
 +    uint32_t box_h = src_h;
 +    uint32_t box_w = src_w;
- 
+
      lv_color_format_t col_format;
      if(glyph_bitmap->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA) {
 @@ -185,19 +187,52 @@
@@ -88,7 +88,7 @@ diff -u -r a/lvgl/src/libs/freetype/lv_freetype_image.c b/lvgl/src/libs/freetype
          return false;
      }
      lv_draw_buf_clear(data->draw_buf, NULL);
- 
+
 -    for(int y = 0; y < box_h; ++y) {
 -        lv_memcpy((uint8_t *)(data->draw_buf->data) + y * stride, glyph_bitmap->bitmap.buffer + y * pitch,
 -                  pitch);
@@ -115,5 +115,5 @@ diff -u -r a/lvgl/src/libs/freetype/lv_freetype_image.c b/lvgl/src/libs/freetype
 +            lv_memcpy(dst_px, src_px, px_size);
 +        }
      }
- 
+
      lv_draw_buf_flush_cache(data->draw_buf, NULL);

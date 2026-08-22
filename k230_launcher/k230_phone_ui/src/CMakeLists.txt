@@ -6,6 +6,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(K230_ENABLE_DEV_APPS "Install unreleased engineering apps such as WiFi iperf, LoRa FLRC, and Halow" OFF)
+option(K230_INSTALL_DEBUG_PROBES "Install low-level display/debug probe utilities" OFF)
+
 set(RADIOLIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/RadioLib/src)
 set(NOFRENDO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nofrendo/src)
 set(LIBTMT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libtmt)
@@ -224,6 +227,7 @@ target_compile_definitions(k230_phone_ui PRIVATE
     LV_CONF_PATH="${CMAKE_SYSROOT}/usr/include/lvgl/lv_conf.h"
     K230_R58_COMPACT_SWITCH_TEST=0
     K230_R59_PERSISTENT_PANEL_UI=0
+    K230_ENABLE_DEV_APPS=$<BOOL:${K230_ENABLE_DEV_APPS}>
     K230_CAMERA_FACE_KPU=${K230_PHONE_UI_FACE_DETECT_ENABLED}
 )
 
@@ -231,6 +235,7 @@ target_compile_definitions(k230_phone_ui_fullswitch_test PRIVATE
     LV_CONF_PATH="${CMAKE_SYSROOT}/usr/include/lvgl/lv_conf.h"
     K230_R58_COMPACT_SWITCH_TEST=0
     K230_R59_PERSISTENT_PANEL_UI=0
+    K230_ENABLE_DEV_APPS=$<BOOL:${K230_ENABLE_DEV_APPS}>
     K230_CAMERA_FACE_KPU=${K230_PHONE_UI_FACE_DETECT_ENABLED}
 )
 
@@ -387,10 +392,42 @@ target_link_libraries(k230_qr_scan PRIVATE
     m
 )
 
-install(TARGETS k230_phone_ui k230_phone_ui_fullswitch_test k230_camera_capture k230_lora_flrc_bench k230_lora_flrc_video k230_lora_flrc_tile_stream k230_lorawan_test k230_halow_udp_stream k230_meshtastic_probe k230_qr_scan k230_pcm_volume k230_nrf52840_dfu drm_motion_probe drm_motion_probe_rgb565 lvgl_scroll_probe RUNTIME DESTINATION /root/app/k230_phone_ui)
-install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
-        ${CMAKE_CURRENT_SOURCE_DIR}/k230_halow_camera_stream.sh
-        DESTINATION /root/app/k230_phone_ui)
+set(K230_PHONE_UI_INSTALL_TARGETS
+    k230_phone_ui
+    k230_phone_ui_fullswitch_test
+    k230_camera_capture
+    k230_lorawan_test
+    k230_meshtastic_probe
+    k230_qr_scan
+    k230_pcm_volume
+    k230_nrf52840_dfu
+)
+
+if(K230_ENABLE_DEV_APPS)
+    list(APPEND K230_PHONE_UI_INSTALL_TARGETS
+        k230_lora_flrc_bench
+        k230_lora_flrc_video
+        k230_lora_flrc_tile_stream
+        k230_halow_udp_stream
+    )
+endif()
+
+if(K230_INSTALL_DEBUG_PROBES)
+    list(APPEND K230_PHONE_UI_INSTALL_TARGETS
+        drm_motion_probe
+        drm_motion_probe_rgb565
+        lvgl_scroll_probe
+    )
+endif()
+
+install(TARGETS ${K230_PHONE_UI_INSTALL_TARGETS}
+        RUNTIME DESTINATION /root/app/k230_phone_ui)
+
+if(K230_ENABLE_DEV_APPS)
+    install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_flrc_camera_stream.sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/k230_halow_camera_stream.sh
+            DESTINATION /root/app/k230_phone_ui)
+endif()
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fonts DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/icons DESTINATION /root/app/k230_phone_ui)

@@ -40,9 +40,8 @@ fi
 mkdir -p "$PACKAGE_DIR"
 rsync -a --delete "$LAUNCHER_DIR/k230_phone_ui/" "$PACKAGE_DIR/"
 
-# The SDK's overlay sync and Buildroot package rsync do not delete files that
-# disappeared after switching launcher branches. Remove generated copies here so
-# dev-only files cannot leak into a main image, or the other way around.
+# The SDK overlay sync and Buildroot package rsync can leave stale generated
+# package files behind. Remove generated copies before syncing this launcher.
 rm -rf "$OUTPUT_BUILDROOT_PACKAGE_DIR" "$OUTPUT_PACKAGE_BUILD_DIR" "$OUTPUT_TARGET_APP_DIR"
 
 if ! grep -q 'source "package/k230_phone_ui/Config.in"' "$CONFIG_IN"; then

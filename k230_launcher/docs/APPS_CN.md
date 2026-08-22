@@ -45,13 +45,12 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Radio` / 网络电台 | 播放网络电台和自定义音频流地址 | 选择预设电台或输入自定义 URL，然后使用播放/暂停和音量控制需要先连接网络 |
 | `Record` / 录音 | 使用板载麦克风录音，列出录音文件，支持播放和删除 | 点击录音按钮开始或停止录音进入录音列表后可以播放或删除 `/root/recordings` 中的录音 |
 | `Mic FFT` / 麦克风频谱 | 实时显示麦克风频谱和输入电平信息 | 用于快速检查麦克风是否工作，也可以调整显示增益方便观察弱信号 |
-| `LoRa` | 控制 SX1262 或 LR2021，支持 Factory、聊天、监听、自动发送、连续载波发射等模式 | 选择或编辑 profile 后选择工作模式连续载波发射只建议工程射频测试使用，不建议普通用户日常使用，并且必须确认已经连接合适天线 |
-| `Meshtastic` | 控制独立 `k230_meshtastic_probe` daemon，提供 Meshtastic 风格 LoRa mesh 文本、支持的 K230 设备间语音/照片传输、节点缓存、地图、频道配置档和 profile 设置 | 进入应用后 daemon 自动启动通过设置图标配置 region、preset、channel、PSK、TX power、node/from/to/hop/ACK在消息输入框直接输入并发送，按住语音按钮录制语音，节点页面可查看节点缓存。通过 `Channel` 可以保存/加载 K230 频道配置档、保存官方 Meshtastic 频道 URL，也可以手动输入 URL 导入频道；K230 摄像头扫码作为备用方式。收到新消息时会播放 `设置` > `通知` 中选择的音效 |
+| `LoRa` | 控制 SX1262 或 LR2021，支持基于 profile 的射频测试、监听、自动发送、连续载波发射等模式 | 选择或编辑 profile 后选择工作模式连续载波发射只建议工程射频测试使用，不建议普通用户日常使用，并且必须确认已经连接合适天线 |
+| `Meshtastic` | Beta 应用，控制独立 `k230_meshtastic_probe` daemon，提供 Meshtastic 风格 LoRa mesh 文本、支持的 K230 设备间语音/照片传输、节点缓存、地图、频道配置档和 profile 设置 | 进入应用后 daemon 自动启动通过设置图标配置 region、preset、channel、PSK、TX power、node/from/to/hop/ACK在消息输入框直接输入并发送，按住语音按钮录制语音，节点页面可查看节点缓存。通过 `Channel` 可以保存/加载 K230 频道配置档、保存官方 Meshtastic 频道 URL，也可以手动输入 URL 导入频道；K230 摄像头扫码作为备用方式。收到新消息时会播放 `设置` > `通知` 中选择的音效 |
 | `LoRaWAN` | 管理 LoRaWAN profile，并通过 LoRa 模块运行 OTAA 入网和发送测试 | 加载已有 profile，或新建/编辑 profile应用会检查密钥长度配置保存后才能运行，可按需开启模拟温度数据上传 |
 | `NES` | 从 `/root/nes` 加载 `.nes` ROM，并支持触摸按键和硬件键盘控制 | 镜像默认不内置 NES ROM请自行将 ROM 文件放入 `/root/nes`，再从列表选择 ROM键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 为 Start，`Space` 或 `Shift` 为 Select，`U/I/O` 为 A，`H/J/K` 为 B，`Esc` 停止游戏或返回 ROM 列表 |
 | `AI` | 打开随镜像提供的 K230 AI 示例界面 | 当模型资源存在时，可以运行支持的本地 AI 示例，并在屏幕上查看结果 |
 | `RTSP` | 开启或停止摄像头 RTSP 推流，并显示推流地址 | 开启后，在同一网络的电脑上打开界面显示的 URL使用相机前需要先关闭 RTSP |
-| `Halow` | 通过接在以太网口上的 Wi-Fi HaLow 链路，在两台设备之间发送或接收摄像头视频帧 | 将 HaLow 设备接到网口，先设置本机静态 IP，再输入对端 IP摄像头端点击 `Start TX`，显示端点击 `Start RX`分辨率档位为 `320x240`、`640x480`、`720p`，默认使用 `320x240`接收帧会保存到 `/root/videos/halow_rx` |
 | `Wi-Fi` | 扫描 Wi-Fi、保存密码、连接网络和自动回连 | 打开 Wi-Fi，点击网络名称，输入不少于 8 位的密码，等待连接结果 |
 | `Bluetooth` / 蓝牙 | 扫描有名称的 BLE 设备，连接设备，并显示 GATT 服务、特征和描述符 | 打开蓝牙，点击设备名称，确认连接后进入设备详情页 |
 | `nRF DFU` | 通过 K230 的 UART 给板载 nRF52840 更新 AT 固件 | 先打开 `MTP`，将 K230 nRF52840 AT 应用升级包复制为 `/root/nrf52840/firmware/firmware.zip`，回到 `nRF DFU` 后点击 `升级`。应用会在写入前检查当前 AT 版本和升级包版本，非 K230 包和相同版本都会拒绝升级。升级过程中界面会锁定并显示进度，不要断电。失败时查看 `/tmp/k230_nrf52840_dfu_ui.log` |
