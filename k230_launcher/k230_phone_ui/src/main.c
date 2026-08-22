@@ -254,6 +254,9 @@ typedef struct {
 } camera_face_box_t;
 
 static volatile int running = 1;
+static volatile int fast_refresh_pending;
+static pthread_t ui_main_thread;
+static int ui_main_thread_valid;
 static lv_indev_t *evdev_indev;
 static lv_indev_read_cb_t evdev_original_read_cb;
 static char input_path[64];
@@ -3629,7 +3632,11 @@ static void request_fast_refresh(void)
 
 void app_request_fast_refresh(void)
 {
-    request_fast_refresh();
+    if(ui_main_thread_valid && pthread_equal(pthread_self(), ui_main_thread)) {
+        request_fast_refresh();
+        return;
+    }
+    fast_refresh_pending = 1;
 }
 
 void app_refresh_current_page(void)
@@ -11453,6 +11460,9 @@ int main(void)
     const char *input_dev;
     uint64_t last_loop_start_us = 0;
 
+    ui_main_thread = pthread_self();
+    ui_main_thread_valid = 1;
+
     app_start_us = monotonic_us();
     unlink(TOUCH_TRACE_PATH);
     unlink(EDGE_BACK_LOG_PATH);
@@ -11562,6 +11572,10 @@ int main(void)
         edge_back_consume_raw_pending();
         power_key_shutdown_visual_poll();
         display_idle_poll();
+        if(fast_refresh_pending) {
+            fast_refresh_pending = 0;
+            request_fast_refresh();
+        }
         wait_ms = lv_timer_handler();
         handler_us = monotonic_us() - loop_start_us;
         if(handler_us > TOUCH_TRACE_SLOW_US) {
