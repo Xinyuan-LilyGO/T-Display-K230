@@ -55,6 +55,7 @@ static ui_input_dialog_state_t *active_dialog;
 static ui_input_dialog_state_t *active_inline;
 static ui_input_dialog_state_t *known_inline;
 static int soft_keyboard_enabled = 1;
+static uint64_t inline_focus_suppress_until_us;
 
 static void ui_input_pinyin_update_candidates(ui_input_dialog_state_t *state);
 static void ui_input_hardware_key_cb(int code, uint32_t key, int pressed,
@@ -289,6 +290,7 @@ static void ui_input_inline_hide_state(ui_input_dialog_state_t *state)
     if(!state || !state->inline_mode) {
         return;
     }
+    inline_focus_suppress_until_us = ui_monotonic_us() + 600000ULL;
     if(state->textarea && lv_obj_is_valid(state->textarea)) {
         lv_obj_remove_state(state->textarea, LV_STATE_FOCUSED);
     }
@@ -314,10 +316,30 @@ static void ui_input_inline_hide_state(ui_input_dialog_state_t *state)
 
 static void ui_input_inline_show_state(ui_input_dialog_state_t *state)
 {
+    uint64_t now;
+
     if(!state || !state->inline_mode || !state->textarea ||
        !lv_obj_is_valid(state->textarea)) {
         return;
     }
+    now = ui_monotonic_us();
+    if(inline_focus_suppress_until_us && now < inline_focus_suppress_until_us) {
+        ui_input_log("inline focus suppressed remain_us=%llu",
+                     (unsigned long long)(inline_focus_suppress_until_us - now));
+        if(state->keyboard && lv_obj_is_valid(state->keyboard)) {
+            lv_obj_add_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+        if(state->candidate_bar && lv_obj_is_valid(state->candidate_bar)) {
+            lv_obj_add_flag(state->candidate_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_remove_state(state->textarea, LV_STATE_FOCUSED);
+        if(active_inline == state) {
+            active_inline = NULL;
+        }
+        ui_input_inline_apply_layout(state, 0);
+        return;
+    }
+    inline_focus_suppress_until_us = 0;
 
     if(active_inline && active_inline != state) {
         ui_input_inline_hide_state(active_inline);
