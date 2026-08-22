@@ -77,6 +77,7 @@ static int nrf_dfu_preflight_cache_valid;
 static int nrf_dfu_preflight_cache_rc;
 static char nrf_dfu_preflight_cache_message[192];
 static char nrf_dfu_preflight_cache_version[96];
+static int nrf_dfu_restore_meshtastic_on_leave;
 
 static void nrf_dfu_update_ui(void);
 
@@ -430,6 +431,9 @@ static int nrf_dfu_query_current_version(char *out, size_t out_len,
 
 static void nrf_dfu_prepare_exclusive_uart(void)
 {
+    pthread_mutex_lock(&nrf_dfu_lock);
+    nrf_dfu_restore_meshtastic_on_leave = 1;
+    pthread_mutex_unlock(&nrf_dfu_lock);
     if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
         nrf_dfu_append_log("failed to stop Meshtastic worker for DFU preflight");
     }
@@ -1013,6 +1017,9 @@ static void *nrf_dfu_worker(void *arg)
              target_version);
     pthread_mutex_unlock(&nrf_dfu_lock);
 
+    pthread_mutex_lock(&nrf_dfu_lock);
+    nrf_dfu_restore_meshtastic_on_leave = 1;
+    pthread_mutex_unlock(&nrf_dfu_lock);
     if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
         nrf_dfu_append_log("failed to stop Meshtastic worker");
     }
@@ -1684,7 +1691,20 @@ void ui_nrf52840_dfu_cleanup(void)
     nrf_dfu_overlay_percent = NULL;
     nrf_dfu_overlay_close_btn = NULL;
     nrf_dfu_overlay_hold = 0;
-    if(!nrf_dfu_running) {
+}
+
+void ui_nrf52840_dfu_leave(void)
+{
+    int restore = 0;
+
+    pthread_mutex_lock(&nrf_dfu_lock);
+    if(!nrf_dfu_running && nrf_dfu_restore_meshtastic_on_leave) {
+        restore = 1;
+        nrf_dfu_restore_meshtastic_on_leave = 0;
+    }
+    pthread_mutex_unlock(&nrf_dfu_lock);
+
+    if(restore) {
         ui_meshtastic_startup();
     }
 }

@@ -11204,6 +11204,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
                         page_name(page), previous_page_name);
         ui_meshtastic_pause_for_radio_owner(page_name(page));
     }
+    if(current_page == PAGE_NRF52840_DFU && page != PAGE_NRF52840_DFU) {
+        ui_nrf52840_dfu_leave();
+    }
     cleanup_page_state();
     if(root_transition) {
         page_root = create_page_root(root_from_x);
