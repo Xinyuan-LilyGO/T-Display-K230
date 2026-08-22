@@ -68,6 +68,7 @@
 #define BUTTON_INT0_IDLE_VALUE 0
 #define BUTTON_TEST_LOG "/tmp/k230_button_test.log"
 #define REBOOT_DIAG_LOG "/tmp/k230_reboot_diag.log"
+#define BQ25896_LOG "/tmp/k230_bq25896.log"
 #define KEYBOARD_BACKLIGHT_LOG "/tmp/k230_keyboard_backlight.log"
 #define KEYBOARD_HOTKEY_LOG "/tmp/k230_keyboard_hotkey.log"
 #define BOOT0_TOGGLE_DEBOUNCE_US 500000ULL
@@ -138,6 +139,7 @@
 #define BQ25896_REG_CHG_CTRL 0x03
 #define BQ25896_REG_CHG_CURRENT 0x04
 #define BQ25896_REG_CHG_VOLT 0x06
+#define BQ25896_REG_TIMER_CTRL 0x07
 #define BQ25896_REG_STATUS 0x0B
 #define BQ25896_REG_FAULT 0x0C
 #define BQ25896_REG_ADC_BATV 0x0E
@@ -151,6 +153,8 @@
 #define BQ25896_MASK_CHG_CONFIG 0x10
 #define BQ25896_MASK_ICHG 0x7F
 #define BQ25896_MASK_VREG 0xFC
+#define BQ25896_MASK_WATCHDOG 0x30
+#define BQ25896_WATCHDOG_DISABLED 0x00
 #define BQ25896_FAST_CHG_STEP_MA 64
 #define BQ25896_FAST_CHG_MAX_MA 3008
 #define BQ25896_INPUT_CURRENT_BASE_MA 100
@@ -292,7 +296,10 @@ typedef struct {
     double ntc_pct;
     uint8_t status_reg;
     uint8_t fault_reg;
+    uint8_t chg_current_reg;
+    uint8_t timer_reg;
     uint8_t idpm_reg;
+    int watchdog_s;
     char status[128];
 } bq25896_reading_t;
 
@@ -760,6 +767,23 @@ static void button_test_log(const char *fmt, ...)
     va_list ap;
 
     fp = fopen(BUTTON_TEST_LOG, "a");
+    if(!fp) {
+        return;
+    }
+    va_start(ap, fmt);
+    fprintf(fp, "%llu ", (unsigned long long)ui_monotonic_us());
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fprintf(fp, "\n");
+    fclose(fp);
+}
+
+static void bq25896_log(const char *fmt, ...)
+{
+    FILE *fp;
+    va_list ap;
+
+    fp = fopen(BQ25896_LOG, "a");
     if(!fp) {
         return;
     }
@@ -2744,6 +2768,68 @@ static const char *bq25896_bus_state_name(uint8_t status_reg)
     }
 }
 
+static int bq25896_round_fast_charge_current(int ma);
+
+static int bq25896_watchdog_seconds(uint8_t timer_reg)
+{
+    switch((timer_reg & BQ25896_MASK_WATCHDOG) >> 4) {
+    case 0:
+        return 0;
+    case 1:
+        return 40;
+    case 2:
+        return 80;
+    case 3:
+        return 160;
+    default:
+        return -1;
+    }
+}
+
+static int bq25896_saved_fast_charge_current(int *ma)
+{
+    char value[32];
+
+    if(!ma) {
+        return 0;
+    }
+    if(ui_prefs_get(PREF_BQ25896_ICHG_MA, value, sizeof(value), "") != 0 ||
+       !value[0]) {
+        return 0;
+    }
+    *ma = bq25896_round_fast_charge_current(atoi(value));
+    return 1;
+}
+
+static int bq25896_disable_watchdog(const char *reason)
+{
+    uint8_t before = 0;
+    uint8_t after = 0;
+    int rc;
+
+    if(keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_TIMER_CTRL,
+                             &before) != 0) {
+        bq25896_log("watchdog disable reason=%s read-reg07 failed",
+                    reason ? reason : "unknown");
+        return -1;
+    }
+
+    rc = keyboard_i2c_update_bits(BQ25896_ADDR, BQ25896_REG_TIMER_CTRL,
+                                  BQ25896_MASK_WATCHDOG,
+                                  BQ25896_WATCHDOG_DISABLED);
+    if(keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_TIMER_CTRL,
+                             &after) != 0) {
+        after = 0xFF;
+    }
+
+    if((before & BQ25896_MASK_WATCHDOG) != BQ25896_WATCHDOG_DISABLED ||
+       rc != 0) {
+        bq25896_log("watchdog disable reason=%s before=0x%02X after=0x%02X rc=%d",
+                    reason ? reason : "unknown", before, after, rc);
+    }
+    return rc;
+}
+
 static int bq25896_read(bq25896_reading_t *reading)
 {
     uint8_t reg0 = 0;
@@ -2751,6 +2837,7 @@ static int bq25896_read(bq25896_reading_t *reading)
     uint8_t reg3 = 0;
     uint8_t reg4 = 0;
     uint8_t reg6 = 0;
+    uint8_t reg7 = 0;
     uint8_t reg0b = 0;
     uint8_t reg0c = 0;
     uint8_t reg0e = 0;
@@ -2780,6 +2867,7 @@ static int bq25896_read(bq25896_reading_t *reading)
     keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_CHG_CTRL, &reg3);
     keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_CHG_CURRENT, &reg4);
     keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_CHG_VOLT, &reg6);
+    keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_TIMER_CTRL, &reg7);
     keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_STATUS, &reg0b);
     keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_FAULT, &reg0c);
     keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_IDPM, &reg13);
@@ -2824,7 +2912,10 @@ static int bq25896_read(bq25896_reading_t *reading)
                        (double)(reg10 & 0x7F) * BQ25896_ADC_NTC_STEP_PCT;
     reading->status_reg = reg0b;
     reading->fault_reg = reg0c;
+    reading->chg_current_reg = reg4;
+    reading->timer_reg = reg7;
     reading->idpm_reg = reg13;
+    reading->watchdog_s = bq25896_watchdog_seconds(reg7);
     reading->ok = 1;
     snprintf(reading->status, sizeof(reading->status), "Ready");
     return 0;
@@ -2848,9 +2939,23 @@ static int bq25896_apply_fast_charge_current(int ma)
 {
     int closest = bq25896_round_fast_charge_current(ma);
     uint8_t value = (uint8_t)(closest / BQ25896_FAST_CHG_STEP_MA);
+    uint8_t reg4 = 0;
+    uint8_t reg7 = 0;
+    int wd_rc;
+    int rc;
+    int rd4_rc;
+    int rd7_rc;
 
-    return keyboard_i2c_update_bits(BQ25896_ADDR, BQ25896_REG_CHG_CURRENT,
-                                    BQ25896_MASK_ICHG, value);
+    wd_rc = bq25896_disable_watchdog("apply-current");
+    rc = keyboard_i2c_update_bits(BQ25896_ADDR, BQ25896_REG_CHG_CURRENT,
+                                  BQ25896_MASK_ICHG, value);
+    rd4_rc = keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_CHG_CURRENT,
+                                   &reg4);
+    rd7_rc = keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_TIMER_CTRL,
+                                   &reg7);
+    bq25896_log("apply-current request=%d rounded=%d reg04=0x%02X reg07=0x%02X wd_rc=%d rc=%d rd4=%d rd7=%d",
+                ma, closest, reg4, reg7, wd_rc, rc, rd4_rc, rd7_rc);
+    return rc;
 }
 
 static int bq25896_set_fast_charge_current(int ma)
@@ -2866,26 +2971,70 @@ static int bq25896_set_fast_charge_current(int ma)
 
 static int bq25896_set_charge_enabled(int enabled)
 {
-    return keyboard_i2c_update_bits(BQ25896_ADDR, BQ25896_REG_CHG_CTRL,
-                                    BQ25896_MASK_CHG_CONFIG,
-                                    enabled ? BQ25896_MASK_CHG_CONFIG : 0);
+    int wd_rc;
+    int rc;
+
+    wd_rc = bq25896_disable_watchdog(enabled ? "charge-enable" :
+                                     "charge-disable");
+    rc = keyboard_i2c_update_bits(BQ25896_ADDR, BQ25896_REG_CHG_CTRL,
+                                  BQ25896_MASK_CHG_CONFIG,
+                                  enabled ? BQ25896_MASK_CHG_CONFIG : 0);
+    bq25896_log("charge-enable enabled=%d wd_rc=%d rc=%d", enabled, wd_rc, rc);
+    return rc;
+}
+
+static int bq25896_ensure_runtime_config(const bq25896_reading_t *reading,
+                                         const char *reason)
+{
+    int pref_ma;
+    int has_pref;
+    int changed = 0;
+
+    if(!reading || !reading->present) {
+        return 0;
+    }
+
+    if((reading->timer_reg & BQ25896_MASK_WATCHDOG) !=
+       BQ25896_WATCHDOG_DISABLED) {
+        bq25896_log("runtime watchdog active reason=%s reg07=0x%02X watchdog=%ds",
+                    reason ? reason : "unknown", reading->timer_reg,
+                    reading->watchdog_s);
+        if(bq25896_disable_watchdog(reason ? reason : "runtime") == 0) {
+            changed = 1;
+        }
+    }
+
+    has_pref = bq25896_saved_fast_charge_current(&pref_ma);
+    if(has_pref && reading->fast_charge_ma != pref_ma) {
+        bq25896_log("runtime current mismatch reason=%s chip=%dmA pref=%dmA reg04=0x%02X reg07=0x%02X",
+                    reason ? reason : "unknown", reading->fast_charge_ma,
+                    pref_ma, reading->chg_current_reg, reading->timer_reg);
+        if(bq25896_apply_fast_charge_current(pref_ma) == 0) {
+            changed = 1;
+        }
+    }
+
+    return changed;
 }
 
 static void bq25896_apply_startup_pref(void)
 {
-    char value[32];
     int ma;
+    int has_pref;
+    int wd_rc;
     int rc;
 
-    if(ui_prefs_get(PREF_BQ25896_ICHG_MA, value, sizeof(value), "") != 0 ||
-       !value[0]) {
+    wd_rc = bq25896_disable_watchdog("startup");
+    has_pref = bq25896_saved_fast_charge_current(&ma);
+    if(!has_pref) {
         button_test_log("BQ25896 startup charge current pref=missing skip");
+        bq25896_log("startup pref=missing wd_rc=%d skip-current", wd_rc);
         return;
     }
 
-    ma = bq25896_round_fast_charge_current(atoi(value));
     rc = bq25896_apply_fast_charge_current(ma);
     button_test_log("BQ25896 startup charge current pref=%dmA rc=%d", ma, rc);
+    bq25896_log("startup pref=%dmA wd_rc=%d rc=%d", ma, wd_rc, rc);
 }
 
 static const char *bq27220_flow_state(const bq27220_reading_t *reading)
@@ -3040,6 +3189,9 @@ int ui_bq25896_get_power_state(int *usb_present, int *vbus_mv, int *vbat_mv)
     if(bq25896_read(&reading) != 0) {
         return -1;
     }
+    if(bq25896_ensure_runtime_config(&reading, "power-state")) {
+        (void)bq25896_read(&reading);
+    }
 
     vbus_state = (reading.status_reg >> 5) & 0x07;
     if(usb_present) {
@@ -3068,6 +3220,9 @@ int ui_bq25896_get_charge_state(int *charging, int *done)
     }
     if(bq25896_read(&reading) != 0) {
         return -1;
+    }
+    if(bq25896_ensure_runtime_config(&reading, "charge-state")) {
+        (void)bq25896_read(&reading);
     }
 
     state = (reading.status_reg >> 3) & 0x03;
@@ -6284,10 +6439,20 @@ static void bq25896_update_page(void)
     }
 
     if(bq25896_read(&reading) == 0) {
+        if(bq25896_ensure_runtime_config(&reading, "charger-page")) {
+            (void)bq25896_read(&reading);
+        }
         if(bq25896_status_label) {
-            snprintf(text, sizeof(text), "%s  PN=%d REV=%d",
-                     bq25896_bus_state_name(reading.status_reg),
-                     reading.part_number, reading.revision);
+            if(reading.watchdog_s > 0) {
+                snprintf(text, sizeof(text), "%s  PN=%d REV=%d  WD=%ds",
+                         bq25896_bus_state_name(reading.status_reg),
+                         reading.part_number, reading.revision,
+                         reading.watchdog_s);
+            } else {
+                snprintf(text, sizeof(text), "%s  PN=%d REV=%d  WD=off",
+                         bq25896_bus_state_name(reading.status_reg),
+                         reading.part_number, reading.revision);
+            }
             lv_label_set_text(bq25896_status_label, text);
             lv_obj_set_style_text_color(bq25896_status_label,
                                         lv_color_hex(0x25C281), 0);
@@ -6336,8 +6501,8 @@ static void bq25896_update_page(void)
             lv_label_set_text(bq25896_ntc_label, text);
         }
         if(bq25896_fault_label) {
-            snprintf(text, sizeof(text), "0x%02X  IDPM 0x%02X",
-                     reading.fault_reg, reading.idpm_reg);
+            snprintf(text, sizeof(text), "0x%02X  IDPM 0x%02X  REG07 0x%02X",
+                     reading.fault_reg, reading.idpm_reg, reading.timer_reg);
             lv_label_set_text(bq25896_fault_label, text);
         }
         style_choice_button(bq25896_charge_on_btn, reading.charge_enabled,
