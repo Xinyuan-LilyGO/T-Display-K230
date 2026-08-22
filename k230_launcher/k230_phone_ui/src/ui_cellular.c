@@ -110,6 +110,17 @@ typedef struct {
     lv_obj_t *label;
 } cellular_cn0_bar_t;
 
+typedef struct {
+    int gps;
+    int beidou;
+    int galileo;
+    int glonass;
+    int qzss;
+    int navic;
+    int mixed;
+    int other;
+} cellular_constellation_counts_t;
+
 static const char *const cellular_link_cmds[] = {
     "AT",
     "AT+CMEE=1",
@@ -218,15 +229,10 @@ static lv_obj_t *cellular_gps_label;
 static lv_obj_t *cellular_ttff_label;
 static lv_obj_t *cellular_sat_chart;
 static lv_obj_t *cellular_sat_label;
-static lv_obj_t *cellular_gnss_lat_label;
-static lv_obj_t *cellular_gnss_lon_label;
-static lv_obj_t *cellular_gnss_sats_label;
-static lv_obj_t *cellular_gnss_time_label;
-static lv_obj_t *cellular_gnss_hdop_label;
-static lv_obj_t *cellular_gnss_ttff_card_label;
-static lv_obj_t *cellular_gnss_alt_label;
-static lv_obj_t *cellular_gnss_speed_label;
-static lv_obj_t *cellular_gnss_course_label;
+static lv_obj_t *cellular_gnss_position_label;
+static lv_obj_t *cellular_gnss_precision_label;
+static lv_obj_t *cellular_gnss_motion_label;
+static lv_obj_t *cellular_gnss_satellites_label;
 static lv_obj_t *cellular_gnss_signal_summary_label;
 static lv_obj_t *cellular_gnss_cno_stats_label;
 static lv_obj_t *cellular_log_label;
@@ -1157,6 +1163,40 @@ static void cellular_sat_stats(const cellular_satellite_t *sats,
     *active = count;
 }
 
+static void cellular_sat_constellation_counts(
+    const cellular_satellite_t *sats, size_t sat_count,
+    cellular_constellation_counts_t *out)
+{
+    if(!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    for(size_t i = 0; sats && i < sat_count; i++) {
+        const char *talker = sats[i].talker;
+
+        if(!sats[i].valid || !talker || !talker[0]) {
+            continue;
+        }
+        if(strcmp(talker, "GP") == 0) {
+            out->gps++;
+        } else if(strcmp(talker, "GB") == 0 || strcmp(talker, "BD") == 0) {
+            out->beidou++;
+        } else if(strcmp(talker, "GA") == 0) {
+            out->galileo++;
+        } else if(strcmp(talker, "GL") == 0) {
+            out->glonass++;
+        } else if(strcmp(talker, "GQ") == 0) {
+            out->qzss++;
+        } else if(strcmp(talker, "GI") == 0) {
+            out->navic++;
+        } else if(strcmp(talker, "GN") == 0) {
+            out->mixed++;
+        } else {
+            out->other++;
+        }
+    }
+}
+
 static uint32_t cellular_sat_color(const char *talker)
 {
     if(!talker) {
@@ -1556,9 +1596,13 @@ static void cellular_status_refresh(void)
     char ttff[64];
     char ttff_value[32];
     char gnss_utc[32];
+    char gnss_date[32];
+    char gnss_pdop[24];
     char gnss_hdop[24];
+    char gnss_vdop[24];
     char running_title[64];
     cellular_satellite_t sats_copy[NRF9151_MAX_SATS];
+    cellular_constellation_counts_t constellations;
     double latitude = 0.0;
     double longitude = 0.0;
     double altitude_m = 0.0;
@@ -1619,8 +1663,15 @@ static void cellular_status_refresh(void)
     snprintf(gnss_utc, sizeof(gnss_utc), "%s",
              manager_status.gnss_utc_time[0] ?
              manager_status.gnss_utc_time : "--");
+    snprintf(gnss_date, sizeof(gnss_date), "%s",
+             manager_status.gnss_utc_date[0] ?
+             manager_status.gnss_utc_date : "--");
+    snprintf(gnss_pdop, sizeof(gnss_pdop), "%s",
+             manager_status.gnss_pdop[0] ? manager_status.gnss_pdop : "--");
     snprintf(gnss_hdop, sizeof(gnss_hdop), "%s",
              manager_status.gnss_hdop[0] ? manager_status.gnss_hdop : "--");
+    snprintf(gnss_vdop, sizeof(gnss_vdop), "%s",
+             manager_status.gnss_vdop[0] ? manager_status.gnss_vdop : "--");
     gnss_start_us = cellular_gnss_start_us;
     gnss_fix_us = cellular_gnss_fix_us;
     gnss_fix_valid = cellular_gnss_fix_valid;
@@ -1635,6 +1686,8 @@ static void cellular_status_refresh(void)
                              gnss_fix_us, gnss_fix_valid);
     cellular_sat_stats(sats_copy, NRF9151_MAX_SATS, &best_cn0, &avg_cn0,
                        &active_cn0);
+    cellular_sat_constellation_counts(sats_copy, NRF9151_MAX_SATS,
+                                      &constellations);
 
     if(cellular_status_label) {
         char text[224];
@@ -1783,44 +1836,68 @@ static void cellular_status_refresh(void)
     if(cellular_sat_label) {
         char text[160];
 
-        snprintf(text, sizeof(text), "Best %d dB-Hz  Avg %d  Active %d  RX %u",
-                 best_cn0, avg_cn0, active_cn0, nmea_rx_count);
+        snprintf(text, sizeof(text),
+                 "GPS %d  BDS %d  GAL %d  GLO %d  RX %u",
+                 constellations.gps, constellations.beidou,
+                 constellations.galileo, constellations.glonass,
+                 nmea_rx_count);
         lv_label_set_text(cellular_sat_label, text);
     }
-    if(cellular_gnss_lat_label) {
-        lv_label_set_text_fmt(cellular_gnss_lat_label,
-                              gnss_has_fix ? "%.6f" : "--", latitude);
+    if(cellular_gnss_position_label) {
+        char text[192];
+        char alt_text[32];
+
+        snprintf(alt_text, sizeof(alt_text), "%s", "--");
+        if(gnss_has_fix && has_altitude) {
+            snprintf(alt_text, sizeof(alt_text), "%.1f m", altitude_m);
+        }
+        snprintf(text, sizeof(text),
+                 "Lat  %s\nLon  %s\nAlt  %s",
+                 "--", "--", alt_text);
+        if(gnss_has_fix) {
+            snprintf(text, sizeof(text),
+                     "Lat  %.6f\nLon  %.6f\nAlt  %s",
+                     latitude, longitude, alt_text);
+        }
+        lv_label_set_text(cellular_gnss_position_label, text);
     }
-    if(cellular_gnss_lon_label) {
-        lv_label_set_text_fmt(cellular_gnss_lon_label,
-                              gnss_has_fix ? "%.6f" : "--", longitude);
+    if(cellular_gnss_precision_label) {
+        char text[192];
+
+        snprintf(text, sizeof(text),
+                 "PDOP %s\nHDOP %s\nVDOP %s\nSats %u",
+                 gnss_pdop, gnss_hdop, gnss_vdop, satellite_count);
+        lv_label_set_text(cellular_gnss_precision_label, text);
     }
-    if(cellular_gnss_sats_label) {
-        lv_label_set_text_fmt(cellular_gnss_sats_label, "%u", satellite_count);
+    if(cellular_gnss_motion_label) {
+        char text[192];
+        char speed_text[32];
+        char course_text[32];
+
+        snprintf(speed_text, sizeof(speed_text), "%s", "--");
+        snprintf(course_text, sizeof(course_text), "%s", "--");
+        if(gnss_has_fix && has_speed) {
+            snprintf(speed_text, sizeof(speed_text), "%.1f kn", speed_knots);
+        }
+        if(gnss_has_fix && has_course) {
+            snprintf(course_text, sizeof(course_text), "%.0f deg", course_deg);
+        }
+        snprintf(text, sizeof(text),
+                 "Speed  %s\nCourse %s\nTTFF   %s",
+                 speed_text, course_text, ttff_value);
+        lv_label_set_text(cellular_gnss_motion_label, text);
     }
-    if(cellular_gnss_time_label) {
-        lv_label_set_text(cellular_gnss_time_label, gnss_utc);
-    }
-    if(cellular_gnss_hdop_label) {
-        lv_label_set_text(cellular_gnss_hdop_label, gnss_hdop);
-    }
-    if(cellular_gnss_ttff_card_label) {
-        lv_label_set_text(cellular_gnss_ttff_card_label, ttff_value);
-    }
-    if(cellular_gnss_alt_label) {
-        lv_label_set_text_fmt(cellular_gnss_alt_label,
-                              gnss_has_fix && has_altitude ? "%.1f m" : "--",
-                              altitude_m);
-    }
-    if(cellular_gnss_speed_label) {
-        lv_label_set_text_fmt(cellular_gnss_speed_label,
-                              gnss_has_fix && has_speed ? "%.1f kn" : "--",
-                              speed_knots);
-    }
-    if(cellular_gnss_course_label) {
-        lv_label_set_text_fmt(cellular_gnss_course_label,
-                              gnss_has_fix && has_course ? "%.0f deg" : "--",
-                              course_deg);
+    if(cellular_gnss_satellites_label) {
+        char text[224];
+
+        snprintf(text, sizeof(text),
+                 "Date %s\nUTC  %s\nRX   %u\nGPS %d  BDS %d\nGAL %d  GLO %d\nQZS %d  NAV %d  MIX %d",
+                 gnss_date, gnss_utc, nmea_rx_count,
+                 constellations.gps, constellations.beidou,
+                 constellations.galileo, constellations.glonass,
+                 constellations.qzss, constellations.navic,
+                 constellations.mixed);
+        lv_label_set_text(cellular_gnss_satellites_label, text);
     }
     if(cellular_gnss_signal_summary_label) {
         lv_label_set_text_fmt(cellular_gnss_signal_summary_label, "%s",
@@ -4738,16 +4815,17 @@ static lv_obj_t *cellular_gnss_metric_card(lv_obj_t *parent, int x, int y,
     lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(accent, LV_ALIGN_LEFT_MID, 0, 0);
 
-    label = ui_label(card, title, &lv_font_montserrat_12, 0x94A3B8);
+    label = ui_label(card, title, &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_width(label, w - 34);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 18, 8);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 18, 10);
 
     if(value_label) {
-        *value_label = ui_label(card, "--", &lv_font_montserrat_18, 0xF2F5F8);
+        *value_label = ui_label(card, "--", &lv_font_montserrat_16, 0xF2F5F8);
         lv_obj_set_width(*value_label, w - 34);
-        lv_label_set_long_mode(*value_label, LV_LABEL_LONG_DOT);
-        lv_obj_align(*value_label, LV_ALIGN_TOP_LEFT, 18, h > 66 ? 32 : 29);
+        lv_label_set_long_mode(*value_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_line_space(*value_label, 2, 0);
+        lv_obj_align(*value_label, LV_ALIGN_TOP_LEFT, 18, 40);
     }
     return card;
 }
@@ -5210,26 +5288,19 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_set_width(label, left_w - 32);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
-    cellular_gps_label = ui_label(panel, "Searching satellites",
-                                  &lv_font_montserrat_18, 0xF5A524);
-    lv_obj_set_width(cellular_gps_label, left_w - 32);
-    lv_label_set_long_mode(cellular_gps_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(cellular_gps_label, LV_ALIGN_TOP_LEFT, 0, 36);
-    cellular_ttff_label = ui_label(panel, "TTFF: not started",
-                                   &lv_font_montserrat_14, 0x94A3B8);
-    lv_obj_set_width(cellular_ttff_label, left_w - 32);
-    lv_label_set_long_mode(cellular_ttff_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(cellular_ttff_label, LV_ALIGN_TOP_LEFT, 0, 62);
     {
-        int metric_top = 96;
-        int metric_gap = 10;
-        int metric_cols = wide_layout ? 3 : 2;
+        int metric_top = 54;
+        int metric_gap = 12;
+        int metric_cols = 2;
         int metric_w = (left_w - 32 - metric_gap * (metric_cols - 1)) /
                        metric_cols;
-        int metric_h = wide_layout ? 64 : 68;
+        int metric_h = (gnss_left_h - metric_top - metric_gap - 18) / 2;
         int metric_x;
         int metric_y;
 
+        if(metric_h < 150) {
+            metric_h = 150;
+        }
 #define GNSS_METRIC(index, title, color, ptr) \
         do { \
             metric_x = ((index) % metric_cols) * (metric_w + metric_gap); \
@@ -5238,15 +5309,14 @@ void ui_cellular_create(lv_obj_t *scr)
             cellular_gnss_metric_card(panel, metric_x, metric_y, metric_w, \
                                       metric_h, title, color, ptr); \
         } while(0)
-        GNSS_METRIC(0, "Latitude", 0x25C281, &cellular_gnss_lat_label);
-        GNSS_METRIC(1, "Longitude", 0x38BDF8, &cellular_gnss_lon_label);
-        GNSS_METRIC(2, "Satellites", 0xF97316, &cellular_gnss_sats_label);
-        GNSS_METRIC(3, "UTC time", 0xA78BFA, &cellular_gnss_time_label);
-        GNSS_METRIC(4, "HDOP", 0xF5A524, &cellular_gnss_hdop_label);
-        GNSS_METRIC(5, "TTFF", 0x22C55E, &cellular_gnss_ttff_card_label);
-        GNSS_METRIC(6, "Altitude", 0x60A5FA, &cellular_gnss_alt_label);
-        GNSS_METRIC(7, "Speed", 0x2DD4BF, &cellular_gnss_speed_label);
-        GNSS_METRIC(8, "Course", 0xEF4444, &cellular_gnss_course_label);
+        GNSS_METRIC(0, "Position", 0x25C281,
+                    &cellular_gnss_position_label);
+        GNSS_METRIC(1, "Precision", 0xF5A524,
+                    &cellular_gnss_precision_label);
+        GNSS_METRIC(2, "Navigation", 0x38BDF8,
+                    &cellular_gnss_motion_label);
+        GNSS_METRIC(3, "Satellites", 0xA78BFA,
+                    &cellular_gnss_satellites_label);
 #undef GNSS_METRIC
     }
 
@@ -5425,15 +5495,10 @@ void ui_cellular_cleanup(void)
     cellular_ttff_label = NULL;
     cellular_sat_chart = NULL;
     cellular_sat_label = NULL;
-    cellular_gnss_lat_label = NULL;
-    cellular_gnss_lon_label = NULL;
-    cellular_gnss_sats_label = NULL;
-    cellular_gnss_time_label = NULL;
-    cellular_gnss_hdop_label = NULL;
-    cellular_gnss_ttff_card_label = NULL;
-    cellular_gnss_alt_label = NULL;
-    cellular_gnss_speed_label = NULL;
-    cellular_gnss_course_label = NULL;
+    cellular_gnss_position_label = NULL;
+    cellular_gnss_precision_label = NULL;
+    cellular_gnss_motion_label = NULL;
+    cellular_gnss_satellites_label = NULL;
     cellular_gnss_signal_summary_label = NULL;
     cellular_gnss_cno_stats_label = NULL;
     cellular_log_label = NULL;

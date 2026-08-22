@@ -648,6 +648,8 @@ static const ui_translation_t ui_translations[] = {
     { "Landscape", "横屏", "横向き" },
     { "Save failed", "保存失败", "保存失敗" },
     { "Date", "日期", "日付" },
+    { "Navigation", "导航", "ナビゲーション" },
+    { "Signal radar", "信号雷达", "信号レーダー" },
     { "Time zone", "时区", "タイムゾーン" },
     { "Local time", "本地时间", "ローカル時刻" },
     { "NTP server", "NTP 服务器", "NTP サーバー" },

@@ -72,7 +72,10 @@ typedef struct {
     char lte_status[160];
     char gnss_status[160];
     char gnss_utc_time[32];
+    char gnss_utc_date[32];
+    char gnss_pdop[24];
     char gnss_hdop[24];
+    char gnss_vdop[24];
     char last_error[160];
 } k230_nrf9151_status_t;
 

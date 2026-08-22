@@ -435,6 +435,59 @@ static void nrf9151_manager_set_utc_time(k230_nrf9151_status_t *status,
     }
 }
 
+static void nrf9151_manager_set_utc_date(k230_nrf9151_status_t *status,
+                                         const char *date)
+{
+    int day;
+    int month;
+    int year;
+    char buf[8];
+
+    if(!status || !date || !date[0]) {
+        return;
+    }
+    if(strlen(date) >= 6U) {
+        memset(buf, 0, sizeof(buf));
+        memcpy(buf, date, 2);
+        day = atoi(buf);
+        memcpy(buf, date + 2, 2);
+        month = atoi(buf);
+        memcpy(buf, date + 4, 2);
+        year = atoi(buf);
+        year += year >= 80 ? 1900 : 2000;
+        if(day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+            snprintf(status->gnss_utc_date, sizeof(status->gnss_utc_date),
+                     "%04d-%02d-%02d", year, month, day);
+            return;
+        }
+    }
+    snprintf(status->gnss_utc_date, sizeof(status->gnss_utc_date), "%s",
+             date);
+}
+
+static void nrf9151_manager_set_zda_date(k230_nrf9151_status_t *status,
+                                         const char *day_text,
+                                         const char *month_text,
+                                         const char *year_text)
+{
+    int day;
+    int month;
+    int year;
+
+    if(!status || !day_text || !month_text || !year_text ||
+       !day_text[0] || !month_text[0] || !year_text[0]) {
+        return;
+    }
+    day = atoi(day_text);
+    month = atoi(month_text);
+    year = atoi(year_text);
+    if(day < 1 || day > 31 || month < 1 || month > 12 || year < 1980) {
+        return;
+    }
+    snprintf(status->gnss_utc_date, sizeof(status->gnss_utc_date),
+             "%04d-%02d-%02d", year, month, day);
+}
+
 void k230_nrf9151_status_init(k230_nrf9151_status_t *status)
 {
     if(!status) {
@@ -454,7 +507,10 @@ void k230_nrf9151_status_init(k230_nrf9151_status_t *status)
     snprintf(status->lte_status, sizeof(status->lte_status), "%s", "Not tested");
     snprintf(status->gnss_status, sizeof(status->gnss_status), "%s", "Off");
     snprintf(status->gnss_utc_time, sizeof(status->gnss_utc_time), "%s", "--");
+    snprintf(status->gnss_utc_date, sizeof(status->gnss_utc_date), "%s", "--");
+    snprintf(status->gnss_pdop, sizeof(status->gnss_pdop), "%s", "--");
     snprintf(status->gnss_hdop, sizeof(status->gnss_hdop), "%s", "--");
+    snprintf(status->gnss_vdop, sizeof(status->gnss_vdop), "%s", "--");
     snprintf(status->last_error, sizeof(status->last_error), "%s", "-");
 }
 
@@ -567,7 +623,11 @@ int k230_nrf9151_write_status(const k230_nrf9151_status_t *status)
     nrf9151_manager_status_write_key(fp, "gnss_status", copy.gnss_status);
     nrf9151_manager_status_write_key(fp, "gnss_utc_time",
                                      copy.gnss_utc_time);
+    nrf9151_manager_status_write_key(fp, "gnss_utc_date",
+                                     copy.gnss_utc_date);
+    nrf9151_manager_status_write_key(fp, "gnss_pdop", copy.gnss_pdop);
     nrf9151_manager_status_write_key(fp, "gnss_hdop", copy.gnss_hdop);
+    nrf9151_manager_status_write_key(fp, "gnss_vdop", copy.gnss_vdop);
     nrf9151_manager_status_write_key(fp, "last_error", copy.last_error);
     if(fclose(fp) != 0) {
         int saved_errno = errno;
@@ -736,9 +796,18 @@ int k230_nrf9151_read_status(k230_nrf9151_status_t *status,
         } else if(strcmp(line, "gnss_utc_time") == 0) {
             nrf9151_manager_status_set_string(status->gnss_utc_time,
                                               sizeof(status->gnss_utc_time), eq);
+        } else if(strcmp(line, "gnss_utc_date") == 0) {
+            nrf9151_manager_status_set_string(status->gnss_utc_date,
+                                              sizeof(status->gnss_utc_date), eq);
+        } else if(strcmp(line, "gnss_pdop") == 0) {
+            nrf9151_manager_status_set_string(status->gnss_pdop,
+                                              sizeof(status->gnss_pdop), eq);
         } else if(strcmp(line, "gnss_hdop") == 0) {
             nrf9151_manager_status_set_string(status->gnss_hdop,
                                               sizeof(status->gnss_hdop), eq);
+        } else if(strcmp(line, "gnss_vdop") == 0) {
+            nrf9151_manager_status_set_string(status->gnss_vdop,
+                                              sizeof(status->gnss_vdop), eq);
         } else if(strcmp(line, "last_error") == 0) {
             nrf9151_manager_status_set_string(status->last_error,
                                               sizeof(status->last_error), eq);
@@ -2428,6 +2497,9 @@ static void nrf9151_manager_process_nmea_sentence(
         if(count > 1) {
             nrf9151_manager_set_utc_time(status, fields[1]);
         }
+        if(count > 9) {
+            nrf9151_manager_set_utc_date(status, fields[9]);
+        }
         if(count > 6 && fields[2][0] == 'A' &&
            nrf9151_manager_coord_to_double(fields[3], fields[4], &lat) &&
            nrf9151_manager_coord_to_double(fields[5], fields[6], &lon)) {
@@ -2451,6 +2523,27 @@ static void nrf9151_manager_process_nmea_sentence(
                                            status->satellites);
         } else if(count > 2 && fields[2][0] == 'V') {
             status->gnss_has_fix = 0;
+        }
+    } else if(strcmp(type, "GSA") == 0) {
+        if(count > 15 && fields[15] && fields[15][0]) {
+            snprintf(status->gnss_pdop, sizeof(status->gnss_pdop), "%s",
+                     fields[15]);
+        }
+        if(count > 16 && fields[16] && fields[16][0]) {
+            snprintf(status->gnss_hdop, sizeof(status->gnss_hdop), "%s",
+                     fields[16]);
+        }
+        if(count > 17 && fields[17] && fields[17][0]) {
+            snprintf(status->gnss_vdop, sizeof(status->gnss_vdop), "%s",
+                     fields[17]);
+        }
+    } else if(strcmp(type, "ZDA") == 0) {
+        if(count > 1) {
+            nrf9151_manager_set_utc_time(status, fields[1]);
+        }
+        if(count > 4) {
+            nrf9151_manager_set_zda_date(status, fields[2], fields[3],
+                                         fields[4]);
         }
     } else if(strcmp(type, "GSV") == 0) {
         int total_msgs = count > 1 ? nrf9151_manager_parse_int_field(fields[1]) : 0;
