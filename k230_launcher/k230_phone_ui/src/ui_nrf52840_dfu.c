@@ -465,7 +465,7 @@ int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
         return -1;
     }
 
-    rc = ui_nrf52840_prepare_dfu(message, message_len);
+    rc = ui_nrf52840_cached_dfu_status(message, message_len);
     if(ui_nrf52840_get_status(&manager_status) == 0) {
         if(manager_status.version[0]) {
             pthread_mutex_lock(&nrf_dfu_lock);
@@ -479,7 +479,6 @@ int ui_nrf52840_dfu_preflight(char *message, size_t message_len)
         }
     }
 
-    ui_meshtastic_startup();
     return rc;
 }
 

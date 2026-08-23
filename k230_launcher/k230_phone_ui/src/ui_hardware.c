@@ -505,6 +505,8 @@ static int boot0_screen_off;
 static int boot0_saved_backlight = -1;
 static int boot0_saved_keyboard_backlight = -1;
 static uint64_t boot0_last_toggle_us;
+static ui_hardware_screen_toggle_cb_t screen_toggle_cb;
+static void *screen_toggle_cb_user_data;
 static pthread_mutex_t tca8418_event_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t tca8418_irq_thread;
 static int tca8418_irq_thread_started;
@@ -1365,6 +1367,16 @@ static void boot0_apply_screen_toggle(int turn_off)
     }
 }
 
+void ui_hardware_set_screen_toggle_cb(ui_hardware_screen_toggle_cb_t cb,
+                                      void *user_data)
+{
+    pthread_mutex_lock(&hardware_lock);
+    screen_toggle_cb = cb;
+    screen_toggle_cb_user_data = user_data;
+    pthread_mutex_unlock(&hardware_lock);
+    button_test_log("screen toggle callback %s", cb ? "registered" : "cleared");
+}
+
 int ui_hardware_screen_backlight_get(void)
 {
     return hardware_read_backlight_raw();
@@ -1509,8 +1521,20 @@ static void boot0_toggle_poll(void)
     if(boot0_last_raw == BUTTON_BOOT0_IDLE_VALUE &&
        value != BUTTON_BOOT0_IDLE_VALUE &&
        now - boot0_last_toggle_us > BOOT0_TOGGLE_DEBOUNCE_US) {
+        ui_hardware_screen_toggle_cb_t cb;
+        void *cb_user_data;
+
         boot0_last_toggle_us = now;
-        boot0_apply_screen_toggle(!boot0_screen_off);
+        pthread_mutex_lock(&hardware_lock);
+        cb = screen_toggle_cb;
+        cb_user_data = screen_toggle_cb_user_data;
+        pthread_mutex_unlock(&hardware_lock);
+        if(cb) {
+            button_test_log("BOOT0 screen toggle delegated to power manager");
+            cb(cb_user_data);
+        } else {
+            boot0_apply_screen_toggle(!boot0_screen_off);
+        }
     }
     boot0_last_raw = value;
 }

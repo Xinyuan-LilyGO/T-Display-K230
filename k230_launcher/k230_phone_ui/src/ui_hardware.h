@@ -14,6 +14,9 @@ extern "C" {
 void ui_hardware_startup(void);
 void ui_hardware_shutdown(void);
 void ui_hardware_reboot_diag_dump(const char *tag);
+typedef void (*ui_hardware_screen_toggle_cb_t)(void *user_data);
+void ui_hardware_set_screen_toggle_cb(ui_hardware_screen_toggle_cb_t cb,
+                                      void *user_data);
 void ui_extension_keyboard_register_indev(void);
 typedef void (*ui_extension_keyboard_key_cb_t)(int code, uint32_t key,
                                                int pressed, void *user_data);

@@ -15,16 +15,25 @@
 #define NRF52840_DFU_TOOL "/root/app/k230_phone_ui/k230_nrf52840_dfu"
 #define NRF52840_UART_DEV "/dev/ttyS1"
 #define NRF52840_MESHTASTIC_PROC "k230_meshtastic_probe"
+#define NRF52840_PROBE_RETRY_US 2000000ULL
+#define NRF52840_STARTUP_PROBE_ATTEMPTS 4
 
 static pthread_mutex_t nrf52840_lock = PTHREAD_MUTEX_INITIALIZER;
 static nrf52840_status_t nrf52840_status;
 static int nrf52840_started;
+static int nrf52840_shutdown_requested;
+static int nrf52840_probe_running;
+static uint64_t nrf52840_next_probe_us;
 static nrf52840_ble_mode_t nrf52840_dfu_previous_mode = NRF52840_MODE_MESHTASTIC;
 static int nrf52840_dfu_previous_mode_valid;
+
+static int nrf52840_run_at_query(char *response, size_t response_len);
 
 const char *ui_nrf52840_owner_name(nrf52840_owner_t owner)
 {
     switch(owner) {
+    case NRF52840_OWNER_PROBE:
+        return "probe";
     case NRF52840_OWNER_MESHTASTIC:
         return "meshtastic";
     case NRF52840_OWNER_BLE_SCAN:
@@ -131,6 +140,9 @@ static void nrf52840_mark_probe_locked(int present, int at_ok,
                                        const char *version,
                                        const char *error)
 {
+    int keep_cached_dfu = (!at_ok && nrf52840_status.uart_dfu_supported &&
+                           nrf52840_status.version[0]);
+
     nrf52840_status.known = 1;
     nrf52840_status.present = present ? 1 : 0;
     nrf52840_status.at_ok = at_ok ? 1 : 0;
@@ -140,8 +152,12 @@ static void nrf52840_mark_probe_locked(int present, int at_ok,
         nrf52840_status.uart_dfu_supported =
             nrf52840_version_supports_uart_dfu(version);
     } else if(!at_ok) {
-        nrf52840_status.version[0] = '\0';
-        nrf52840_status.uart_dfu_supported = 0;
+        if(keep_cached_dfu) {
+            nrf52840_status.present = 1;
+        } else {
+            nrf52840_status.version[0] = '\0';
+            nrf52840_status.uart_dfu_supported = 0;
+        }
     }
     if(error) {
         nrf52840_set_error_locked(error);
@@ -151,25 +167,158 @@ static void nrf52840_mark_probe_locked(int present, int at_ok,
     }
 }
 
+static int nrf52840_owner_locked(void)
+{
+    return nrf52840_status.owner;
+}
+
+static int nrf52840_probe_now(int claim_owner, char *message,
+                              size_t message_len)
+{
+    char response[768];
+    char version[96];
+    int rc;
+
+    if(message && message_len > 0U) {
+        message[0] = '\0';
+    }
+
+    if(claim_owner &&
+       ui_nrf52840_request(NRF52840_OWNER_PROBE, 0) != 0) {
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s", "nRF52840 UART is busy");
+        }
+        return -1;
+    }
+
+    rc = nrf52840_run_at_query(response, sizeof(response));
+    if(rc == 0 && strstr(response, "OK") &&
+       nrf52840_extract_at_version(response, version, sizeof(version)) == 0) {
+        pthread_mutex_lock(&nrf52840_lock);
+        nrf52840_mark_probe_locked(1, 1, version, NULL);
+        pthread_mutex_unlock(&nrf52840_lock);
+        nrf52840_log("probe ok version=%s dfu=%d", version,
+                     nrf52840_version_supports_uart_dfu(version));
+        if(claim_owner) {
+            ui_nrf52840_release(NRF52840_OWNER_PROBE);
+        }
+        return 0;
+    }
+
+    pthread_mutex_lock(&nrf52840_lock);
+    nrf52840_mark_probe_locked(0, 0, NULL,
+                               response[0] ? response : "AT no response");
+    pthread_mutex_unlock(&nrf52840_lock);
+    if(message && message_len > 0U) {
+        snprintf(message, message_len, "%s",
+                 response[0] ? response : "nRF52840 AT response unavailable");
+        ui_trim_text(message);
+    }
+    nrf52840_log("probe failed: %s", response[0] ? response : "no response");
+    if(claim_owner) {
+        ui_nrf52840_release(NRF52840_OWNER_PROBE);
+    }
+    return -1;
+}
+
+static void *nrf52840_probe_thread(void *arg)
+{
+    int attempts = (int)(intptr_t)arg;
+    int i;
+
+    if(attempts <= 0) {
+        attempts = 1;
+    }
+
+    for(i = 0; i < attempts; i++) {
+        int stop;
+        int owner;
+
+        pthread_mutex_lock(&nrf52840_lock);
+        stop = nrf52840_shutdown_requested;
+        owner = nrf52840_owner_locked();
+        pthread_mutex_unlock(&nrf52840_lock);
+        if(stop) {
+            break;
+        }
+        if(owner != NRF52840_OWNER_NONE &&
+           owner != NRF52840_OWNER_PROBE) {
+            nrf52840_log("startup probe skipped owner=%s",
+                         ui_nrf52840_owner_name((nrf52840_owner_t)owner));
+        } else if(nrf52840_probe_now(1, NULL, 0) == 0) {
+            break;
+        }
+        usleep(NRF52840_PROBE_RETRY_US);
+    }
+
+    pthread_mutex_lock(&nrf52840_lock);
+    nrf52840_probe_running = 0;
+    nrf52840_next_probe_us = ui_monotonic_us() + NRF52840_PROBE_RETRY_US;
+    pthread_mutex_unlock(&nrf52840_lock);
+    return NULL;
+}
+
+int ui_nrf52840_refresh_async(void)
+{
+    pthread_t thread;
+    int start = 0;
+    uint64_t now = ui_monotonic_us();
+
+    pthread_mutex_lock(&nrf52840_lock);
+    if(!nrf52840_shutdown_requested && !nrf52840_probe_running &&
+       now >= nrf52840_next_probe_us) {
+        nrf52840_probe_running = 1;
+        start = 1;
+    }
+    pthread_mutex_unlock(&nrf52840_lock);
+
+    if(!start) {
+        return 0;
+    }
+    if(pthread_create(&thread, NULL, nrf52840_probe_thread,
+                      (void *)(intptr_t)1) == 0) {
+        pthread_detach(thread);
+        nrf52840_log("async probe scheduled");
+        return 1;
+    }
+
+    pthread_mutex_lock(&nrf52840_lock);
+    nrf52840_probe_running = 0;
+    nrf52840_next_probe_us = now + NRF52840_PROBE_RETRY_US;
+    pthread_mutex_unlock(&nrf52840_lock);
+    nrf52840_log("async probe thread failed");
+    return -1;
+}
+
 void ui_nrf52840_manager_startup(void)
 {
+    int start_probe = 0;
+
     pthread_mutex_lock(&nrf52840_lock);
     if(!nrf52840_started) {
         memset(&nrf52840_status, 0, sizeof(nrf52840_status));
         nrf52840_status.owner = NRF52840_OWNER_NONE;
         nrf52840_status.mode = NRF52840_MODE_OFF;
+        nrf52840_shutdown_requested = 0;
+        nrf52840_probe_running = 0;
+        nrf52840_next_probe_us = 0;
         snprintf(nrf52840_status.phoneapi_state,
                  sizeof(nrf52840_status.phoneapi_state), "%s", "offline");
         nrf52840_status.updated_us = ui_monotonic_us();
         nrf52840_started = 1;
+        start_probe = 1;
     }
     pthread_mutex_unlock(&nrf52840_lock);
     nrf52840_log("startup");
+    if(start_probe) {
+        (void)ui_nrf52840_refresh_async();
+    }
 }
 
 void ui_nrf52840_manager_shutdown(void)
 {
     pthread_mutex_lock(&nrf52840_lock);
+    nrf52840_shutdown_requested = 1;
     nrf52840_status.owner = NRF52840_OWNER_NONE;
     nrf52840_status.busy = 0;
     pthread_mutex_unlock(&nrf52840_lock);
@@ -258,6 +407,51 @@ void ui_nrf52840_switch_mode(nrf52840_ble_mode_t mode)
     nrf52840_log("mode=%s", ui_nrf52840_mode_name(mode));
 }
 
+int ui_nrf52840_cached_dfu_status(char *message, size_t message_len)
+{
+    nrf52840_status_t status;
+
+    if(message && message_len > 0U) {
+        message[0] = '\0';
+    }
+
+    if(access(NRF52840_DFU_TOOL, X_OK) != 0) {
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s", "DFU tool missing");
+        }
+        return -1;
+    }
+
+    if(ui_nrf52840_get_status(&status) != 0 || !status.known) {
+        (void)ui_nrf52840_refresh_async();
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s",
+                     "nRF52840 status is initializing. Try again shortly.");
+        }
+        return -3;
+    }
+    if(status.uart_dfu_supported && status.version[0]) {
+        return 0;
+    }
+    if(!status.present || !status.at_ok) {
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s",
+                     status.last_error[0] ? status.last_error :
+                     "nRF52840 AT firmware not detected.");
+            ui_trim_text(message);
+        }
+        return -1;
+    }
+    if(!status.uart_dfu_supported) {
+        if(message && message_len > 0U) {
+            snprintf(message, message_len, "%s",
+                     "Update the nRF52840 bootloader before using DFU.");
+        }
+        return -2;
+    }
+    return 0;
+}
+
 static nrf52840_ble_mode_t nrf52840_restore_previous_mode(void)
 {
     nrf52840_ble_mode_t mode;
@@ -312,15 +506,27 @@ static int nrf52840_run_at_query(char *response, size_t response_len)
 int ui_nrf52840_begin_dfu(int timeout_ms, char *message, size_t message_len)
 {
     nrf52840_ble_mode_t previous_mode;
+    nrf52840_status_t status;
 
     if(message && message_len > 0U) {
         message[0] = '\0';
     }
     if(ui_nrf52840_request(NRF52840_OWNER_DFU, timeout_ms) != 0) {
-        if(message && message_len > 0U) {
-            snprintf(message, message_len, "%s", "nRF52840 is busy");
+        if(ui_nrf52840_get_status(&status) == 0 &&
+           status.owner == NRF52840_OWNER_MESHTASTIC) {
+            nrf52840_log("force pause meshtastic for dfu");
+            if(system("killall " NRF52840_MESHTASTIC_PROC " >/dev/null 2>&1 || true") == -1) {
+                nrf52840_log("killall meshtastic failed");
+            }
+            ui_nrf52840_release(NRF52840_OWNER_MESHTASTIC);
+            usleep(300000);
         }
-        return -1;
+        if(ui_nrf52840_request(NRF52840_OWNER_DFU, timeout_ms) != 0) {
+            if(message && message_len > 0U) {
+                snprintf(message, message_len, "%s", "nRF52840 is busy");
+            }
+            return -1;
+        }
     }
 
     pthread_mutex_lock(&nrf52840_lock);
@@ -343,36 +549,7 @@ int ui_nrf52840_begin_dfu(int timeout_ms, char *message, size_t message_len)
 
 int ui_nrf52840_probe_at(char *message, size_t message_len)
 {
-    char response[768];
-    char version[96];
-    int rc;
-
-    if(message && message_len > 0U) {
-        message[0] = '\0';
-    }
-
-    rc = nrf52840_run_at_query(response, sizeof(response));
-    if(rc == 0 && strstr(response, "OK") &&
-       nrf52840_extract_at_version(response, version, sizeof(version)) == 0) {
-        pthread_mutex_lock(&nrf52840_lock);
-        nrf52840_mark_probe_locked(1, 1, version, NULL);
-        pthread_mutex_unlock(&nrf52840_lock);
-        nrf52840_log("probe ok version=%s dfu=%d", version,
-                     nrf52840_version_supports_uart_dfu(version));
-        return 0;
-    }
-
-    pthread_mutex_lock(&nrf52840_lock);
-    nrf52840_mark_probe_locked(0, 0, NULL,
-                               response[0] ? response : "AT no response");
-    pthread_mutex_unlock(&nrf52840_lock);
-    if(message && message_len > 0U) {
-        snprintf(message, message_len, "%s",
-                 response[0] ? response : "nRF52840 AT response unavailable");
-        ui_trim_text(message);
-    }
-    nrf52840_log("probe failed: %s", response[0] ? response : "no response");
-    return -1;
+    return nrf52840_probe_now(0, message, message_len);
 }
 
 int ui_nrf52840_prepare_dfu(char *message, size_t message_len)

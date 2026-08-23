@@ -75,6 +75,7 @@ set(K230_PHONE_UI_SOURCES
     ui_prefs.c
     ui_i18n.c
     ui_input.c
+    ui_power_manager.c
     ui_nrf52840_manager.c
     ui_nrf9151_manager.c
     ui_multitouch.c

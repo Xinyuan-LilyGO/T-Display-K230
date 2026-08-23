@@ -39,6 +39,7 @@
 
 #include "ui_nrf9151_manager.h"
 #include "ui_nrf52840_manager.h"
+#include "ui_power_manager.h"
 
 #ifndef LV_SYMBOL_WIFI
 #define LV_SYMBOL_WIFI "WiFi"
@@ -150,7 +151,6 @@
 #define DISPLAY_ROTATION_PREF_KEY "display.rotation"
 #define DISPLAY_BRIGHTNESS_PREF_KEY "display.brightness"
 #define PAGE_TRANSITION_PREF_KEY "display.page_transition"
-#define DISPLAY_TIMEOUT_PREF_KEY "display.timeout_s"
 #define DISPLAY_TIMEOUT_DEFAULT_S 0
 #define DISPLAY_TIMEOUT_MODE_COUNT 5
 #define PREF_AUDIO_OUTPUT "audio.output"
@@ -502,12 +502,6 @@ static int display_rotation_degrees;
 static char page_transition_effect[16] = "off";
 static int display_timeout_loaded;
 static int display_timeout_s = DISPLAY_TIMEOUT_DEFAULT_S;
-static pthread_mutex_t display_idle_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t display_last_activity_us;
-static int display_idle_dimmed;
-static int display_idle_wake_pending;
-static int display_idle_saved_screen = -1;
-static int display_idle_saved_keyboard = -1;
 static int edge_back_pref_loaded;
 static int edge_back_enabled;
 static int edge_back_tracking;
@@ -812,8 +806,7 @@ static int page_uses_lora_radio(page_id_t page)
 {
     return page == PAGE_LORA ||
            page == PAGE_LORA_FLRC ||
-           page == PAGE_LORAWAN ||
-           page == PAGE_CELLULAR;
+           page == PAGE_LORAWAN;
 }
 
 static void touch_trace_log(const char *fmt, ...)
@@ -1215,207 +1208,53 @@ static void page_transition_save_pref(const char *mode)
 
 static int display_timeout_valid(int seconds)
 {
-    return seconds == 0 || seconds == 5 || seconds == 10 ||
-           seconds == 30 || seconds == 60;
+    return ui_power_manager_timeout_valid(seconds);
 }
 
 static void display_timeout_load_pref(void)
 {
-    char value[16];
-    int seconds;
-
     if(display_timeout_loaded) {
         return;
     }
-    ui_prefs_get(DISPLAY_TIMEOUT_PREF_KEY, value, sizeof(value), "0");
-    seconds = atoi(value);
-    if(!display_timeout_valid(seconds)) {
-        seconds = DISPLAY_TIMEOUT_DEFAULT_S;
-    }
-    display_timeout_s = seconds;
+    display_timeout_s = ui_power_manager_timeout_s();
     display_timeout_loaded = 1;
 }
 
 static void display_timeout_save_pref(int seconds)
 {
-    char value[16];
-
     if(!display_timeout_valid(seconds)) {
         seconds = DISPLAY_TIMEOUT_DEFAULT_S;
     }
-    display_timeout_s = seconds;
+    ui_power_manager_set_timeout_s(seconds);
+    display_timeout_s = ui_power_manager_timeout_s();
     display_timeout_loaded = 1;
-    snprintf(value, sizeof(value), "%d", seconds);
-    ui_prefs_set(DISPLAY_TIMEOUT_PREF_KEY, value);
     touch_trace_log("DISPLAY_TIMEOUT_PREF seconds=%d", seconds);
     app_note_user_activity();
 }
 
 static const char *display_timeout_label_text(int seconds)
 {
-    switch(seconds) {
-    case 5:
-        return "5 sec";
-    case 10:
-        return "10 sec";
-    case 30:
-        return "30 sec";
-    case 60:
-        return "60 sec";
-    case 0:
-    default:
-        return "Never";
-    }
+    return ui_power_manager_timeout_label(seconds);
 }
 
 void app_note_user_activity(void)
 {
-    uint64_t now = monotonic_us();
-
-    pthread_mutex_lock(&display_idle_lock);
-    display_last_activity_us = now;
-    if(display_idle_dimmed) {
-        display_idle_wake_pending = 1;
-        display_idle_dimmed = 0;
-    }
-    pthread_mutex_unlock(&display_idle_lock);
+    ui_power_manager_note_activity();
 }
 
 static int display_idle_is_dimmed(void)
 {
-    int dimmed;
-
-    pthread_mutex_lock(&display_idle_lock);
-    dimmed = display_idle_dimmed;
-    pthread_mutex_unlock(&display_idle_lock);
-    return dimmed;
+    return ui_power_manager_screen_off();
 }
 
 static int touch_input_blocked(void)
 {
-    int idle_dimmed = display_idle_is_dimmed();
-    int boot0_off = ui_hardware_boot0_screen_off();
-
-    if((idle_dimmed || boot0_off) && ui_hardware_screen_backlight_get() > 0) {
-        uint64_t now = monotonic_us();
-
-        if(boot0_off) {
-            ui_hardware_shutdown_backlights_apply(0, 0);
-            touch_trace_log("DISPLAY_TIMEOUT_TOUCH_FORCE_OFF screen=%d",
-                            ui_hardware_screen_backlight_get());
-        } else if(idle_dimmed) {
-            pthread_mutex_lock(&display_idle_lock);
-            display_idle_dimmed = 0;
-            display_idle_wake_pending = 0;
-            display_last_activity_us = now;
-            pthread_mutex_unlock(&display_idle_lock);
-            touch_trace_log("DISPLAY_TIMEOUT_TOUCH_STATE_RECOVER screen=%d",
-                            ui_hardware_screen_backlight_get());
-        }
-        boot0_off = ui_hardware_boot0_screen_off();
-        idle_dimmed = display_idle_is_dimmed();
-    }
-
-    return idle_dimmed || boot0_off;
+    return ui_power_manager_touch_blocked();
 }
 
 static void display_idle_poll(void)
 {
-    int timeout_s;
-    int restore_pending;
-    int saved_screen;
-    int saved_keyboard;
-    int should_dim = 0;
-    uint64_t now = monotonic_us();
-    uint64_t last_activity;
-
-    if(shutdown_visual_active) {
-        pthread_mutex_lock(&display_idle_lock);
-        display_last_activity_us = now;
-        pthread_mutex_unlock(&display_idle_lock);
-        return;
-    }
-
-    display_timeout_load_pref();
-
-    pthread_mutex_lock(&display_idle_lock);
-    if(display_last_activity_us == 0) {
-        display_last_activity_us = now;
-    }
-    timeout_s = display_timeout_s;
-    restore_pending = display_idle_wake_pending;
-    saved_screen = display_idle_saved_screen;
-    saved_keyboard = display_idle_saved_keyboard;
-    if(restore_pending) {
-        display_idle_wake_pending = 0;
-    }
-    last_activity = display_last_activity_us;
-    if(!restore_pending && timeout_s > 0 && !display_idle_dimmed &&
-       now >= last_activity &&
-       now - last_activity >= (uint64_t)timeout_s * 1000000ULL) {
-        should_dim = 1;
-    }
-    pthread_mutex_unlock(&display_idle_lock);
-
-    if(!restore_pending && display_idle_is_dimmed() &&
-       ui_hardware_screen_backlight_get() > 0) {
-        if(ui_hardware_boot0_screen_off()) {
-            ui_hardware_shutdown_backlights_apply(0, 0);
-            touch_trace_log("DISPLAY_TIMEOUT_POLL_FORCE_OFF screen=%d",
-                            ui_hardware_screen_backlight_get());
-            return;
-        }
-        pthread_mutex_lock(&display_idle_lock);
-        display_idle_dimmed = 0;
-        display_idle_wake_pending = 0;
-        display_last_activity_us = now;
-        pthread_mutex_unlock(&display_idle_lock);
-        touch_trace_log("DISPLAY_TIMEOUT_EXTERNAL_WAKE screen=%d",
-                        ui_hardware_screen_backlight_get());
-        app_request_fast_refresh();
-        return;
-    }
-
-    if(restore_pending) {
-        int screen = saved_screen > 0 ? saved_screen : 80;
-        int keyboard = saved_keyboard >= 0 ? saved_keyboard :
-                       ui_hardware_keyboard_backlight_get();
-
-        ui_hardware_set_screen_off(0);
-        ui_hardware_shutdown_backlights_apply(screen, keyboard);
-        touch_trace_log("DISPLAY_TIMEOUT_WAKE screen=%d keyboard=%d",
-                        screen, keyboard);
-        app_request_fast_refresh();
-        return;
-    }
-
-    if(!should_dim) {
-        return;
-    }
-
-    saved_screen = ui_hardware_screen_backlight_get();
-    saved_keyboard = ui_hardware_keyboard_backlight_get();
-    pthread_mutex_lock(&display_idle_lock);
-    if(!display_idle_dimmed && display_timeout_s > 0 &&
-       now >= display_last_activity_us &&
-       now - display_last_activity_us >=
-       (uint64_t)display_timeout_s * 1000000ULL) {
-        display_idle_saved_screen = saved_screen > 0 ? saved_screen : 80;
-        display_idle_saved_keyboard = saved_keyboard >= 0 ? saved_keyboard : 0;
-        display_idle_dimmed = 1;
-        should_dim = 1;
-    } else {
-        should_dim = 0;
-    }
-    pthread_mutex_unlock(&display_idle_lock);
-
-    if(should_dim) {
-        ui_hardware_set_screen_off(1);
-        touch_trace_log("DISPLAY_TIMEOUT_SLEEP seconds=%d saved_screen=%d "
-                        "saved_keyboard=%d",
-                        timeout_s, display_idle_saved_screen,
-                        display_idle_saved_keyboard);
-    }
+    ui_power_manager_poll();
 }
 
 static void restart_for_display_orientation(const char *value)
@@ -3082,9 +2921,7 @@ static void power_key_publish_state(int pressed)
     pthread_mutex_unlock(&power_key_lock);
 
     if(pressed) {
-        pthread_mutex_lock(&display_idle_lock);
-        display_last_activity_us = now;
-        pthread_mutex_unlock(&display_idle_lock);
+        ui_power_manager_note_activity();
     }
 
     touch_trace_log("POWER_KEY_%s", pressed ? "DOWN" : "UP");
@@ -3336,6 +3173,7 @@ static void shutdown_visual_begin(uint64_t press_us)
     shutdown_last_fade_log_progress = -1;
     shutdown_visual_committed = 0;
     shutdown_visual_active = 1;
+    ui_power_manager_set_shutdown_fade(1);
     shutdown_visual_create();
     touch_trace_log("SHUTDOWN_VISUAL_BEGIN screen=%d keyboard=%d rotation=%d",
                     shutdown_saved_screen_backlight,
@@ -3360,6 +3198,7 @@ static void shutdown_visual_cancel(void)
     shutdown_visual_committed = 0;
     shutdown_visual_poweroff_started = 0;
     shutdown_visual_commit_us = 0;
+    ui_power_manager_set_shutdown_fade(0);
     touch_trace_log("SHUTDOWN_VISUAL_CANCEL restore_screen=%d restore_keyboard=%d",
                     shutdown_saved_screen_backlight,
                     shutdown_saved_keyboard_backlight);
@@ -3663,6 +3502,24 @@ void app_request_fast_refresh(void)
         return;
     }
     fast_refresh_pending = 1;
+}
+
+static void power_manager_refresh_cb(void *user_data)
+{
+    (void)user_data;
+    app_request_fast_refresh();
+}
+
+static void power_manager_trace_cb(const char *message, void *user_data)
+{
+    (void)user_data;
+    touch_trace_log("POWER_MANAGER %s", message ? message : "");
+}
+
+static void hardware_screen_toggle_cb(void *user_data)
+{
+    (void)user_data;
+    ui_power_manager_toggle_screen_from_key();
 }
 
 void app_refresh_current_page(void)
@@ -12078,6 +11935,9 @@ int main(void)
     ui_audio_apply_startup_defaults();
     ui_hardware_reboot_diag_dump("app-start-after-hardware-startup");
     apply_display_brightness_pref();
+    ui_power_manager_init(power_manager_refresh_cb, power_manager_trace_cb,
+                          NULL);
+    ui_hardware_set_screen_toggle_cb(hardware_screen_toggle_cb, NULL);
     ui_cellular_startup();
     ui_ethernet_apply_startup();
     init_styles();
@@ -12178,6 +12038,8 @@ int main(void)
     }
 
     stop_power_key_monitor();
+    ui_hardware_set_screen_toggle_cb(NULL, NULL);
+    ui_power_manager_shutdown();
     touch_trace_running = 0;
     ui_multitouch_stop();
     ui_hardware_reboot_diag_dump("app-stop-before-hardware-shutdown");
