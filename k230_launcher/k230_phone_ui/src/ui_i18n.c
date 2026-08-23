@@ -382,6 +382,7 @@ static const ui_translation_t ui_translations[] = {
     { "Probe now", "立即探测", "今すぐ検出" },
     { "Esc key back", "Esc 键返回", "Esc キーで戻る" },
     { "Use Esc to return to previous page", "使用 Esc 返回上一页", "Esc で前のページに戻る" },
+    { "Hotkeys", "热键", "ホットキー" },
     { "F-key hotkeys", "F 键热键", "F キーホットキー" },
     { "Tap each function key to choose its shortcut action", "点击每个功能键选择快捷动作", "各ファンクションキーをタップしてショートカット動作を選択" },
     { "Function key shortcuts", "功能键快捷键", "ファンクションキーショートカット" },

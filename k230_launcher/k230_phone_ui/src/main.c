@@ -598,6 +598,7 @@ static const app_item_t app_items[] = {
     {"I2C Scan", "I2C", 0x22C55E, PAGE_I2C_SCAN},
     {"Battery", "BAT", 0xA3E635, PAGE_BATTERY},
     {"Keyboard", "KEY", 0xF97316, PAGE_KEYBOARD_TEST},
+    {"Hotkeys", "F1", 0x3DA5FF, PAGE_KEYBOARD_HOTKEYS},
     {"LED Test", "LED", 0x22D3EE, PAGE_XL9555_TEST},
     {"Cellular", "LTE", 0x60A5FA, PAGE_CELLULAR},
     {"USB Modem", "5G", 0x38BDF8, PAGE_USB_MODEM},
@@ -11248,9 +11249,6 @@ static void create_about_page(lv_obj_t *scr)
                            path_exists("/sys/class/net/" NET_WIFI_IFACE) ?
                            0x25C281 : 0x9AA4AF, side_gap);
 
-    settings_nav_row(body, 510, "F1", "F-key hotkeys",
-                     "Quickly edit keyboard shortcuts", 0x3DA5FF,
-                     PAGE_KEYBOARD_HOTKEYS);
 }
 
 static void create_placeholder_page(lv_obj_t *scr, const char *title, const char *state,
