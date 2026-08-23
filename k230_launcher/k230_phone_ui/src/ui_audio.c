@@ -47,7 +47,7 @@
 #define AUDIO_APLAY_PERIOD_US 10000
 #define AUDIO_VOLUME_MIN 0
 #define AUDIO_VOLUME_MAX 45
-#define AUDIO_VOLUME_DEFAULT 24
+#define AUDIO_VOLUME_DEFAULT AUDIO_VOLUME_MAX
 #define AUDIO_ICON_MIC "MIC"
 #define AUDIO_ICON_REC "REC"
 #define AUDIO_ICON_STOP "STOP"
@@ -288,32 +288,6 @@ static int audio_clamp_volume(int value)
     return value;
 }
 
-static int audio_read_mixer_volume(void)
-{
-    FILE *fp;
-    char line[160];
-    int seen_volume = 0;
-    int value = -1;
-
-    fp = popen("amixer contents 2>/dev/null", "r");
-    if(fp) {
-        while(fgets(line, sizeof(line), fp)) {
-            if(strstr(line, "name='PCM Playback Volume'")) {
-                seen_volume = 1;
-                continue;
-            }
-            if(seen_volume && strstr(line, "values=")) {
-                char *pos = strstr(line, "values=");
-                value = atoi(pos + 7);
-                break;
-            }
-        }
-        pclose(fp);
-    }
-
-    return value < 0 ? -1 : audio_clamp_volume(value);
-}
-
 static int audio_read_saved_volume(void)
 {
     char text[32];
@@ -345,9 +319,6 @@ static void audio_load_volume_once(void)
     }
 
     value = audio_read_saved_volume();
-    if(value < 0) {
-        value = audio_read_mixer_volume();
-    }
     if(value < 0) {
         value = AUDIO_VOLUME_DEFAULT;
     }
@@ -424,6 +395,18 @@ int ui_audio_get_volume_value(void)
 {
     audio_load_volume_once();
     return audio_volume;
+}
+
+void ui_audio_apply_startup_defaults(void)
+{
+    if(audio_read_saved_volume() < 0) {
+        audio_volume = AUDIO_VOLUME_DEFAULT;
+        audio_volume_loaded = 1;
+        audio_apply_volume_throttled(1);
+        return;
+    }
+
+    audio_load_volume_once();
 }
 
 int ui_audio_get_volume_max(void)

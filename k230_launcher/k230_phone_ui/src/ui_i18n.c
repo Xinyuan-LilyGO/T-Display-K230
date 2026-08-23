@@ -386,6 +386,7 @@ static const ui_translation_t ui_translations[] = {
     { "Tap each function key to choose its shortcut action", "点击每个功能键选择快捷动作", "各ファンクションキーをタップしてショートカット動作を選択" },
     { "Function key shortcuts", "功能键快捷键", "ファンクションキーショートカット" },
     { "Choose F1-F11 shortcut actions", "设置 F1-F11 的快捷动作", "F1-F11 のショートカット動作を選択" },
+    { "Quickly edit keyboard shortcuts", "快速编辑键盘快捷键", "キーボードショートカットを素早く編集" },
     { "Select a function key", "选择一个功能键", "ファンクションキーを選択" },
     { "Select shortcut action", "选择快捷动作", "ショートカット動作を選択" },
     { "Choose an action for this key", "为这个按键选择动作", "このキーの動作を選択" },

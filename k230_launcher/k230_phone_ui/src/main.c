@@ -151,7 +151,7 @@
 #define DISPLAY_BRIGHTNESS_PREF_KEY "display.brightness"
 #define PAGE_TRANSITION_PREF_KEY "display.page_transition"
 #define DISPLAY_TIMEOUT_PREF_KEY "display.timeout_s"
-#define DISPLAY_TIMEOUT_DEFAULT_S 60
+#define DISPLAY_TIMEOUT_DEFAULT_S 0
 #define DISPLAY_TIMEOUT_MODE_COUNT 5
 #define PREF_AUDIO_OUTPUT "audio.output"
 #define AUDIO_OUTPUT_HEADPHONES "headphones"
@@ -1226,7 +1226,7 @@ static void display_timeout_load_pref(void)
     if(display_timeout_loaded) {
         return;
     }
-    ui_prefs_get(DISPLAY_TIMEOUT_PREF_KEY, value, sizeof(value), "60");
+    ui_prefs_get(DISPLAY_TIMEOUT_PREF_KEY, value, sizeof(value), "0");
     seconds = atoi(value);
     if(!display_timeout_valid(seconds)) {
         seconds = DISPLAY_TIMEOUT_DEFAULT_S;
@@ -1327,6 +1327,13 @@ static void display_idle_poll(void)
     int should_dim = 0;
     uint64_t now = monotonic_us();
     uint64_t last_activity;
+
+    if(shutdown_visual_active) {
+        pthread_mutex_lock(&display_idle_lock);
+        display_last_activity_us = now;
+        pthread_mutex_unlock(&display_idle_lock);
+        return;
+    }
 
     display_timeout_load_pref();
 
@@ -3072,6 +3079,12 @@ static void power_key_publish_state(int pressed)
     power_key_pressed = pressed ? 1 : 0;
     power_key_generation++;
     pthread_mutex_unlock(&power_key_lock);
+
+    if(pressed) {
+        pthread_mutex_lock(&display_idle_lock);
+        display_last_activity_us = now;
+        pthread_mutex_unlock(&display_idle_lock);
+    }
 
     touch_trace_log("POWER_KEY_%s", pressed ? "DOWN" : "UP");
 }
@@ -11234,6 +11247,10 @@ static void create_about_page(lv_obj_t *scr)
     info_row_with_side_gap(body, 440, "WiFi", wifi,
                            path_exists("/sys/class/net/" NET_WIFI_IFACE) ?
                            0x25C281 : 0x9AA4AF, side_gap);
+
+    settings_nav_row(body, 510, "F1", "F-key hotkeys",
+                     "Quickly edit keyboard shortcuts", 0x3DA5FF,
+                     PAGE_KEYBOARD_HOTKEYS);
 }
 
 static void create_placeholder_page(lv_obj_t *scr, const char *title, const char *state,
@@ -12060,6 +12077,7 @@ int main(void)
     ui_time_settings_apply_startup();
     ui_nrf52840_manager_startup();
     ui_hardware_startup();
+    ui_audio_apply_startup_defaults();
     ui_hardware_reboot_diag_dump("app-start-after-hardware-startup");
     apply_display_brightness_pref();
     ui_cellular_startup();

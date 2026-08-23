@@ -5728,7 +5728,8 @@ static int sensor_read_control_temp(double *temp_c, char *source,
 
 static const char *audio_default_output(void)
 {
-    return AUDIO_OUTPUT_EXTERNAL;
+    return ui_hardware_get_aht20(NULL, NULL) == 0 ?
+           AUDIO_OUTPUT_EXTERNAL : AUDIO_OUTPUT_HEADPHONES;
 }
 
 static void audio_apply_output(const char *output)
@@ -5799,6 +5800,8 @@ static void *hardware_thread_entry(void *arg)
 void ui_hardware_startup(void)
 {
     char output[24];
+    const char *default_output;
+    int has_audio_pref;
     int keyboard_pref;
 
     keyboard_base_probe();
@@ -5823,8 +5826,17 @@ void ui_hardware_startup(void)
     bq25896_apply_startup_pref();
     extension_keyboard_apply_startup_pref();
 
-    read_pref_text(PREF_AUDIO_OUTPUT, output, sizeof(output),
-                   audio_default_output());
+    has_audio_pref = ui_prefs_get(PREF_AUDIO_OUTPUT, output, sizeof(output),
+                                  "") == 0 && output[0];
+    if(!has_audio_pref) {
+        default_output = audio_default_output();
+        snprintf(output, sizeof(output), "%s", default_output);
+        ui_prefs_set(PREF_AUDIO_OUTPUT, output);
+        button_test_log("AUDIO startup default output=%s source=%s",
+                        output,
+                        strcmp(output, AUDIO_OUTPUT_EXTERNAL) == 0 ?
+                        "aht20-detected" : "aht20-missing");
+    }
     audio_apply_output(output);
 
     if(!hardware_thread_started) {
