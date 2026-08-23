@@ -9,8 +9,8 @@ This guide explains the apps shipped with the T-Display K230 LVGL launcher.
 ## General Controls
 
 - The home screen is a scrollable app grid. Tap an icon to open an app.
-- Back navigation is available from the top-left back button, the configured edge-swipe gesture, or `Esc` on the hardware keyboard when keyboard back navigation is enabled.
-- Edge-swipe back can be enabled in `Settings` > `Display`. When enabled, swipe inward from the left or right screen edge to return to the previous page. On rotated screens, use the visible left/right edge of the current display orientation.
+- Back navigation is available from the top-left back button, the edge-swipe gesture, or `Esc` on the hardware keyboard when keyboard back navigation is enabled.
+- Edge-swipe back is enabled by default. Swipe inward from the left or right screen edge to return to the previous page. On rotated screens, use the visible left/right edge of the current display orientation.
 - Display orientation, font size, page transition effects, brightness, and screen timeout are configured in `Settings` > `Display`.
 - Language is configured in `Settings` > `Language`. The default language is English, and the default configuration includes Chinese, English, and Japanese.
 - Audio output and default volume are configured in `Settings` > `Audio`. The default output uses an external I2S device.
@@ -30,10 +30,13 @@ The launcher creates these folders in the target root filesystem:
 | `/root/screenshots` | Screenshot app and keyboard screenshot shortcut |
 | `/root/recordings` | Recorder app |
 | `/root/lorawan` | LoRaWAN profile files |
+| `/root/meshtastic` | Meshtastic channel/profile/cache files |
 | `/root/notification` | Notification sound files |
 | `/root/nrf52840/firmware` | nRF52840 DFU application update packages |
+| `/root/maps` | Optional offline map tiles for Meshtastic map view |
 
 Use the `MTP` app to expose these folders to a host computer over USB.
+See [MAPS.md](MAPS.md) for offline map tile download and install instructions.
 
 ## Apps
 
@@ -46,13 +49,13 @@ Use the `MTP` app to expose these folders to a host computer over USB.
 | `Record` | Records from the board microphone, lists recording files, plays them back, and deletes recordings. | Tap record to start and stop. Open the list to play or delete files from `/root/recordings`. |
 | `Mic FFT` | Displays a live microphone spectrum and basic level information. | Use it to check microphone input and adjust the displayed gain for easier signal inspection. |
 | `LoRa` | Controls SX1262 or LR2021 modules with profile-based RF test modes, Listen, Auto TX, and Continuous TX. | Select or edit a profile, then choose the operating mode. Continuous TX is for engineering RF testing only, is not recommended for normal use, and must only be used with a suitable antenna connected. |
-| `Meshtastic` | Beta app that controls the standalone `k230_meshtastic_probe` daemon for Meshtastic-style LoRa mesh text, voice/photo transfer between supported K230 boards, node cache, maps, channel profiles, and profile settings. | The daemon starts when the app opens. Use the settings icon to set region, preset, channel, PSK, TX power, node/from/to/hop/ACK. Type in the message field to send text, hold the voice button to record, and open the node page to inspect the node cache. Use `Channel` to save/load K230 channel profiles, save the official Meshtastic channel URL, or import a URL manually; K230 camera QR scanning is available as a fallback. New received messages play the sound selected in `Settings` > `Notifications`. |
+| `Meshtastic` | Beta app that controls the standalone `k230_meshtastic_probe` daemon for Meshtastic-style LoRa mesh text, LR2021-only voice/photo transfer between K230 boards, node cache, maps, channel profiles, and profile settings. SX1262 boards support basic text mesh messages only. | The daemon starts when the app opens. Use the settings icon to set region, preset, channel, PSK, TX power, node/from/to/hop/ACK. Type in the message field to send text, hold the voice button to record on LR2021 boards, and open the node page to inspect the node cache. Use `Channel` to save/load K230 channel profiles, save the official Meshtastic channel URL, or import a URL manually;The K230 camera's QR code scanning function is currently in testing and is unavailable. New received messages play the sound selected in `Settings` > `Notifications`. Offline map tiles are loaded from `/root/maps`; see [MAPS.md](MAPS.md). |
 | `LoRaWAN` | Manages LoRaWAN profiles and runs OTAA profile tests through the LoRa module. | Load an existing profile, create or edit a profile, validate key lengths, save it, then run the selected profile. Optional simulated telemetry can be enabled. |
 | `NES` | Loads `.nes` ROMs from `/root/nes` and runs them with touch controls or the hardware keyboard. | NES ROMs are not bundled by default. Add your own ROM files to `/root/nes`, then select a ROM from the list. Keyboard controls: arrows or `W/A/S/D` for direction, `Enter` for Start, `Space` or `Shift` for Select, `U/I/O` for A, `H/J/K` for B, and `Esc` to stop or return to the ROM list. |
 | `AI` | Opens the bundled K230 AI demo interface when model resources are installed. | Use it to run supported local AI demos and view their results on the screen. |
 | `RTSP` | Starts or stops camera RTSP streaming and shows the stream address. | Enable streaming, then open the displayed URL from a computer on the same network. Stop RTSP before using the `Camera` app. |
 | `Wi-Fi` | Scans Wi-Fi networks, saves passwords, connects, and reconnects saved networks. | Turn Wi-Fi on, tap a network, enter a password of at least 8 characters, and wait for the connection result. |
-| `Bluetooth` | Scans named BLE devices, connects to a selected device, and displays GATT services, characteristics, and descriptors when available. | Turn Bluetooth on, tap a device, confirm connection, then inspect the device page. |
+| `Bluetooth` | Manages BLE behavior. `Meshtastic` mode reserves the nRF52840 BLE link for the Meshtastic phone bridge. `Custom BLE` mode disables Meshtastic BLE ownership and allows normal BLE scanning, connection, and GATT inspection. The two modes are mutually exclusive. | Turn Bluetooth on, choose the required mode, then tap a device in `Custom BLE` mode to connect and inspect its GATT data. Use `Meshtastic` mode when the Meshtastic phone app should connect to the K230 board. |
 | `nRF DFU` | Updates the onboard nRF52840 AT firmware over the K230 UART link. | Open `MTP`, copy the K230 nRF52840 AT update package as `/root/nrf52840/firmware/firmware.zip`, return to `nRF DFU`, then tap `Update`. The app checks the current AT version and the package version before writing; non-K230 packages and identical versions are rejected. The UI is locked during the update and shows progress; do not power off the board. On failure, check `/tmp/k230_nrf52840_dfu_ui.log`. |
 | `MTP` | Enables USB MTP file access for the SD-card/root filesystem folders. | Tap the MTP control, connect USB to a host computer, and manage files such as photos, screenshots, music, videos, and ROMs. |
 | `Gallery` | Shows captured photos as thumbnails and opens them in a full-screen viewer. | Tap a thumbnail to view it. Swipe left or right to browse adjacent photos. |
@@ -62,6 +65,7 @@ Use the `MTP` app to expose these folders to a host computer over USB.
 | `I2C Scan` | Scans available I2C buses and highlights detected device addresses. | Use it to verify AHT20, BQ25896, BQ27220, XL9555, TCA8418, and other board devices. |
 | `Battery` | Shows battery gauge, charger, voltage, current, capacity, and related telemetry when supported devices are present. | Open the page to view current battery and charging state. Charger controls are available through Settings when supported. |
 | `Keyboard` | Tests the TCA8418 keyboard matrix, keyboard interrupt path, key mapping, and keyboard backlight. | Press hardware keys to light the matching key. Adjust keyboard backlight from the page or Settings. |
+| `Hotkeys` | Opens the F1-F11 hardware-key shortcut editor. | Tap a function key, choose its action, and return. Actions include display orientation, brightness, volume, audio output route, keyboard backlight, and other launcher shortcuts. Hotkey settings are persisted. |
 | `LED Test` | Controls XL9555-driven LEDs. | Toggle LEDs from the page. The board LED logic is active-low where noted by the UI. |
 | `Cellular` | Tests the nRF9151 serial modem path, SIM state, LTE status, GNSS, HTTP/HTTPS, MQTT, NMEA output, and satellite C/N0 bars. | Tap `LTE` for the SIM/network check, tap `GNSS` for NMEA monitoring, or use the HTTP/MQTT test buttons for basic modem data tests. HTTPS and MQTT TLS/mTLS require credentials already provisioned in the modem `sec_tag`. |
 | `USB Modem` | Debug page for USB modem detection and connection status. | This page is currently for engineering/debug visibility only. It does not provide a complete end-user dialing or data-session workflow yet. |
@@ -105,6 +109,6 @@ Some functions are reached through `Settings` instead of direct home icons:
 | `Language` | Selects the launcher language. |
 | `Date & time` | Sets NTP and timezone options. |
 | `Audio` | Selects output route and default volume. |
-| `Keyboard settings` | Controls keyboard detection, keyboard back navigation, and keyboard backlight behavior. |
+| `Keyboard settings` | Controls keyboard detection, keyboard back navigation, keyboard backlight behavior, and F1-F11 hotkey actions. |
 | `Sensors` | Shows AHT20 temperature/humidity and related sensor status. |
 | `Charger` | Shows and configures BQ25896 charger options when present. |

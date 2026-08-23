@@ -20,6 +20,24 @@ https://github.com/kendryte/k230_linux_sdk.git
 dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 ```
 
+## 当前版本
+
+当前公开基线：`v0.2.0`
+
+`v0.2.0` 将前期已经验证的 Launcher 和 BSP 工作合并到主发布线。相比
+`v0.1`，本版本加入了更完整的手机风格 LVGL Launcher、横竖屏自适应布局、
+相机和多媒体应用、系统设置、可选键盘底板外设支持、nRF52840/nRF9151
+统一管理、LoRa/LoRaWAN 工具以及 Meshtastic Beta 功能。
+
+功能状态：
+
+- 日常可用应用：相机、相册、音乐、网络电台、录音、视频播放器、终端、
+  MTP、Wi-Fi、以太网、显示、音频、通知、电池、充电器、传感器、键盘和系统设置
+- Beta 应用：Meshtastic、LoRaWAN、nRF9151 蜂窝/GNSS 数据工具、
+  nRF52840 UART DFU
+- 用户自备资源：默认镜像不内置 NES ROM 和离线地图瓦片，用户可通过 SD 卡或
+  MTP 自行复制
+
 ## 目录结构
 
 ```text
@@ -32,6 +50,7 @@ scripts/           主机依赖安装、overlay 应用、镜像构建和 SSH 部
 ## 文档入口
 
 - [Launcher 应用使用说明](k230_launcher/docs/APPS_CN.md)
+- [离线地图瓦片下载说明](k230_launcher/docs/MAPS_CN.md)
 - [BSP GPIO 和硬件连接表](k230_bsp/docs/HARDWARE_PINMAP_CN.md)
 - [BSP README](k230_bsp/README_CN.MD)
 - [Launcher README](k230_launcher/README_CN.MD)
@@ -84,6 +103,14 @@ git submodule update --init --recursive
 
 ```text
 k230_bsp/images/sysimage-sdcard.img
+```
+
+如果需要完全干净地重新构建，先删除 SDK 输出目录，再重新应用 overlay 并构建：
+
+```sh
+rm -rf k230_linux_sdk/output
+./scripts/apply_to_sdk.sh
+./scripts/build_sdcard_image.sh
 ```
 
 ## 在 Windows 中通过 WSL2 编译
@@ -201,8 +228,12 @@ Launcher：
 `k230_bsp/images/` 下的镜像文件是本机构建产物
 
 
-## 已知问题
+## 当前限制
 
-- 竖屏状态下滑动,页面底部会出现黑色阻挡
-- 屏幕有时候会出现轻微左右抖动,断电重启之后正常
-- 以上问题被定义为软件bug,会在后续修复此问题
+- Meshtastic 当前作为 Beta 功能提供。核心聊天、节点显示、地图和频道分享已经可用。
+  语音/图片传输仅限两端都使用 LR2021 模块的 K230 设备；SX1262 版本仅支持基础
+  文字 mesh 消息。
+- HDMI 目前保留为诊断功能，AMOLED 仍然是默认显示路径
+- 依赖扩展硬件的功能只会在检测到对应模块后启用，包括 nRF9151、nRF52840、
+  TCA8418、BQ27220、BQ25896、XL9555 和 AHT20
+- 离线地图瓦片、NES ROM 和用户媒体文件需要用户自行复制到 SD 卡中

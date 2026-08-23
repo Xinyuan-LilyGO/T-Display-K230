@@ -16,6 +16,17 @@ https://github.com/kendryte/k230_linux_sdk.git
 dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 ```
 
+## Release Scope
+
+This BSP is the hardware layer used by the `v0.2.0` image. It provides the
+kernel, U-Boot, Buildroot, device-tree, boot-logo, and rootfs overlay changes
+required by the T-Display K230 board. The LVGL launcher is installed separately
+from `k230_launcher`, but both layers are applied by the top-level helper
+scripts in this repository.
+
+The BSP enables optional hardware buses and pins. User-facing apps should still
+detect optional modules at runtime before enabling hardware-dependent features.
+
 ## What This BSP Includes
 
 - RM69A10 AMOLED MIPI DSI panel and U-Boot boot logo.
@@ -37,6 +48,12 @@ peripheral connection map.
 ## Build From a Fresh Ubuntu PC
 
 The upstream SDK is verified mainly on Ubuntu 22.04 and 24.04.
+
+When building the full public image from this repository, the top-level
+`scripts/setup_ubuntu.sh`, `scripts/apply_to_sdk.sh`, and
+`scripts/build_sdcard_image.sh` wrappers are recommended. The commands below are
+the lower-level BSP-only flow for users who want to apply only the board support
+overlay to an SDK checkout.
 
 Install Git and basic tools:
 
@@ -91,7 +108,7 @@ The BSP defconfig sets `BR2_TAR_OPTIONS="--no-same-owner"` so Linux source extra
 
 The BSP defconfig also locks LVGL to the SDK-compatible `59dc7e436ae97a25e32656739ea6a943f9f11b6a` package revision and disables upstream `python-k230`. The Python/LVGL binding package is not part of hardware enablement and is incompatible with the current LVGL 9 generated API in this upstream SDK snapshot.
 
-U-Boot display detection uses DesignWare DM I2C. The BSP enables `CONFIG_DM_I2C`, `CONFIG_SYS_I2C_DW`, and `CONFIG_CMD_I2C` in the T-Display U-Boot defconfig and carries the RM69A10/LT9611 default I2C address fix used during clean-build validation.
+U-Boot display detection uses DesignWare DM I2C. The BSP enables `CONFIG_DM_I2C`, `CONFIG_SYS_I2C_DW`, and `CONFIG_CMD_I2C` in the T-Display U-Boot defconfig and carries the RM69A10/LT9611 default I2C address fix.
 
 The SD-card image uses an MBR partition table. This avoids stale backup-GPT data on larger TF cards causing Linux to ignore the boot/rootfs partitions after flashing a small image.
 
@@ -139,6 +156,11 @@ BSP:
 ```
 
 Then rebuild the image or rebuild only the launcher package.
+
+The launcher layer creates the default runtime folders used by the apps, such as
+`/root/music`, `/root/videos`, `/root/photos`, `/root/screenshots`,
+`/root/recordings`, `/root/lorawan`, `/root/meshtastic`,
+`/root/notification`, and `/root/nrf52840/firmware`.
 
 ## Directory Layout
 

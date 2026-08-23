@@ -16,6 +16,16 @@ https://github.com/kendryte/k230_linux_sdk.git
 dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 ```
 
+## 发布范围
+
+本 BSP 是 `v0.2.0` 镜像使用的硬件支持层，包含 T-Display K230 所需的
+kernel、U-Boot、Buildroot、设备树、启动 logo 和 rootfs overlay 变更。
+LVGL Launcher 由 `k230_launcher` 单独安装，但本仓库顶层脚本会统一应用
+BSP 和 Launcher。
+
+BSP 会启用可选硬件需要的总线和引脚。面向用户的应用仍需要在运行时检测对应
+模块是否存在，再启用依赖外设的功能。
+
 ## 本 BSP 包含什么
 
 - RM69A10 AMOLED MIPI DSI 屏幕和 U-Boot 启动 logo。
@@ -37,6 +47,11 @@ GPIO、总线和外设连接关系请看
 ## 从全新 Ubuntu 电脑开始构建
 
 上游 SDK 主要验证环境是 Ubuntu 22.04 和 Ubuntu 24.04。
+
+如果是从本仓库构建完整公开镜像，推荐使用顶层
+`scripts/setup_ubuntu.sh`、`scripts/apply_to_sdk.sh` 和
+`scripts/build_sdcard_image.sh`。下面的命令是更底层的 BSP-only 流程，
+用于只想把板级支持 overlay 应用到某个 SDK checkout 的场景。
 
 安装 Git 和基础工具：
 
@@ -91,7 +106,7 @@ BSP defconfig 默认设置 `BR2_TAR_OPTIONS="--no-same-owner"`，这样在容器
 
 BSP defconfig 也将 LVGL 固定到 SDK 当前可构建的 `59dc7e436ae97a25e32656739ea6a943f9f11b6a` 版本，并禁用上游 `python-k230`。`python-k230` 是 Python/LVGL 绑定示例，不属于硬件 BSP；在当前上游 SDK 快照里它和 LVGL 9 生成 API 不兼容。
 
-U-Boot 显示探测使用 DesignWare DM I2C。BSP 在 T-Display U-Boot defconfig 中启用 `CONFIG_DM_I2C`、`CONFIG_SYS_I2C_DW` 和 `CONFIG_CMD_I2C`，并包含本次干净构建验证时使用的 RM69A10/LT9611 默认 I2C 地址修正。
+U-Boot 显示探测使用 DesignWare DM I2C。BSP 在 T-Display U-Boot defconfig 中启用 `CONFIG_DM_I2C`、`CONFIG_SYS_I2C_DW` 和 `CONFIG_CMD_I2C`，并包含 RM69A10/LT9611 默认 I2C 地址修正。
 
 SD 卡镜像使用 MBR 分区表。这样可以避免小镜像写入大 TF 卡后，旧的 backup GPT 残留导致 Linux 忽略 boot/rootfs 分区。
 
@@ -138,6 +153,10 @@ sync
 ```
 
 之后根据需要重新构建完整镜像，或者只重建 launcher package。
+
+Launcher 层会创建应用使用的默认运行目录，例如 `/root/music`、`/root/videos`、
+`/root/photos`、`/root/screenshots`、`/root/recordings`、`/root/lorawan`、
+`/root/meshtastic`、`/root/notification` 和 `/root/nrf52840/firmware`。
 
 ## 目录结构
 

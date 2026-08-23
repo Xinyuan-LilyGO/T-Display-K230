@@ -9,6 +9,26 @@
 This directory contains the phone-style LVGL launcher application for the
 LILYGO T-Display K230.
 
+## Release Scope
+
+This launcher is the user interface layer used by the `v0.2.0` image. It is
+designed for the BSP-provided RM69A10 display, Goodix touch input, GC2093 camera,
+audio routes, optional keyboard base, LoRa module, nRF52840, and nRF9151.
+
+Main app groups:
+
+- Camera, gallery, screenshot, video, music, network radio, recorder, mic FFT,
+  I2S test, terminal, NES, MTP, and display test.
+- Network and system settings for Wi-Fi, Ethernet, Bluetooth, display, audio,
+  notification sounds, language, time, sensors, charger, battery, keyboard,
+  F-key hotkeys, and system information.
+- LoRa profile testing, LoRaWAN profile management, nRF52840 DFU, nRF9151
+  cellular/GNSS/HTTP/MQTT tools, and Meshtastic beta.
+
+Apps that require optional hardware check for the related module before use. If
+the module is not present, the launcher should show a user-facing notice instead
+of entering a broken page.
+
 ## Prerequisites
 
 Install basic host tools first:
@@ -31,8 +51,14 @@ The BSP README explains the full SDK dependency setup and image build flow.
 ## App Guide
 
 See [docs/APPS.md](docs/APPS.md) for the usage guide of each launcher app.
+See [docs/MAPS.md](docs/MAPS.md) for offline map tile download and install
+instructions.
 See [docs/APP_DEVELOPMENT_RULES.md](docs/APP_DEVELOPMENT_RULES.md) for
 launcher app development rules and optional-peripheral handling.
+
+Meshtastic is included as a beta app. Its voice/photo transfer requires LR2021
+modules on both K230 boards; SX1262 boards support basic text mesh messages
+only.
 
 ## Install Into The SDK
 
@@ -47,10 +73,11 @@ The script installs:
 - `buildroot-overlay/package/k230_phone_ui`
 - `BR2_PACKAGE_K230_PHONE_UI=y` in `k230_canmv_t_display_rm69a10_defconfig`
 - `S99zz_k230_phone_ui` autostart service
-- default media folders: `/root/music`, `/root/nes`, `/root/videos`, `/root/photos`, `/root/screenshots`, `/root/recordings`, `/root/lorawan`, `/root/notification`, `/root/nrf52840/firmware`
+- default media folders: `/root/music`, `/root/nes`, `/root/videos`, `/root/photos`, `/root/screenshots`, `/root/recordings`, `/root/lorawan`, `/root/meshtastic`, `/root/notification`, `/root/nrf52840/firmware`
 - optional bundled media from `resources/videos` into `/root/videos`
 - optional bundled media from `resources/music` into `/root/music`
 - optional bundled notification sounds from `resources/notification` into `/root/notification`
+- a runtime map cache policy for `/root/maps`; map tiles are not bundled into the default image
 
 To use a different local resource directory:
 
@@ -81,6 +108,28 @@ Supported triggers:
 - Press `FN + LILYGO` on the hardware keyboard.
 
 Use the MTP app to expose the SD-card root directory to a host computer, then copy files from `/root/screenshots`.
+
+## User Data Folders
+
+The launcher expects these folders on the device:
+
+```text
+/root/music                Local music files
+/root/videos               Video files
+/root/photos               Camera photos and thumbnails
+/root/screenshots          PNG screenshots
+/root/recordings           Recorder output
+/root/nes                  User-provided NES ROM files
+/root/lorawan              LoRaWAN profile JSON files
+/root/meshtastic           Meshtastic channel/profile/cache files
+/root/notification         Notification sound files
+/root/nrf52840/firmware    nRF52840 DFU package, normally firmware.zip
+/root/maps                 Optional offline map tiles copied by the user
+```
+
+NES ROMs and offline map tiles are not bundled by default. See
+[docs/MAPS.md](docs/MAPS.md) for the expected map tile directory layout and
+download options.
 
 ## Notes
 

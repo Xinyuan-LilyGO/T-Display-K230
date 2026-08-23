@@ -22,6 +22,26 @@ https://github.com/kendryte/k230_linux_sdk.git
 dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 ```
 
+## Current Release
+
+Current public baseline: `v0.2.0`.
+
+`v0.2.0` promotes the previously tested launcher and BSP work into the main
+release line. Compared with `v0.1`, this release adds a fuller phone-style LVGL
+launcher, responsive portrait/landscape layouts, camera and media apps,
+settings pages, optional keyboard-base hardware support, nRF52840/nRF9151
+management, LoRa/LoRaWAN tools, and Meshtastic beta support.
+
+Feature status:
+
+- Stable daily-use apps: camera, gallery, music, network radio, recorder,
+  video player, terminal, MTP, Wi-Fi, Ethernet, display, audio, notification,
+  battery, charger, sensor, keyboard, and system settings.
+- Beta apps: Meshtastic, LoRaWAN, nRF9151 cellular/GNSS data tools, and
+  nRF52840 UART DFU.
+- User-provided content: NES ROM files and offline map tiles are not bundled in
+  the default image.
+
 ## Repository Layout
 
 ```text
@@ -34,6 +54,7 @@ scripts/           Host setup, SDK overlay, image build, and SSH deployment help
 ## Documentation
 
 - [Launcher app guide](k230_launcher/docs/APPS.md)
+- [Offline map tile guide](k230_launcher/docs/MAPS.md)
 - [BSP GPIO and hardware map](k230_bsp/docs/HARDWARE_PINMAP.md)
 - [BSP README](k230_bsp/README.MD)
 - [Launcher README](k230_launcher/README.MD)
@@ -86,6 +107,15 @@ The image is exported to:
 
 ```text
 k230_bsp/images/sysimage-sdcard.img
+```
+
+For a fully clean rebuild, remove the SDK output directory, re-apply the board
+overlay, then build through the helper script:
+
+```sh
+rm -rf k230_linux_sdk/output
+./scripts/apply_to_sdk.sh
+./scripts/build_sdcard_image.sh
 ```
 
 ## Build From Windows With WSL2
@@ -203,9 +233,15 @@ Deploy the launcher and boot files:
 
 Generated image files under `k230_bsp/images/` are local build artifacts.
 
-## Known Issues
+## Known Limitations
 
-- A black obstruction appears at the bottom of the page when swiping in portrait mode.
-- The screen sometimes exhibits slight left-right shaking, which resolves after a power cycle.
-- These issues are classified as software bugs and will be fixed in a future update.
-
+- Meshtastic is included as a beta feature. Core chat, node display, map view,
+  and channel sharing are available. Voice/photo transfer is only available
+  between K230 boards fitted with LR2021 modules; SX1262 boards support basic
+  text mesh messages only.
+- HDMI support is kept as a diagnostic feature. AMOLED remains the default
+  display path.
+- Optional hardware features are shown only when the related module is detected.
+  This includes nRF9151, nRF52840, TCA8418, BQ27220, BQ25896, XL9555, and AHT20.
+- Offline map tiles, NES ROMs, and user media files should be copied to the SD
+  card by the user.
