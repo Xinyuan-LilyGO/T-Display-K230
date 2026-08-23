@@ -10,6 +10,7 @@ extern "C" {
 
 typedef enum {
     NRF52840_OWNER_NONE = 0,
+    NRF52840_OWNER_PROBE,
     NRF52840_OWNER_MESHTASTIC,
     NRF52840_OWNER_BLE_SCAN,
     NRF52840_OWNER_BLE_CONNECT,
@@ -47,6 +48,8 @@ int ui_nrf52840_request(nrf52840_owner_t owner, int timeout_ms);
 void ui_nrf52840_release(nrf52840_owner_t owner);
 void ui_nrf52840_switch_mode(nrf52840_ble_mode_t mode);
 
+int ui_nrf52840_refresh_async(void);
+int ui_nrf52840_cached_dfu_status(char *message, size_t message_len);
 int ui_nrf52840_begin_dfu(int timeout_ms, char *message, size_t message_len);
 int ui_nrf52840_probe_at(char *message, size_t message_len);
 int ui_nrf52840_prepare_dfu(char *message, size_t message_len);

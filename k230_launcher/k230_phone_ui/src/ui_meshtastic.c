@@ -4337,6 +4337,30 @@ static void mesh_request_gnss_if_enabled(void)
     (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
 }
 
+static int mesh_nrf52840_acquire_owner(const char *reason)
+{
+    if(!ui_ble_meshtastic_bridge_enabled()) {
+        ui_nrf52840_switch_mode(NRF52840_MODE_OFF);
+        return 0;
+    }
+    if(ui_nrf52840_request(NRF52840_OWNER_MESHTASTIC, 2500) != 0) {
+        mesh_append_log("BLE PhoneAPI disabled for %s: nRF52840 busy",
+                        reason ? reason : "mesh");
+        return 0;
+    }
+    ui_nrf52840_switch_mode(NRF52840_MODE_MESHTASTIC);
+    mesh_append_log("BLE PhoneAPI owner acquired for %s",
+                    reason ? reason : "mesh");
+    return 1;
+}
+
+static void mesh_nrf52840_release_owner(const char *reason)
+{
+    ui_nrf52840_release(NRF52840_OWNER_MESHTASTIC);
+    mesh_append_log("BLE PhoneAPI owner released for %s",
+                    reason ? reason : "mesh");
+}
+
 static void mesh_start_event_cb(lv_event_t *event)
 {
     char region_arg[32];
@@ -4361,6 +4385,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     char media_option[192];
     char phoneapi_option[32];
     char command[1792];
+    int phoneapi_enabled;
     int rc;
 
     (void)event;
@@ -4370,6 +4395,7 @@ static void mesh_start_event_cb(lv_event_t *event)
         return;
     }
     mesh_background_monitor_stop();
+    mesh_nrf52840_release_owner("restart");
     if(system("killall k230_meshtastic_probe >/dev/null 2>&1 || true") == -1) {
         mesh_append_log("failed to stop previous daemon");
     }
@@ -4452,8 +4478,9 @@ static void mesh_start_event_cb(lv_event_t *event)
              mesh_photo_repeat, mesh_photo_repair_rounds,
              mesh_photo_repair_repeat, mesh_photo_repair_window_ms,
              mesh_photo_cache_ttl_sec);
+    phoneapi_enabled = mesh_nrf52840_acquire_owner("daemon");
     snprintf(phoneapi_option, sizeof(phoneapi_option), "%s",
-             ui_ble_meshtastic_bridge_enabled() ? "" : "--no-phoneapi ");
+             phoneapi_enabled ? "" : "--no-phoneapi ");
     if(mesh_channel_name[0]) {
         snprintf(command, sizeof(command),
                  "rm -f " MESHTASTIC_SOCKET_PATH "; "
@@ -4480,6 +4507,9 @@ static void mesh_start_event_cb(lv_event_t *event)
     rc = system(command);
     mesh_append_log("start daemon rc=%d log=%s", ui_shell_exit_code(rc),
                     MESHTASTIC_DAEMON_LOG);
+    if(ui_shell_exit_code(rc) != 0 && phoneapi_enabled) {
+        mesh_nrf52840_release_owner("start-failed");
+    }
     mesh_request_gnss_if_enabled();
     usleep(250000);
     mesh_background_monitor_start();
@@ -4495,9 +4525,9 @@ static void mesh_start_if_needed(const char *reason)
         ui_trim_text(response);
         snprintf(mesh_status_text, sizeof(mesh_status_text), "%s", response);
         mesh_append_log("reuse daemon for %s", reason ? reason : "open");
+        (void)mesh_nrf52840_acquire_owner(reason ? reason : "reuse");
         mesh_background_monitor_start();
         mesh_refresh_status();
-        ui_nrf52840_switch_mode(NRF52840_MODE_MESHTASTIC);
         return;
     }
 
@@ -4517,6 +4547,7 @@ static void mesh_stop_event_cb(lv_event_t *event)
         ui_trim_text(response);
         mesh_append_log("stop failed: %s", response);
     }
+    mesh_nrf52840_release_owner("stop");
     (void)k230_nrf9151_stop_gnss_monitor_for("meshtastic");
     usleep(120000);
     mesh_refresh_status();
@@ -4557,6 +4588,7 @@ void ui_meshtastic_pause_for_radio_owner(const char *owner)
                         response[0] ? response : "no status");
     }
 
+    mesh_nrf52840_release_owner(mesh_radio_pause_owner);
     snprintf(mesh_status_text, sizeof(mesh_status_text), "Paused by %s",
              mesh_radio_pause_owner);
     mesh_apply_ble_status(mesh_status_text, 0);

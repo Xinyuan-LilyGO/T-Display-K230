@@ -39,7 +39,7 @@ constexpr uint32_t kDfuDataPacket = 4;
 constexpr uint32_t kDfuStopDataPacket = 5;
 constexpr uint32_t kDfuUpdateModeApp = 4;
 
-constexpr size_t kDefaultDfuPayloadChunk = 32;
+constexpr size_t kDefaultDfuPayloadChunk = 512;
 constexpr size_t kMaxDfuPayloadChunk = 590;
 constexpr int kDefaultBaud = 115200;
 
@@ -56,17 +56,17 @@ struct Options {
     std::string at_command;
     int baud = kDefaultBaud;
     int trigger_baud = kDefaultBaud;
-    int ack_timeout_ms = 3000;
+    int ack_timeout_ms = 4000;
     int retries = 8;
     int trigger_timeout_ms = 2000;
-    int trigger_delay_ms = 3500;
+    int trigger_delay_ms = 50;
     int at_read_ms = 2000;
     int post_start_delay_ms = 0;
-    int post_init_delay_ms = 1000;
+    int post_init_delay_ms = 0;
     int write_burst_size = 0;
     int write_gap_us = 0;
-    int throttle_every = 8;
-    int throttle_ms = 120;
+    int throttle_every = 0;
+    int throttle_ms = 0;
     size_t chunk_size = kDefaultDfuPayloadChunk;
     bool trigger = true;
     bool verbose = false;
@@ -84,17 +84,17 @@ void usage(const char *argv0) {
             "      --trigger-baud BAUD  Baud rate used only for AT+DFU trigger. Default: 115200\n"
             "      --at CMD          Send one AT command, print the response, and exit.\n"
             "      --at-read-ms N    Read window for --at. Default: 2000\n"
-            "      --ack-timeout-ms N Wait this long for each DFU ACK. Default: 3000\n"
+            "      --ack-timeout-ms N Wait this long for each DFU ACK. Default: 4000\n"
             "      --retries N        Retry each DFU packet this many times. Default: 8\n"
             "      --trigger-timeout-ms N  Wait for AT+DFU response. Default: 2000\n"
-            "      --trigger-delay-ms N    Wait after AT+DFU before DFU packets. Default: 3500\n"
+            "      --trigger-delay-ms N    Wait after AT+DFU before DFU packets. Default: 50\n"
             "      --post-start-delay-ms N Wait after the start packet ACK before init. Default: 0\n"
-            "      --post-init-delay-ms N  Wait after the init packet ACK before data. Default: 1000\n"
-            "      --chunk-size N     Firmware data payload bytes per packet. Default: 32, max: 590\n"
+            "      --post-init-delay-ms N  Wait after the init packet ACK before data. Default: 0\n"
+            "      --chunk-size N     Firmware data payload bytes per packet. Default: 512, max: 590\n"
             "      --write-burst N    Drain the UART after each N encoded bytes. Default: disabled\n"
             "      --write-gap-us N   Delay after each drained write burst. Default: 0\n"
-            "      --throttle-every N Sleep after each N DFU data packets. Default: 8, 0 disables.\n"
-            "      --throttle-ms N    Sleep duration for --throttle-every. Default: 120\n"
+            "      --throttle-every N Sleep after each N DFU data packets. Default: 0, 0 disables.\n"
+            "      --throttle-ms N    Sleep duration for --throttle-every. Default: 0\n"
             "      --no-trigger      Do not send AT+DFU before transfer.\n"
             "      --package-version Print the AT firmware version embedded in the package and exit.\n"
             "      --dry-run         Parse package and exit without serial access.\n"
