@@ -27,10 +27,12 @@
 #define XIAOZHI_DEFAULT_URL "wss://api.tenclass.net:443/xiaozhi/v1/"
 #define XIAOZHI_PREF_URL "xiaozhi.url"
 #define XIAOZHI_PREF_TOKEN "xiaozhi.token"
-#define XIAOZHI_PREF_VALUE_MAX 160
+#define XIAOZHI_PREF_VALUE_MAX 1024
+#define XIAOZHI_CMD_MAX 14000
 
 typedef enum {
     XIAOZHI_ACTION_PROBE = 0,
+    XIAOZHI_ACTION_ACTIVATE,
     XIAOZHI_ACTION_AUDIO,
     XIAOZHI_ACTION_PTT,
 } xiaozhi_action_t;
@@ -47,6 +49,7 @@ static lv_obj_t *xiaozhi_record_level_label;
 static lv_obj_t *xiaozhi_status_label;
 static lv_obj_t *xiaozhi_detail_label;
 static lv_obj_t *xiaozhi_log_label;
+static lv_obj_t *xiaozhi_bind_btn;
 static lv_obj_t *xiaozhi_probe_btn;
 static lv_obj_t *xiaozhi_new_chat_btn;
 static lv_obj_t *xiaozhi_audio_btn;
@@ -60,6 +63,7 @@ static pid_t xiaozhi_session_pid = -1;
 static int xiaozhi_ptt_recording;
 static int xiaozhi_session_ready;
 static int xiaozhi_record_phase;
+static int xiaozhi_settings_dirty;
 static uint64_t xiaozhi_record_start_us;
 static char xiaozhi_status_text[192] = "Ready";
 static char xiaozhi_detail_text[256] =
@@ -129,8 +133,8 @@ static void xiaozhi_env_prefix(char *out, size_t len)
 {
     char url[XIAOZHI_PREF_VALUE_MAX];
     char token[XIAOZHI_PREF_VALUE_MAX];
-    char url_q[XIAOZHI_PREF_VALUE_MAX * 5];
-    char token_q[XIAOZHI_PREF_VALUE_MAX * 5];
+    char url_q[XIAOZHI_PREF_VALUE_MAX * 5 + 8];
+    char token_q[XIAOZHI_PREF_VALUE_MAX * 5 + 8];
 
     xiaozhi_get_url(url, sizeof(url));
     xiaozhi_get_token(token, sizeof(token));
@@ -175,8 +179,8 @@ static int xiaozhi_write_control(const char *cmd)
 static void xiaozhi_start_session(void)
 {
     FILE *fp;
-    char cmd[2400];
-    char env_prefix[1800];
+    char cmd[XIAOZHI_CMD_MAX];
+    char env_prefix[XIAOZHI_CMD_MAX - 512];
     char ctl_q[128];
     char log_q[128];
     char line[64];
@@ -295,7 +299,7 @@ static void xiaozhi_update_settings_labels(void)
 {
     char url[XIAOZHI_PREF_VALUE_MAX];
     char token[XIAOZHI_PREF_VALUE_MAX];
-    char text[240];
+    char text[XIAOZHI_PREF_VALUE_MAX + 64];
 
     xiaozhi_get_url(url, sizeof(url));
     xiaozhi_get_token(token, sizeof(token));
@@ -834,6 +838,8 @@ static const char *xiaozhi_action_name(xiaozhi_action_t action)
     switch(action) {
     case XIAOZHI_ACTION_PROBE:
         return "Probe";
+    case XIAOZHI_ACTION_ACTIVATE:
+        return "Bind device";
     case XIAOZHI_ACTION_AUDIO:
         return "Audio loopback";
     case XIAOZHI_ACTION_PTT:
@@ -846,12 +852,18 @@ static const char *xiaozhi_action_name(xiaozhi_action_t action)
 static void xiaozhi_build_command(xiaozhi_action_t action, char *cmd,
                                   size_t len)
 {
-    char env_prefix[1800];
+    char env_prefix[XIAOZHI_CMD_MAX - 512];
 
     xiaozhi_env_prefix(env_prefix, sizeof(env_prefix));
     switch(action) {
     case XIAOZHI_ACTION_PROBE:
         snprintf(cmd, len, "%s %s probe --timeout-ms 8000 2>&1",
+                 env_prefix, XIAOZHI_BIN);
+        break;
+    case XIAOZHI_ACTION_ACTIVATE:
+        snprintf(cmd, len,
+                 "%s %s activate --timeout-ms 10000 "
+                 "--activate-timeout 180 2>&1",
                  env_prefix, XIAOZHI_BIN);
         break;
     case XIAOZHI_ACTION_AUDIO:
@@ -870,13 +882,87 @@ static void xiaozhi_build_command(xiaozhi_action_t action, char *cmd,
     }
 }
 
+static int xiaozhi_handle_helper_config_line(const char *line,
+                                             char *display,
+                                             size_t display_len)
+{
+    const char *url_key = "CONFIG websocket.url=";
+    const char *token_key = "CONFIG websocket.token=";
+    const char *version_key = "CONFIG websocket.version=";
+    const char *p;
+
+    if(!line || !display || display_len == 0) {
+        return 0;
+    }
+
+    p = strstr(line, url_key);
+    if(p) {
+        char value[XIAOZHI_PREF_VALUE_MAX];
+        snprintf(value, sizeof(value), "%s", p + strlen(url_key));
+        ui_trim_text(value);
+        if(value[0] && ui_prefs_set(XIAOZHI_PREF_URL, value) == 0) {
+            snprintf(display, display_len, "%s", ui_tr("Server URL saved"));
+            return 1;
+        }
+        snprintf(display, display_len, "%s", ui_tr("Save failed"));
+        return 1;
+    }
+
+    p = strstr(line, token_key);
+    if(p) {
+        char value[XIAOZHI_PREF_VALUE_MAX];
+        snprintf(value, sizeof(value), "%s", p + strlen(token_key));
+        ui_trim_text(value);
+        if(value[0] && ui_prefs_set(XIAOZHI_PREF_TOKEN, value) == 0) {
+            snprintf(display, display_len, "%s",
+                     ui_tr("Activation token saved"));
+            return 1;
+        }
+        snprintf(display, display_len, "%s", ui_tr("Save failed"));
+        return 1;
+    }
+
+    p = strstr(line, version_key);
+    if(p) {
+        snprintf(display, display_len, "%s: %s", ui_tr("Protocol version"),
+                 p + strlen(version_key));
+        return 1;
+    }
+
+    p = strstr(line, "ACTIVATION_CODE:");
+    if(p) {
+        p += strlen("ACTIVATION_CODE:");
+        while(*p == ' ') {
+            p++;
+        }
+        snprintf(display, display_len, "%s %s", ui_tr("Activation code"),
+                 p);
+        return 2;
+    }
+
+    p = strstr(line, "ACTIVATION_DONE");
+    if(p) {
+        snprintf(display, display_len, "%s", ui_tr("Device bound"));
+        return 2;
+    }
+
+    p = strstr(line, "ACTIVATION_TIMEOUT");
+    if(p) {
+        snprintf(display, display_len, "%s", ui_tr("Activation timeout"));
+        return 2;
+    }
+
+    return 0;
+}
+
 static void *xiaozhi_worker(void *arg)
 {
     xiaozhi_action_t action = (xiaozhi_action_t)(intptr_t)arg;
-    char cmd[2300];
-    char line[512];
+    char cmd[XIAOZHI_CMD_MAX];
+    char line[1536];
     FILE *fp;
     int rc = -1;
+    int config_saved = 0;
 
     if(access(XIAOZHI_BIN, X_OK) != 0) {
         pthread_mutex_lock(&xiaozhi_lock);
@@ -902,12 +988,36 @@ static void *xiaozhi_worker(void *arg)
     }
 
     while(fgets(line, sizeof(line), fp)) {
+        char display[1536];
+        int parsed;
+
         ui_trim_text(line);
         if(!line[0]) {
             continue;
         }
+        display[0] = '\0';
+        parsed = xiaozhi_handle_helper_config_line(line, display,
+                                                   sizeof(display));
         pthread_mutex_lock(&xiaozhi_lock);
-        xiaozhi_append_log_locked(line);
+        if(parsed) {
+            xiaozhi_append_log_locked(display);
+            if(parsed == 1) {
+                config_saved = 1;
+                xiaozhi_settings_dirty = 1;
+            }
+            if(strstr(display, ui_tr("Activation code")) == display) {
+                xiaozhi_set_status_locked("Activation code", display, 0);
+            } else if(strstr(display, ui_tr("Device bound")) == display) {
+                xiaozhi_set_status_locked("Device bound",
+                                          "Session restarting", 0);
+            } else if(strstr(display, ui_tr("Activation timeout")) == display) {
+                xiaozhi_set_status_locked("Activation timeout",
+                                          "Open xiaozhi.me console and enter the code.",
+                                          -1);
+            }
+        } else {
+            xiaozhi_append_log_locked(line);
+        }
         pthread_mutex_unlock(&xiaozhi_lock);
         app_request_fast_refresh();
     }
@@ -916,13 +1026,21 @@ static void *xiaozhi_worker(void *arg)
     pthread_mutex_lock(&xiaozhi_lock);
     xiaozhi_running = 0;
     if(rc == 0) {
-        xiaozhi_set_status_locked("Completed", xiaozhi_action_name(action),
-                                  rc);
+        if(action == XIAOZHI_ACTION_ACTIVATE && config_saved) {
+            xiaozhi_set_status_locked("Device bound", "Session restarting",
+                                      rc);
+        } else {
+            xiaozhi_set_status_locked("Completed", xiaozhi_action_name(action),
+                                      rc);
+        }
     } else {
         xiaozhi_set_status_locked("Failed, check log",
                                   xiaozhi_action_name(action), rc);
     }
     pthread_mutex_unlock(&xiaozhi_lock);
+    if(action == XIAOZHI_ACTION_ACTIVATE && rc == 0 && config_saved) {
+        xiaozhi_restart_session();
+    }
     app_request_fast_refresh();
     return NULL;
 }
@@ -960,6 +1078,13 @@ static void xiaozhi_probe_event_cb(lv_event_t *event)
     (void)event;
     xiaozhi_stop_session();
     xiaozhi_start_session();
+}
+
+static void xiaozhi_bind_event_cb(lv_event_t *event)
+{
+    (void)event;
+    xiaozhi_stop_session();
+    xiaozhi_start_action(XIAOZHI_ACTION_ACTIVATE);
 }
 
 static void xiaozhi_audio_event_cb(lv_event_t *event)
@@ -1182,6 +1307,7 @@ static void xiaozhi_update(void)
     int rc;
     int recording;
     int session_ready;
+    int settings_dirty;
     pid_t ptt_pid;
     pid_t session_pid;
     char status[192];
@@ -1239,6 +1365,8 @@ static void xiaozhi_update(void)
     running = xiaozhi_running;
     rc = xiaozhi_last_rc;
     recording = xiaozhi_ptt_recording;
+    settings_dirty = xiaozhi_settings_dirty;
+    xiaozhi_settings_dirty = 0;
     session_ready = xiaozhi_session_ready;
     ptt_pid = xiaozhi_ptt_pid;
     session_pid = xiaozhi_session_pid;
@@ -1251,6 +1379,9 @@ static void xiaozhi_update(void)
 
     xiaozhi_last_log_line(log_text, log_preview, sizeof(log_preview));
 
+    if(settings_dirty) {
+        xiaozhi_update_settings_labels();
+    }
     if(xiaozhi_status_label) {
         lv_label_set_text(xiaozhi_status_label, ui_tr(status));
         lv_obj_set_style_text_color(xiaozhi_status_label,
@@ -1274,6 +1405,10 @@ static void xiaozhi_update(void)
     if(xiaozhi_probe_btn) {
         running ? lv_obj_add_state(xiaozhi_probe_btn, LV_STATE_DISABLED) :
                   lv_obj_clear_state(xiaozhi_probe_btn, LV_STATE_DISABLED);
+    }
+    if(xiaozhi_bind_btn) {
+        running ? lv_obj_add_state(xiaozhi_bind_btn, LV_STATE_DISABLED) :
+                  lv_obj_clear_state(xiaozhi_bind_btn, LV_STATE_DISABLED);
     }
     if(xiaozhi_new_chat_btn) {
         running ? lv_obj_add_state(xiaozhi_new_chat_btn, LV_STATE_DISABLED) :
@@ -1319,8 +1454,8 @@ void ui_xiaozhi_create(lv_obj_t *scr)
     int chat_h = body_h - top_pad - status_h - action_h - gap * 2 - 14;
     int action_y;
     int cfg_y = landscape ? 0 : 202;
-    int cfg_w = landscape ? 112 : (content_w - 20) / 3;
-    int title_w = landscape ? content_w - 386 : content_w;
+    int cfg_w = landscape ? 100 : (content_w - 30) / 4;
+    int title_w = landscape ? content_w - 458 : content_w;
 
     if(chat_h < 160) {
         chat_h = 160;
@@ -1383,7 +1518,7 @@ void ui_xiaozhi_create(lv_obj_t *scr)
                  0, landscape ? 92 : 132);
 
     if(landscape) {
-        int cfg_x = content_w - cfg_w * 3 - 20;
+        int cfg_x = content_w - cfg_w * 4 - 30;
 
         btn = ui_command_button(xiaozhi_status_panel, cfg_x, cfg_y, cfg_w,
                                 "Server",
@@ -1396,6 +1531,12 @@ void ui_xiaozhi_create(lv_obj_t *scr)
         lv_obj_add_event_cb(btn, xiaozhi_open_token_event_cb, LV_EVENT_CLICKED,
                             NULL);
         btn = ui_command_button(xiaozhi_status_panel, cfg_x + (cfg_w + 10) * 2,
+                                cfg_y, cfg_w, "Bind",
+                                0x25C281);
+        xiaozhi_bind_btn = btn;
+        lv_obj_add_event_cb(btn, xiaozhi_bind_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+        btn = ui_command_button(xiaozhi_status_panel, cfg_x + (cfg_w + 10) * 3,
                                 cfg_y, cfg_w,
                                 "Clear token", 0xF97316);
         lv_obj_add_event_cb(btn, xiaozhi_clear_token_event_cb,
@@ -1412,6 +1553,12 @@ void ui_xiaozhi_create(lv_obj_t *scr)
         lv_obj_add_event_cb(btn, xiaozhi_open_token_event_cb, LV_EVENT_CLICKED,
                             NULL);
         btn = ui_command_button(xiaozhi_status_panel, (cfg_w + 10) * 2, cfg_y,
+                                cfg_w, "Bind",
+                                0x25C281);
+        xiaozhi_bind_btn = btn;
+        lv_obj_add_event_cb(btn, xiaozhi_bind_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+        btn = ui_command_button(xiaozhi_status_panel, (cfg_w + 10) * 3, cfg_y,
                                 cfg_w,
                                 "Clear token", 0xF97316);
         lv_obj_add_event_cb(btn, xiaozhi_clear_token_event_cb,
@@ -1524,6 +1671,7 @@ void ui_xiaozhi_cleanup(void)
     xiaozhi_status_label = NULL;
     xiaozhi_detail_label = NULL;
     xiaozhi_log_label = NULL;
+    xiaozhi_bind_btn = NULL;
     xiaozhi_probe_btn = NULL;
     xiaozhi_new_chat_btn = NULL;
     xiaozhi_audio_btn = NULL;
