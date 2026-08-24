@@ -23,7 +23,7 @@ Main app groups:
   notification sounds, language, time, sensors, charger, battery, keyboard,
   F-key hotkeys, and system information.
 - LoRa profile testing, LoRaWAN profile management, nRF52840 DFU, nRF9151
-  cellular/GNSS/HTTP/MQTT tools, and Meshtastic beta.
+  cellular/GNSS/HTTP/MQTT tools, Meshtastic beta, and Xiaozhi voice assistant.
 
 Apps that require optional hardware check for the related module before use. If
 the module is not present, the launcher should show a user-facing notice instead
