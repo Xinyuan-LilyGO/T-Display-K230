@@ -569,6 +569,40 @@ static int json_get_int_after(const char *json, const char *key, int fallback)
     return atoi(p);
 }
 
+static void log_chat_message_from_json(const char *json)
+{
+    char type[32];
+    char state[32];
+    char text[512];
+
+    if (!json || json_get_string(json, "type", type, sizeof(type)) != 0) {
+        return;
+    }
+
+    if (strcmp(type, "stt") == 0) {
+        if (json_get_string(json, "text", text, sizeof(text)) == 0) {
+            trim_newline(text);
+            if (text[0]) {
+                log_line("CHAT", "user: %s", text);
+            }
+        }
+        return;
+    }
+
+    if (strcmp(type, "tts") == 0) {
+        if (json_get_string(json, "state", state, sizeof(state)) == 0 &&
+            strcmp(state, "sentence_start") != 0) {
+            return;
+        }
+        if (json_get_string(json, "text", text, sizeof(text)) == 0) {
+            trim_newline(text);
+            if (text[0]) {
+                log_line("CHAT", "assistant: %s", text);
+            }
+        }
+    }
+}
+
 static void make_hello(char *buf, size_t len)
 {
     snprintf(buf, len,
@@ -867,6 +901,7 @@ static int connect_and_hello(const app_opts_t *opts, ws_conn_t *ws, char *sessio
         }
         if (opcode == 1) {
             log_line("INFO", "text: %s", payload);
+            log_chat_message_from_json((const char *)payload);
             if (strstr((const char *)payload, "\"type\"") && strstr((const char *)payload, "\"hello\"")) {
                 json_get_string((const char *)payload, "session_id", session_id, session_len);
                 *server_rate = json_get_int_after((const char *)payload, "sample_rate", 24000);
@@ -979,6 +1014,7 @@ static int command_ptt(const app_opts_t *opts)
         }
         if (opcode == 1) {
             log_line("INFO", "text: %s", payload);
+            log_chat_message_from_json((const char *)payload);
         } else if (opcode == 2) {
             log_line("INFO", "rx opus bytes=%zu", len);
             if (dec && playback_open) {
@@ -1126,6 +1162,7 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
         }
         if (opcode == 1) {
             log_line("INFO", "text: %s", payload);
+            log_chat_message_from_json((const char *)payload);
         } else if (opcode == 2) {
             log_line("INFO", "rx opus bytes=%zu", len);
             if (dec && playback_open) {
