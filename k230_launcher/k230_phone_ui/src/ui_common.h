@@ -98,6 +98,7 @@ typedef enum {
     PAGE_USB_MODEM,
     PAGE_FILES,
     PAGE_AI,
+    PAGE_XIAOZHI,
     PAGE_RTSP,
     PAGE_TERMINAL,
     PAGE_ABOUT,

@@ -103,6 +103,7 @@ set(K230_PHONE_UI_SOURCES
     ui_mic_spectrum.c
     ui_usb_storage.c
     ui_meshtastic.c
+    ui_xiaozhi.c
     ui_lora.cpp
     ui_nes.cpp
     ${LIBTMT_DIR}/tmt.c
@@ -145,6 +146,7 @@ add_executable(k230_qr_scan
 )
 add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(k230_nrf52840_dfu k230_nrf52840_dfu.cpp)
+add_executable(k230_xiaozhi_probe k230_xiaozhi_probe.c)
 add_executable(drm_motion_probe drm_motion_probe.c)
 add_executable(drm_motion_probe_rgb565 drm_motion_probe.c)
 add_executable(lvgl_scroll_probe lvgl_scroll_probe.c)
@@ -219,6 +221,11 @@ target_include_directories(k230_qr_scan PRIVATE
     ${CMAKE_SYSROOT}/usr/include
     ${CMAKE_SYSROOT}/usr/include/libdrm
     ${QUIRC_DIR}
+)
+
+target_include_directories(k230_xiaozhi_probe PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${CMAKE_SYSROOT}/usr/include/opus
 )
 
 target_compile_definitions(k230_meshtastic_probe PRIVATE
@@ -394,6 +401,18 @@ target_link_libraries(k230_qr_scan PRIVATE
     m
 )
 
+target_link_directories(k230_xiaozhi_probe PRIVATE
+    ${CMAKE_SYSROOT}/usr/lib
+)
+
+target_link_libraries(k230_xiaozhi_probe PRIVATE
+    ssl
+    crypto
+    asound
+    opus
+    pthread
+)
+
 set(K230_PHONE_UI_INSTALL_TARGETS
     k230_phone_ui
     k230_phone_ui_fullswitch_test
@@ -403,6 +422,7 @@ set(K230_PHONE_UI_INSTALL_TARGETS
     k230_qr_scan
     k230_pcm_volume
     k230_nrf52840_dfu
+    k230_xiaozhi_probe
 )
 
 if(K230_ENABLE_DEV_APPS)
