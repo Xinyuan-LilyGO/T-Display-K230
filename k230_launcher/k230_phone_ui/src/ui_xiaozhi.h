@@ -9,6 +9,7 @@ extern "C" {
 
 void ui_xiaozhi_create(lv_obj_t *scr);
 void ui_xiaozhi_cleanup(void);
+void ui_xiaozhi_handle_voice_key(int pressed);
 
 #ifdef __cplusplus
 }

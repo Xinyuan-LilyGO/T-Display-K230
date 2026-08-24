@@ -3,7 +3,9 @@
 #include "ui_audio.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
+#include "ui_meshtastic.h"
 #include "ui_prefs.h"
+#include "ui_xiaozhi.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -4585,6 +4587,18 @@ static void extension_keyboard_enqueue_tca_event(int code, int pressed)
         return;
     }
     app_note_user_activity();
+
+    if(code == 11 &&
+       (app_current_page_is(PAGE_XIAOZHI) ||
+        app_current_page_is(PAGE_MESHTASTIC))) {
+        if(app_current_page_is(PAGE_XIAOZHI)) {
+            ui_xiaozhi_handle_voice_key(pressed);
+        } else {
+            ui_meshtastic_handle_voice_key(pressed);
+        }
+        extension_keyboard_repeat_clear();
+        return;
+    }
 
     if(!pressed) {
         if(code == extension_keyboard_repeat_code) {
