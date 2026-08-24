@@ -19,6 +19,7 @@
 #include <time.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -57,6 +58,7 @@ typedef struct {
     const char *client_id;
     const char *capture_dev;
     const char *playback_dev;
+    const char *control_path;
     int seconds;
     int wait_seconds;
     int timeout_ms;
@@ -71,6 +73,13 @@ typedef struct {
     int channels;
     snd_pcm_stream_t stream;
 } pcm_handle_t;
+
+typedef struct {
+    int read_fd;
+    int keep_fd;
+    char buf[256];
+    size_t len;
+} control_reader_t;
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_record_stop = 0;
@@ -663,6 +672,115 @@ static int pcm_write_frames(pcm_handle_t *ph, const int16_t *buf, snd_pcm_uframe
     return 0;
 }
 
+static void control_close(control_reader_t *ctl)
+{
+    if (!ctl) return;
+    if (ctl->read_fd >= 0) close(ctl->read_fd);
+    if (ctl->keep_fd >= 0) close(ctl->keep_fd);
+    memset(ctl, 0, sizeof(*ctl));
+    ctl->read_fd = -1;
+    ctl->keep_fd = -1;
+}
+
+static int control_open(control_reader_t *ctl, const char *path)
+{
+    memset(ctl, 0, sizeof(*ctl));
+    ctl->read_fd = -1;
+    ctl->keep_fd = -1;
+
+    if (!path || !path[0]) {
+        log_line("ERR", "missing --control FIFO path");
+        return -1;
+    }
+
+    if (mkfifo(path, 0600) != 0 && errno != EEXIST) {
+        log_line("ERR", "mkfifo(%s): %s", path, strerror(errno));
+        return -1;
+    }
+
+    ctl->read_fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (ctl->read_fd < 0) {
+        log_line("ERR", "open control read %s: %s", path, strerror(errno));
+        control_close(ctl);
+        return -1;
+    }
+
+    ctl->keep_fd = open(path, O_WRONLY | O_NONBLOCK);
+    if (ctl->keep_fd < 0) {
+        log_line("WARN", "open control keepalive %s: %s", path, strerror(errno));
+    }
+    return 0;
+}
+
+static int control_pop_line(control_reader_t *ctl, char *line, size_t line_len)
+{
+    if (!ctl || ctl->read_fd < 0 || !line || line_len == 0) {
+        return -1;
+    }
+
+    for (;;) {
+        for (size_t i = 0; i < ctl->len; ++i) {
+            if (ctl->buf[i] == '\n') {
+                size_t n = i;
+                if (n > 0 && ctl->buf[n - 1] == '\r') n--;
+                if (n >= line_len) n = line_len - 1;
+                memcpy(line, ctl->buf, n);
+                line[n] = '\0';
+                memmove(ctl->buf, ctl->buf + i + 1, ctl->len - i - 1);
+                ctl->len -= i + 1;
+                trim_newline(line);
+                if (!line[0]) {
+                    continue;
+                }
+                return 1;
+            }
+        }
+
+        char tmp[96];
+        ssize_t rc = read(ctl->read_fd, tmp, sizeof(tmp));
+        if (rc > 0) {
+            if (ctl->len + (size_t)rc >= sizeof(ctl->buf)) {
+                log_line("WARN", "control line overflow, dropping buffer");
+                ctl->len = 0;
+            }
+            size_t copy = (size_t)rc;
+            if (copy > sizeof(ctl->buf) - ctl->len) {
+                copy = sizeof(ctl->buf) - ctl->len;
+            }
+            memcpy(ctl->buf + ctl->len, tmp, copy);
+            ctl->len += copy;
+            continue;
+        }
+        if (rc == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;
+        }
+        log_line("ERR", "read control FIFO: %s", strerror(errno));
+        return -1;
+    }
+}
+
+static int control_wait_line(control_reader_t *ctl, char *line,
+                             size_t line_len, int timeout_ms)
+{
+    int got = control_pop_line(ctl, line, line_len);
+    if (got != 0) return got;
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(ctl->read_fd, &rfds);
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int rc = select(ctl->read_fd + 1, &rfds, NULL, NULL, &tv);
+    if (rc < 0) {
+        if (errno == EINTR) return 0;
+        log_line("ERR", "select control FIFO: %s", strerror(errno));
+        return -1;
+    }
+    if (rc == 0) return 0;
+    return control_pop_line(ctl, line, line_len);
+}
+
 static int command_audio_loopback(const app_opts_t *opts)
 {
     pcm_handle_t cap, play;
@@ -888,6 +1006,234 @@ static int command_ptt(const app_opts_t *opts)
     return 0;
 }
 
+static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
+                            const char *session_id, int server_rate,
+                            control_reader_t *ctl)
+{
+    char listen[256];
+    pcm_handle_t cap;
+    int err = 0;
+    OpusEncoder *enc = NULL;
+    pcm_handle_t play;
+    int playback_open = 0;
+    OpusDecoder *dec = NULL;
+    int rc = 0;
+
+    g_record_stop = 0;
+    make_listen(listen, sizeof(listen), session_id, "start");
+    log_line("INFO", "send listen start");
+    if (ws_send_frame(ws, 1, listen, strlen(listen)) < 0) {
+        log_line("ERR", "send listen start failed");
+        return 1;
+    }
+
+    if (open_pcm(&cap, SND_PCM_STREAM_CAPTURE, opts->capture_dev,
+                 DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS) < 0) {
+        return 1;
+    }
+
+    enc = opus_encoder_create(DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS,
+                              OPUS_APPLICATION_VOIP, &err);
+    if (!enc || err != OPUS_OK) {
+        log_line("ERR", "opus_encoder_create: %s", opus_strerror(err));
+        close_pcm(&cap);
+        return 1;
+    }
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE(30000));
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(0));
+
+    int16_t pcm[OPUS_FRAME_SAMPLES];
+    unsigned char packet[OPUS_MAX_PACKET];
+    int frames = (opts->seconds * DEFAULT_SAMPLE_RATE + OPUS_FRAME_SAMPLES - 1) / OPUS_FRAME_SAMPLES;
+    log_line("INFO", "record and send: seconds=%d frames=%d", opts->seconds, frames);
+    for (int i = 0; i < frames && !g_stop && !g_record_stop; ++i) {
+        char cmd[64];
+        while (ctl && control_pop_line(ctl, cmd, sizeof(cmd)) > 0) {
+            if (strcmp(cmd, "PTT_END") == 0) {
+                log_line("INFO", "control PTT_END");
+                g_record_stop = 1;
+                break;
+            }
+            if (strcmp(cmd, "QUIT") == 0) {
+                log_line("INFO", "control QUIT");
+                g_stop = 1;
+                break;
+            }
+        }
+        if (g_stop || g_record_stop) break;
+
+        if (pcm_read_frames(&cap, pcm, OPUS_FRAME_SAMPLES) < 0) {
+            rc = 1;
+            break;
+        }
+        int nb = opus_encode(enc, pcm, OPUS_FRAME_SAMPLES, packet, sizeof(packet));
+        if (nb < 0) {
+            log_line("ERR", "opus_encode: %s", opus_strerror(nb));
+            rc = 1;
+            break;
+        }
+        if (ws_send_frame(ws, 2, packet, (size_t)nb) < 0) {
+            log_line("ERR", "send opus frame failed");
+            rc = 1;
+            break;
+        }
+        if ((i % 10) == 0) log_line("INFO", "tx frame=%d opus_bytes=%d", i, nb);
+    }
+    opus_encoder_destroy(enc);
+    close_pcm(&cap);
+
+    make_listen(listen, sizeof(listen), session_id, "stop");
+    log_line("INFO", "send listen stop");
+    if (ws_send_frame(ws, 1, listen, strlen(listen)) < 0) {
+        log_line("ERR", "send listen stop failed");
+        return 1;
+    }
+    if (rc != 0 || g_stop) {
+        return rc ? rc : 1;
+    }
+
+    playback_open = (open_pcm(&play, SND_PCM_STREAM_PLAYBACK,
+                              opts->playback_dev, (unsigned int)server_rate,
+                              DEFAULT_CHANNELS) == 0);
+    dec = opus_decoder_create(server_rate, DEFAULT_CHANNELS, &err);
+    if (!dec || err != OPUS_OK) {
+        log_line("ERR", "opus_decoder_create(%d): %s", server_rate,
+                 opus_strerror(err));
+        playback_open = 0;
+    }
+
+    int16_t decoded[5760];
+    time_t deadline = time(NULL) + opts->wait_seconds;
+    log_line("INFO", "receive response: wait=%d", opts->wait_seconds);
+    while (!g_stop && time(NULL) <= deadline) {
+        int opcode = 0;
+        unsigned char *payload = NULL;
+        size_t len = 0;
+        char cmd[64];
+
+        while (ctl && control_pop_line(ctl, cmd, sizeof(cmd)) > 0) {
+            if (strcmp(cmd, "QUIT") == 0) {
+                log_line("INFO", "control QUIT");
+                g_stop = 1;
+                break;
+            }
+        }
+        if (g_stop) break;
+
+        if (ws_read_frame(ws, &opcode, &payload, &len) < 0) {
+            log_line("WARN", "read frame ended");
+            break;
+        }
+        if (opcode == 1) {
+            log_line("INFO", "text: %s", payload);
+        } else if (opcode == 2) {
+            log_line("INFO", "rx opus bytes=%zu", len);
+            if (dec && playback_open) {
+                int samples = opus_decode(dec, payload, (opus_int32)len,
+                                          decoded, 5760, 0);
+                if (samples > 0) {
+                    pcm_write_frames(&play, decoded,
+                                     (snd_pcm_uframes_t)samples);
+                } else {
+                    log_line("ERR", "opus_decode rx: %s",
+                             opus_strerror(samples));
+                }
+            }
+        } else if (opcode == 8) {
+            log_line("INFO", "server close");
+            free(payload);
+            rc = 2;
+            break;
+        } else if (opcode == 9) {
+            ws_send_frame(ws, 10, payload, len);
+        }
+        free(payload);
+    }
+
+    if (dec) opus_decoder_destroy(dec);
+    if (playback_open) close_pcm(&play);
+    return rc;
+}
+
+static int command_session(const app_opts_t *opts)
+{
+    control_reader_t ctl;
+    ws_conn_t ws;
+    char session_id[128] = "";
+    int server_rate = 24000;
+    int connected = 0;
+    int rc = 0;
+
+    if (control_open(&ctl, opts->control_path) < 0) {
+        return 1;
+    }
+
+    memset(&ws, 0, sizeof(ws));
+    ws.fd = -1;
+    if (connect_and_hello(opts, &ws, session_id, sizeof(session_id),
+                          &server_rate) == 0) {
+        connected = 1;
+        log_line("INFO", "session ready: session=%s server_rate=%d",
+                 session_id[0] ? session_id : "(empty)", server_rate);
+    } else {
+        log_line("ERR", "session connect failed");
+        control_close(&ctl);
+        ws_close(&ws);
+        return 1;
+    }
+
+    while (!g_stop) {
+        char cmd[64];
+        int got = control_wait_line(&ctl, cmd, sizeof(cmd), 1000);
+        if (got < 0) {
+            rc = 1;
+            break;
+        }
+        if (got == 0) {
+            continue;
+        }
+
+        if (strcmp(cmd, "QUIT") == 0) {
+            log_line("INFO", "session quit");
+            break;
+        }
+        if (strcmp(cmd, "PTT_BEGIN") != 0) {
+            log_line("WARN", "unknown control command: %s", cmd);
+            continue;
+        }
+
+        if (!connected) {
+            if (connect_and_hello(opts, &ws, session_id, sizeof(session_id),
+                                  &server_rate) != 0) {
+                log_line("ERR", "session reconnect failed");
+                ws_close(&ws);
+                rc = 1;
+                continue;
+            }
+            connected = 1;
+            log_line("INFO", "session ready: session=%s server_rate=%d",
+                     session_id[0] ? session_id : "(empty)", server_rate);
+        }
+
+        log_line("INFO", "ptt turn start");
+        int turn_rc = session_ptt_turn(opts, &ws, session_id, server_rate,
+                                       &ctl);
+        log_line(turn_rc == 0 ? "INFO" : "ERR", "ptt turn done rc=%d",
+                 turn_rc);
+        if (turn_rc != 0) {
+            ws_close(&ws);
+            connected = 0;
+        }
+    }
+
+    if (connected) {
+        ws_close(&ws);
+    }
+    control_close(&ctl);
+    log_line("INFO", "session ended rc=%d", rc);
+    return rc;
+}
+
 static void print_usage(FILE *out)
 {
     fprintf(out,
@@ -896,10 +1242,12 @@ static void print_usage(FILE *out)
             "  xiaozhi_k230_lab probe [options]\n"
             "  xiaozhi_k230_lab audio-loopback [options]\n"
             "  xiaozhi_k230_lab ptt [options]\n"
+            "  xiaozhi_k230_lab session --control FIFO [options]\n"
             "\n"
             "Options:\n"
             "  --url URL              WebSocket URL, default: %s or XIAOZHI_URL\n"
             "  --token TOKEN          Bearer token, default: XIAOZHI_TOKEN\n"
+            "  --control FIFO         control FIFO for session mode\n"
             "  --device-id ID         Device-Id header, default: first MAC address\n"
             "  --client-id ID         Client-Id header, default: /etc/machine-id or random UUID\n"
             "  --capture DEV          ALSA capture device, default: default\n"
@@ -956,6 +1304,7 @@ static int parse_args(int argc, char **argv, app_opts_t *opts)
         else if (strcmp(a, "--client-id") == 0) target = &opts->client_id;
         else if (strcmp(a, "--capture") == 0) target = &opts->capture_dev;
         else if (strcmp(a, "--playback") == 0) target = &opts->playback_dev;
+        else if (strcmp(a, "--control") == 0) target = &opts->control_path;
         else if (strcmp(a, "--seconds") == 0) {
             if (++i >= argc) return -1;
             opts->seconds = atoi(argv[i]);
@@ -1016,6 +1365,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(opts.mode, "ptt") == 0) {
         return command_ptt(&opts);
+    }
+    if (strcmp(opts.mode, "session") == 0) {
+        return command_session(&opts);
     }
 
     log_line("ERR", "unknown mode: %s", opts.mode);

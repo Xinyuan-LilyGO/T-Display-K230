@@ -7,18 +7,21 @@
 #include "ui_prefs.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define XIAOZHI_BIN "/root/app/k230_phone_ui/k230_xiaozhi_probe"
 #define XIAOZHI_LOG "/tmp/k230_xiaozhi_ui.log"
+#define XIAOZHI_CTL "/tmp/k230_xiaozhi_session.ctl"
 #define XIAOZHI_LOG_TEXT_MAX 4096
 #define XIAOZHI_DEFAULT_URL "wss://api.tenclass.net:443/xiaozhi/v1/"
 #define XIAOZHI_PREF_URL "xiaozhi.url"
@@ -44,11 +47,17 @@ static lv_obj_t *xiaozhi_token_label;
 static int xiaozhi_running;
 static int xiaozhi_last_rc;
 static pid_t xiaozhi_ptt_pid = -1;
+static pid_t xiaozhi_session_pid = -1;
 static int xiaozhi_ptt_recording;
+static int xiaozhi_session_ready;
 static char xiaozhi_status_text[192] = "Ready";
 static char xiaozhi_detail_text[256] =
     "Probe cloud handshake, test audio loopback, or send one short PTT turn.";
 static char xiaozhi_log_text[XIAOZHI_LOG_TEXT_MAX] = "No log yet";
+
+static void xiaozhi_set_status_locked(const char *status, const char *detail,
+                                      int rc);
+static void xiaozhi_append_log_locked(const char *line);
 
 static void xiaozhi_get_url(char *buf, size_t len)
 {
@@ -121,6 +130,148 @@ static void xiaozhi_apply_audio_output_route(void)
     int external = ui_audio_output_is_external() ? 1 : 0;
 
     ui_audio_output_set_external(external);
+}
+
+static int xiaozhi_process_alive(pid_t pid)
+{
+    return pid > 0 && kill(pid, 0) == 0;
+}
+
+static int xiaozhi_write_control(const char *cmd)
+{
+    int fd;
+    char line[96];
+    ssize_t written;
+
+    if(!cmd || !cmd[0]) {
+        return -1;
+    }
+
+    fd = open(XIAOZHI_CTL, O_WRONLY | O_NONBLOCK);
+    if(fd < 0) {
+        return -1;
+    }
+    snprintf(line, sizeof(line), "%s\n", cmd);
+    written = write(fd, line, strlen(line));
+    close(fd);
+    return written > 0 ? 0 : -1;
+}
+
+static void xiaozhi_start_session(void)
+{
+    FILE *fp;
+    char cmd[2400];
+    char env_prefix[1800];
+    char ctl_q[128];
+    char log_q[128];
+    char line[64];
+    long pid;
+
+    pthread_mutex_lock(&xiaozhi_lock);
+    if(xiaozhi_process_alive(xiaozhi_session_pid)) {
+        pthread_mutex_unlock(&xiaozhi_lock);
+        return;
+    }
+    xiaozhi_session_pid = -1;
+    xiaozhi_session_ready = 0;
+    pthread_mutex_unlock(&xiaozhi_lock);
+
+    if(access(XIAOZHI_BIN, X_OK) != 0) {
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_set_status_locked("Helper missing",
+                                  "k230_xiaozhi_probe is not installed.",
+                                  127);
+        pthread_mutex_unlock(&xiaozhi_lock);
+        app_request_fast_refresh();
+        return;
+    }
+
+    unlink(XIAOZHI_CTL);
+    if(mkfifo(XIAOZHI_CTL, 0600) != 0 && errno != EEXIST) {
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_set_status_locked("Start failed", "Control FIFO failed", -1);
+        pthread_mutex_unlock(&xiaozhi_lock);
+        app_request_fast_refresh();
+        return;
+    }
+
+    fp = fopen(XIAOZHI_LOG, "w");
+    if(fp) {
+        fclose(fp);
+    }
+
+    xiaozhi_apply_audio_output_route();
+    xiaozhi_env_prefix(env_prefix, sizeof(env_prefix));
+    xiaozhi_shell_quote(ctl_q, sizeof(ctl_q), XIAOZHI_CTL);
+    xiaozhi_shell_quote(log_q, sizeof(log_q), XIAOZHI_LOG);
+    snprintf(cmd, sizeof(cmd),
+             "%s %s session --control %s --seconds 30 --wait 15 "
+             "--timeout-ms 10000 >> %s 2>&1 & echo $!",
+             env_prefix, XIAOZHI_BIN, ctl_q, log_q);
+
+    fp = popen(cmd, "r");
+    if(!fp || !fgets(line, sizeof(line), fp)) {
+        if(fp) {
+            pclose(fp);
+        }
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_set_status_locked("Start failed", "popen failed", -1);
+        pthread_mutex_unlock(&xiaozhi_lock);
+        app_request_fast_refresh();
+        return;
+    }
+    pclose(fp);
+
+    pid = strtol(line, NULL, 10);
+    if(pid <= 0) {
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_set_status_locked("Start failed", "Invalid session pid", -1);
+        pthread_mutex_unlock(&xiaozhi_lock);
+        app_request_fast_refresh();
+        return;
+    }
+
+    pthread_mutex_lock(&xiaozhi_lock);
+    xiaozhi_session_pid = (pid_t)pid;
+    xiaozhi_session_ready = 0;
+    xiaozhi_set_status_locked("Connecting", "Session handshake", 0);
+    xiaozhi_log_text[0] = '\0';
+    xiaozhi_append_log_locked("== Xiaozhi session starting ==");
+    pthread_mutex_unlock(&xiaozhi_lock);
+    app_request_fast_refresh();
+}
+
+static void xiaozhi_stop_session(void)
+{
+    pid_t pid;
+
+    pthread_mutex_lock(&xiaozhi_lock);
+    pid = xiaozhi_session_pid;
+    xiaozhi_session_pid = -1;
+    xiaozhi_session_ready = 0;
+    xiaozhi_ptt_recording = 0;
+    xiaozhi_running = 0;
+    pthread_mutex_unlock(&xiaozhi_lock);
+
+    xiaozhi_write_control("QUIT");
+    if(pid > 0) {
+        kill(pid, SIGTERM);
+    }
+    unlink(XIAOZHI_CTL);
+}
+
+static void xiaozhi_restart_session(void)
+{
+    xiaozhi_stop_session();
+    xiaozhi_start_session();
+}
+
+static void xiaozhi_truncate_log(void)
+{
+    FILE *fp = fopen(XIAOZHI_LOG, "w");
+    if(fp) {
+        fclose(fp);
+    }
 }
 
 static void xiaozhi_update_settings_labels(void)
@@ -365,7 +516,8 @@ static void xiaozhi_start_action(xiaozhi_action_t action)
 static void xiaozhi_probe_event_cb(lv_event_t *event)
 {
     (void)event;
-    xiaozhi_start_action(XIAOZHI_ACTION_PROBE);
+    xiaozhi_stop_session();
+    xiaozhi_start_session();
 }
 
 static void xiaozhi_audio_event_cb(lv_event_t *event)
@@ -376,59 +528,36 @@ static void xiaozhi_audio_event_cb(lv_event_t *event)
 
 static void xiaozhi_start_ptt_hold(void)
 {
-    FILE *fp;
-    char cmd[2300];
-    char env_prefix[1800];
-    char line[64];
     char header[128];
-    long pid;
+    int session_ready;
+    pid_t session_pid;
 
     pthread_mutex_lock(&xiaozhi_lock);
-    if(xiaozhi_running || xiaozhi_ptt_pid > 0) {
+    if(xiaozhi_running) {
         pthread_mutex_unlock(&xiaozhi_lock);
         return;
     }
+    session_pid = xiaozhi_session_pid;
+    session_ready = xiaozhi_session_ready;
     pthread_mutex_unlock(&xiaozhi_lock);
 
-    if(access(XIAOZHI_BIN, X_OK) != 0) {
+    if(!xiaozhi_process_alive(session_pid)) {
+        xiaozhi_start_session();
+    }
+    if(!xiaozhi_process_alive(session_pid) || !session_ready) {
         pthread_mutex_lock(&xiaozhi_lock);
-        xiaozhi_set_status_locked("Helper missing",
-                                  "k230_xiaozhi_probe is not installed.",
-                                  127);
+        xiaozhi_set_status_locked("Session not ready",
+                                  "Wait for session ready", -1);
         pthread_mutex_unlock(&xiaozhi_lock);
         app_request_fast_refresh();
         return;
     }
 
-    fp = fopen(XIAOZHI_LOG, "w");
-    if(fp) {
-        fclose(fp);
-    }
-
-    xiaozhi_apply_audio_output_route();
-    xiaozhi_env_prefix(env_prefix, sizeof(env_prefix));
-    snprintf(cmd, sizeof(cmd),
-             "%s %s ptt --seconds 30 --wait 15 --timeout-ms 10000 "
-             ">> %s 2>&1 & echo $!",
-             env_prefix, XIAOZHI_BIN, XIAOZHI_LOG);
-
-    fp = popen(cmd, "r");
-    if(!fp || !fgets(line, sizeof(line), fp)) {
-        if(fp) {
-            pclose(fp);
-        }
+    xiaozhi_truncate_log();
+    if(xiaozhi_write_control("PTT_BEGIN") != 0) {
         pthread_mutex_lock(&xiaozhi_lock);
-        xiaozhi_set_status_locked("Start failed", "popen failed", -1);
-        pthread_mutex_unlock(&xiaozhi_lock);
-        app_request_fast_refresh();
-        return;
-    }
-    pclose(fp);
-
-    pid = strtol(line, NULL, 10);
-    if(pid <= 0) {
-        pthread_mutex_lock(&xiaozhi_lock);
-        xiaozhi_set_status_locked("Start failed", "Invalid PTT pid", -1);
+        xiaozhi_set_status_locked("Session not ready",
+                                  "Tap Reconnect and try again", -1);
         pthread_mutex_unlock(&xiaozhi_lock);
         app_request_fast_refresh();
         return;
@@ -436,11 +565,10 @@ static void xiaozhi_start_ptt_hold(void)
 
     pthread_mutex_lock(&xiaozhi_lock);
     xiaozhi_running = 1;
-    xiaozhi_ptt_pid = (pid_t)pid;
     xiaozhi_ptt_recording = 1;
     xiaozhi_log_text[0] = '\0';
     xiaozhi_set_status_locked("Recording", "Release to send", 0);
-    snprintf(header, sizeof(header), "== Hold PTT pid=%ld ==", pid);
+    snprintf(header, sizeof(header), "== Hold PTT session ==");
     xiaozhi_append_log_locked(header);
     pthread_mutex_unlock(&xiaozhi_lock);
     app_request_fast_refresh();
@@ -448,11 +576,8 @@ static void xiaozhi_start_ptt_hold(void)
 
 static void xiaozhi_stop_ptt_hold(void)
 {
-    pid_t pid;
-
     pthread_mutex_lock(&xiaozhi_lock);
-    pid = xiaozhi_ptt_pid;
-    if(pid <= 0 || !xiaozhi_ptt_recording) {
+    if(!xiaozhi_ptt_recording) {
         pthread_mutex_unlock(&xiaozhi_lock);
         return;
     }
@@ -460,7 +585,7 @@ static void xiaozhi_stop_ptt_hold(void)
     xiaozhi_set_status_locked("Sending", "Waiting for reply", 0);
     pthread_mutex_unlock(&xiaozhi_lock);
 
-    kill(pid, SIGUSR1);
+    xiaozhi_write_control("PTT_END");
     app_request_fast_refresh();
 }
 
@@ -504,6 +629,7 @@ static void xiaozhi_url_submit_cb(const char *text, void *user_data)
     }
     if(ui_prefs_set(XIAOZHI_PREF_URL, value) == 0) {
         xiaozhi_save_status("Saved", "Server URL saved");
+        xiaozhi_restart_session();
     } else {
         xiaozhi_save_status("Save failed", "Server URL is too long");
     }
@@ -519,6 +645,7 @@ static void xiaozhi_token_submit_cb(const char *text, void *user_data)
     if(ui_prefs_set(XIAOZHI_PREF_TOKEN, value) == 0) {
         xiaozhi_save_status("Saved",
                             value[0] ? "Token saved" : "Token cleared");
+        xiaozhi_restart_session();
     } else {
         xiaozhi_save_status("Save failed", "Token is too long");
     }
@@ -564,6 +691,7 @@ static void xiaozhi_clear_token_event_cb(lv_event_t *event)
     (void)event;
     if(ui_prefs_set(XIAOZHI_PREF_TOKEN, "") == 0) {
         xiaozhi_save_status("Saved", "Token cleared");
+        xiaozhi_restart_session();
     } else {
         xiaozhi_save_status("Save failed", "Token is too long");
     }
@@ -573,12 +701,43 @@ static void xiaozhi_update(void)
 {
     int running;
     int rc;
+    int recording;
+    int session_ready;
     pid_t ptt_pid;
+    pid_t session_pid;
     char status[192];
     char detail[256];
     char log_text[XIAOZHI_LOG_TEXT_MAX];
 
     pthread_mutex_lock(&xiaozhi_lock);
+    session_pid = xiaozhi_session_pid;
+    if(session_pid > 0) {
+        xiaozhi_reload_log_tail_locked();
+        if(!xiaozhi_session_ready &&
+           strstr(xiaozhi_log_text, "session ready")) {
+            xiaozhi_session_ready = 1;
+            if(!xiaozhi_running) {
+                xiaozhi_set_status_locked("Ready", "Session ready", 0);
+            }
+        }
+        if(xiaozhi_running && !xiaozhi_ptt_recording &&
+           strstr(xiaozhi_log_text, "ptt turn done rc=0")) {
+            xiaozhi_running = 0;
+            xiaozhi_set_status_locked("Completed", "PTT", 0);
+        } else if(xiaozhi_running && !xiaozhi_ptt_recording &&
+                  strstr(xiaozhi_log_text, "ptt turn done rc=")) {
+            xiaozhi_running = 0;
+            xiaozhi_set_status_locked("Failed, check log", "PTT", -1);
+        }
+        if(kill(session_pid, 0) != 0 && errno == ESRCH) {
+            xiaozhi_session_pid = -1;
+            xiaozhi_session_ready = 0;
+            xiaozhi_ptt_recording = 0;
+            xiaozhi_running = 0;
+            xiaozhi_set_status_locked("Session stopped", "Tap Reconnect",
+                                      -1);
+        }
+    }
     if(xiaozhi_ptt_pid > 0) {
         xiaozhi_reload_log_tail_locked();
         if(kill(xiaozhi_ptt_pid, 0) != 0 && errno == ESRCH) {
@@ -594,7 +753,10 @@ static void xiaozhi_update(void)
     }
     running = xiaozhi_running;
     rc = xiaozhi_last_rc;
+    recording = xiaozhi_ptt_recording;
+    session_ready = xiaozhi_session_ready;
     ptt_pid = xiaozhi_ptt_pid;
+    session_pid = xiaozhi_session_pid;
     snprintf(status, sizeof(status), "%s", xiaozhi_status_text);
     snprintf(detail, sizeof(detail), "%s", xiaozhi_detail_text);
     snprintf(log_text, sizeof(log_text), "%s", xiaozhi_log_text);
@@ -623,7 +785,9 @@ static void xiaozhi_update(void)
                   lv_obj_clear_state(xiaozhi_audio_btn, LV_STATE_DISABLED);
     }
     if(xiaozhi_ptt_btn) {
-        if(running && ptt_pid <= 0) {
+        if((running && ptt_pid <= 0 && !recording) ||
+           !session_ready ||
+           !xiaozhi_process_alive(session_pid)) {
             lv_obj_add_state(xiaozhi_ptt_btn, LV_STATE_DISABLED);
         } else {
             lv_obj_clear_state(xiaozhi_ptt_btn, LV_STATE_DISABLED);
@@ -659,6 +823,7 @@ void ui_xiaozhi_create(lv_obj_t *scr)
     ui_create_header(scr, "Xiaozhi");
 
     body = ui_page_body(scr, 144);
+    xiaozhi_start_session();
     panel = ui_panel(body, x, 18, w, panel_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101418), 0);
     ui_make_scrollable(panel, 54);
@@ -728,7 +893,7 @@ void ui_xiaozhi_create(lv_obj_t *scr)
 
     if(landscape) {
         xiaozhi_probe_btn = ui_command_button(panel, 0, button_y, button_w,
-                                              "Probe", 0x3DA5FF);
+                                              "Reconnect", 0x3DA5FF);
         xiaozhi_audio_btn = ui_command_button(panel, button_w + 16, button_y,
                                               button_w, "Audio", 0x22C55E);
         xiaozhi_ptt_btn = ui_command_button(panel, (button_w + 16) * 2,
@@ -736,7 +901,7 @@ void ui_xiaozhi_create(lv_obj_t *scr)
                                             0xF97316);
     } else {
         xiaozhi_probe_btn = ui_command_button(panel, 0, button_y, button_w,
-                                              "Probe", 0x3DA5FF);
+                                              "Reconnect", 0x3DA5FF);
         xiaozhi_audio_btn = ui_command_button(panel, 0, button_y + 74,
                                               button_w, "Audio", 0x22C55E);
         xiaozhi_ptt_btn = ui_command_button(panel, 0, button_y + 148,
@@ -776,6 +941,8 @@ void ui_xiaozhi_create(lv_obj_t *scr)
 
 void ui_xiaozhi_cleanup(void)
 {
+    xiaozhi_stop_session();
+
     pthread_mutex_lock(&xiaozhi_lock);
     if(xiaozhi_ptt_pid > 0) {
         kill(xiaozhi_ptt_pid, SIGTERM);
