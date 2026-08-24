@@ -1,6 +1,7 @@
 #include "ui_xiaozhi.h"
 
 #include "ui_common.h"
+#include "ui_hardware.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
 #include "ui_prefs.h"
@@ -113,6 +114,13 @@ static void xiaozhi_env_prefix(char *out, size_t len)
     xiaozhi_shell_quote(token_q, sizeof(token_q), token);
     snprintf(out, len, "env XIAOZHI_URL=%s XIAOZHI_TOKEN=%s", url_q,
              token_q);
+}
+
+static void xiaozhi_apply_audio_output_route(void)
+{
+    int external = ui_audio_output_is_external() ? 1 : 0;
+
+    ui_audio_output_set_external(external);
 }
 
 static void xiaozhi_update_settings_labels(void)
@@ -288,6 +296,7 @@ static void *xiaozhi_worker(void *arg)
         return NULL;
     }
 
+    xiaozhi_apply_audio_output_route();
     xiaozhi_build_command(action, cmd, sizeof(cmd));
     fp = popen(cmd, "r");
     if(!fp) {
@@ -396,6 +405,7 @@ static void xiaozhi_start_ptt_hold(void)
         fclose(fp);
     }
 
+    xiaozhi_apply_audio_output_route();
     xiaozhi_env_prefix(env_prefix, sizeof(env_prefix));
     snprintf(cmd, sizeof(cmd),
              "%s %s ptt --seconds 30 --wait 15 --timeout-ms 10000 "
