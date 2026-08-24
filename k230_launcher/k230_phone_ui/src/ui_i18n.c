@@ -201,6 +201,8 @@ static const ui_translation_t ui_translations[] = {
     { "Connecting", "连接中", "接続中" },
     { "Session handshake", "会话握手中", "セッションハンドシェイク中" },
     { "Session ready", "会话已就绪", "セッション準備完了" },
+    { "New chat", "新对话", "新規チャット" },
+    { "Session restarting", "会话正在重启", "セッション再起動中" },
     { "Session stopped", "会话已停止", "セッション停止" },
     { "Tap Reconnect", "点击重连", "再接続をタップ" },
     { "Session not ready", "会话未就绪", "セッション未準備" },

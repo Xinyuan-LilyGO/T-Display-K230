@@ -48,6 +48,7 @@ static lv_obj_t *xiaozhi_status_label;
 static lv_obj_t *xiaozhi_detail_label;
 static lv_obj_t *xiaozhi_log_label;
 static lv_obj_t *xiaozhi_probe_btn;
+static lv_obj_t *xiaozhi_new_chat_btn;
 static lv_obj_t *xiaozhi_audio_btn;
 static lv_obj_t *xiaozhi_ptt_btn;
 static lv_obj_t *xiaozhi_url_label;
@@ -1154,6 +1155,27 @@ static void xiaozhi_clear_token_event_cb(lv_event_t *event)
     }
 }
 
+static void xiaozhi_new_chat_event_cb(lv_event_t *event)
+{
+    (void)event;
+
+    pthread_mutex_lock(&xiaozhi_lock);
+    if(xiaozhi_running) {
+        pthread_mutex_unlock(&xiaozhi_lock);
+        return;
+    }
+    xiaozhi_chat_text[0] = '\0';
+    xiaozhi_rendered_chat_text[0] = '\0';
+    xiaozhi_log_scan_len = strlen(xiaozhi_log_text);
+    xiaozhi_set_status_locked("New chat", "Session restarting", 0);
+    xiaozhi_append_log_locked("== New chat ==");
+    pthread_mutex_unlock(&xiaozhi_lock);
+
+    xiaozhi_chat_rebuild("");
+    xiaozhi_restart_session();
+    app_request_fast_refresh();
+}
+
 static void xiaozhi_update(void)
 {
     int running;
@@ -1252,6 +1274,10 @@ static void xiaozhi_update(void)
     if(xiaozhi_probe_btn) {
         running ? lv_obj_add_state(xiaozhi_probe_btn, LV_STATE_DISABLED) :
                   lv_obj_clear_state(xiaozhi_probe_btn, LV_STATE_DISABLED);
+    }
+    if(xiaozhi_new_chat_btn) {
+        running ? lv_obj_add_state(xiaozhi_new_chat_btn, LV_STATE_DISABLED) :
+                  lv_obj_clear_state(xiaozhi_new_chat_btn, LV_STATE_DISABLED);
     }
     if(xiaozhi_audio_btn) {
         running ? lv_obj_add_state(xiaozhi_audio_btn, LV_STATE_DISABLED) :
@@ -1419,30 +1445,41 @@ void ui_xiaozhi_create(lv_obj_t *scr)
                                   lv_color_hex(0x1F2937), 0);
 
     if(landscape) {
-        int button_w = (content_w - 24) / 3;
+        int button_w = (content_w - 36) / 4;
 
         xiaozhi_probe_btn = ui_command_button(xiaozhi_action_panel, 0, 10,
                                               button_w, "Reconnect",
                                               0x3DA5FF);
+        xiaozhi_new_chat_btn = ui_command_button(xiaozhi_action_panel,
+                                                 button_w + 12, 10,
+                                                 button_w, "New chat",
+                                                 0xA78BFA);
         xiaozhi_audio_btn = ui_command_button(xiaozhi_action_panel,
-                                              button_w + 12, 10, button_w,
-                                              "Audio", 0x22C55E);
+                                              (button_w + 12) * 2, 10,
+                                              button_w, "Audio", 0x22C55E);
         xiaozhi_ptt_btn = ui_command_button(xiaozhi_action_panel,
-                                            (button_w + 12) * 2, 10, button_w,
+                                            (button_w + 12) * 3, 10, button_w,
                                             "Hold to talk", 0xF97316);
     } else {
-        int half_w = (content_w - 12) / 2;
+        int third_w = (content_w - 24) / 3;
 
         xiaozhi_probe_btn = ui_command_button(xiaozhi_action_panel, 0, 8,
-                                              half_w, "Reconnect", 0x3DA5FF);
+                                              third_w, "Reconnect",
+                                              0x3DA5FF);
+        xiaozhi_new_chat_btn = ui_command_button(xiaozhi_action_panel,
+                                                 third_w + 12, 8,
+                                                 third_w, "New chat",
+                                                 0xA78BFA);
         xiaozhi_audio_btn = ui_command_button(xiaozhi_action_panel,
-                                              half_w + 12, 8, half_w,
+                                              (third_w + 12) * 2, 8, third_w,
                                               "Audio", 0x22C55E);
         xiaozhi_ptt_btn = ui_command_button(xiaozhi_action_panel, 0, 82,
                                             content_w, "Hold to talk",
                                             0xF97316);
     }
     lv_obj_add_event_cb(xiaozhi_probe_btn, xiaozhi_probe_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(xiaozhi_new_chat_btn, xiaozhi_new_chat_event_cb,
                         LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(xiaozhi_audio_btn, xiaozhi_audio_event_cb,
                         LV_EVENT_CLICKED, NULL);
@@ -1488,6 +1525,7 @@ void ui_xiaozhi_cleanup(void)
     xiaozhi_detail_label = NULL;
     xiaozhi_log_label = NULL;
     xiaozhi_probe_btn = NULL;
+    xiaozhi_new_chat_btn = NULL;
     xiaozhi_audio_btn = NULL;
     xiaozhi_ptt_btn = NULL;
     xiaozhi_url_label = NULL;
