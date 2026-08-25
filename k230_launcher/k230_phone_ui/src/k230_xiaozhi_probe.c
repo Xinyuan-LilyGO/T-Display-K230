@@ -1031,6 +1031,7 @@ static void log_chat_message_from_json(const char *json)
     char type[32];
     char state[32];
     char text[512];
+    char emotion[64];
 
     if (!json || json_get_string(json, "type", type, sizeof(type)) != 0) {
         return;
@@ -1041,6 +1042,16 @@ static void log_chat_message_from_json(const char *json)
             trim_newline(text);
             if (text[0]) {
                 log_line("CHAT", "user: %s", text);
+            }
+        }
+        return;
+    }
+
+    if (strcmp(type, "llm") == 0) {
+        if (json_get_string(json, "emotion", emotion, sizeof(emotion)) == 0) {
+            trim_newline(emotion);
+            if (emotion[0]) {
+                log_line("EMOTION", "%s", emotion);
             }
         }
         return;
