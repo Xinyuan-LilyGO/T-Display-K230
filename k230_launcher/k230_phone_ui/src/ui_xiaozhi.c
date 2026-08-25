@@ -494,6 +494,7 @@ static void xiaozhi_start_session(void)
         fclose(fp);
     }
 
+    ui_network_force_default_route("xiaozhi-session");
     xiaozhi_apply_audio_output_route();
     xiaozhi_env_prefix(env_prefix, sizeof(env_prefix));
     xiaozhi_shell_quote(ctl_q, sizeof(ctl_q), XIAOZHI_CTL);
@@ -1942,6 +1943,7 @@ static void *xiaozhi_worker(void *arg)
     }
 
     xiaozhi_apply_audio_output_route();
+    ui_network_force_default_route("xiaozhi-action");
     xiaozhi_build_command(action, cmd, sizeof(cmd));
     fp = popen(cmd, "r");
     if(!fp) {

@@ -994,28 +994,24 @@ static int ui_network_run_route_sync(const char *preferred,
     }
 
     snprintf(cmd, sizeof(cmd),
-             "PREF='%s'; OTHER='%s'; "
+             "PREF='%s'; OTHER='%s'; FLUSH_OTHER=%d; "
              "if command -v ip >/dev/null 2>&1; then "
-             "ip route del default dev \"$OTHER\" >/dev/null 2>&1 || true; "
-             "%s"
-             "if ! ip route show default dev \"$PREF\" | grep -q .; then "
-             "GW=$(ip route show default 2>/dev/null | "
+             "GW=$(ip route show default dev \"$PREF\" 2>/dev/null | "
              "awk '/ via / {print $3; exit}'); "
-             "if [ -z \"$GW\" ]; then "
+             "[ -z \"$GW\" ] && "
              "GW=$(ip -4 addr show dev \"$PREF\" 2>/dev/null | "
              "awk '/ inet / {split($2,a,\"/\"); split(a[1],o,\".\"); "
              "if(o[1] != \"\") print o[1]\".\"o[2]\".\"o[3]\".1\"; exit}'); "
-             "fi; "
-             "[ -n \"$GW\" ] && "
-             "ip route replace default via \"$GW\" dev \"$PREF\" "
-             ">/dev/null 2>&1 || true; "
-             "fi; "
+             "while ip route del default >/dev/null 2>&1; do :; done; "
+             "[ \"$FLUSH_OTHER\" = \"1\" ] && "
+             "ip addr flush dev \"$OTHER\" >/dev/null 2>&1 || true; "
+             "[ -n \"$GW\" ] || exit 2; "
+             "ip route replace default via \"$GW\" dev \"$PREF\"; "
              "else "
              "route del default dev \"$OTHER\" >/dev/null 2>&1 || true; "
              "fi",
              preferred, other && other[0] ? other : "",
-             flush_other_ipv4 ?
-             "ip addr flush dev \"$OTHER\" >/dev/null 2>&1 || true; " : "");
+             flush_other_ipv4 ? 1 : 0);
 
     rc = system(cmd);
     return ui_shell_exit_code(rc);
@@ -1124,6 +1120,16 @@ void ui_network_sync_default_route(const char *reason)
         ui_network_route_log(reason, preferred, eth_carrier, eth_has_ip,
                              eth_ip, wifi_has_ip, wifi_ip, rc);
     }
+}
+
+void ui_network_force_default_route(const char *reason)
+{
+    ui_network_route_last_us = 0;
+    ui_network_route_last_preferred[0] = '\0';
+    ui_network_route_last_eth_carrier = -2;
+    ui_network_route_last_eth_ip = 0;
+    ui_network_route_last_wifi_ip = 0;
+    ui_network_sync_default_route(reason);
 }
 
 int ui_shell_exit_code(int rc)
