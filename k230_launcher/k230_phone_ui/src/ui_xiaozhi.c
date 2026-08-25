@@ -6,6 +6,8 @@
 #include "ui_input.h"
 #include "ui_prefs.h"
 
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -255,6 +257,63 @@ static int xiaozhi_kws_clear_dead_process(void)
     return route_active;
 }
 
+static int xiaozhi_kws_kill_stale_helpers(pid_t keep_pid)
+{
+    DIR *dir;
+    struct dirent *entry;
+    int killed = 0;
+
+    dir = opendir("/proc");
+    if(!dir) {
+        return 0;
+    }
+
+    while((entry = readdir(dir)) != NULL) {
+        char path[64];
+        char cmdline[256];
+        char *end = NULL;
+        long pid_l;
+        int fd;
+        ssize_t rd;
+
+        if(!isdigit((unsigned char)entry->d_name[0])) {
+            continue;
+        }
+
+        pid_l = strtol(entry->d_name, &end, 10);
+        if(pid_l <= 0 || (end && *end != '\0') || pid_l == keep_pid) {
+            continue;
+        }
+
+        snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid_l);
+        fd = open(path, O_RDONLY);
+        if(fd < 0) {
+            continue;
+        }
+        rd = read(fd, cmdline, sizeof(cmdline) - 1);
+        close(fd);
+        if(rd <= 0) {
+            continue;
+        }
+        cmdline[rd] = '\0';
+        if(strstr(cmdline, "k230_xiaozhi_kws")) {
+            if(kill((pid_t)pid_l, SIGTERM) == 0) {
+                killed++;
+            }
+        }
+    }
+    closedir(dir);
+
+    if(killed > 0) {
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_append_log_locked("KWS_CLEANUP stale helper stopped");
+        pthread_mutex_unlock(&xiaozhi_lock);
+        usleep(150000);
+    }
+
+    return killed;
+}
+
 static void xiaozhi_kws_start(void)
 {
     FILE *fp;
@@ -265,10 +324,12 @@ static void xiaozhi_kws_start(void)
     char line[64];
     long pid;
     int should_start;
+    pid_t tracked_pid;
 
     xiaozhi_kws_clear_dead_process();
 
     pthread_mutex_lock(&xiaozhi_lock);
+    tracked_pid = xiaozhi_kws_pid;
     should_start = xiaozhi_kws_should_run && xiaozhi_kws_available &&
                    !xiaozhi_running && !xiaozhi_ptt_recording &&
                    !xiaozhi_process_alive(xiaozhi_kws_pid);
@@ -290,6 +351,7 @@ static void xiaozhi_kws_start(void)
         return;
     }
 
+    xiaozhi_kws_kill_stale_helpers(tracked_pid);
     ui_audio_input_route_enter("Xiaozhi KWS");
 
     xiaozhi_shell_quote(bin_q, sizeof(bin_q), XIAOZHI_KWS_BIN);
@@ -390,6 +452,12 @@ static void xiaozhi_start_session(void)
     char log_q[128];
     char line[64];
     long pid;
+    pid_t tracked_kws_pid;
+
+    pthread_mutex_lock(&xiaozhi_lock);
+    tracked_kws_pid = xiaozhi_kws_pid;
+    pthread_mutex_unlock(&xiaozhi_lock);
+    xiaozhi_kws_kill_stale_helpers(tracked_kws_pid);
 
     pthread_mutex_lock(&xiaozhi_lock);
     if(xiaozhi_process_alive(xiaozhi_session_pid)) {
@@ -1675,16 +1743,7 @@ static void xiaozhi_face_open_event_cb(lv_event_t *event)
     lv_obj_align(xiaozhi_face_status_label, LV_ALIGN_TOP_MID, 0,
                  landscape ? 30 : 44);
 
-    xiaozhi_face_emotion_label =
-        ui_label(xiaozhi_face_overlay, "Emotion neutral",
-                 &lv_font_montserrat_18, 0x38BDF8);
-    lv_obj_set_width(xiaozhi_face_emotion_label, sw - 96);
-    lv_obj_set_style_text_align(xiaozhi_face_emotion_label,
-                                LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(xiaozhi_face_emotion_label, LV_LABEL_LONG_DOT);
-    xiaozhi_face_enable_touch_bubble(xiaozhi_face_emotion_label);
-    lv_obj_align(xiaozhi_face_emotion_label, LV_ALIGN_BOTTOM_MID, 0,
-                 landscape ? -22 : -32);
+    xiaozhi_face_emotion_label = NULL;
 
     xiaozhi_face_ptt_btn = ui_command_button(xiaozhi_face_overlay,
                                              sw / 2 - ptt_w / 2, ptt_y,
@@ -2644,6 +2703,7 @@ void ui_xiaozhi_cleanup(void)
     pthread_mutex_unlock(&xiaozhi_lock);
     xiaozhi_auto_ptt_timer_stop();
     xiaozhi_kws_stop();
+    xiaozhi_kws_kill_stale_helpers(-1);
     xiaozhi_stop_session();
     xiaozhi_record_overlay_close();
     xiaozhi_face_overlay_close();
