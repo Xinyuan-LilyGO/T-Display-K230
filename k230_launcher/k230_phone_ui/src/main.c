@@ -637,6 +637,7 @@ static void cleanup_page_state(void);
 static int camera_gallery_handle_back(void);
 static void edge_back_load_pref(void);
 static void edge_back_event_cb(lv_event_t *event);
+static void edge_back_hint_hide(void);
 static int display_logical_width(void);
 static int display_logical_height(void);
 static void load_runtime_display_orientation(void);
