@@ -700,6 +700,74 @@ static void xiaozhi_chat_rebuild(const char *shown)
     }
 }
 
+static int xiaozhi_chat_append_delta(const char *previous, const char *shown)
+{
+    char copy[XIAOZHI_CHAT_TEXT_MAX];
+    char *line;
+    char *save = NULL;
+    const char *delta;
+    size_t previous_len;
+    int count = 0;
+
+    if(!xiaozhi_chat_scroll || !lv_obj_is_valid(xiaozhi_chat_scroll)) {
+        return 0;
+    }
+
+    if(!previous) {
+        previous = "";
+    }
+    if(!shown) {
+        shown = "";
+    }
+
+    previous_len = strlen(previous);
+    if(strncmp(shown, previous, previous_len) != 0) {
+        return 0;
+    }
+    if(shown[previous_len] && shown[previous_len] != '\n') {
+        return 0;
+    }
+
+    delta = shown + previous_len;
+    if(*delta == '\n') {
+        delta++;
+    }
+    if(!*delta) {
+        return 1;
+    }
+
+    if(previous_len == 0) {
+        lv_obj_clean(xiaozhi_chat_scroll);
+    }
+
+    snprintf(copy, sizeof(copy), "%s", delta);
+    line = strtok_r(copy, "\n", &save);
+    while(line) {
+        char role = line[0];
+        char *body = strchr(line, '|');
+
+        if(body && body[1]) {
+            body++;
+            xiaozhi_chat_add_bubble(role, body);
+            count++;
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+
+    if(count > 0) {
+        uint32_t child_count = lv_obj_get_child_count(xiaozhi_chat_scroll);
+        if(child_count > 0) {
+            lv_obj_t *last =
+                lv_obj_get_child(xiaozhi_chat_scroll, child_count - 1);
+            if(last) {
+                lv_obj_scroll_to_view(last, LV_ANIM_OFF);
+            }
+        }
+    }
+
+    return count > 0;
+}
+
 static void xiaozhi_record_overlay_close(void)
 {
     if(xiaozhi_record_overlay_timer) {
@@ -1328,6 +1396,18 @@ static void xiaozhi_update(void)
             }
         }
         if(xiaozhi_running && !xiaozhi_ptt_recording &&
+           strstr(xiaozhi_log_text, "EVENT response_done")) {
+            xiaozhi_running = 0;
+            xiaozhi_set_status_locked("Completed", "Reply finished", 0);
+            xiaozhi_record_overlay_close();
+        } else if(xiaozhi_running && !xiaozhi_ptt_recording &&
+                  strstr(xiaozhi_log_text, "EVENT audio_start")) {
+            xiaozhi_set_status_locked("Playing", "Receiving reply", 0);
+        } else if(xiaozhi_running && !xiaozhi_ptt_recording &&
+                  strstr(xiaozhi_log_text, "EVENT request_sent")) {
+            xiaozhi_set_status_locked("Receiving", "Waiting for reply", 0);
+        }
+        if(xiaozhi_running && !xiaozhi_ptt_recording &&
            strstr(xiaozhi_log_text, "ptt turn done rc=0")) {
             xiaozhi_running = 0;
             xiaozhi_set_status_locked("Completed", "PTT", 0);
@@ -1398,9 +1478,14 @@ static void xiaozhi_update(void)
     }
     if(xiaozhi_chat_scroll &&
        strcmp(chat_text, xiaozhi_rendered_chat_text) != 0) {
+        int appended =
+            xiaozhi_chat_append_delta(xiaozhi_rendered_chat_text, chat_text);
+
+        if(!appended) {
+            xiaozhi_chat_rebuild(chat_text);
+        }
         snprintf(xiaozhi_rendered_chat_text,
                  sizeof(xiaozhi_rendered_chat_text), "%s", chat_text);
-        xiaozhi_chat_rebuild(chat_text);
     }
     if(xiaozhi_probe_btn) {
         running ? lv_obj_add_state(xiaozhi_probe_btn, LV_STATE_DISABLED) :
@@ -1642,7 +1727,7 @@ void ui_xiaozhi_create(lv_obj_t *scr)
     snprintf(xiaozhi_rendered_chat_text, sizeof(xiaozhi_rendered_chat_text),
              "%s", xiaozhi_chat_text);
     xiaozhi_start_session();
-    xiaozhi_timer = lv_timer_create(xiaozhi_timer_cb, 500, NULL);
+    xiaozhi_timer = lv_timer_create(xiaozhi_timer_cb, 200, NULL);
     xiaozhi_update_settings_labels();
     xiaozhi_update();
 }

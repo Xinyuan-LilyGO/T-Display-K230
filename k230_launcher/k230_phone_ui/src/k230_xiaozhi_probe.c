@@ -1060,6 +1060,25 @@ static void log_chat_message_from_json(const char *json)
     }
 }
 
+static int json_has_type_state(const char *json, const char *type_value,
+                               const char *state_value)
+{
+    char type[32];
+    char state[32];
+
+    if (!json || !type_value || !state_value) {
+        return 0;
+    }
+    if (json_get_string(json, "type", type, sizeof(type)) != 0 ||
+        strcmp(type, type_value) != 0) {
+        return 0;
+    }
+    if (json_get_string(json, "state", state, sizeof(state)) != 0) {
+        return 0;
+    }
+    return strcmp(state, state_value) == 0;
+}
+
 static void make_hello(char *buf, size_t len)
 {
     snprintf(buf, len,
@@ -1569,6 +1588,7 @@ static int command_ptt(const app_opts_t *opts)
     make_listen(listen, sizeof(listen), session_id, "stop");
     log_line("INFO", "send listen stop");
     ws_send_frame(&ws, 1, listen, strlen(listen));
+    log_line("EVENT", "request_sent");
 
     pcm_handle_t play;
     int playback_open = (open_pcm(&play, SND_PCM_STREAM_PLAYBACK, opts->playback_dev, (unsigned int)server_rate, DEFAULT_CHANNELS) == 0);
@@ -1580,6 +1600,7 @@ static int command_ptt(const app_opts_t *opts)
 
     int16_t decoded[5760];
     time_t deadline = time(NULL) + opts->wait_seconds;
+    int rx_audio_seen = 0;
     log_line("INFO", "receive response: wait=%d", opts->wait_seconds);
     while (!g_stop && time(NULL) <= deadline) {
         int opcode = 0;
@@ -1592,8 +1613,20 @@ static int command_ptt(const app_opts_t *opts)
         if (opcode == 1) {
             log_line("INFO", "text: %s", payload);
             log_chat_message_from_json((const char *)payload);
+            if (json_has_type_state((const char *)payload, "tts", "start")) {
+                log_line("EVENT", "response_start");
+            } else if (json_has_type_state((const char *)payload, "tts",
+                                           "stop")) {
+                log_line("EVENT", "response_done");
+                free(payload);
+                break;
+            }
         } else if (opcode == 2) {
             log_line("INFO", "rx opus bytes=%zu", len);
+            if (!rx_audio_seen) {
+                rx_audio_seen = 1;
+                log_line("EVENT", "audio_start");
+            }
             if (dec && playback_open) {
                 int samples = opus_decode(dec, payload, (opus_int32)len, decoded, 5760, 0);
                 if (samples > 0) {
@@ -1701,6 +1734,7 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
         log_line("ERR", "send listen stop failed");
         return 1;
     }
+    log_line("EVENT", "request_sent");
     if (rc != 0 || g_stop) {
         return rc ? rc : 1;
     }
@@ -1717,6 +1751,7 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
 
     int16_t decoded[5760];
     time_t deadline = time(NULL) + opts->wait_seconds;
+    int rx_audio_seen = 0;
     log_line("INFO", "receive response: wait=%d", opts->wait_seconds);
     while (!g_stop && time(NULL) <= deadline) {
         int opcode = 0;
@@ -1740,8 +1775,20 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
         if (opcode == 1) {
             log_line("INFO", "text: %s", payload);
             log_chat_message_from_json((const char *)payload);
+            if (json_has_type_state((const char *)payload, "tts", "start")) {
+                log_line("EVENT", "response_start");
+            } else if (json_has_type_state((const char *)payload, "tts",
+                                           "stop")) {
+                log_line("EVENT", "response_done");
+                free(payload);
+                break;
+            }
         } else if (opcode == 2) {
             log_line("INFO", "rx opus bytes=%zu", len);
+            if (!rx_audio_seen) {
+                rx_audio_seen = 1;
+                log_line("EVENT", "audio_start");
+            }
             if (dec && playback_open) {
                 int samples = opus_decode(dec, payload, (opus_int32)len,
                                           decoded, 5760, 0);
