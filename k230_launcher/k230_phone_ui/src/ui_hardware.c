@@ -76,6 +76,7 @@
 #define KEYBOARD_BACKLIGHT_LOG "/tmp/k230_keyboard_backlight.log"
 #define KEYBOARD_HOTKEY_LOG "/tmp/k230_keyboard_hotkey.log"
 #define BOOT0_TOGGLE_DEBOUNCE_US 500000ULL
+#define BOOT0_TOGGLE_STABLE_US 120000ULL
 #define BOOT0_FADE_STEPS 12
 #define BOOT0_FADE_STEP_US 25000
 #define HARDWARE_BACKLIGHT_PATH_MAX 160
@@ -507,6 +508,10 @@ static int boot0_screen_off;
 static int boot0_saved_backlight = -1;
 static int boot0_saved_keyboard_backlight = -1;
 static uint64_t boot0_last_toggle_us;
+static int boot0_press_active;
+static int boot0_press_reported;
+static uint64_t boot0_press_start_us;
+static char boot0_press_source[40];
 static ui_hardware_screen_toggle_cb_t screen_toggle_cb;
 static void *screen_toggle_cb_user_data;
 static pthread_mutex_t tca8418_event_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1504,6 +1509,7 @@ static void boot0_toggle_poll(void)
     char err[160];
     int value;
     uint64_t now = ui_monotonic_us();
+    uint64_t low_us;
 
     if(button_read_gpio(BUTTON_BOOT0_GPIO, &value, source, sizeof(source),
                         err, sizeof(err)) != 0) {
@@ -1513,6 +1519,10 @@ static void boot0_toggle_poll(void)
     if(!boot0_toggle_initialized) {
         boot0_last_raw = value;
         boot0_toggle_initialized = 1;
+        boot0_press_active = 0;
+        boot0_press_reported = 0;
+        boot0_press_start_us = 0;
+        boot0_press_source[0] = '\0';
         if(hardware_read_backlight_raw() <= 0) {
             boot0_screen_off = 1;
             button_test_log("BOOT0 initial screen-off state from backlight=0");
@@ -1520,21 +1530,56 @@ static void boot0_toggle_poll(void)
         return;
     }
 
-    if(boot0_last_raw == BUTTON_BOOT0_IDLE_VALUE &&
-       value != BUTTON_BOOT0_IDLE_VALUE &&
+    if(value == BUTTON_BOOT0_IDLE_VALUE) {
+        if(boot0_press_active && !boot0_press_reported) {
+            low_us = now >= boot0_press_start_us ?
+                     now - boot0_press_start_us : 0;
+            button_test_log("BOOT0 ignored short low duration_us=%llu source=%s",
+                            (unsigned long long)low_us,
+                            boot0_press_source[0] ? boot0_press_source :
+                            source);
+        }
+        boot0_press_active = 0;
+        boot0_press_reported = 0;
+        boot0_press_start_us = 0;
+        boot0_press_source[0] = '\0';
+        boot0_last_raw = value;
+        return;
+    }
+
+    if(boot0_last_raw == BUTTON_BOOT0_IDLE_VALUE && !boot0_press_active) {
+        boot0_press_active = 1;
+        boot0_press_reported = 0;
+        boot0_press_start_us = now;
+        snprintf(boot0_press_source, sizeof(boot0_press_source), "%s",
+                 source[0] ? source : "unknown");
+    }
+
+    low_us = boot0_press_active && now >= boot0_press_start_us ?
+             now - boot0_press_start_us : 0;
+    if(boot0_press_active && !boot0_press_reported &&
+       low_us >= BOOT0_TOGGLE_STABLE_US &&
        now - boot0_last_toggle_us > BOOT0_TOGGLE_DEBOUNCE_US) {
         ui_hardware_screen_toggle_cb_t cb;
         void *cb_user_data;
 
         boot0_last_toggle_us = now;
+        boot0_press_reported = 1;
         pthread_mutex_lock(&hardware_lock);
         cb = screen_toggle_cb;
         cb_user_data = screen_toggle_cb_user_data;
         pthread_mutex_unlock(&hardware_lock);
         if(cb) {
-            button_test_log("BOOT0 screen toggle delegated to power manager");
+            button_test_log("BOOT0 screen toggle delegated to power manager duration_us=%llu source=%s",
+                            (unsigned long long)low_us,
+                            boot0_press_source[0] ? boot0_press_source :
+                            source);
             cb(cb_user_data);
         } else {
+            button_test_log("BOOT0 screen toggle direct duration_us=%llu source=%s",
+                            (unsigned long long)low_us,
+                            boot0_press_source[0] ? boot0_press_source :
+                            source);
             boot0_apply_screen_toggle(!boot0_screen_off);
         }
     }
