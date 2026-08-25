@@ -925,8 +925,12 @@ static void edge_back_raw_trace(uint32_t seq, int pressed, int32_t screen_x,
 {
     static int raw_down;
     const char *reason = NULL;
+    uint64_t now = ui_monotonic_us();
 
-    if(!edge_back_enabled) {
+    if(edge_back_lvgl_suppress_until_us &&
+       now < edge_back_lvgl_suppress_until_us) {
+        reason = "suppress";
+    } else if(!edge_back_enabled) {
         reason = "disabled";
     } else if(current_page == PAGE_HOME) {
         reason = "home";
@@ -3975,6 +3979,28 @@ void app_set_edge_back_enabled(int enabled)
     edge_back_enabled = 1;
     edge_back_pref_loaded = 1;
     edge_back_log("SET ignored always_on=1");
+}
+
+void app_edge_back_cancel_gesture(uint32_t suppress_ms)
+{
+    uint64_t now = ui_monotonic_us();
+    uint64_t suppress_us = suppress_ms ? (uint64_t)suppress_ms * 1000ULL :
+                           250000ULL;
+
+    pthread_mutex_lock(&edge_back_raw_state_lock);
+    edge_back_raw_pending = 0;
+    edge_back_raw_hint_active = 0;
+    edge_back_raw_hint_generation++;
+    pthread_mutex_unlock(&edge_back_raw_state_lock);
+
+    edge_back_tracking = 0;
+    edge_back_direction = 0;
+    edge_back_raw_tracking = 0;
+    edge_back_raw_direction = 0;
+    edge_back_lvgl_suppress_until_us = now + suppress_us;
+    edge_back_hint_hide();
+    edge_back_log("CANCEL_GESTURE page=%s suppress_ms=%lu",
+                  page_name(current_page), (unsigned long)suppress_ms);
 }
 
 static int edge_back_clamp(int value, int min_value, int max_value)

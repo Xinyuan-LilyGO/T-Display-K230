@@ -125,6 +125,7 @@ void app_refresh_status_bar(void);
 void app_note_user_activity(void);
 int app_edge_back_enabled(void);
 void app_set_edge_back_enabled(int enabled);
+void app_edge_back_cancel_gesture(uint32_t suppress_ms);
 int app_display_rotation_degrees(void);
 void app_set_display_rotation_degrees(int degrees);
 int app_display_logical_width(void);

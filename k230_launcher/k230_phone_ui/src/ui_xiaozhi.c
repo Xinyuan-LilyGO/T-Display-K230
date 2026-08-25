@@ -1319,6 +1319,7 @@ static void xiaozhi_face_touch_event_cb(lv_event_t *event)
         (xiaozhi_face_edge_start_point.x >=
              sw - XIAOZHI_FACE_EDGE_START_PX &&
          dx < 0))) {
+        app_edge_back_cancel_gesture(500);
         xiaozhi_face_overlay_close();
         app_request_fast_refresh();
         lv_event_stop_processing(event);
