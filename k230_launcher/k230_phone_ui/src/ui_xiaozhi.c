@@ -27,6 +27,9 @@
 #define XIAOZHI_LOG_TEXT_MAX 4096
 #define XIAOZHI_CHAT_TEXT_MAX 8192
 #define XIAOZHI_WAKE_RECORD_MS 3000
+#define XIAOZHI_FACE_CONTROLS_HIDE_MS 3500
+#define XIAOZHI_FACE_EDGE_START_PX 28
+#define XIAOZHI_FACE_EDGE_SWIPE_PX 90
 #define XIAOZHI_DEFAULT_URL "wss://api.tenclass.net:443/xiaozhi/v1/"
 #define XIAOZHI_PREF_URL "xiaozhi.url"
 #define XIAOZHI_PREF_TOKEN "xiaozhi.token"
@@ -83,7 +86,11 @@ static int xiaozhi_kws_route_active;
 static int xiaozhi_kws_available = 1;
 static int xiaozhi_record_phase;
 static int xiaozhi_settings_dirty;
+static int xiaozhi_face_controls_hidden;
+static int xiaozhi_face_edge_tracking;
 static uint64_t xiaozhi_record_start_us;
+static uint64_t xiaozhi_face_controls_last_touch_us;
+static lv_point_t xiaozhi_face_edge_start_point;
 static size_t xiaozhi_kws_log_scan_len;
 static char xiaozhi_status_text[192] = "Ready";
 static char xiaozhi_detail_text[256] =
@@ -1153,6 +1160,103 @@ static void xiaozhi_face_show(lv_obj_t *obj, int show)
     }
 }
 
+static void xiaozhi_face_enable_touch_bubble(lv_obj_t *obj)
+{
+    if(obj && lv_obj_is_valid(obj)) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_EVENT_BUBBLE);
+    }
+}
+
+static void xiaozhi_face_controls_show(void)
+{
+    xiaozhi_face_controls_last_touch_us = ui_monotonic_us();
+    xiaozhi_face_controls_hidden = 0;
+    if(xiaozhi_face_ptt_btn && lv_obj_is_valid(xiaozhi_face_ptt_btn)) {
+        lv_obj_clear_flag(xiaozhi_face_ptt_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void xiaozhi_face_controls_update(int recording)
+{
+    uint64_t now;
+    uint64_t idle_ms;
+
+    if(!xiaozhi_face_ptt_btn || !lv_obj_is_valid(xiaozhi_face_ptt_btn)) {
+        return;
+    }
+    if(recording) {
+        xiaozhi_face_controls_show();
+        return;
+    }
+
+    now = ui_monotonic_us();
+    if(xiaozhi_face_controls_last_touch_us == 0) {
+        xiaozhi_face_controls_last_touch_us = now;
+    }
+    idle_ms = (now - xiaozhi_face_controls_last_touch_us) / 1000ULL;
+    if(idle_ms >= XIAOZHI_FACE_CONTROLS_HIDE_MS &&
+       !xiaozhi_face_controls_hidden) {
+        xiaozhi_face_controls_hidden = 1;
+        lv_obj_add_flag(xiaozhi_face_ptt_btn, LV_OBJ_FLAG_HIDDEN);
+        app_request_fast_refresh();
+    }
+}
+
+static void xiaozhi_face_touch_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_indev_t *indev = lv_indev_active();
+    lv_point_t point;
+    int sw;
+    int dx;
+    int dy;
+
+    if(code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING ||
+       code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST ||
+       code == LV_EVENT_CLICKED) {
+        xiaozhi_face_controls_show();
+    }
+
+    if(!indev) {
+        return;
+    }
+    lv_indev_get_point(indev, &point);
+    sw = ui_screen_width();
+
+    if(code == LV_EVENT_PRESSED) {
+        xiaozhi_face_edge_start_point = point;
+        xiaozhi_face_edge_tracking = 0;
+        if(point.x <= XIAOZHI_FACE_EDGE_START_PX) {
+            xiaozhi_face_edge_tracking = 1;
+        } else if(point.x >= sw - XIAOZHI_FACE_EDGE_START_PX) {
+            xiaozhi_face_edge_tracking = 1;
+        }
+        return;
+    }
+
+    if(code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) {
+        return;
+    }
+    if(!xiaozhi_face_edge_tracking) {
+        return;
+    }
+
+    dx = point.x - xiaozhi_face_edge_start_point.x;
+    dy = point.y - xiaozhi_face_edge_start_point.y;
+    xiaozhi_face_edge_tracking = 0;
+    if(abs(dx) >= XIAOZHI_FACE_EDGE_SWIPE_PX &&
+       abs(dy) < XIAOZHI_FACE_EDGE_SWIPE_PX &&
+       ((xiaozhi_face_edge_start_point.x <= XIAOZHI_FACE_EDGE_START_PX &&
+         dx > 0) ||
+        (xiaozhi_face_edge_start_point.x >=
+             sw - XIAOZHI_FACE_EDGE_START_PX &&
+         dx < 0))) {
+        xiaozhi_face_overlay_close();
+        app_request_fast_refresh();
+        lv_event_stop_processing(event);
+    }
+}
+
 static xiaozhi_face_kind_t xiaozhi_face_kind_from_emotion(const char *emotion)
 {
     if(!emotion || !emotion[0]) {
@@ -1453,6 +1557,7 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
             lv_obj_clear_state(xiaozhi_face_ptt_btn, LV_STATE_DISABLED);
         }
     }
+    xiaozhi_face_controls_update(recording);
 }
 
 static void xiaozhi_face_refresh_from_state(void)
@@ -1502,18 +1607,13 @@ static void xiaozhi_face_overlay_close(void)
     xiaozhi_face_emotion_label = NULL;
     xiaozhi_face_status_label = NULL;
     xiaozhi_face_ptt_btn = NULL;
-}
-
-static void xiaozhi_face_close_event_cb(lv_event_t *event)
-{
-    (void)event;
-    xiaozhi_face_overlay_close();
-    app_request_fast_refresh();
+    xiaozhi_face_controls_hidden = 0;
+    xiaozhi_face_edge_tracking = 0;
+    xiaozhi_face_controls_last_touch_us = 0;
 }
 
 static void xiaozhi_face_open_event_cb(lv_event_t *event)
 {
-    lv_obj_t *close_btn;
     lv_obj_t *label;
     int sw = ui_screen_width();
     int sh = ui_screen_height();
@@ -1537,6 +1637,16 @@ static void xiaozhi_face_open_event_cb(lv_event_t *event)
     lv_obj_set_style_pad_all(xiaozhi_face_overlay, 0, 0);
     lv_obj_add_flag(xiaozhi_face_overlay, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(xiaozhi_face_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(xiaozhi_face_overlay, xiaozhi_face_touch_event_cb,
+                        LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(xiaozhi_face_overlay, xiaozhi_face_touch_event_cb,
+                        LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(xiaozhi_face_overlay, xiaozhi_face_touch_event_cb,
+                        LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(xiaozhi_face_overlay, xiaozhi_face_touch_event_cb,
+                        LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(xiaozhi_face_overlay, xiaozhi_face_touch_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 
     xiaozhi_face_left_eye = lv_obj_create(xiaozhi_face_overlay);
     xiaozhi_face_right_eye = lv_obj_create(xiaozhi_face_overlay);
@@ -1548,13 +1658,11 @@ static void xiaozhi_face_open_event_cb(lv_event_t *event)
     lv_obj_clear_flag(xiaozhi_face_left_brow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(xiaozhi_face_right_brow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(xiaozhi_face_mouth, LV_OBJ_FLAG_SCROLLABLE);
-
-    close_btn = ui_command_button(xiaozhi_face_overlay, 32, 24,
-                                  landscape ? 100 : 88, "Close",
-                                  0x94A3B8);
-    lv_obj_set_height(close_btn, 48);
-    lv_obj_add_event_cb(close_btn, xiaozhi_face_close_event_cb,
-                        LV_EVENT_CLICKED, NULL);
+    xiaozhi_face_enable_touch_bubble(xiaozhi_face_left_eye);
+    xiaozhi_face_enable_touch_bubble(xiaozhi_face_right_eye);
+    xiaozhi_face_enable_touch_bubble(xiaozhi_face_left_brow);
+    xiaozhi_face_enable_touch_bubble(xiaozhi_face_right_brow);
+    xiaozhi_face_enable_touch_bubble(xiaozhi_face_mouth);
 
     xiaozhi_face_status_label =
         ui_label(xiaozhi_face_overlay, "Ready", &lv_font_montserrat_24,
@@ -1563,6 +1671,7 @@ static void xiaozhi_face_open_event_cb(lv_event_t *event)
     lv_obj_set_style_text_align(xiaozhi_face_status_label,
                                 LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(xiaozhi_face_status_label, LV_LABEL_LONG_DOT);
+    xiaozhi_face_enable_touch_bubble(xiaozhi_face_status_label);
     lv_obj_align(xiaozhi_face_status_label, LV_ALIGN_TOP_MID, 0,
                  landscape ? 30 : 44);
 
@@ -1573,6 +1682,7 @@ static void xiaozhi_face_open_event_cb(lv_event_t *event)
     lv_obj_set_style_text_align(xiaozhi_face_emotion_label,
                                 LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(xiaozhi_face_emotion_label, LV_LABEL_LONG_DOT);
+    xiaozhi_face_enable_touch_bubble(xiaozhi_face_emotion_label);
     lv_obj_align(xiaozhi_face_emotion_label, LV_ALIGN_BOTTOM_MID, 0,
                  landscape ? -22 : -32);
 
@@ -1586,13 +1696,16 @@ static void xiaozhi_face_open_event_cb(lv_event_t *event)
                         LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(xiaozhi_face_ptt_btn, xiaozhi_ptt_event_cb,
                         LV_EVENT_PRESS_LOST, NULL);
+    xiaozhi_face_enable_touch_bubble(xiaozhi_face_ptt_btn);
 
     label = ui_label(xiaozhi_face_overlay, "XIAOZHI", &lv_font_montserrat_18,
                      0x334155);
     lv_obj_set_width(label, 160);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, 0);
+    xiaozhi_face_enable_touch_bubble(label);
     lv_obj_align(label, LV_ALIGN_TOP_RIGHT, -38, 38);
 
+    xiaozhi_face_controls_show();
     xiaozhi_face_refresh_from_state();
     xiaozhi_face_timer = lv_timer_create(xiaozhi_face_timer_cb, 160, NULL);
     app_request_fast_refresh();
@@ -1977,9 +2090,15 @@ static void xiaozhi_ptt_event_cb(lv_event_t *event)
     lv_event_code_t code = lv_event_get_code(event);
 
     if(code == LV_EVENT_PRESSED) {
+        if(xiaozhi_face_overlay && lv_obj_is_valid(xiaozhi_face_overlay)) {
+            xiaozhi_face_controls_show();
+        }
         xiaozhi_start_ptt_hold();
         lv_event_stop_processing(event);
     } else if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if(xiaozhi_face_overlay && lv_obj_is_valid(xiaozhi_face_overlay)) {
+            xiaozhi_face_controls_show();
+        }
         xiaozhi_stop_ptt_hold();
         lv_event_stop_processing(event);
     }
