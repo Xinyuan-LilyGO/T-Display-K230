@@ -92,6 +92,7 @@ static int xiaozhi_face_controls_hidden;
 static int xiaozhi_face_edge_tracking;
 static uint64_t xiaozhi_record_start_us;
 static uint64_t xiaozhi_face_controls_last_touch_us;
+static uint64_t xiaozhi_face_back_guard_until_us;
 static lv_point_t xiaozhi_face_edge_start_point;
 static size_t xiaozhi_kws_log_scan_len;
 static char xiaozhi_status_text[192] = "Ready";
@@ -108,6 +109,7 @@ static void xiaozhi_set_status_locked(const char *status, const char *detail,
 static void xiaozhi_append_log_locked(const char *line);
 static void xiaozhi_record_overlay_close(void);
 static void xiaozhi_face_overlay_close(void);
+static int xiaozhi_face_consume_back(const char *source);
 static void xiaozhi_ptt_event_cb(lv_event_t *event);
 static void xiaozhi_stop_ptt_hold(void);
 static void xiaozhi_kws_start(void);
@@ -1319,9 +1321,7 @@ static void xiaozhi_face_touch_event_cb(lv_event_t *event)
         (xiaozhi_face_edge_start_point.x >=
              sw - XIAOZHI_FACE_EDGE_START_PX &&
          dx < 0))) {
-        app_edge_back_cancel_gesture(500);
-        xiaozhi_face_overlay_close();
-        app_request_fast_refresh();
+        xiaozhi_face_consume_back("face_overlay");
         lv_event_stop_processing(event);
     }
 }
@@ -1679,6 +1679,34 @@ static void xiaozhi_face_overlay_close(void)
     xiaozhi_face_controls_hidden = 0;
     xiaozhi_face_edge_tracking = 0;
     xiaozhi_face_controls_last_touch_us = 0;
+}
+
+static int xiaozhi_face_consume_back(const char *source)
+{
+    uint64_t now = ui_monotonic_us();
+    int overlay_open = xiaozhi_face_overlay &&
+                       lv_obj_is_valid(xiaozhi_face_overlay);
+
+    if(!overlay_open && xiaozhi_face_back_guard_until_us &&
+       now < xiaozhi_face_back_guard_until_us) {
+        app_edge_back_cancel_gesture(300);
+        return 1;
+    }
+    if(!overlay_open) {
+        return 0;
+    }
+
+    (void)source;
+    xiaozhi_face_back_guard_until_us = now + 700000ULL;
+    app_edge_back_cancel_gesture(500);
+    xiaozhi_face_overlay_close();
+    app_request_fast_refresh();
+    return 1;
+}
+
+int ui_xiaozhi_handle_back(void)
+{
+    return xiaozhi_face_consume_back("global_back");
 }
 
 static void xiaozhi_face_open_event_cb(lv_event_t *event)
