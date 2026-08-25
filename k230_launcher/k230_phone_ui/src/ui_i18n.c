@@ -170,6 +170,7 @@ static const ui_translation_t ui_translations[] = {
     { "Audio loopback", "音频回环", "音声ループバック" },
     { "Audio", "音频", "音声" },
     { "Face", "表情", "表情" },
+    { "Robot face", "机器人脸", "ロボット顔" },
     { "Emotion", "表情", "感情" },
     { "PTT", "按键语音", "PTT" },
     { "Hold to talk", "按住说话", "押して話す" },

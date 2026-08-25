@@ -1066,6 +1066,13 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
 {
     xiaozhi_face_kind_t kind;
     uint32_t accent;
+    uint64_t now_ms;
+    int speaking;
+    int blink_ms;
+    int blink_reduce = 0;
+    int pulse;
+    int look_x;
+    int look_y;
     int sw;
     int sh;
     int landscape;
@@ -1088,6 +1095,23 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
 
     kind = xiaozhi_face_kind_from_emotion(emotion);
     accent = xiaozhi_face_accent_for_kind(kind);
+    now_ms = ui_monotonic_us() / 1000ULL;
+    speaking = status && (strstr(status, "Playing") ||
+                          strstr(status, "Receiving") ||
+                          strstr(status, "Sending"));
+    blink_ms = (int)(now_ms % 3600ULL);
+    if(blink_ms < 120 && kind != XIAOZHI_FACE_SURPRISED && !recording) {
+        blink_reduce = 85;
+    } else if(blink_ms < 190 && kind != XIAOZHI_FACE_SURPRISED &&
+              !recording) {
+        blink_reduce = 55;
+    }
+    pulse = (int)((now_ms / (speaking || recording ? 90ULL : 240ULL)) % 8ULL);
+    if(pulse > 4) {
+        pulse = 8 - pulse;
+    }
+    look_x = (int)(((now_ms / 900ULL) % 5ULL) - 2);
+    look_y = (int)(((now_ms / 1300ULL) % 3ULL) - 1);
     sw = ui_screen_width();
     sh = ui_screen_height();
     landscape = ui_is_landscape();
@@ -1129,14 +1153,23 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
     default:
         break;
     }
+    if(blink_reduce) {
+        eye_h = (eye_h * (100 - blink_reduce)) / 100;
+        if(eye_h < 10) {
+            eye_h = 10;
+        }
+    } else if(speaking || recording) {
+        eye_h += pulse * (landscape ? 4 : 5);
+    }
 
     eye_gap = landscape ? (sw * 16) / 100 : (sw * 18) / 100;
     eye_y = (sh / 2) - eye_h / 2 - (landscape ? 4 : 88);
     if(eye_y < (landscape ? 112 : 154)) {
         eye_y = landscape ? 112 : 154;
     }
-    left_x = sw / 2 - eye_gap - eye_w / 2;
-    right_x = sw / 2 + eye_gap - eye_w / 2;
+    eye_y += look_y * (landscape ? 8 : 10);
+    left_x = sw / 2 - eye_gap - eye_w / 2 + look_x * 8;
+    right_x = sw / 2 + eye_gap - eye_w / 2 + look_x * 8;
     if(left_x < 42) {
         left_x = 42;
         right_x = sw - 42 - eye_w;
@@ -1191,6 +1224,9 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
         break;
     default:
         break;
+    }
+    if(speaking || recording) {
+        mouth_h += pulse * (landscape ? 6 : 8);
     }
     mouth_y = eye_y + eye_h + (landscape ? 76 : 118);
     if(mouth_y + mouth_h > sh - 126) {
@@ -2016,7 +2052,7 @@ void ui_xiaozhi_create(lv_obj_t *scr)
     int top_pad = landscape ? 8 : 14;
     int gap = landscape ? 8 : 10;
     int status_h = landscape ? 144 : 276;
-    int action_h = landscape ? 82 : 152;
+    int action_h = landscape ? 82 : 220;
     int chat_y = top_pad + status_h + gap;
     int chat_h = body_h - top_pad - status_h - action_h - gap * 2 - 14;
     int action_y;
@@ -2161,16 +2197,17 @@ void ui_xiaozhi_create(lv_obj_t *scr)
     if(landscape) {
         int button_w = (content_w - 48) / 5;
 
-        xiaozhi_probe_btn = ui_command_button(xiaozhi_action_panel, 0, 10,
+        xiaozhi_face_btn = ui_command_button(xiaozhi_action_panel, 0, 10,
+                                             button_w, "Robot face",
+                                             0x38BDF8);
+        xiaozhi_probe_btn = ui_command_button(xiaozhi_action_panel,
+                                              button_w + 12, 10,
                                               button_w, "Reconnect",
                                               0x3DA5FF);
         xiaozhi_new_chat_btn = ui_command_button(xiaozhi_action_panel,
-                                                 button_w + 12, 10,
+                                                 (button_w + 12) * 2, 10,
                                                  button_w, "New chat",
                                                  0xA78BFA);
-        xiaozhi_face_btn = ui_command_button(xiaozhi_action_panel,
-                                             (button_w + 12) * 2, 10,
-                                             button_w, "Face", 0x38BDF8);
         xiaozhi_audio_btn = ui_command_button(xiaozhi_action_panel,
                                               (button_w + 12) * 3, 10,
                                               button_w, "Audio", 0x22C55E);
@@ -2178,23 +2215,23 @@ void ui_xiaozhi_create(lv_obj_t *scr)
                                             (button_w + 12) * 4, 10, button_w,
                                             "Hold to talk", 0xF97316);
     } else {
-        int fourth_w = (content_w - 36) / 4;
+        int third_w = (content_w - 24) / 3;
 
-        xiaozhi_probe_btn = ui_command_button(xiaozhi_action_panel, 0, 8,
-                                              fourth_w, "Reconnect",
+        xiaozhi_face_btn = ui_command_button(xiaozhi_action_panel, 0, 8,
+                                             content_w, "Robot face",
+                                             0x38BDF8);
+        xiaozhi_probe_btn = ui_command_button(xiaozhi_action_panel, 0, 76,
+                                              third_w, "Reconnect",
                                               0x3DA5FF);
         xiaozhi_new_chat_btn = ui_command_button(xiaozhi_action_panel,
-                                                 fourth_w + 12, 8,
-                                                 fourth_w, "New chat",
+                                                 third_w + 12, 76,
+                                                 third_w, "New chat",
                                                  0xA78BFA);
-        xiaozhi_face_btn = ui_command_button(xiaozhi_action_panel,
-                                             (fourth_w + 12) * 2, 8,
-                                             fourth_w, "Face", 0x38BDF8);
         xiaozhi_audio_btn = ui_command_button(xiaozhi_action_panel,
-                                              (fourth_w + 12) * 3, 8,
-                                              fourth_w,
+                                              (third_w + 12) * 2, 76,
+                                              third_w,
                                               "Audio", 0x22C55E);
-        xiaozhi_ptt_btn = ui_command_button(xiaozhi_action_panel, 0, 82,
+        xiaozhi_ptt_btn = ui_command_button(xiaozhi_action_panel, 0, 146,
                                             content_w, "Hold to talk",
                                             0xF97316);
     }
