@@ -8253,6 +8253,13 @@ void ui_battery_monitor_create(lv_obj_t *scr)
     int details_w = landscape ? body_w - details_x : 520;
     int cap_w;
     int metrics_y;
+    int soc_y = landscape ? 120 : 138;
+    int soc_text_y = landscape ? 150 : 166;
+    int soc_bar_y = landscape ? 214 : 232;
+    int capacity_y = landscape ? 262 : 282;
+    int capacity_btn_y = landscape ? 306 : 326;
+    int shutdown_y = landscape ? 382 : 402;
+    int shutdown_btn_y = landscape ? 422 : 446;
     const int metrics_step = 54;
 
     if(details_w < 320) {
@@ -8263,7 +8270,8 @@ void ui_battery_monitor_create(lv_obj_t *scr)
     }
 
     ui_create_header(scr, "Battery");
-    body = ui_scroll_panel(scr, 24, ui_page_top_y(154), 520,
+    body = ui_scroll_panel(scr, 24, ui_page_top_y(154),
+                           landscape ? body_w : 520,
                            ui_body_height(154));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     lv_obj_set_style_pad_bottom(body, 96, 0);
@@ -8301,13 +8309,13 @@ void ui_battery_monitor_create(lv_obj_t *scr)
     lv_obj_align(battery_status_label, LV_ALIGN_TOP_LEFT, 0, 86);
 
     battery_soc_label = ui_label(summary, "--", &lv_font_montserrat_48, 0xA3E635);
-    lv_obj_align(battery_soc_label, LV_ALIGN_TOP_LEFT, 0, 138);
+    lv_obj_align(battery_soc_label, LV_ALIGN_TOP_LEFT, 0, soc_y);
     ui_label(summary, "State of charge", &lv_font_montserrat_18, 0x9AA4AF);
     lv_obj_align(lv_obj_get_child(summary, lv_obj_get_child_count(summary) - 1),
-                 LV_ALIGN_TOP_RIGHT, 0, 166);
+                 LV_ALIGN_TOP_RIGHT, 0, soc_text_y);
 
     battery_soc_bar = lv_bar_create(summary);
-    lv_obj_set_pos(battery_soc_bar, 0, 232);
+    lv_obj_set_pos(battery_soc_bar, 0, soc_bar_y);
     lv_obj_set_size(battery_soc_bar,
                     landscape ? left_w - 32 :
                     ui_fit_width(lv_obj_get_parent(battery_soc_bar), 0, 488),
@@ -8327,10 +8335,10 @@ void ui_battery_monitor_create(lv_obj_t *scr)
                                       0xA3E635);
     lv_obj_set_width(battery_capacity_label, cap_w);
     lv_label_set_long_mode(battery_capacity_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(battery_capacity_label, 0, 282);
+    lv_obj_set_pos(battery_capacity_label, 0, capacity_y);
 
-    btn = ui_command_button(summary, 0, 326, cap_w, "Calibrate capacity",
-                            0xA3E635);
+    btn = ui_command_button(summary, 0, capacity_btn_y, cap_w,
+                            "Calibrate capacity", 0xA3E635);
     lv_obj_add_event_cb(btn, battery_capacity_event_cb, LV_EVENT_CLICKED,
                         NULL);
 
@@ -8338,10 +8346,10 @@ void ui_battery_monitor_create(lv_obj_t *scr)
                                       0x9AA4AF);
     lv_obj_set_width(battery_shutdown_label, cap_w);
     lv_label_set_long_mode(battery_shutdown_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(battery_shutdown_label, 0, 402);
+    lv_obj_set_pos(battery_shutdown_label, 0, shutdown_y);
 
-    btn = ui_command_button(summary, 0, 446, cap_w, "Shutdown voltage",
-                            0xF5A524);
+    btn = ui_command_button(summary, 0, shutdown_btn_y, cap_w,
+                            "Shutdown voltage", 0xF5A524);
     lv_obj_add_event_cb(btn, battery_shutdown_event_cb, LV_EVENT_CLICKED,
                         NULL);
 
