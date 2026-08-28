@@ -7442,6 +7442,9 @@ static void battery_shutdown_choice_open(void)
     int pad = 22;
     int button_gap = 14;
     int button_w;
+    int button_col;
+    int button_row;
+    int button_x;
     int list_y;
     int list_h;
     int selected = battery_shutdown_voltage_mv();
@@ -7499,16 +7502,20 @@ static void battery_shutdown_choice_open(void)
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
-    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
 
-    button_w = panel_w - pad * 2;
+    button_w = (panel_w - pad * 2 - button_gap) / 2;
     for(size_t i = 0; i < sizeof(battery_shutdown_options_mv) /
            sizeof(battery_shutdown_options_mv[0]); i++) {
         char label[32];
         int mv = battery_shutdown_options_mv[i];
-        int y = (int)i * (60 + button_gap);
+        int y;
+
+        button_col = (int)i % 2;
+        button_row = (int)i / 2;
+        button_x = button_col * (button_w + button_gap);
+        y = button_row * (60 + button_gap);
 
         if(mv > 0) {
             snprintf(label, sizeof(label), "%.1f V", (double)mv / 1000.0);
@@ -7516,7 +7523,7 @@ static void battery_shutdown_choice_open(void)
             snprintf(label, sizeof(label), "%s", ui_tr("Off"));
         }
         battery_shutdown_btn[i] =
-            ui_command_button(list, 0, y, button_w, label,
+            ui_command_button(list, button_x, y, button_w, label,
                               mv > 0 ? 0xF5A524 : 0x9AA4AF);
         style_choice_button(battery_shutdown_btn[i], mv == selected,
                             mv > 0 ? 0xF5A524 : 0x9AA4AF);
@@ -7525,6 +7532,7 @@ static void battery_shutdown_choice_open(void)
                             LV_EVENT_CLICKED, (void *)(intptr_t)mv);
     }
 
+    button_w = panel_w - pad * 2;
     close_btn = ui_command_button(panel, pad, panel_h - pad - 60,
                                   button_w, "Cancel", 0x9AA4AF);
     lv_obj_add_event_cb(close_btn, battery_shutdown_choice_close_event_cb,
