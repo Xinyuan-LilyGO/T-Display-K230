@@ -220,7 +220,8 @@
 #define BATTERY_CAPACITY_MAX_MAH 20000
 #define BATTERY_SHUTDOWN_DISABLED_MV 0
 #define BATTERY_SHUTDOWN_MIN_MV 3300
-#define BATTERY_SHUTDOWN_MAX_MV 3700
+#define BATTERY_SHUTDOWN_MAX_MV 4000
+#define BATTERY_SHUTDOWN_OPTION_COUNT 7
 #define BATTERY_LOW_SHUTDOWN_POLL_US 30000000ULL
 #define BATTERY_LOW_SHUTDOWN_CONFIRM_COUNT 3
 #define BATTERY_LOW_SHUTDOWN_LOG "/tmp/k230_low_battery_shutdown.log"
@@ -584,7 +585,7 @@ static lv_obj_t *keyboard_hotkey_osd_value_label;
 static lv_obj_t *keyboard_hotkey_osd_bar;
 static lv_timer_t *keyboard_hotkey_osd_timer;
 static lv_obj_t *battery_shutdown_overlay;
-static lv_obj_t *battery_shutdown_btn[4];
+static lv_obj_t *battery_shutdown_btn[BATTERY_SHUTDOWN_OPTION_COUNT];
 static uint64_t battery_low_shutdown_next_check_us;
 static int battery_low_shutdown_low_count;
 static int battery_low_shutdown_started;
@@ -597,8 +598,8 @@ static const int bq25896_voltage_options_mv[BQ25896_CHG_VOLT_OPTION_COUNT] = {
     4208, 4288, 4352, 4416
 };
 
-static const int battery_shutdown_options_mv[] = {
-    3500, 3600, 3700, BATTERY_SHUTDOWN_DISABLED_MV
+static const int battery_shutdown_options_mv[BATTERY_SHUTDOWN_OPTION_COUNT] = {
+    3500, 3600, 3700, 3800, 3900, 4000, BATTERY_SHUTDOWN_DISABLED_MV
 };
 
 static void keyboard_hotkey_log(const char *fmt, ...)
@@ -7429,6 +7430,7 @@ static void battery_shutdown_choice_event_cb(lv_event_t *event)
 static void battery_shutdown_choice_open(void)
 {
     lv_obj_t *panel;
+    lv_obj_t *list;
     lv_obj_t *title;
     lv_obj_t *hint;
     lv_obj_t *close_btn;
@@ -7436,10 +7438,12 @@ static void battery_shutdown_choice_open(void)
     int screen_h = ui_screen_height();
     int landscape = ui_is_landscape();
     int panel_w = landscape ? 460 : screen_w - 72;
-    int panel_h = landscape ? 500 : 500;
+    int panel_h = landscape ? screen_h - 72 : screen_h - 96;
     int pad = 22;
     int button_gap = 14;
     int button_w;
+    int list_y;
+    int list_h;
     int selected = battery_shutdown_voltage_mv();
 
     if(panel_w > screen_w - 48) {
@@ -7450,6 +7454,9 @@ static void battery_shutdown_choice_open(void)
     }
     if(panel_h > screen_h - 48) {
         panel_h = screen_h - 48;
+    }
+    if(panel_h < 360) {
+        panel_h = 360;
     }
 
     battery_shutdown_choice_close();
@@ -7483,12 +7490,25 @@ static void battery_shutdown_choice_open(void)
     lv_obj_set_width(hint, panel_w - pad * 2);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
 
+    list_y = pad + 84;
+    list_h = panel_h - list_y - 60 - pad * 2;
+    if(list_h < 180) {
+        list_h = 180;
+    }
+    list = ui_panel(panel, pad, list_y, panel_w - pad * 2, list_h);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+
     button_w = panel_w - pad * 2;
     for(size_t i = 0; i < sizeof(battery_shutdown_options_mv) /
            sizeof(battery_shutdown_options_mv[0]); i++) {
         char label[32];
         int mv = battery_shutdown_options_mv[i];
-        int y = pad + 84 + (int)i * (60 + button_gap);
+        int y = (int)i * (60 + button_gap);
 
         if(mv > 0) {
             snprintf(label, sizeof(label), "%.1f V", (double)mv / 1000.0);
@@ -7496,7 +7516,7 @@ static void battery_shutdown_choice_open(void)
             snprintf(label, sizeof(label), "%s", ui_tr("Off"));
         }
         battery_shutdown_btn[i] =
-            ui_command_button(panel, pad, y, button_w, label,
+            ui_command_button(list, 0, y, button_w, label,
                               mv > 0 ? 0xF5A524 : 0x9AA4AF);
         style_choice_button(battery_shutdown_btn[i], mv == selected,
                             mv > 0 ? 0xF5A524 : 0x9AA4AF);
