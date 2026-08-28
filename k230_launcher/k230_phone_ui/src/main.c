@@ -169,8 +169,6 @@
 #define POWER_SHUTDOWN_FADE_US 700000ULL
 #define POWER_SHUTDOWN_CANCEL_LIMIT_US 5000000ULL
 #define POWER_SHUTDOWN_UPDATE_US 80000ULL
-#define LOW_BATTERY_WARNING_US 5000000ULL
-#define LOW_BATTERY_WARNING_UPDATE_US 100000ULL
 #ifndef K230_R58_COMPACT_SWITCH_TEST
 #define K230_R58_COMPACT_SWITCH_TEST 0
 #endif
@@ -540,10 +538,6 @@ static lv_obj_t *shutdown_overlay_obj;
 static lv_obj_t *shutdown_progress_arc;
 static lv_obj_t *shutdown_detail_label;
 static lv_obj_t *shutdown_hint_label;
-static lv_obj_t *low_battery_overlay_obj;
-static lv_obj_t *low_battery_arc_obj;
-static lv_obj_t *low_battery_detail_label;
-static lv_obj_t *low_battery_hint_label;
 static lv_obj_t *screenshot_toast_obj;
 static lv_obj_t *entry_block_dialog;
 static lv_obj_t *entry_probe_dialog;
@@ -569,12 +563,6 @@ static int shutdown_saved_screen_backlight;
 static int shutdown_saved_keyboard_backlight;
 static int shutdown_last_progress = -1;
 static int shutdown_last_fade_log_progress = -1;
-static int low_battery_warning_active;
-static uint64_t low_battery_warning_start_us;
-static uint64_t low_battery_warning_last_update_us;
-static int low_battery_warning_voltage_mv;
-static int low_battery_warning_threshold_mv;
-static int low_battery_warning_soc_pct;
 static char status_wifi_state[24] = "on";
 static char status_ble_state[24] = "offline";
 static int status_wifi_visible = 1;
@@ -3383,176 +3371,6 @@ static void shutdown_visual_update(uint64_t now)
     }
 }
 
-static void low_battery_warning_destroy(void)
-{
-    if(low_battery_overlay_obj && lv_obj_is_valid(low_battery_overlay_obj)) {
-        lv_obj_delete_async(low_battery_overlay_obj);
-    }
-    low_battery_overlay_obj = NULL;
-    low_battery_arc_obj = NULL;
-    low_battery_detail_label = NULL;
-    low_battery_hint_label = NULL;
-}
-
-static void low_battery_warning_begin(int voltage_mv, int threshold_mv,
-                                      int soc_pct)
-{
-    lv_obj_t *panel;
-    lv_obj_t *title;
-    lv_obj_t *icon;
-    int w = display_logical_width();
-    int h = display_logical_height();
-    int landscape = display_orientation_is_landscape();
-    int panel_w = landscape ? 520 : w - 72;
-    int panel_h = landscape ? 290 : 360;
-    int arc_size = landscape ? 86 : 110;
-    int top_gap = landscape ? 28 : 34;
-
-    if(low_battery_warning_active || shutdown_visual_active) {
-        return;
-    }
-    if(panel_w > w - 48) {
-        panel_w = w - 48;
-    }
-    if(panel_w < 300) {
-        panel_w = 300;
-    }
-
-    low_battery_warning_voltage_mv = voltage_mv;
-    low_battery_warning_threshold_mv = threshold_mv;
-    low_battery_warning_soc_pct = soc_pct;
-    low_battery_warning_start_us = monotonic_us();
-    low_battery_warning_last_update_us = 0;
-    low_battery_warning_active = 1;
-    ui_power_manager_set_shutdown_fade(1);
-
-    low_battery_overlay_obj = lv_obj_create(lv_layer_top());
-    lv_obj_set_pos(low_battery_overlay_obj, 0, 0);
-    lv_obj_set_size(low_battery_overlay_obj, w, h);
-    lv_obj_set_style_bg_color(low_battery_overlay_obj, lv_color_hex(0x030507),
-                              0);
-    lv_obj_set_style_bg_opa(low_battery_overlay_obj, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(low_battery_overlay_obj, 0, 0);
-    lv_obj_set_style_radius(low_battery_overlay_obj, 0, 0);
-    lv_obj_set_style_pad_all(low_battery_overlay_obj, 0, 0);
-    lv_obj_clear_flag(low_battery_overlay_obj, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(low_battery_overlay_obj, LV_OBJ_FLAG_CLICKABLE);
-
-    panel = ui_panel(low_battery_overlay_obj, 0, 0, panel_w, panel_h);
-    lv_obj_center(panel);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x151018), 0);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0x7F1D1D), 0);
-    lv_obj_set_style_border_width(panel, 1, 0);
-    lv_obj_set_style_shadow_width(panel, 26, 0);
-    lv_obj_set_style_shadow_color(panel, lv_color_hex(0x7F1D1D), 0);
-    lv_obj_set_style_shadow_opa(panel, LV_OPA_40, 0);
-    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-
-    low_battery_arc_obj = lv_arc_create(panel);
-    lv_obj_set_size(low_battery_arc_obj, arc_size, arc_size);
-    lv_obj_set_pos(low_battery_arc_obj, (panel_w - arc_size) / 2, top_gap);
-    lv_arc_set_range(low_battery_arc_obj, 0, 100);
-    lv_arc_set_value(low_battery_arc_obj, 0);
-    lv_arc_set_bg_angles(low_battery_arc_obj, 0, 360);
-    lv_arc_set_rotation(low_battery_arc_obj, 270);
-    lv_obj_set_style_arc_width(low_battery_arc_obj, landscape ? 6 : 8,
-                               LV_PART_MAIN);
-    lv_obj_set_style_arc_width(low_battery_arc_obj, landscape ? 6 : 8,
-                               LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(low_battery_arc_obj, lv_color_hex(0x2A141A),
-                               LV_PART_MAIN);
-    lv_obj_set_style_arc_color(low_battery_arc_obj, lv_color_hex(0xEF4D5A),
-                               LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(low_battery_arc_obj, LV_OPA_TRANSP, LV_PART_KNOB);
-    lv_obj_clear_flag(low_battery_arc_obj, LV_OBJ_FLAG_CLICKABLE);
-
-    icon = label(panel, "!", landscape ? &lv_font_montserrat_32 :
-                 &lv_font_montserrat_48, 0xFCA5A5);
-    lv_obj_set_pos(icon, (panel_w - 24) / 2, top_gap + arc_size / 2 -
-                   (landscape ? 22 : 30));
-
-    title = label(panel, "Low battery", &lv_font_montserrat_28, 0xFEE2E2);
-    lv_obj_set_width(title, panel_w - 40);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(title, 20, top_gap + arc_size + (landscape ? 18 : 28));
-
-    low_battery_detail_label =
-        label(panel, "", &lv_font_montserrat_18, 0xFCA5A5);
-    lv_obj_set_width(low_battery_detail_label, panel_w - 44);
-    lv_obj_set_style_text_align(low_battery_detail_label, LV_TEXT_ALIGN_CENTER,
-                                0);
-    lv_obj_set_pos(low_battery_detail_label, 22,
-                   top_gap + arc_size + (landscape ? 60 : 78));
-
-    low_battery_hint_label =
-        label(panel, "", &lv_font_montserrat_16, 0xCBD5E1);
-    lv_obj_set_width(low_battery_hint_label, panel_w - 44);
-    lv_obj_set_style_text_align(low_battery_hint_label, LV_TEXT_ALIGN_CENTER,
-                                0);
-    lv_obj_set_pos(low_battery_hint_label, 22, panel_h - 58);
-
-    lv_obj_move_foreground(low_battery_overlay_obj);
-    start_opa_anim(low_battery_overlay_obj, LV_OPA_TRANSP, LV_OPA_COVER, 0,
-                   180);
-    touch_trace_log("LOW_BATTERY_WARNING_BEGIN voltage=%d threshold=%d soc=%d",
-                    voltage_mv, threshold_mv, soc_pct);
-    request_fast_refresh();
-}
-
-static void low_battery_warning_update(uint64_t now)
-{
-    uint64_t elapsed;
-    int progress;
-    int remain_s;
-    char text[128];
-
-    if(!low_battery_warning_active) {
-        return;
-    }
-    if(low_battery_warning_last_update_us &&
-       now - low_battery_warning_last_update_us <
-       LOW_BATTERY_WARNING_UPDATE_US) {
-        return;
-    }
-    low_battery_warning_last_update_us = now;
-
-    elapsed = now > low_battery_warning_start_us ?
-              now - low_battery_warning_start_us : 0;
-    progress = (int)(elapsed * 100ULL / LOW_BATTERY_WARNING_US);
-    if(progress > 100) {
-        progress = 100;
-    }
-    remain_s = (int)(((LOW_BATTERY_WARNING_US > elapsed ?
-                       LOW_BATTERY_WARNING_US - elapsed : 0ULL) +
-                      999999ULL) / 1000000ULL);
-
-    if(low_battery_arc_obj && lv_obj_is_valid(low_battery_arc_obj)) {
-        lv_arc_set_value(low_battery_arc_obj, progress);
-    }
-    if(low_battery_detail_label &&
-       lv_obj_is_valid(low_battery_detail_label)) {
-        snprintf(text, sizeof(text), "%d mV <= %d mV  SOC %d%%",
-                 low_battery_warning_voltage_mv,
-                 low_battery_warning_threshold_mv,
-                 low_battery_warning_soc_pct);
-        lv_label_set_text(low_battery_detail_label, text);
-    }
-    if(low_battery_hint_label && lv_obj_is_valid(low_battery_hint_label)) {
-        snprintf(text, sizeof(text), "%s %ds",
-                 ui_tr("Powering off to protect battery"), remain_s);
-        lv_label_set_text(low_battery_hint_label, text);
-    }
-    request_fast_refresh();
-
-    if(progress >= 100) {
-        low_battery_warning_destroy();
-        low_battery_warning_active = 0;
-        shutdown_visual_low_battery_reason = 1;
-        shutdown_visual_begin(now - POWER_SHUTDOWN_PREVIEW_DELAY_US);
-        touch_trace_log("LOW_BATTERY_WARNING_DONE");
-    }
-}
-
 static void low_battery_shutdown_visual_poll(void)
 {
     uint64_t now = monotonic_us();
@@ -3560,16 +3378,15 @@ static void low_battery_shutdown_visual_poll(void)
     int threshold_mv = 0;
     int soc_pct = -1;
 
-    if(low_battery_warning_active) {
-        low_battery_warning_update(now);
-        return;
-    }
     if(shutdown_visual_active) {
         return;
     }
     if(ui_hardware_consume_low_battery_shutdown(&voltage_mv, &threshold_mv,
                                                 &soc_pct)) {
-        low_battery_warning_begin(voltage_mv, threshold_mv, soc_pct);
+        shutdown_visual_low_battery_reason = 1;
+        shutdown_visual_begin(now - POWER_SHUTDOWN_PREVIEW_DELAY_US);
+        touch_trace_log("LOW_BATTERY_SHUTDOWN_DIRECT voltage=%d threshold=%d soc=%d",
+                        voltage_mv, threshold_mv, soc_pct);
     }
 }
 
@@ -3579,10 +3396,6 @@ static void power_key_shutdown_visual_poll(void)
     uint64_t press_us;
     int pressed;
     unsigned int generation;
-
-    if(low_battery_warning_active) {
-        return;
-    }
 
     pthread_mutex_lock(&power_key_lock);
     pressed = power_key_pressed;
