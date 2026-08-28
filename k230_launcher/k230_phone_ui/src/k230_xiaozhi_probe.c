@@ -37,15 +37,18 @@
 #define OPUS_MAX_PACKET 1276
 #define WS_MAX_FRAME (1024 * 1024)
 #define HTTP_MAX_RESPONSE (512 * 1024)
+#define WAKE_VAD_WARMUP_FRAMES 4
 #define WAKE_VAD_PREROLL_FRAMES 5
-#define WAKE_VAD_START_MEAN 180
-#define WAKE_VAD_START_PEAK 1000
-#define WAKE_VAD_STOP_MEAN 110
-#define WAKE_VAD_STOP_PEAK 650
-#define WAKE_VAD_MIN_SPEECH_FRAMES 8
-#define WAKE_VAD_SILENCE_FRAMES 14
+#define WAKE_VAD_START_FRAMES 2
+#define WAKE_VAD_START_MEAN 550
+#define WAKE_VAD_START_PEAK 2400
+#define WAKE_VAD_STOP_MEAN 450
+#define WAKE_VAD_MIN_ACTIVE_FRAMES 8
+#define WAKE_VAD_SILENCE_FRAMES 12
 #define WAKE_VAD_IDLE_TIMEOUT_FRAMES \
     ((5 * DEFAULT_SAMPLE_RATE + OPUS_FRAME_SAMPLES - 1) / OPUS_FRAME_SAMPLES)
+#define WAKE_VAD_MAX_ACTIVE_FRAMES \
+    ((10 * DEFAULT_SAMPLE_RATE + OPUS_FRAME_SAMPLES - 1) / OPUS_FRAME_SAMPLES)
 
 typedef struct {
     int tls;
@@ -1787,7 +1790,9 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
     unsigned char packet[OPUS_MAX_PACKET];
     int frames = (opts->seconds * DEFAULT_SAMPLE_RATE + OPUS_FRAME_SAMPLES - 1) / OPUS_FRAME_SAMPLES;
     int sent_frames = 0;
+    int active_frames = 0;
     int speech_frames = 0;
+    int start_candidate_frames = 0;
     int silence_frames = 0;
     opus_preroll_frame_t preroll[WAKE_VAD_PREROLL_FRAMES];
     int preroll_count = 0;
@@ -1822,9 +1827,19 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
                 preroll_count++;
             }
 
+            if (i < WAKE_VAD_WARMUP_FRAMES) {
+                if ((i % 2) == 0) {
+                    log_line("INFO",
+                             "wake VAD warmup frame=%d mean=%d peak=%d",
+                             i, mean_abs, peak_abs);
+                }
+                continue;
+            }
+
             voice_now = mean_abs >= WAKE_VAD_START_MEAN ||
                         peak_abs >= WAKE_VAD_START_PEAK;
             if (!voice_now) {
+                start_candidate_frames = 0;
                 if ((i % 10) == 0) {
                     log_line("INFO", "wake VAD wait frame=%d mean=%d peak=%d",
                              i, mean_abs, peak_abs);
@@ -1835,6 +1850,14 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
                     log_line("INFO", "wake VAD no speech: frames=%d", i);
                     break;
                 }
+                continue;
+            }
+            start_candidate_frames++;
+            if (start_candidate_frames < WAKE_VAD_START_FRAMES) {
+                log_line("INFO",
+                         "wake VAD candidate frame=%d/%d mean=%d peak=%d",
+                         start_candidate_frames, WAKE_VAD_START_FRAMES,
+                         mean_abs, peak_abs);
                 continue;
             }
 
@@ -1865,6 +1888,7 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
             if (rc != 0) {
                 break;
             }
+            active_frames = 1;
             speech_frames = 1;
             silence_frames = 0;
             continue;
@@ -1882,10 +1906,10 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
         }
 
         if (record_mode == SESSION_RECORD_WAKE_VAD) {
+            active_frames++;
             voice_now = mean_abs >= WAKE_VAD_START_MEAN ||
                         peak_abs >= WAKE_VAD_START_PEAK;
-            silence_now = mean_abs <= WAKE_VAD_STOP_MEAN &&
-                          peak_abs <= WAKE_VAD_STOP_PEAK;
+            silence_now = mean_abs <= WAKE_VAD_STOP_MEAN;
             if (voice_now) {
                 speech_frames++;
                 silence_frames = 0;
@@ -1894,11 +1918,18 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
             } else {
                 silence_frames = 0;
             }
-            if (speech_frames >= WAKE_VAD_MIN_SPEECH_FRAMES &&
+            if (active_frames >= WAKE_VAD_MAX_ACTIVE_FRAMES) {
+                log_line("INFO",
+                         "wake VAD max active reached frame=%d active=%d sent=%d",
+                         i, active_frames, sent_frames);
+                break;
+            }
+            if (active_frames >= WAKE_VAD_MIN_ACTIVE_FRAMES &&
                 silence_frames >= WAKE_VAD_SILENCE_FRAMES) {
                 log_line("INFO",
-                         "wake VAD speech_end frame=%d speech_frames=%d sent=%d",
-                         i, speech_frames, sent_frames);
+                         "wake VAD speech_end frame=%d active=%d speech=%d silence=%d sent=%d",
+                         i, active_frames, speech_frames, silence_frames,
+                         sent_frames);
                 break;
             }
         }

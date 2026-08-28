@@ -2176,7 +2176,6 @@ static void xiaozhi_stop_ptt_hold(void)
     pthread_mutex_unlock(&xiaozhi_lock);
 
     xiaozhi_write_control("PTT_END");
-    xiaozhi_ptt_route_leave_if_needed();
     xiaozhi_record_overlay_close();
     app_request_fast_refresh();
 }
