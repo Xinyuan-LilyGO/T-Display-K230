@@ -37,6 +37,15 @@
 #define OPUS_MAX_PACKET 1276
 #define WS_MAX_FRAME (1024 * 1024)
 #define HTTP_MAX_RESPONSE (512 * 1024)
+#define WAKE_VAD_PREROLL_FRAMES 5
+#define WAKE_VAD_START_MEAN 180
+#define WAKE_VAD_START_PEAK 1000
+#define WAKE_VAD_STOP_MEAN 110
+#define WAKE_VAD_STOP_PEAK 650
+#define WAKE_VAD_MIN_SPEECH_FRAMES 8
+#define WAKE_VAD_SILENCE_FRAMES 14
+#define WAKE_VAD_IDLE_TIMEOUT_FRAMES \
+    ((5 * DEFAULT_SAMPLE_RATE + OPUS_FRAME_SAMPLES - 1) / OPUS_FRAME_SAMPLES)
 
 typedef struct {
     int tls;
@@ -102,6 +111,16 @@ typedef struct {
     char buf[256];
     size_t len;
 } control_reader_t;
+
+typedef enum {
+    SESSION_RECORD_MANUAL = 0,
+    SESSION_RECORD_WAKE_VAD,
+} session_record_mode_t;
+
+typedef struct {
+    unsigned char data[OPUS_MAX_PACKET];
+    int len;
+} opus_preroll_frame_t;
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_record_stop = 0;
@@ -1663,11 +1682,71 @@ static int command_ptt(const app_opts_t *opts)
     return 0;
 }
 
-static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
-                            const char *session_id, int server_rate,
-                            control_reader_t *ctl)
+static void pcm_level_stats(const int16_t *pcm, int samples, int *mean_abs,
+                            int *peak_abs)
+{
+    long long sum = 0;
+    int peak = 0;
+
+    if (!pcm || samples <= 0) {
+        if (mean_abs) *mean_abs = 0;
+        if (peak_abs) *peak_abs = 0;
+        return;
+    }
+
+    for (int i = 0; i < samples; ++i) {
+        int v = pcm[i];
+        int a = v < 0 ? -v : v;
+        sum += a;
+        if (a > peak) {
+            peak = a;
+        }
+    }
+
+    if (mean_abs) *mean_abs = (int)(sum / samples);
+    if (peak_abs) *peak_abs = peak;
+}
+
+static int session_control_should_stop(control_reader_t *ctl)
+{
+    char cmd[64];
+
+    while (ctl && control_pop_line(ctl, cmd, sizeof(cmd)) > 0) {
+        if (strcmp(cmd, "PTT_END") == 0 || strcmp(cmd, "WAKE_END") == 0) {
+            log_line("INFO", "control %s", cmd);
+            g_record_stop = 1;
+            return 1;
+        }
+        if (strcmp(cmd, "QUIT") == 0) {
+            log_line("INFO", "control QUIT");
+            g_stop = 1;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int send_listen_state(ws_conn_t *ws, const char *session_id,
+                             const char *state)
 {
     char listen[256];
+
+    make_listen(listen, sizeof(listen), session_id, state);
+    log_line("INFO", "send listen %s", state);
+    if (ws_send_frame(ws, 1, listen, strlen(listen)) < 0) {
+        log_line("ERR", "send listen %s failed", state);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
+                            const char *session_id, int server_rate,
+                            control_reader_t *ctl,
+                            session_record_mode_t record_mode)
+{
     pcm_handle_t cap;
     int err = 0;
     OpusEncoder *enc = NULL;
@@ -1675,13 +1754,18 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
     int playback_open = 0;
     OpusDecoder *dec = NULL;
     int rc = 0;
+    int listen_started = 0;
+    int wake_no_speech_logged = 0;
 
     g_record_stop = 0;
-    make_listen(listen, sizeof(listen), session_id, "start");
-    log_line("INFO", "send listen start");
-    if (ws_send_frame(ws, 1, listen, strlen(listen)) < 0) {
-        log_line("ERR", "send listen start failed");
-        return 1;
+    if (record_mode == SESSION_RECORD_MANUAL) {
+        if (send_listen_state(ws, session_id, "start") < 0) {
+            return 1;
+        }
+        listen_started = 1;
+    } else {
+        log_line("INFO", "wake VAD armed: preroll=%d idle_timeout_frames=%d",
+                 WAKE_VAD_PREROLL_FRAMES, WAKE_VAD_IDLE_TIMEOUT_FRAMES);
     }
 
     if (open_pcm(&cap, SND_PCM_STREAM_CAPTURE, opts->capture_dev,
@@ -1702,50 +1786,138 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
     int16_t pcm[OPUS_FRAME_SAMPLES];
     unsigned char packet[OPUS_MAX_PACKET];
     int frames = (opts->seconds * DEFAULT_SAMPLE_RATE + OPUS_FRAME_SAMPLES - 1) / OPUS_FRAME_SAMPLES;
+    int sent_frames = 0;
+    int speech_frames = 0;
+    int silence_frames = 0;
+    opus_preroll_frame_t preroll[WAKE_VAD_PREROLL_FRAMES];
+    int preroll_count = 0;
+    int preroll_next = 0;
     log_line("INFO", "record and send: seconds=%d frames=%d", opts->seconds, frames);
     for (int i = 0; i < frames && !g_stop && !g_record_stop; ++i) {
-        char cmd[64];
-        while (ctl && control_pop_line(ctl, cmd, sizeof(cmd)) > 0) {
-            if (strcmp(cmd, "PTT_END") == 0) {
-                log_line("INFO", "control PTT_END");
-                g_record_stop = 1;
-                break;
-            }
-            if (strcmp(cmd, "QUIT") == 0) {
-                log_line("INFO", "control QUIT");
-                g_stop = 1;
-                break;
-            }
-        }
+        int mean_abs = 0;
+        int peak_abs = 0;
+        int voice_now = 0;
+        int silence_now = 0;
+
+        session_control_should_stop(ctl);
         if (g_stop || g_record_stop) break;
 
         if (pcm_read_frames(&cap, pcm, OPUS_FRAME_SAMPLES) < 0) {
             rc = 1;
             break;
         }
+        pcm_level_stats(pcm, OPUS_FRAME_SAMPLES, &mean_abs, &peak_abs);
         int nb = opus_encode(enc, pcm, OPUS_FRAME_SAMPLES, packet, sizeof(packet));
         if (nb < 0) {
             log_line("ERR", "opus_encode: %s", opus_strerror(nb));
             rc = 1;
             break;
         }
+
+        if (record_mode == SESSION_RECORD_WAKE_VAD && !listen_started) {
+            memcpy(preroll[preroll_next].data, packet, (size_t)nb);
+            preroll[preroll_next].len = nb;
+            preroll_next = (preroll_next + 1) % WAKE_VAD_PREROLL_FRAMES;
+            if (preroll_count < WAKE_VAD_PREROLL_FRAMES) {
+                preroll_count++;
+            }
+
+            voice_now = mean_abs >= WAKE_VAD_START_MEAN ||
+                        peak_abs >= WAKE_VAD_START_PEAK;
+            if (!voice_now) {
+                if ((i % 10) == 0) {
+                    log_line("INFO", "wake VAD wait frame=%d mean=%d peak=%d",
+                             i, mean_abs, peak_abs);
+                }
+                if (i >= WAKE_VAD_IDLE_TIMEOUT_FRAMES) {
+                    log_line("EVENT", "wake_no_speech");
+                    wake_no_speech_logged = 1;
+                    log_line("INFO", "wake VAD no speech: frames=%d", i);
+                    break;
+                }
+                continue;
+            }
+
+            if (send_listen_state(ws, session_id, "start") < 0) {
+                rc = 1;
+                break;
+            }
+            listen_started = 1;
+            log_line("EVENT", "wake_speech_start");
+            log_line("INFO", "wake VAD speech_start frame=%d mean=%d peak=%d",
+                     i, mean_abs, peak_abs);
+
+            int first = (preroll_next + WAKE_VAD_PREROLL_FRAMES -
+                         preroll_count) % WAKE_VAD_PREROLL_FRAMES;
+            for (int p = 0; p < preroll_count; ++p) {
+                int idx = (first + p) % WAKE_VAD_PREROLL_FRAMES;
+                if (preroll[idx].len <= 0) {
+                    continue;
+                }
+                if (ws_send_frame(ws, 2, preroll[idx].data,
+                                  (size_t)preroll[idx].len) < 0) {
+                    log_line("ERR", "send wake preroll frame failed");
+                    rc = 1;
+                    break;
+                }
+                sent_frames++;
+            }
+            if (rc != 0) {
+                break;
+            }
+            speech_frames = 1;
+            silence_frames = 0;
+            continue;
+        }
+
         if (ws_send_frame(ws, 2, packet, (size_t)nb) < 0) {
             log_line("ERR", "send opus frame failed");
             rc = 1;
             break;
         }
-        if ((i % 10) == 0) log_line("INFO", "tx frame=%d opus_bytes=%d", i, nb);
+        sent_frames++;
+        if ((i % 10) == 0) {
+            log_line("INFO", "tx frame=%d opus_bytes=%d level=%d/%d", i, nb,
+                     mean_abs, peak_abs);
+        }
+
+        if (record_mode == SESSION_RECORD_WAKE_VAD) {
+            voice_now = mean_abs >= WAKE_VAD_START_MEAN ||
+                        peak_abs >= WAKE_VAD_START_PEAK;
+            silence_now = mean_abs <= WAKE_VAD_STOP_MEAN &&
+                          peak_abs <= WAKE_VAD_STOP_PEAK;
+            if (voice_now) {
+                speech_frames++;
+                silence_frames = 0;
+            } else if (silence_now) {
+                silence_frames++;
+            } else {
+                silence_frames = 0;
+            }
+            if (speech_frames >= WAKE_VAD_MIN_SPEECH_FRAMES &&
+                silence_frames >= WAKE_VAD_SILENCE_FRAMES) {
+                log_line("INFO",
+                         "wake VAD speech_end frame=%d speech_frames=%d sent=%d",
+                         i, speech_frames, sent_frames);
+                break;
+            }
+        }
     }
     opus_encoder_destroy(enc);
     close_pcm(&cap);
 
-    make_listen(listen, sizeof(listen), session_id, "stop");
-    log_line("INFO", "send listen stop");
-    if (ws_send_frame(ws, 1, listen, strlen(listen)) < 0) {
-        log_line("ERR", "send listen stop failed");
+    if (!listen_started) {
+        if (rc == 0 && !g_stop && !wake_no_speech_logged) {
+            log_line("EVENT", "wake_no_speech");
+        }
+        return rc;
+    }
+
+    if (send_listen_state(ws, session_id, "stop") < 0) {
         return 1;
     }
     log_line("EVENT", "request_sent");
+    log_line("INFO", "record sent_frames=%d", sent_frames);
     if (rc != 0 || g_stop) {
         return rc ? rc : 1;
     }
@@ -1869,7 +2041,7 @@ static int command_session(const app_opts_t *opts)
             log_line("INFO", "session quit");
             break;
         }
-        if (strcmp(cmd, "PTT_BEGIN") != 0) {
+        if (strcmp(cmd, "PTT_BEGIN") != 0 && strcmp(cmd, "WAKE_BEGIN") != 0) {
             log_line("WARN", "unknown control command: %s", cmd);
             continue;
         }
@@ -1887,10 +2059,15 @@ static int command_session(const app_opts_t *opts)
                      session_id[0] ? session_id : "(empty)", server_rate);
         }
 
-        log_line("INFO", "ptt turn start");
+        session_record_mode_t record_mode =
+            strcmp(cmd, "WAKE_BEGIN") == 0 ? SESSION_RECORD_WAKE_VAD :
+                                             SESSION_RECORD_MANUAL;
+        log_line("INFO", "%s turn start",
+                 record_mode == SESSION_RECORD_WAKE_VAD ? "wake" : "ptt");
         int turn_rc = session_ptt_turn(opts, &ws, session_id, server_rate,
-                                       &ctl);
-        log_line(turn_rc == 0 ? "INFO" : "ERR", "ptt turn done rc=%d",
+                                       &ctl, record_mode);
+        log_line(turn_rc == 0 ? "INFO" : "ERR", "%s turn done rc=%d",
+                 record_mode == SESSION_RECORD_WAKE_VAD ? "wake" : "ptt",
                  turn_rc);
         if (turn_rc != 0) {
             ws_close(&ws);

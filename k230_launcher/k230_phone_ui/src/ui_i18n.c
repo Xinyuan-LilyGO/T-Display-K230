@@ -175,6 +175,7 @@ static const ui_translation_t ui_translations[] = {
     { "Wake detected", "已唤醒", "ウェイク検出" },
     { "Wake word failed", "唤醒词失败", "ウェイクワード失敗" },
     { "Wake word unavailable", "唤醒词不可用", "ウェイクワード使用不可" },
+    { "Speak now", "请开始说话", "話してください" },
     { "KWS helper or model missing", "缺少 KWS 程序或模型", "KWS ヘルパーまたはモデルなし" },
     { "KWS popen failed", "KWS 启动失败", "KWS 起動失敗" },
     { "Invalid KWS pid", "KWS 进程无效", "KWS PID 無効" },

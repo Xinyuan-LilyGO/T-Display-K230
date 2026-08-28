@@ -28,7 +28,6 @@
 #define XIAOZHI_CTL "/tmp/k230_xiaozhi_session.ctl"
 #define XIAOZHI_LOG_TEXT_MAX 4096
 #define XIAOZHI_CHAT_TEXT_MAX 8192
-#define XIAOZHI_WAKE_RECORD_MS 3000
 #define XIAOZHI_FACE_CONTROLS_HIDE_MS 3500
 #define XIAOZHI_FACE_EDGE_START_PX 28
 #define XIAOZHI_FACE_EDGE_SWIPE_PX 90
@@ -72,7 +71,6 @@ static lv_obj_t *xiaozhi_face_emotion_label;
 static lv_obj_t *xiaozhi_face_status_label;
 static lv_obj_t *xiaozhi_face_ptt_btn;
 static lv_timer_t *xiaozhi_face_timer;
-static lv_timer_t *xiaozhi_auto_ptt_timer;
 static lv_obj_t *xiaozhi_url_label;
 static lv_obj_t *xiaozhi_token_label;
 static int xiaozhi_running;
@@ -84,6 +82,7 @@ static int xiaozhi_ptt_recording;
 static int xiaozhi_session_ready;
 static int xiaozhi_kws_should_run;
 static int xiaozhi_kws_route_active;
+static int xiaozhi_ptt_route_active;
 static int xiaozhi_kws_available = 1;
 static int xiaozhi_record_phase;
 static int xiaozhi_settings_dirty;
@@ -114,7 +113,6 @@ static void xiaozhi_stop_ptt_hold(void);
 static void xiaozhi_kws_start(void);
 static void xiaozhi_kws_stop(void);
 static void xiaozhi_kws_restart_if_idle(void);
-static void xiaozhi_auto_ptt_timer_stop(void);
 
 static void xiaozhi_get_url(char *buf, size_t len)
 {
@@ -212,6 +210,22 @@ static int xiaozhi_write_control(const char *cmd)
     written = write(fd, line, strlen(line));
     close(fd);
     return written > 0 ? 0 : -1;
+}
+
+static void xiaozhi_ptt_route_enter_if_needed(void)
+{
+    if(!xiaozhi_ptt_route_active) {
+        ui_audio_input_route_enter("Xiaozhi PTT");
+        xiaozhi_ptt_route_active = 1;
+    }
+}
+
+static void xiaozhi_ptt_route_leave_if_needed(void)
+{
+    if(xiaozhi_ptt_route_active) {
+        ui_audio_input_route_leave("Xiaozhi PTT");
+        xiaozhi_ptt_route_active = 0;
+    }
 }
 
 static void xiaozhi_kws_leave_route_if_needed(int route_active)
@@ -540,9 +554,9 @@ static void xiaozhi_stop_session(void)
 {
     pid_t pid;
 
-    xiaozhi_auto_ptt_timer_stop();
     xiaozhi_kws_stop();
     xiaozhi_record_overlay_close();
+    xiaozhi_ptt_route_leave_if_needed();
     pthread_mutex_lock(&xiaozhi_lock);
     pid = xiaozhi_session_pid;
     xiaozhi_session_pid = -1;
@@ -2017,7 +2031,6 @@ static void xiaozhi_start_action(xiaozhi_action_t action)
     pthread_t thread;
     char header[128];
 
-    xiaozhi_auto_ptt_timer_stop();
     xiaozhi_kws_stop();
 
     pthread_mutex_lock(&xiaozhi_lock);
@@ -2057,27 +2070,12 @@ static void xiaozhi_audio_event_cb(lv_event_t *event)
     xiaozhi_start_action(XIAOZHI_ACTION_AUDIO);
 }
 
-static void xiaozhi_auto_ptt_timer_cb(lv_timer_t *timer)
-{
-    if(xiaozhi_auto_ptt_timer == timer) {
-        xiaozhi_auto_ptt_timer = NULL;
-    }
-    lv_timer_delete(timer);
-    xiaozhi_stop_ptt_hold();
-}
-
-static void xiaozhi_auto_ptt_timer_stop(void)
-{
-    if(xiaozhi_auto_ptt_timer) {
-        lv_timer_delete(xiaozhi_auto_ptt_timer);
-        xiaozhi_auto_ptt_timer = NULL;
-    }
-}
-
 static int xiaozhi_begin_ptt_session(const char *header_text,
                                      const char *status,
                                      const char *detail,
-                                     const char *overlay_title)
+                                     const char *overlay_title,
+                                     const char *control_cmd,
+                                     int manual_hold)
 {
     char header[128];
     char token[XIAOZHI_PREF_VALUE_MAX];
@@ -2091,7 +2089,6 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
         return -1;
     }
 
-    xiaozhi_auto_ptt_timer_stop();
     xiaozhi_kws_stop();
 
     pthread_mutex_lock(&xiaozhi_lock);
@@ -2121,7 +2118,12 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
     }
 
     xiaozhi_truncate_log();
-    if(xiaozhi_write_control("PTT_BEGIN") != 0) {
+    if(!control_cmd || !control_cmd[0]) {
+        control_cmd = "PTT_BEGIN";
+    }
+    xiaozhi_ptt_route_enter_if_needed();
+    if(xiaozhi_write_control(control_cmd) != 0) {
+        xiaozhi_ptt_route_leave_if_needed();
         pthread_mutex_lock(&xiaozhi_lock);
         xiaozhi_set_status_locked("Session not ready",
                                   "Tap Reconnect and try again", -1);
@@ -2133,7 +2135,7 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
 
     pthread_mutex_lock(&xiaozhi_lock);
     xiaozhi_running = 1;
-    xiaozhi_ptt_recording = 1;
+    xiaozhi_ptt_recording = manual_hold ? 1 : 0;
     xiaozhi_log_text[0] = '\0';
     xiaozhi_log_scan_len = 0;
     xiaozhi_kws_log_scan_len = 0;
@@ -2149,22 +2151,21 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
 static void xiaozhi_start_ptt_hold(void)
 {
     xiaozhi_begin_ptt_session("== Hold PTT session ==", "Recording",
-                              "Release to send", "PTT");
+                              "Release to send", "PTT", "PTT_BEGIN", 1);
 }
 
 static void xiaozhi_start_wake_turn(void)
 {
     if(xiaozhi_begin_ptt_session("== Wake word session ==", "Wake detected",
-                                 "Listening after wake", "小智小智") == 0) {
-        xiaozhi_auto_ptt_timer =
-            lv_timer_create(xiaozhi_auto_ptt_timer_cb, XIAOZHI_WAKE_RECORD_MS,
-                            NULL);
+                                 "Speak now", "小智小智", "WAKE_BEGIN", 0) == 0) {
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_append_log_locked("WAKE_VAD armed");
+        pthread_mutex_unlock(&xiaozhi_lock);
     }
 }
 
 static void xiaozhi_stop_ptt_hold(void)
 {
-    xiaozhi_auto_ptt_timer_stop();
     pthread_mutex_lock(&xiaozhi_lock);
     if(!xiaozhi_ptt_recording) {
         pthread_mutex_unlock(&xiaozhi_lock);
@@ -2175,6 +2176,7 @@ static void xiaozhi_stop_ptt_hold(void)
     pthread_mutex_unlock(&xiaozhi_lock);
 
     xiaozhi_write_control("PTT_END");
+    xiaozhi_ptt_route_leave_if_needed();
     xiaozhi_record_overlay_close();
     app_request_fast_refresh();
 }
@@ -2338,6 +2340,7 @@ static void xiaozhi_update(void)
     int settings_dirty;
     int kws_detected = 0;
     int start_wake_turn = 0;
+    int leave_ptt_route = 0;
     pid_t ptt_pid;
     pid_t session_pid;
     char status[192];
@@ -2368,7 +2371,18 @@ static void xiaozhi_update(void)
             }
         }
         if(xiaozhi_running && !xiaozhi_ptt_recording &&
-           strstr(xiaozhi_log_text, "EVENT response_done")) {
+           (strstr(xiaozhi_log_text, "EVENT request_sent") ||
+            strstr(xiaozhi_log_text, "EVENT wake_no_speech") ||
+            strstr(xiaozhi_log_text, "turn done rc="))) {
+            leave_ptt_route = 1;
+        }
+        if(xiaozhi_running && !xiaozhi_ptt_recording &&
+           strstr(xiaozhi_log_text, "EVENT wake_no_speech")) {
+            xiaozhi_running = 0;
+            xiaozhi_set_status_locked("Listening", "Say 小智小智", 0);
+            xiaozhi_record_overlay_close();
+        } else if(xiaozhi_running && !xiaozhi_ptt_recording &&
+                  strstr(xiaozhi_log_text, "EVENT response_done")) {
             xiaozhi_running = 0;
             xiaozhi_set_status_locked("Completed", "Reply finished", 0);
             xiaozhi_record_overlay_close();
@@ -2380,12 +2394,14 @@ static void xiaozhi_update(void)
             xiaozhi_set_status_locked("Receiving", "Waiting for reply", 0);
         }
         if(xiaozhi_running && !xiaozhi_ptt_recording &&
-           strstr(xiaozhi_log_text, "ptt turn done rc=0")) {
+           (strstr(xiaozhi_log_text, "ptt turn done rc=0") ||
+            strstr(xiaozhi_log_text, "wake turn done rc=0"))) {
             xiaozhi_running = 0;
             xiaozhi_set_status_locked("Completed", "PTT", 0);
             xiaozhi_record_overlay_close();
         } else if(xiaozhi_running && !xiaozhi_ptt_recording &&
-                  strstr(xiaozhi_log_text, "ptt turn done rc=")) {
+                  (strstr(xiaozhi_log_text, "ptt turn done rc=") ||
+                   strstr(xiaozhi_log_text, "wake turn done rc="))) {
             xiaozhi_running = 0;
             xiaozhi_set_status_locked("Failed, check log", "PTT", -1);
             xiaozhi_record_overlay_close();
@@ -2430,6 +2446,9 @@ static void xiaozhi_update(void)
     snprintf(emotion, sizeof(emotion), "%s", xiaozhi_emotion_text);
     pthread_mutex_unlock(&xiaozhi_lock);
 
+    if(leave_ptt_route) {
+        xiaozhi_ptt_route_leave_if_needed();
+    }
     xiaozhi_last_log_line(log_text, log_preview, sizeof(log_preview));
 
     if(settings_dirty) {
@@ -2720,7 +2739,6 @@ void ui_xiaozhi_cleanup(void)
     pthread_mutex_lock(&xiaozhi_lock);
     xiaozhi_kws_should_run = 0;
     pthread_mutex_unlock(&xiaozhi_lock);
-    xiaozhi_auto_ptt_timer_stop();
     xiaozhi_kws_stop();
     xiaozhi_kws_kill_stale_helpers(-1);
     xiaozhi_stop_session();
