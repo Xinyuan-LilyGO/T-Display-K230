@@ -26,6 +26,33 @@ foreach(face_detect_candidate ${FACE_DETECT_SRC_CANDIDATES})
     endif()
 endforeach()
 set(K230_PHONE_UI_FACE_DETECT_ENABLED 0)
+set(AI_DEMO_KWS_SRC_DIR "")
+set(AI_DEMO_COMMON_SRC_DIR "")
+set(AI_DEMO_KWS_CANDIDATES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ai_demo/kws
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../ai_demo/kws
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../buildroot-2025.02.1/package/ai_demo/kws
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../buildroot-overlay/package/ai_demo/kws
+)
+set(AI_DEMO_COMMON_CANDIDATES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ai_demo/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../ai_demo/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../buildroot-2025.02.1/package/ai_demo/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../buildroot-overlay/package/ai_demo/common
+)
+foreach(ai_demo_kws_candidate ${AI_DEMO_KWS_CANDIDATES})
+    if(EXISTS ${ai_demo_kws_candidate}/kws.cc)
+        set(AI_DEMO_KWS_SRC_DIR ${ai_demo_kws_candidate})
+        break()
+    endif()
+endforeach()
+foreach(ai_demo_common_candidate ${AI_DEMO_COMMON_CANDIDATES})
+    if(EXISTS ${ai_demo_common_candidate}/ai_base.cc)
+        set(AI_DEMO_COMMON_SRC_DIR ${ai_demo_common_candidate})
+        break()
+    endif()
+endforeach()
+set(K230_XIAOZHI_KWS_ENABLED 0)
 file(GLOB NOFRENDO_SOURCES
     ${NOFRENDO_DIR}/*.c
     ${NOFRENDO_DIR}/cpu/*.c
@@ -103,6 +130,7 @@ set(K230_PHONE_UI_SOURCES
     ui_mic_spectrum.c
     ui_usb_storage.c
     ui_meshtastic.c
+    ui_xiaozhi.c
     ui_lora.cpp
     ui_nes.cpp
     ${LIBTMT_DIR}/tmt.c
@@ -145,6 +173,17 @@ add_executable(k230_qr_scan
 )
 add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(k230_nrf52840_dfu k230_nrf52840_dfu.cpp)
+add_executable(k230_xiaozhi_probe k230_xiaozhi_probe.c)
+if(AI_DEMO_KWS_SRC_DIR AND AI_DEMO_COMMON_SRC_DIR)
+    set(K230_XIAOZHI_KWS_ENABLED 1)
+    add_executable(k230_xiaozhi_kws
+        k230_xiaozhi_kws.cpp
+        ${AI_DEMO_COMMON_SRC_DIR}/ai_base.cc
+        ${AI_DEMO_KWS_SRC_DIR}/kws.cc
+        ${AI_DEMO_KWS_SRC_DIR}/feature_pipeline.cc
+        ${AI_DEMO_KWS_SRC_DIR}/fft.cc
+    )
+endif()
 add_executable(drm_motion_probe drm_motion_probe.c)
 add_executable(drm_motion_probe_rgb565 drm_motion_probe.c)
 add_executable(lvgl_scroll_probe lvgl_scroll_probe.c)
@@ -220,6 +259,21 @@ target_include_directories(k230_qr_scan PRIVATE
     ${CMAKE_SYSROOT}/usr/include/libdrm
     ${QUIRC_DIR}
 )
+
+target_include_directories(k230_xiaozhi_probe PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${CMAKE_SYSROOT}/usr/include/opus
+)
+
+if(K230_XIAOZHI_KWS_ENABLED)
+target_include_directories(k230_xiaozhi_kws PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
+    ${CMAKE_SYSROOT}/usr/include/opencv4
+    ${CMAKE_SYSROOT}/usr/include/libdrm
+    ${AI_DEMO_COMMON_SRC_DIR}
+    ${AI_DEMO_KWS_SRC_DIR}
+)
+endif()
 
 target_compile_definitions(k230_meshtastic_probe PRIVATE
     RADIOLIB_GODMODE=1
@@ -394,6 +448,49 @@ target_link_libraries(k230_qr_scan PRIVATE
     m
 )
 
+target_link_directories(k230_xiaozhi_probe PRIVATE
+    ${CMAKE_SYSROOT}/usr/lib
+)
+
+target_link_libraries(k230_xiaozhi_probe PRIVATE
+    ssl
+    crypto
+    asound
+    opus
+    pthread
+)
+
+if(K230_XIAOZHI_KWS_ENABLED)
+target_link_directories(k230_xiaozhi_kws PRIVATE
+    ${CMAKE_SYSROOT}/usr/lib
+)
+
+target_link_libraries(k230_xiaozhi_kws PRIVATE
+    -Wl,--start-group
+    Nncase.Runtime.Native
+    nncase.rt_modules.k230
+    functional_k230
+    opencv_imgcodecs
+    opencv_imgproc
+    opencv_core
+    sharpyuv
+    libjpeg.so.9
+    webp
+    png
+    z
+    v4l2-drm
+    drm
+    display
+    mmz
+    alure2
+    asound
+    libopenal.so
+    pthread
+    m
+    -Wl,--end-group
+)
+endif()
+
 set(K230_PHONE_UI_INSTALL_TARGETS
     k230_phone_ui
     k230_phone_ui_fullswitch_test
@@ -403,7 +500,14 @@ set(K230_PHONE_UI_INSTALL_TARGETS
     k230_qr_scan
     k230_pcm_volume
     k230_nrf52840_dfu
+    k230_xiaozhi_probe
 )
+
+if(K230_XIAOZHI_KWS_ENABLED)
+    list(APPEND K230_PHONE_UI_INSTALL_TARGETS
+        k230_xiaozhi_kws
+    )
+endif()
 
 if(K230_ENABLE_DEV_APPS)
     list(APPEND K230_PHONE_UI_INSTALL_TARGETS
@@ -436,4 +540,8 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/icons DESTINATION /root/app/k230_p
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/models/face_detection_320.kmodel)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/models/face_detection_320.kmodel
             DESTINATION /root/app/face_detect)
+endif()
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/models/xiaozhi_kws.kmodel)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/models/xiaozhi_kws.kmodel
+            DESTINATION /root/app/k230_phone_ui/models)
 endif()

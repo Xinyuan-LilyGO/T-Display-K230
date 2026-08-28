@@ -220,6 +220,7 @@
 #include "ui_video_player.h"
 #include "ui_wifi.h"
 #include "ui_wifi_iperf.h"
+#include "ui_xiaozhi.h"
 
 typedef struct {
     const char *title;
@@ -554,6 +555,7 @@ static int reboot_confirm_started;
 static int shutdown_visual_active;
 static int shutdown_visual_committed;
 static int shutdown_visual_poweroff_started;
+static int shutdown_visual_low_battery_reason;
 static uint64_t shutdown_visual_start_us;
 static uint64_t shutdown_visual_commit_us;
 static uint64_t shutdown_visual_last_update_us;
@@ -608,6 +610,7 @@ static const app_item_t app_items[] = {
     {"LoRaWAN", "WAN", 0x14B8A6, PAGE_LORAWAN},
     {"NES", "NES", 0xF97316, PAGE_NES},
     {"AI", LV_SYMBOL_BARS, 0xFF6B6B, PAGE_AI},
+    {"Xiaozhi", "AI", 0x60A5FA, PAGE_XIAOZHI},
     {"RTSP", LV_SYMBOL_VIDEO, 0x22C55E, PAGE_RTSP},
     {"Wi-Fi", "WiFi", 0x25C281, PAGE_WIFI},
 #if K230_ENABLE_DEV_APPS
@@ -635,6 +638,7 @@ static void cleanup_page_state(void);
 static int camera_gallery_handle_back(void);
 static void edge_back_load_pref(void);
 static void edge_back_event_cb(lv_event_t *event);
+static void edge_back_hint_hide(void);
 static int display_logical_width(void);
 static int display_logical_height(void);
 static void load_runtime_display_orientation(void);
@@ -660,6 +664,7 @@ static void request_fast_refresh(void);
 static void start_power_key_monitor(void);
 static void stop_power_key_monitor(void);
 static void power_key_shutdown_visual_poll(void);
+static void low_battery_shutdown_visual_poll(void);
 static void status_bar_relayout(void);
 
 static void sig_handler(int sig)
@@ -777,6 +782,8 @@ static const char *page_name(page_id_t page)
         return "MTP";
     case PAGE_AI:
         return "AI";
+    case PAGE_XIAOZHI:
+        return "Xiaozhi";
     case PAGE_RTSP:
         return "RTSP";
     case PAGE_TERMINAL:
@@ -921,8 +928,12 @@ static void edge_back_raw_trace(uint32_t seq, int pressed, int32_t screen_x,
 {
     static int raw_down;
     const char *reason = NULL;
+    uint64_t now = ui_monotonic_us();
 
-    if(!edge_back_enabled) {
+    if(edge_back_lvgl_suppress_until_us &&
+       now < edge_back_lvgl_suppress_until_us) {
+        reason = "suppress";
+    } else if(!edge_back_enabled) {
         reason = "disabled";
     } else if(current_page == PAGE_HOME) {
         reason = "home";
@@ -3121,19 +3132,27 @@ static void shutdown_visual_create(void)
                  0xD1FAE5);
     lv_obj_center(icon);
 
-    title = label(shutdown_overlay_obj, "Powering off", &lv_font_montserrat_32,
+    title = label(shutdown_overlay_obj,
+                  shutdown_visual_low_battery_reason ? "Low battery" :
+                  "Powering off", &lv_font_montserrat_32,
                   0xF2F5F8);
     lv_obj_set_width(title, w);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(title, 0, title_y);
 
-    shutdown_detail_label = label(shutdown_overlay_obj, "Saving display state",
+    shutdown_detail_label = label(shutdown_overlay_obj,
+                                  shutdown_visual_low_battery_reason ?
+                                  "Battery below shutdown voltage" :
+                                  "Saving display state",
                                   &lv_font_montserrat_18, 0x9AA4AF);
     lv_obj_set_width(shutdown_detail_label, w);
     lv_obj_set_style_text_align(shutdown_detail_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(shutdown_detail_label, 0, title_y + 48);
 
-    shutdown_hint_label = label(shutdown_overlay_obj, "Hold power key",
+    shutdown_hint_label = label(shutdown_overlay_obj,
+                                shutdown_visual_low_battery_reason ?
+                                "Powering off to protect battery" :
+                                "Hold power key",
                                 &lv_font_montserrat_16, 0x64748B);
     lv_obj_set_width(shutdown_hint_label, w);
     lv_obj_set_style_text_align(shutdown_hint_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -3175,10 +3194,12 @@ static void shutdown_visual_begin(uint64_t press_us)
     shutdown_visual_active = 1;
     ui_power_manager_set_shutdown_fade(1);
     shutdown_visual_create();
-    touch_trace_log("SHUTDOWN_VISUAL_BEGIN screen=%d keyboard=%d rotation=%d",
+    touch_trace_log("SHUTDOWN_VISUAL_BEGIN screen=%d keyboard=%d rotation=%d reason=%s",
                     shutdown_saved_screen_backlight,
                     shutdown_saved_keyboard_backlight,
-                    display_rotation_degrees);
+                    display_rotation_degrees,
+                    shutdown_visual_low_battery_reason ? "low-battery" :
+                    "power-key");
 }
 
 static void shutdown_visual_cancel(void)
@@ -3198,6 +3219,7 @@ static void shutdown_visual_cancel(void)
     shutdown_visual_committed = 0;
     shutdown_visual_poweroff_started = 0;
     shutdown_visual_commit_us = 0;
+    shutdown_visual_low_battery_reason = 0;
     ui_power_manager_set_shutdown_fade(0);
     touch_trace_log("SHUTDOWN_VISUAL_CANCEL restore_screen=%d restore_keyboard=%d",
                     shutdown_saved_screen_backlight,
@@ -3231,10 +3253,16 @@ static void shutdown_visual_commit(void)
         lv_arc_set_value(shutdown_progress_arc, 100);
     }
     if(shutdown_detail_label && lv_obj_is_valid(shutdown_detail_label)) {
-        lv_label_set_text(shutdown_detail_label, "Dimming backlights");
+        lv_label_set_text(shutdown_detail_label,
+                          shutdown_visual_low_battery_reason ?
+                          ui_tr("Protecting battery") :
+                          ui_tr("Dimming backlights"));
     }
     if(shutdown_hint_label && lv_obj_is_valid(shutdown_hint_label)) {
-        lv_label_set_text(shutdown_hint_label, "Power off committed");
+        lv_label_set_text(shutdown_hint_label,
+                          shutdown_visual_low_battery_reason ?
+                          ui_tr("Powering off") :
+                          ui_tr("Power off committed"));
     }
     request_fast_refresh();
     touch_trace_log("SHUTDOWN_VISUAL_COMMIT fade_us=%u",
@@ -3291,13 +3319,18 @@ static void shutdown_visual_update(uint64_t now)
         }
         if(shutdown_detail_label && lv_obj_is_valid(shutdown_detail_label)) {
             lv_label_set_text(shutdown_detail_label,
-                              fade_progress >= 100 ? "Shutting down" :
-                              "Dimming backlights");
+                              shutdown_visual_low_battery_reason ?
+                              (fade_progress >= 100 ? ui_tr("Shutting down") :
+                               ui_tr("Protecting battery")) :
+                              (fade_progress >= 100 ? ui_tr("Shutting down") :
+                               ui_tr("Dimming backlights")));
         }
         if(shutdown_hint_label && lv_obj_is_valid(shutdown_hint_label)) {
             lv_label_set_text(shutdown_hint_label,
-                              fade_progress >= 100 ? "Powering off" :
-                              "Release is ignored");
+                              shutdown_visual_low_battery_reason ?
+                              ui_tr("Powering off") :
+                              (fade_progress >= 100 ? ui_tr("Powering off") :
+                               ui_tr("Release is ignored")));
         }
         request_fast_refresh();
         if(fade_progress >= 100) {
@@ -3314,14 +3347,19 @@ static void shutdown_visual_update(uint64_t now)
         }
         if(shutdown_detail_label && lv_obj_is_valid(shutdown_detail_label)) {
             lv_label_set_text(shutdown_detail_label,
-                              progress >= 100 ? "Shutting down" :
-                              "Keep holding power key");
+                              shutdown_visual_low_battery_reason ?
+                              (progress >= 100 ? ui_tr("Shutting down") :
+                               ui_tr("Battery below shutdown voltage")) :
+                              (progress >= 100 ? ui_tr("Shutting down") :
+                               ui_tr("Keep holding power key")));
         }
         if(shutdown_hint_label && lv_obj_is_valid(shutdown_hint_label) &&
            progress >= 88) {
             lv_label_set_text(shutdown_hint_label,
-                              progress >= 100 ? "Dimming backlights" :
-                              "Almost there");
+                              shutdown_visual_low_battery_reason ?
+                              ui_tr("Powering off to protect battery") :
+                              (progress >= 100 ? ui_tr("Dimming backlights") :
+                               ui_tr("Almost there")));
         }
         request_fast_refresh();
     } else if(fade_progress > 0) {
@@ -3330,6 +3368,25 @@ static void shutdown_visual_update(uint64_t now)
 
     if(progress >= 100) {
         shutdown_visual_commit();
+    }
+}
+
+static void low_battery_shutdown_visual_poll(void)
+{
+    uint64_t now = monotonic_us();
+    int voltage_mv = 0;
+    int threshold_mv = 0;
+    int soc_pct = -1;
+
+    if(shutdown_visual_active) {
+        return;
+    }
+    if(ui_hardware_consume_low_battery_shutdown(&voltage_mv, &threshold_mv,
+                                                &soc_pct)) {
+        shutdown_visual_low_battery_reason = 1;
+        shutdown_visual_begin(now - POWER_SHUTDOWN_PREVIEW_DELAY_US);
+        touch_trace_log("LOW_BATTERY_SHUTDOWN_DIRECT voltage=%d threshold=%d soc=%d",
+                        voltage_mv, threshold_mv, soc_pct);
     }
 }
 
@@ -3349,10 +3406,11 @@ static void power_key_shutdown_visual_poll(void)
 
     if(pressed && press_us &&
        now - press_us >= POWER_SHUTDOWN_PREVIEW_DELAY_US) {
+        shutdown_visual_low_battery_reason = 0;
         shutdown_visual_begin(press_us);
     }
 
-    if(!pressed && shutdown_visual_active) {
+    if(!pressed && shutdown_visual_active && !shutdown_visual_low_battery_reason) {
         if(shutdown_visual_committed ||
            shutdown_visual_progress_at(now) >= 100) {
             shutdown_visual_commit();
@@ -3878,6 +3936,9 @@ static void nav_back(void)
     if(ui_input_handle_back()) {
         return;
     }
+    if(ui_xiaozhi_handle_back()) {
+        return;
+    }
     if(camera_gallery_handle_back()) {
         return;
     }
@@ -3971,6 +4032,28 @@ void app_set_edge_back_enabled(int enabled)
     edge_back_enabled = 1;
     edge_back_pref_loaded = 1;
     edge_back_log("SET ignored always_on=1");
+}
+
+void app_edge_back_cancel_gesture(uint32_t suppress_ms)
+{
+    uint64_t now = ui_monotonic_us();
+    uint64_t suppress_us = suppress_ms ? (uint64_t)suppress_ms * 1000ULL :
+                           250000ULL;
+
+    pthread_mutex_lock(&edge_back_raw_state_lock);
+    edge_back_raw_pending = 0;
+    edge_back_raw_hint_active = 0;
+    edge_back_raw_hint_generation++;
+    pthread_mutex_unlock(&edge_back_raw_state_lock);
+
+    edge_back_tracking = 0;
+    edge_back_direction = 0;
+    edge_back_raw_tracking = 0;
+    edge_back_raw_direction = 0;
+    edge_back_lvgl_suppress_until_us = now + suppress_us;
+    edge_back_hint_hide();
+    edge_back_log("CANCEL_GESTURE page=%s suppress_ms=%lu",
+                  page_name(current_page), (unsigned long)suppress_ms);
 }
 
 static int edge_back_clamp(int value, int min_value, int max_value)
@@ -4181,6 +4264,11 @@ static void edge_back_event_cb(lv_event_t *event)
             edge_back_direction = 0;
             return;
         }
+        if(ui_xiaozhi_handle_back()) {
+            trace_ui_action("LVGL_EDGE_BACK_XIAOZHI_FACE", current_page);
+            edge_back_direction = 0;
+            return;
+        }
         if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
             trace_ui_action("LVGL_EDGE_BACK_INNER", PAGE_CELLULAR);
             edge_back_direction = 0;
@@ -4272,6 +4360,12 @@ static void edge_back_consume_raw_pending(void)
     edge_back_lvgl_suppress_until_us = ui_monotonic_us() + 250000ULL;
     if(ui_input_handle_back()) {
         trace_ui_action("RAW_EDGE_BACK_INPUT", current_page);
+        edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
+        edge_back_hint_hide();
+        return;
+    }
+    if(ui_xiaozhi_handle_back()) {
+        trace_ui_action("RAW_EDGE_BACK_XIAOZHI_FACE", current_page);
         edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
         edge_back_hint_hide();
         return;
@@ -4635,6 +4729,10 @@ static void back_event_cb(lv_event_t *event)
         trace_ui_action("LVGL_CLICKED_BACK_INPUT", current_page);
         return;
     }
+    if(ui_xiaozhi_handle_back()) {
+        trace_ui_action("LVGL_CLICKED_BACK_XIAOZHI_FACE", current_page);
+        return;
+    }
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
         trace_ui_action("LVGL_CLICKED_BACK_INNER", PAGE_CELLULAR);
         return;
@@ -4681,6 +4779,10 @@ void app_nav_back(void)
 {
     if(ui_input_handle_back()) {
         trace_ui_action("APP_BACK_INPUT", current_page);
+        return;
+    }
+    if(ui_xiaozhi_handle_back()) {
+        trace_ui_action("APP_BACK_XIAOZHI_FACE", current_page);
         return;
     }
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
@@ -10499,6 +10601,7 @@ static void cleanup_page_state(void)
     ui_usb_storage_cleanup();
     ui_time_settings_cleanup();
     ui_ai_demo_cleanup();
+    ui_xiaozhi_cleanup();
     ui_rtsp_cleanup();
     ui_video_player_cleanup();
     ui_ble_cleanup();
@@ -11840,6 +11943,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     case PAGE_AI:
         ui_ai_demo_create(scr);
         break;
+    case PAGE_XIAOZHI:
+        ui_xiaozhi_create(scr);
+        break;
     case PAGE_RTSP:
         ui_rtsp_create(scr);
         break;
@@ -12015,6 +12121,7 @@ int main(void)
 
         edge_back_update_raw_hint();
         edge_back_consume_raw_pending();
+        low_battery_shutdown_visual_poll();
         power_key_shutdown_visual_poll();
         display_idle_poll();
         if(fast_refresh_pending) {

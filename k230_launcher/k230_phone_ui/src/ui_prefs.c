@@ -9,7 +9,7 @@
 
 #define UI_PREFS_MAX_ITEMS 256
 #define UI_PREFS_KEY_MAX 64
-#define UI_PREFS_VALUE_MAX 160
+#define UI_PREFS_VALUE_MAX 1024
 
 typedef struct {
     char key[UI_PREFS_KEY_MAX];
@@ -81,7 +81,7 @@ static int prefs_ensure_dir(void)
 static int prefs_load(ui_pref_item_t *items, size_t max_items)
 {
     FILE *fp;
-    char line[256];
+    char line[1200];
     int count = 0;
 
     if(!items || max_items == 0) {

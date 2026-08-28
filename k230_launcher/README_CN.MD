@@ -21,7 +21,7 @@ LoRa 模块、nRF52840 和 nRF9151。
 - Wi-Fi、以太网、蓝牙、显示、音频、通知音效、语言、时间、传感器、
   充电器、电池、键盘、F 键热键和系统信息设置
 - LoRa profile 测试、LoRaWAN profile 管理、nRF52840 DFU、nRF9151
-  蜂窝/GNSS/HTTP/MQTT 工具和 Meshtastic Beta
+  蜂窝/GNSS/HTTP/MQTT 工具、Meshtastic Beta 和小智语音助手
 
 依赖可选硬件的应用在进入前需要检测对应模块是否存在。如果模块不存在，
 Launcher 应显示用户可理解的提示，而不是进入不可用页面。

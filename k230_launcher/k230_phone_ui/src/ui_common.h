@@ -98,6 +98,7 @@ typedef enum {
     PAGE_USB_MODEM,
     PAGE_FILES,
     PAGE_AI,
+    PAGE_XIAOZHI,
     PAGE_RTSP,
     PAGE_TERMINAL,
     PAGE_ABOUT,
@@ -124,6 +125,7 @@ void app_refresh_status_bar(void);
 void app_note_user_activity(void);
 int app_edge_back_enabled(void);
 void app_set_edge_back_enabled(int enabled);
+void app_edge_back_cancel_gesture(uint32_t suppress_ms);
 int app_display_rotation_degrees(void);
 void app_set_display_rotation_degrees(int degrees);
 int app_display_logical_width(void);
@@ -178,6 +180,7 @@ int ui_read_iface_ip(const char *iface, char *buf, size_t len);
 void ui_read_iface_state(const char *iface, char *buf, size_t len,
                          uint32_t *color);
 void ui_network_sync_default_route(const char *reason);
+void ui_network_force_default_route(const char *reason);
 int ui_shell_exit_code(int rc);
 uint64_t ui_monotonic_us(void);
 

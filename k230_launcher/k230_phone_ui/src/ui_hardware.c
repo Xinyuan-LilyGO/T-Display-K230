@@ -3,7 +3,9 @@
 #include "ui_audio.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
+#include "ui_meshtastic.h"
 #include "ui_prefs.h"
+#include "ui_xiaozhi.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -43,6 +45,7 @@
 #define PREF_BQ25896_ICHG_MA "bq25896.ichg_ma"
 #define PREF_BQ25896_VREG_MV "bq25896.vreg_mv"
 #define PREF_BATTERY_CAPACITY_MAH "battery.capacity_mah"
+#define PREF_BATTERY_SHUTDOWN_MV "battery.shutdown_mv"
 #define PREF_KEYBOARD_BACKLIGHT "keyboard.backlight_pct"
 #define PREF_KEYBOARD_BACKLIGHT_PWM_HZ "keyboard.backlight_pwm_hz"
 #define PREF_EXTENSION_KEYBOARD "keyboard.extension_enabled"
@@ -74,6 +77,7 @@
 #define KEYBOARD_BACKLIGHT_LOG "/tmp/k230_keyboard_backlight.log"
 #define KEYBOARD_HOTKEY_LOG "/tmp/k230_keyboard_hotkey.log"
 #define BOOT0_TOGGLE_DEBOUNCE_US 500000ULL
+#define BOOT0_TOGGLE_STABLE_US 120000ULL
 #define BOOT0_FADE_STEPS 12
 #define BOOT0_FADE_STEP_US 25000
 #define HARDWARE_BACKLIGHT_PATH_MAX 160
@@ -158,6 +162,7 @@
 #define BQ25896_MASK_WATCHDOG 0x30
 #define BQ25896_WATCHDOG_DISABLED 0x00
 #define BQ25896_FAST_CHG_STEP_MA 64
+#define BQ25896_FAST_CHG_DEFAULT_MA 704
 #define BQ25896_FAST_CHG_MAX_MA 3008
 #define BQ25896_INPUT_CURRENT_BASE_MA 100
 #define BQ25896_INPUT_CURRENT_STEP_MA 50
@@ -213,6 +218,13 @@
 #define BATTERY_CAPACITY_DEFAULT_MAH 6000
 #define BATTERY_CAPACITY_MIN_MAH 500
 #define BATTERY_CAPACITY_MAX_MAH 20000
+#define BATTERY_SHUTDOWN_DISABLED_MV 0
+#define BATTERY_SHUTDOWN_MIN_MV 3300
+#define BATTERY_SHUTDOWN_MAX_MV 4000
+#define BATTERY_SHUTDOWN_OPTION_COUNT 7
+#define BATTERY_LOW_SHUTDOWN_POLL_US 30000000ULL
+#define BATTERY_LOW_SHUTDOWN_CONFIRM_COUNT 3
+#define BATTERY_LOW_SHUTDOWN_LOG "/tmp/k230_low_battery_shutdown.log"
 #define TCA8418_ADDR 0x34
 #define TCA8418_ROWS 7
 #define TCA8418_COLS 10
@@ -468,6 +480,7 @@ static lv_obj_t *battery_remaining_label;
 static lv_obj_t *battery_full_label;
 static lv_obj_t *battery_design_label;
 static lv_obj_t *battery_capacity_label;
+static lv_obj_t *battery_shutdown_label;
 static lv_obj_t *battery_temp_label;
 static lv_obj_t *battery_internal_temp_label;
 static lv_obj_t *battery_time_empty_label;
@@ -505,6 +518,10 @@ static int boot0_screen_off;
 static int boot0_saved_backlight = -1;
 static int boot0_saved_keyboard_backlight = -1;
 static uint64_t boot0_last_toggle_us;
+static int boot0_press_active;
+static int boot0_press_reported;
+static uint64_t boot0_press_start_us;
+static char boot0_press_source[40];
 static ui_hardware_screen_toggle_cb_t screen_toggle_cb;
 static void *screen_toggle_cb_user_data;
 static pthread_mutex_t tca8418_event_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -567,9 +584,22 @@ static lv_obj_t *keyboard_hotkey_osd_title_label;
 static lv_obj_t *keyboard_hotkey_osd_value_label;
 static lv_obj_t *keyboard_hotkey_osd_bar;
 static lv_timer_t *keyboard_hotkey_osd_timer;
+static lv_obj_t *battery_shutdown_overlay;
+static lv_obj_t *battery_shutdown_btn[BATTERY_SHUTDOWN_OPTION_COUNT];
+static uint64_t battery_low_shutdown_next_check_us;
+static int battery_low_shutdown_low_count;
+static int battery_low_shutdown_started;
+static int battery_low_shutdown_pending;
+static int battery_low_shutdown_pending_voltage_mv;
+static int battery_low_shutdown_pending_threshold_mv;
+static int battery_low_shutdown_pending_soc_pct;
 
 static const int bq25896_voltage_options_mv[BQ25896_CHG_VOLT_OPTION_COUNT] = {
     4208, 4288, 4352, 4416
+};
+
+static const int battery_shutdown_options_mv[BATTERY_SHUTDOWN_OPTION_COUNT] = {
+    3500, 3600, 3700, 3800, 3900, 4000, BATTERY_SHUTDOWN_DISABLED_MV
 };
 
 static void keyboard_hotkey_log(const char *fmt, ...)
@@ -590,12 +620,16 @@ static void keyboard_hotkey_log(const char *fmt, ...)
 }
 
 static void style_choice_button(lv_obj_t *btn, int selected, uint32_t accent);
+static void button_test_log(const char *fmt, ...);
 static int keyboard_backlight_pref_frequency_hz(void);
 static int keyboard_backlight_pwm_update_duty_only(int duty_percent);
 static void keyboard_backlight_apply(int duty_percent, int frequency_hz,
                                      int save_pref);
 static int xl9555_set_led(int index, int enabled);
 static uint32_t extension_keyboard_shift_symbol_for_code(int code);
+static int bq27220_set_new_capacity(uint16_t design_mah,
+                                    uint16_t full_charge_mah);
+static int battery_shutdown_voltage_mv(void);
 static void keyboard_settings_update_ui(void);
 static void keyboard_hotkeys_update_ui(void);
 static void keyboard_hotkey_action_update_ui(void);
@@ -676,12 +710,45 @@ static int read_pref_int(const char *key, int fallback, int min_value,
     return clamp_int(parsed, min_value, max_value);
 }
 
+static int read_pref_int_if_set(const char *key, int *out, int min_value,
+                                int max_value)
+{
+    char value[32];
+    int parsed;
+
+    if(!key || !out) {
+        return 0;
+    }
+    if(ui_prefs_get(key, value, sizeof(value), "") != 0 || !value[0]) {
+        return 0;
+    }
+    parsed = atoi(value);
+    *out = clamp_int(parsed, min_value, max_value);
+    return 1;
+}
+
 static void write_pref_int(const char *key, int value)
 {
     char text[32];
 
     snprintf(text, sizeof(text), "%d", value);
     ui_prefs_set(key, text);
+}
+
+static int ensure_pref_int_default(const char *key, int value, int min_value,
+                                   int max_value, const char *tag)
+{
+    int existing;
+    int clipped = clamp_int(value, min_value, max_value);
+
+    if(read_pref_int_if_set(key, &existing, min_value, max_value)) {
+        button_test_log("default %s exists=%d", tag ? tag : key, existing);
+        return 0;
+    }
+
+    write_pref_int(key, clipped);
+    button_test_log("default %s initialized=%d", tag ? tag : key, clipped);
+    return 1;
 }
 
 static void read_pref_text(const char *key, char *buf, size_t len,
@@ -1502,6 +1569,7 @@ static void boot0_toggle_poll(void)
     char err[160];
     int value;
     uint64_t now = ui_monotonic_us();
+    uint64_t low_us;
 
     if(button_read_gpio(BUTTON_BOOT0_GPIO, &value, source, sizeof(source),
                         err, sizeof(err)) != 0) {
@@ -1511,6 +1579,10 @@ static void boot0_toggle_poll(void)
     if(!boot0_toggle_initialized) {
         boot0_last_raw = value;
         boot0_toggle_initialized = 1;
+        boot0_press_active = 0;
+        boot0_press_reported = 0;
+        boot0_press_start_us = 0;
+        boot0_press_source[0] = '\0';
         if(hardware_read_backlight_raw() <= 0) {
             boot0_screen_off = 1;
             button_test_log("BOOT0 initial screen-off state from backlight=0");
@@ -1518,21 +1590,56 @@ static void boot0_toggle_poll(void)
         return;
     }
 
-    if(boot0_last_raw == BUTTON_BOOT0_IDLE_VALUE &&
-       value != BUTTON_BOOT0_IDLE_VALUE &&
+    if(value == BUTTON_BOOT0_IDLE_VALUE) {
+        if(boot0_press_active && !boot0_press_reported) {
+            low_us = now >= boot0_press_start_us ?
+                     now - boot0_press_start_us : 0;
+            button_test_log("BOOT0 ignored short low duration_us=%llu source=%s",
+                            (unsigned long long)low_us,
+                            boot0_press_source[0] ? boot0_press_source :
+                            source);
+        }
+        boot0_press_active = 0;
+        boot0_press_reported = 0;
+        boot0_press_start_us = 0;
+        boot0_press_source[0] = '\0';
+        boot0_last_raw = value;
+        return;
+    }
+
+    if(boot0_last_raw == BUTTON_BOOT0_IDLE_VALUE && !boot0_press_active) {
+        boot0_press_active = 1;
+        boot0_press_reported = 0;
+        boot0_press_start_us = now;
+        snprintf(boot0_press_source, sizeof(boot0_press_source), "%s",
+                 source[0] ? source : "unknown");
+    }
+
+    low_us = boot0_press_active && now >= boot0_press_start_us ?
+             now - boot0_press_start_us : 0;
+    if(boot0_press_active && !boot0_press_reported &&
+       low_us >= BOOT0_TOGGLE_STABLE_US &&
        now - boot0_last_toggle_us > BOOT0_TOGGLE_DEBOUNCE_US) {
         ui_hardware_screen_toggle_cb_t cb;
         void *cb_user_data;
 
         boot0_last_toggle_us = now;
+        boot0_press_reported = 1;
         pthread_mutex_lock(&hardware_lock);
         cb = screen_toggle_cb;
         cb_user_data = screen_toggle_cb_user_data;
         pthread_mutex_unlock(&hardware_lock);
         if(cb) {
-            button_test_log("BOOT0 screen toggle delegated to power manager");
+            button_test_log("BOOT0 screen toggle delegated to power manager duration_us=%llu source=%s",
+                            (unsigned long long)low_us,
+                            boot0_press_source[0] ? boot0_press_source :
+                            source);
             cb(cb_user_data);
         } else {
+            button_test_log("BOOT0 screen toggle direct duration_us=%llu source=%s",
+                            (unsigned long long)low_us,
+                            boot0_press_source[0] ? boot0_press_source :
+                            source);
             boot0_apply_screen_toggle(!boot0_screen_off);
         }
     }
@@ -2947,6 +3054,44 @@ static int bq25896_disable_watchdog(const char *reason)
     return rc;
 }
 
+static void hardware_apply_first_boot_defaults(void)
+{
+    int capacity_initialized;
+
+    ensure_pref_int_default(PREF_BQ25896_ICHG_MA,
+                            BQ25896_FAST_CHG_DEFAULT_MA,
+                            0, BQ25896_FAST_CHG_MAX_MA,
+                            "bq25896.ichg_ma");
+    ensure_pref_int_default(PREF_BQ25896_VREG_MV,
+                            BQ25896_CHG_VOLT_DEFAULT_MV,
+                            BQ25896_CHG_VOLT_BASE_MV,
+                            BQ25896_CHG_VOLT_MAX_MV,
+                            "bq25896.vreg_mv");
+    capacity_initialized =
+        ensure_pref_int_default(PREF_BATTERY_CAPACITY_MAH,
+                                BATTERY_CAPACITY_DEFAULT_MAH,
+                                BATTERY_CAPACITY_MIN_MAH,
+                                BATTERY_CAPACITY_MAX_MAH,
+                                "battery.capacity_mah");
+    ensure_pref_int_default(PREF_BATTERY_SHUTDOWN_MV,
+                            BATTERY_SHUTDOWN_DISABLED_MV,
+                            BATTERY_SHUTDOWN_DISABLED_MV,
+                            BATTERY_SHUTDOWN_MAX_MV,
+                            "battery.shutdown_mv");
+    if(capacity_initialized) {
+        keyboard_base_state_t base;
+
+        keyboard_base_get_state(&base);
+        if(base.bq27220) {
+            int rc = bq27220_set_new_capacity(
+                (uint16_t)BATTERY_CAPACITY_DEFAULT_MAH,
+                (uint16_t)BATTERY_CAPACITY_DEFAULT_MAH);
+            bq27220_log("startup default capacity sync rc=%d capacity=%dmAh",
+                        rc, BATTERY_CAPACITY_DEFAULT_MAH);
+        }
+    }
+}
+
 static int bq25896_read(bq25896_reading_t *reading)
 {
     uint8_t reg0 = 0;
@@ -3628,6 +3773,131 @@ int ui_bq27220_get_soc_pct(int *soc_pct)
     }
     *soc_pct = clamp_int(reading.soc_pct, 0, 100);
     return 0;
+}
+
+static void battery_low_shutdown_start(const bq27220_reading_t *reading,
+                                       int threshold_mv)
+{
+    FILE *fp;
+
+    if(battery_low_shutdown_started) {
+        return;
+    }
+    battery_low_shutdown_started = 1;
+    bq27220_log("low-shutdown start threshold=%dmV voltage=%dmV current=%dmA soc=%d%%",
+                threshold_mv,
+                reading ? reading->voltage_mv : -1,
+                reading ? reading->current_ma : 0,
+                reading ? reading->soc_pct : -1);
+    fp = fopen(BATTERY_LOW_SHUTDOWN_LOG, "a");
+    if(fp) {
+        fprintf(fp, "%llu pending threshold=%dmV voltage=%dmV current=%dmA soc=%d%%\n",
+                (unsigned long long)ui_monotonic_us(), threshold_mv,
+                reading ? reading->voltage_mv : -1,
+                reading ? reading->current_ma : 0,
+                reading ? reading->soc_pct : -1);
+        fclose(fp);
+    }
+
+    pthread_mutex_lock(&hardware_lock);
+    battery_low_shutdown_pending = 1;
+    battery_low_shutdown_pending_voltage_mv = reading ? reading->voltage_mv : 0;
+    battery_low_shutdown_pending_threshold_mv = threshold_mv;
+    battery_low_shutdown_pending_soc_pct = reading ? reading->soc_pct : -1;
+    pthread_mutex_unlock(&hardware_lock);
+    app_request_fast_refresh();
+}
+
+int ui_hardware_consume_low_battery_shutdown(int *voltage_mv,
+                                             int *threshold_mv,
+                                             int *soc_pct)
+{
+    int pending;
+
+    pthread_mutex_lock(&hardware_lock);
+    pending = battery_low_shutdown_pending;
+    if(pending) {
+        if(voltage_mv) {
+            *voltage_mv = battery_low_shutdown_pending_voltage_mv;
+        }
+        if(threshold_mv) {
+            *threshold_mv = battery_low_shutdown_pending_threshold_mv;
+        }
+        if(soc_pct) {
+            *soc_pct = battery_low_shutdown_pending_soc_pct;
+        }
+        battery_low_shutdown_pending = 0;
+    }
+    pthread_mutex_unlock(&hardware_lock);
+    return pending;
+}
+
+static void battery_low_shutdown_poll(void)
+{
+    keyboard_base_state_t base;
+    bq27220_reading_t reading;
+    uint64_t now = ui_monotonic_us();
+    int threshold_mv;
+    int low;
+    int usb_present = 0;
+    int charger_known;
+
+    if(battery_low_shutdown_started) {
+        return;
+    }
+    if(battery_low_shutdown_next_check_us &&
+       now < battery_low_shutdown_next_check_us) {
+        return;
+    }
+    battery_low_shutdown_next_check_us = now + BATTERY_LOW_SHUTDOWN_POLL_US;
+
+    threshold_mv = battery_shutdown_voltage_mv();
+    if(threshold_mv <= 0) {
+        battery_low_shutdown_low_count = 0;
+        return;
+    }
+
+    keyboard_base_get_state(&base);
+    if(!base.bq27220) {
+        if(battery_low_shutdown_low_count) {
+            bq27220_log("low-shutdown reset: bq27220 missing");
+        }
+        battery_low_shutdown_low_count = 0;
+        return;
+    }
+
+    if(bq27220_read(&reading) != 0) {
+        if(battery_low_shutdown_low_count) {
+            bq27220_log("low-shutdown reset: read failed");
+        }
+        battery_low_shutdown_low_count = 0;
+        return;
+    }
+
+    charger_known = ui_bq25896_get_usb_present(&usb_present, NULL) == 0;
+    low = reading.voltage_mv > 0 &&
+          reading.voltage_mv <= threshold_mv &&
+          reading.current_ma <= 0 &&
+          !(charger_known && usb_present);
+    if(low) {
+        battery_low_shutdown_low_count++;
+        bq27220_log("low-shutdown sample %d/%d threshold=%dmV voltage=%dmV current=%dmA soc=%d%% usb=%d/%d",
+                    battery_low_shutdown_low_count,
+                    BATTERY_LOW_SHUTDOWN_CONFIRM_COUNT,
+                    threshold_mv, reading.voltage_mv, reading.current_ma,
+                    reading.soc_pct, charger_known ? 1 : 0, usb_present);
+        if(battery_low_shutdown_low_count >=
+           BATTERY_LOW_SHUTDOWN_CONFIRM_COUNT) {
+            battery_low_shutdown_start(&reading, threshold_mv);
+        }
+    } else {
+        if(battery_low_shutdown_low_count) {
+            bq27220_log("low-shutdown recovered threshold=%dmV voltage=%dmV current=%dmA soc=%d%% usb=%d/%d",
+                        threshold_mv, reading.voltage_mv, reading.current_ma,
+                        reading.soc_pct, charger_known ? 1 : 0, usb_present);
+        }
+        battery_low_shutdown_low_count = 0;
+    }
 }
 
 static const char *tca8418_key_name(int code)
@@ -4585,6 +4855,18 @@ static void extension_keyboard_enqueue_tca_event(int code, int pressed)
         return;
     }
     app_note_user_activity();
+
+    if(code == 11 &&
+       (app_current_page_is(PAGE_XIAOZHI) ||
+        app_current_page_is(PAGE_MESHTASTIC))) {
+        if(app_current_page_is(PAGE_XIAOZHI)) {
+            ui_xiaozhi_handle_voice_key(pressed);
+        } else {
+            ui_meshtastic_handle_voice_key(pressed);
+        }
+        extension_keyboard_repeat_clear();
+        return;
+    }
 
     if(!pressed) {
         if(code == extension_keyboard_repeat_code) {
@@ -5810,6 +6092,7 @@ static void *hardware_thread_entry(void *arg)
     while(!hardware_thread_stop) {
         boot0_toggle_poll();
         fan_apply_policy_once();
+        battery_low_shutdown_poll();
         extension_keyboard_auto_detect_poll();
         for(int i = 0; i < 20 && !hardware_thread_stop; i++) {
             boot0_toggle_poll();
@@ -5829,6 +6112,7 @@ void ui_hardware_startup(void)
     int keyboard_pref;
 
     keyboard_base_probe();
+    hardware_apply_first_boot_defaults();
     button_prepare_boot0_gpio();
     keyboard_pref = read_pref_int(PREF_KEYBOARD_BACKLIGHT,
                                   KEYBOARD_BACKLIGHT_DEFAULT_PCT, 0, 100);
@@ -7068,6 +7352,200 @@ static int battery_user_capacity_mah(void)
                          BATTERY_CAPACITY_MAX_MAH);
 }
 
+static int battery_shutdown_voltage_mv(void)
+{
+    int mv = read_pref_int(PREF_BATTERY_SHUTDOWN_MV,
+                           BATTERY_SHUTDOWN_DISABLED_MV,
+                           BATTERY_SHUTDOWN_DISABLED_MV,
+                           BATTERY_SHUTDOWN_MAX_MV);
+
+    for(size_t i = 0; i < sizeof(battery_shutdown_options_mv) /
+           sizeof(battery_shutdown_options_mv[0]); i++) {
+        if(mv == battery_shutdown_options_mv[i]) {
+            return mv;
+        }
+    }
+    return BATTERY_SHUTDOWN_DISABLED_MV;
+}
+
+static void battery_format_shutdown_voltage(int mv, char *buf, size_t len)
+{
+    if(!buf || len == 0) {
+        return;
+    }
+    if(mv <= 0) {
+        snprintf(buf, len, "%s", ui_tr("Off"));
+        return;
+    }
+    snprintf(buf, len, "%.1f V", (double)mv / 1000.0);
+}
+
+static void battery_update_shutdown_label(void)
+{
+    char value[32];
+    char text[96];
+    int mv;
+
+    if(!battery_shutdown_label) {
+        return;
+    }
+    mv = battery_shutdown_voltage_mv();
+    battery_format_shutdown_voltage(mv, value, sizeof(value));
+    snprintf(text, sizeof(text), "%s  %s", ui_tr("Shutdown voltage"), value);
+    lv_label_set_text(battery_shutdown_label, text);
+    lv_obj_set_style_text_color(battery_shutdown_label,
+                                lv_color_hex(mv > 0 ? 0xF5A524 : 0x9AA4AF),
+                                0);
+}
+
+static void battery_shutdown_choice_close(void)
+{
+    if(battery_shutdown_overlay && lv_obj_is_valid(battery_shutdown_overlay)) {
+        lv_obj_delete_async(battery_shutdown_overlay);
+    }
+    battery_shutdown_overlay = NULL;
+    memset(battery_shutdown_btn, 0, sizeof(battery_shutdown_btn));
+}
+
+static void battery_shutdown_choice_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    battery_shutdown_choice_close();
+}
+
+static void battery_shutdown_choice_event_cb(lv_event_t *event)
+{
+    int mv = (int)(intptr_t)lv_event_get_user_data(event);
+
+    write_pref_int(PREF_BATTERY_SHUTDOWN_MV, mv);
+    battery_low_shutdown_low_count = 0;
+    battery_low_shutdown_started = 0;
+    battery_low_shutdown_next_check_us = 0;
+    bq27220_log("low-shutdown setting=%dmV", mv);
+    battery_update_shutdown_label();
+    battery_shutdown_choice_close();
+    app_request_fast_refresh();
+}
+
+static void battery_shutdown_choice_open(void)
+{
+    lv_obj_t *panel;
+    lv_obj_t *list;
+    lv_obj_t *title;
+    lv_obj_t *hint;
+    lv_obj_t *close_btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int landscape = ui_is_landscape();
+    int panel_w = landscape ? 460 : screen_w - 72;
+    int panel_h = landscape ? screen_h - 72 : screen_h - 96;
+    int pad = 22;
+    int button_gap = 14;
+    int button_w;
+    int button_col;
+    int button_row;
+    int button_x;
+    int list_y;
+    int list_h;
+    int selected = battery_shutdown_voltage_mv();
+
+    if(panel_w > screen_w - 48) {
+        panel_w = screen_w - 48;
+    }
+    if(panel_w < 300) {
+        panel_w = 300;
+    }
+    if(panel_h > screen_h - 48) {
+        panel_h = screen_h - 48;
+    }
+    if(panel_h < 360) {
+        panel_h = 360;
+    }
+
+    battery_shutdown_choice_close();
+    battery_shutdown_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(battery_shutdown_overlay);
+    lv_obj_set_style_bg_color(battery_shutdown_overlay, lv_color_hex(0x030507),
+                              0);
+    lv_obj_set_style_bg_opa(battery_shutdown_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(battery_shutdown_overlay, 0, 0);
+    lv_obj_set_style_radius(battery_shutdown_overlay, 0, 0);
+    lv_obj_clear_flag(battery_shutdown_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(battery_shutdown_overlay,
+                        battery_shutdown_choice_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    panel = ui_panel(battery_shutdown_overlay, 0, 0, panel_w, panel_h);
+    lv_obj_center(panel);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x121922), 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x2A3440), 0);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    title = ui_label(panel, "Shutdown voltage", &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, pad, pad);
+    lv_obj_set_width(title, panel_w - pad * 2);
+
+    hint = ui_label(panel, "Low-battery shutdown", &lv_font_montserrat_16,
+                    0x9AA4AF);
+    lv_obj_set_pos(hint, pad, pad + 42);
+    lv_obj_set_width(hint, panel_w - pad * 2);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+
+    list_y = pad + 84;
+    list_h = panel_h - list_y - 60 - pad * 2;
+    if(list_h < 180) {
+        list_h = 180;
+    }
+    list = ui_panel(panel, pad, list_y, panel_w - pad * 2, list_h);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+
+    button_w = (panel_w - pad * 2 - button_gap) / 2;
+    for(size_t i = 0; i < sizeof(battery_shutdown_options_mv) /
+           sizeof(battery_shutdown_options_mv[0]); i++) {
+        char label[32];
+        int mv = battery_shutdown_options_mv[i];
+        int y;
+
+        button_col = (int)i % 2;
+        button_row = (int)i / 2;
+        button_x = button_col * (button_w + button_gap);
+        y = button_row * (60 + button_gap);
+
+        if(mv > 0) {
+            snprintf(label, sizeof(label), "%.1f V", (double)mv / 1000.0);
+        } else {
+            snprintf(label, sizeof(label), "%s", ui_tr("Off"));
+        }
+        battery_shutdown_btn[i] =
+            ui_command_button(list, button_x, y, button_w, label,
+                              mv > 0 ? 0xF5A524 : 0x9AA4AF);
+        style_choice_button(battery_shutdown_btn[i], mv == selected,
+                            mv > 0 ? 0xF5A524 : 0x9AA4AF);
+        lv_obj_add_event_cb(battery_shutdown_btn[i],
+                            battery_shutdown_choice_event_cb,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)mv);
+    }
+
+    button_w = panel_w - pad * 2;
+    close_btn = ui_command_button(panel, pad, panel_h - pad - 60,
+                                  button_w, "Cancel", 0x9AA4AF);
+    lv_obj_add_event_cb(close_btn, battery_shutdown_choice_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(panel);
+}
+
+static void battery_shutdown_event_cb(lv_event_t *event)
+{
+    (void)event;
+    battery_shutdown_choice_open();
+}
+
 static int battery_parse_capacity(const char *text, int *capacity_mah)
 {
     char *end = NULL;
@@ -7180,6 +7658,7 @@ static void battery_update_page(void)
                  battery_user_capacity_mah());
         lv_label_set_text(battery_capacity_label, text);
     }
+    battery_update_shutdown_label();
 
     if(bq27220_read(&reading) == 0) {
         soc = clamp_int(reading.soc_pct, 0, 100);
@@ -7721,7 +8200,8 @@ void ui_bq25896_create(lv_obj_t *scr)
     lv_obj_set_pos(bq25896_slider_label,
                    group_x + group_w - value_w, 300);
 
-    last_current = read_pref_int(PREF_BQ25896_ICHG_MA, 512, 0,
+    last_current = read_pref_int(PREF_BQ25896_ICHG_MA,
+                                 BQ25896_FAST_CHG_DEFAULT_MA, 0,
                                  BQ25896_FAST_CHG_MAX_MA);
     bq25896_current_slider = lv_slider_create(body);
     lv_obj_set_pos(bq25896_current_slider, slider_x, 354);
@@ -7801,6 +8281,13 @@ void ui_battery_monitor_create(lv_obj_t *scr)
     int details_w = landscape ? body_w - details_x : 520;
     int cap_w;
     int metrics_y;
+    int soc_y = landscape ? 120 : 138;
+    int soc_text_y = landscape ? 150 : 166;
+    int soc_bar_y = landscape ? 214 : 232;
+    int capacity_y = landscape ? 262 : 282;
+    int capacity_btn_y = landscape ? 306 : 326;
+    int shutdown_y = landscape ? 382 : 402;
+    int shutdown_btn_y = landscape ? 422 : 446;
     const int metrics_step = 54;
 
     if(details_w < 320) {
@@ -7811,7 +8298,8 @@ void ui_battery_monitor_create(lv_obj_t *scr)
     }
 
     ui_create_header(scr, "Battery");
-    body = ui_scroll_panel(scr, 24, ui_page_top_y(154), 520,
+    body = ui_scroll_panel(scr, 24, ui_page_top_y(154),
+                           landscape ? body_w : 520,
                            ui_body_height(154));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     lv_obj_set_style_pad_bottom(body, 96, 0);
@@ -7849,13 +8337,13 @@ void ui_battery_monitor_create(lv_obj_t *scr)
     lv_obj_align(battery_status_label, LV_ALIGN_TOP_LEFT, 0, 86);
 
     battery_soc_label = ui_label(summary, "--", &lv_font_montserrat_48, 0xA3E635);
-    lv_obj_align(battery_soc_label, LV_ALIGN_TOP_LEFT, 0, 138);
+    lv_obj_align(battery_soc_label, LV_ALIGN_TOP_LEFT, 0, soc_y);
     ui_label(summary, "State of charge", &lv_font_montserrat_18, 0x9AA4AF);
     lv_obj_align(lv_obj_get_child(summary, lv_obj_get_child_count(summary) - 1),
-                 LV_ALIGN_TOP_RIGHT, 0, 166);
+                 LV_ALIGN_TOP_RIGHT, 0, soc_text_y);
 
     battery_soc_bar = lv_bar_create(summary);
-    lv_obj_set_pos(battery_soc_bar, 0, 232);
+    lv_obj_set_pos(battery_soc_bar, 0, soc_bar_y);
     lv_obj_set_size(battery_soc_bar,
                     landscape ? left_w - 32 :
                     ui_fit_width(lv_obj_get_parent(battery_soc_bar), 0, 488),
@@ -7875,14 +8363,25 @@ void ui_battery_monitor_create(lv_obj_t *scr)
                                       0xA3E635);
     lv_obj_set_width(battery_capacity_label, cap_w);
     lv_label_set_long_mode(battery_capacity_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(battery_capacity_label, 0, 282);
+    lv_obj_set_pos(battery_capacity_label, 0, capacity_y);
 
-    btn = ui_command_button(summary, 0, 326, cap_w, "Calibrate capacity",
-                            0xA3E635);
+    btn = ui_command_button(summary, 0, capacity_btn_y, cap_w,
+                            "Calibrate capacity", 0xA3E635);
     lv_obj_add_event_cb(btn, battery_capacity_event_cb, LV_EVENT_CLICKED,
                         NULL);
 
-    metrics_y = landscape ? 16 : 404;
+    battery_shutdown_label = ui_label(summary, "--", &lv_font_montserrat_18,
+                                      0x9AA4AF);
+    lv_obj_set_width(battery_shutdown_label, cap_w);
+    lv_label_set_long_mode(battery_shutdown_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(battery_shutdown_label, 0, shutdown_y);
+
+    btn = ui_command_button(summary, 0, shutdown_btn_y, cap_w,
+                            "Shutdown voltage", 0xF5A524);
+    lv_obj_add_event_cb(btn, battery_shutdown_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    metrics_y = landscape ? 16 : 536;
 
     battery_info_row(metrics_a, metrics_y, "Voltage", "--", 0xA3E635);
     battery_voltage_label = lv_obj_get_child(metrics_a,
@@ -8809,6 +9308,7 @@ void ui_hardware_cleanup(void)
     battery_full_label = NULL;
     battery_design_label = NULL;
     battery_capacity_label = NULL;
+    battery_shutdown_label = NULL;
     battery_temp_label = NULL;
     battery_internal_temp_label = NULL;
     battery_time_empty_label = NULL;
