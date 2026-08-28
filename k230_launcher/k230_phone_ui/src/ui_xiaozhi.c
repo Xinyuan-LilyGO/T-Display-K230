@@ -57,7 +57,6 @@ static lv_obj_t *xiaozhi_record_level_label;
 static lv_obj_t *xiaozhi_status_label;
 static lv_obj_t *xiaozhi_detail_label;
 static lv_obj_t *xiaozhi_log_label;
-static lv_obj_t *xiaozhi_bind_btn;
 static lv_obj_t *xiaozhi_probe_btn;
 static lv_obj_t *xiaozhi_new_chat_btn;
 static lv_obj_t *xiaozhi_audio_btn;
@@ -1806,7 +1805,7 @@ static const char *xiaozhi_action_name(xiaozhi_action_t action)
     case XIAOZHI_ACTION_PROBE:
         return "Probe";
     case XIAOZHI_ACTION_ACTIVATE:
-        return "Bind device";
+        return "Get binding code";
     case XIAOZHI_ACTION_AUDIO:
         return "Audio loopback";
     case XIAOZHI_ACTION_PTT:
@@ -2052,13 +2051,6 @@ static void xiaozhi_probe_event_cb(lv_event_t *event)
     xiaozhi_kws_restart_if_idle();
 }
 
-static void xiaozhi_bind_event_cb(lv_event_t *event)
-{
-    (void)event;
-    xiaozhi_stop_session();
-    xiaozhi_start_action(XIAOZHI_ACTION_ACTIVATE);
-}
-
 static void xiaozhi_audio_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -2088,8 +2080,16 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
                                      const char *overlay_title)
 {
     char header[128];
+    char token[XIAOZHI_PREF_VALUE_MAX];
     int session_ready;
     pid_t session_pid;
+
+    xiaozhi_get_token(token, sizeof(token));
+    if(!token[0]) {
+        xiaozhi_stop_session();
+        xiaozhi_start_action(XIAOZHI_ACTION_ACTIVATE);
+        return -1;
+    }
 
     xiaozhi_auto_ptt_timer_stop();
     xiaozhi_kws_stop();
@@ -2105,6 +2105,10 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
 
     if(!xiaozhi_process_alive(session_pid)) {
         xiaozhi_start_session();
+        pthread_mutex_lock(&xiaozhi_lock);
+        session_pid = xiaozhi_session_pid;
+        session_ready = xiaozhi_session_ready;
+        pthread_mutex_unlock(&xiaozhi_lock);
     }
     if(!xiaozhi_process_alive(session_pid) || !session_ready) {
         pthread_mutex_lock(&xiaozhi_lock);
@@ -2460,10 +2464,6 @@ static void xiaozhi_update(void)
         running ? lv_obj_add_state(xiaozhi_probe_btn, LV_STATE_DISABLED) :
                   lv_obj_clear_state(xiaozhi_probe_btn, LV_STATE_DISABLED);
     }
-    if(xiaozhi_bind_btn) {
-        running ? lv_obj_add_state(xiaozhi_bind_btn, LV_STATE_DISABLED) :
-                  lv_obj_clear_state(xiaozhi_bind_btn, LV_STATE_DISABLED);
-    }
     if(xiaozhi_new_chat_btn) {
         running ? lv_obj_add_state(xiaozhi_new_chat_btn, LV_STATE_DISABLED) :
                   lv_obj_clear_state(xiaozhi_new_chat_btn, LV_STATE_DISABLED);
@@ -2518,8 +2518,8 @@ void ui_xiaozhi_create(lv_obj_t *scr)
     int chat_h = body_h - top_pad - status_h - action_h - gap * 2 - 14;
     int action_y;
     int cfg_y = landscape ? 0 : 202;
-    int cfg_w = landscape ? 100 : (content_w - 30) / 4;
-    int title_w = landscape ? content_w - 458 : content_w;
+    int cfg_w = landscape ? 116 : (content_w - 20) / 3;
+    int title_w = landscape ? content_w - 396 : content_w;
 
     if(chat_h < 160) {
         chat_h = 160;
@@ -2555,7 +2555,7 @@ void ui_xiaozhi_create(lv_obj_t *scr)
                  landscape ? 34 : 42);
 
     xiaozhi_detail_label = ui_label(xiaozhi_status_panel,
-                                    "Probe cloud handshake, test audio loopback, or send one short PTT turn.",
+                                    "Reconnect, test audio, or send the first voice turn to show the binding code.",
                                     &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_width(xiaozhi_detail_label,
                      title_w > 120 ? title_w : content_w);
@@ -2582,7 +2582,7 @@ void ui_xiaozhi_create(lv_obj_t *scr)
                  0, landscape ? 92 : 132);
 
     if(landscape) {
-        int cfg_x = content_w - cfg_w * 4 - 30;
+        int cfg_x = content_w - cfg_w * 3 - 20;
 
         btn = ui_command_button(xiaozhi_status_panel, cfg_x, cfg_y, cfg_w,
                                 "Server",
@@ -2595,12 +2595,6 @@ void ui_xiaozhi_create(lv_obj_t *scr)
         lv_obj_add_event_cb(btn, xiaozhi_open_token_event_cb, LV_EVENT_CLICKED,
                             NULL);
         btn = ui_command_button(xiaozhi_status_panel, cfg_x + (cfg_w + 10) * 2,
-                                cfg_y, cfg_w, "Bind",
-                                0x25C281);
-        xiaozhi_bind_btn = btn;
-        lv_obj_add_event_cb(btn, xiaozhi_bind_event_cb,
-                            LV_EVENT_CLICKED, NULL);
-        btn = ui_command_button(xiaozhi_status_panel, cfg_x + (cfg_w + 10) * 3,
                                 cfg_y, cfg_w,
                                 "Clear token", 0xF97316);
         lv_obj_add_event_cb(btn, xiaozhi_clear_token_event_cb,
@@ -2617,12 +2611,6 @@ void ui_xiaozhi_create(lv_obj_t *scr)
         lv_obj_add_event_cb(btn, xiaozhi_open_token_event_cb, LV_EVENT_CLICKED,
                             NULL);
         btn = ui_command_button(xiaozhi_status_panel, (cfg_w + 10) * 2, cfg_y,
-                                cfg_w, "Bind",
-                                0x25C281);
-        xiaozhi_bind_btn = btn;
-        lv_obj_add_event_cb(btn, xiaozhi_bind_event_cb,
-                            LV_EVENT_CLICKED, NULL);
-        btn = ui_command_button(xiaozhi_status_panel, (cfg_w + 10) * 3, cfg_y,
                                 cfg_w,
                                 "Clear token", 0xF97316);
         lv_obj_add_event_cb(btn, xiaozhi_clear_token_event_cb,
@@ -2758,7 +2746,6 @@ void ui_xiaozhi_cleanup(void)
     xiaozhi_status_label = NULL;
     xiaozhi_detail_label = NULL;
     xiaozhi_log_label = NULL;
-    xiaozhi_bind_btn = NULL;
     xiaozhi_probe_btn = NULL;
     xiaozhi_new_chat_btn = NULL;
     xiaozhi_audio_btn = NULL;

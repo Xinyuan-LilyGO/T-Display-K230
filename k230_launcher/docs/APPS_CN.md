@@ -53,7 +53,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `LoRaWAN` | 管理 LoRaWAN profile，并通过 LoRa 模块运行 OTAA 入网和发送测试 | 加载已有 profile，或新建/编辑 profile应用会检查密钥长度配置保存后才能运行，可按需开启模拟温度数据上传 |
 | `NES` | 从 `/root/nes` 加载 `.nes` ROM，并支持触摸按键和硬件键盘控制 | 镜像默认不内置 NES ROM请自行将 ROM 文件放入 `/root/nes`，再从列表选择 ROM键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 为 Start，`Space` 或 `Shift` 为 Select，`U/I/O` 为 A，`H/J/K` 为 B，`Esc` 停止游戏或返回 ROM 列表 |
 | `AI` | 打开随镜像提供的 K230 AI 示例界面 | 当模型资源存在时，可以运行支持的本地 AI 示例，并在屏幕上查看结果 |
-| `Xiaozhi` / 小智 | 面向兼容小智协议 WebSocket 服务的语音助手客户端，支持官方 6 位验证码绑定、后台会话、聊天气泡记录、录音浮层和硬件 MIC 键 | 首次使用时在 xiaozhi.me 控制台点击添加设备，然后在 K230 小智页面点击 `Bind`，将设备显示的 6 位验证码输入网页。绑定成功后会自动保存服务器地址和令牌并重连。`Server` 和 `Token` 保留给高级调试或私有服务使用。按住 `PTT` 或硬件 MIC 键开始说话，松开发送。点击 `New chat` 可以清空当前对话并启动新的会话 |
+| `Xiaozhi` / 小智 | 面向兼容小智协议 WebSocket 服务的语音助手客户端，支持官方 6 位验证码绑定、后台会话、聊天气泡记录、录音浮层和硬件 MIC 键 | 首次使用时在 xiaozhi.me 控制台点击添加设备，然后在 K230 小智页面发送第一条语音消息，服务端会在设备上返回 6 位绑定验证码，将验证码输入网页即可。绑定成功后会自动保存服务器地址和令牌并重连。`Server` 和 `Token` 保留给高级调试或私有服务使用。按住 `PTT` 或硬件 MIC 键开始说话，松开发送。点击 `New chat` 可以清空当前对话并启动新的会话 |
 | `RTSP` | 开启或停止摄像头 RTSP 推流，并显示推流地址 | 开启后，在同一网络的电脑上打开界面显示的 URL使用相机前需要先关闭 RTSP |
 | `Wi-Fi` | 扫描 Wi-Fi、保存密码、连接网络和自动回连 | 打开 Wi-Fi，点击网络名称，输入不少于 8 位的密码，等待连接结果 |
 | `Bluetooth` / 蓝牙 | 管理 BLE 行为。`Meshtastic` 模式会将 nRF52840 BLE 链路保留给 Meshtastic 手机 App 连接；`Custom BLE` 模式会关闭 Meshtastic 对 BLE 的占用，并允许普通 BLE 扫描、连接和 GATT 查看。两种模式互斥，不能同时使用 | 打开蓝牙后选择需要的模式。在 `Custom BLE` 模式下点击设备名称即可连接并查看 GATT 信息；需要 Meshtastic 手机 App 连接 K230 时请选择 `Meshtastic` 模式 |
