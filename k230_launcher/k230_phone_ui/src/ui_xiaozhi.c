@@ -31,6 +31,8 @@
 #define XIAOZHI_FACE_CONTROLS_HIDE_MS 3500
 #define XIAOZHI_FACE_EDGE_START_PX 28
 #define XIAOZHI_FACE_EDGE_SWIPE_PX 90
+#define XIAOZHI_KWS_RESTART_COOLDOWN_US 1500000ULL
+#define XIAOZHI_KWS_CRASH_BACKOFF_US 5000000ULL
 #define XIAOZHI_DEFAULT_URL "wss://api.tenclass.net:443/xiaozhi/v1/"
 #define XIAOZHI_PREF_URL "xiaozhi.url"
 #define XIAOZHI_PREF_TOKEN "xiaozhi.token"
@@ -92,6 +94,7 @@ static int xiaozhi_face_edge_tracking;
 static uint64_t xiaozhi_record_start_us;
 static uint64_t xiaozhi_face_controls_last_touch_us;
 static uint64_t xiaozhi_face_back_guard_until_us;
+static uint64_t xiaozhi_kws_restart_after_us;
 static lv_point_t xiaozhi_face_edge_start_point;
 static size_t xiaozhi_kws_log_scan_len;
 static char xiaozhi_status_text[192] = "Ready";
@@ -296,6 +299,8 @@ static int xiaozhi_kws_clear_dead_process(void)
         xiaozhi_kws_pid = -1;
         route_active = xiaozhi_kws_route_active;
         xiaozhi_kws_route_active = 0;
+        xiaozhi_kws_restart_after_us =
+            ui_monotonic_us() + XIAOZHI_KWS_CRASH_BACKOFF_US;
         xiaozhi_append_log_locked("KWS_STOPPED process exited");
     }
     pthread_mutex_unlock(&xiaozhi_lock);
@@ -372,15 +377,18 @@ static void xiaozhi_kws_start(void)
     long pid;
     int should_start;
     pid_t tracked_pid;
+    uint64_t now;
 
     xiaozhi_kws_clear_dead_process();
+    now = ui_monotonic_us();
 
     pthread_mutex_lock(&xiaozhi_lock);
     tracked_pid = xiaozhi_kws_pid;
     should_start = xiaozhi_kws_should_run && xiaozhi_kws_available &&
                    !xiaozhi_running && !xiaozhi_ptt_recording &&
                    !xiaozhi_ptt_pending_hold &&
-                   !xiaozhi_process_alive(xiaozhi_kws_pid);
+                   !xiaozhi_process_alive(xiaozhi_kws_pid) &&
+                   now >= xiaozhi_kws_restart_after_us;
     pthread_mutex_unlock(&xiaozhi_lock);
 
     if(!should_start || !app_current_page_is(PAGE_XIAOZHI)) {
@@ -449,11 +457,13 @@ static void xiaozhi_kws_start(void)
 static void xiaozhi_kws_restart_if_idle(void)
 {
     int should_restart;
+    uint64_t now = ui_monotonic_us();
 
     pthread_mutex_lock(&xiaozhi_lock);
     should_restart = xiaozhi_kws_should_run && xiaozhi_kws_available &&
                      !xiaozhi_running && !xiaozhi_ptt_recording &&
-                     !xiaozhi_ptt_pending_hold;
+                     !xiaozhi_ptt_pending_hold &&
+                     now >= xiaozhi_kws_restart_after_us;
     pthread_mutex_unlock(&xiaozhi_lock);
 
     if(should_restart) {
@@ -2413,6 +2423,7 @@ static void xiaozhi_update(void)
     char log_preview[512];
     char chat_text[XIAOZHI_CHAT_TEXT_MAX];
     char emotion[64];
+    uint64_t now_us = ui_monotonic_us();
 
     pthread_mutex_lock(&xiaozhi_lock);
     session_pid = xiaozhi_session_pid;
@@ -2447,11 +2458,15 @@ static void xiaozhi_update(void)
         if(xiaozhi_running && !xiaozhi_ptt_recording &&
            strstr(xiaozhi_log_text, "EVENT wake_no_speech")) {
             xiaozhi_running = 0;
+            xiaozhi_kws_restart_after_us =
+                now_us + XIAOZHI_KWS_RESTART_COOLDOWN_US;
             xiaozhi_set_status_locked("Listening", "Say 小智小智", 0);
             xiaozhi_record_overlay_close();
         } else if(xiaozhi_running && !xiaozhi_ptt_recording &&
                   strstr(xiaozhi_log_text, "EVENT response_done")) {
             xiaozhi_running = 0;
+            xiaozhi_kws_restart_after_us =
+                now_us + XIAOZHI_KWS_RESTART_COOLDOWN_US;
             xiaozhi_set_status_locked("Completed", "Reply finished", 0);
             xiaozhi_record_overlay_close();
         } else if(xiaozhi_running && !xiaozhi_ptt_recording &&
@@ -2465,12 +2480,16 @@ static void xiaozhi_update(void)
            (strstr(xiaozhi_log_text, "ptt turn done rc=0") ||
             strstr(xiaozhi_log_text, "wake turn done rc=0"))) {
             xiaozhi_running = 0;
+            xiaozhi_kws_restart_after_us =
+                now_us + XIAOZHI_KWS_RESTART_COOLDOWN_US;
             xiaozhi_set_status_locked("Completed", "PTT", 0);
             xiaozhi_record_overlay_close();
         } else if(xiaozhi_running && !xiaozhi_ptt_recording &&
                   (strstr(xiaozhi_log_text, "ptt turn done rc=") ||
                    strstr(xiaozhi_log_text, "wake turn done rc="))) {
             xiaozhi_running = 0;
+            xiaozhi_kws_restart_after_us =
+                now_us + XIAOZHI_KWS_RESTART_COOLDOWN_US;
             xiaozhi_set_status_locked("Failed, check log", "PTT", -1);
             xiaozhi_record_overlay_close();
         }
@@ -2497,6 +2516,8 @@ static void xiaozhi_update(void)
             xiaozhi_ptt_recording = 0;
             xiaozhi_ptt_pending_hold = 0;
             xiaozhi_running = 0;
+            xiaozhi_kws_restart_after_us =
+                now_us + XIAOZHI_KWS_RESTART_COOLDOWN_US;
             xiaozhi_record_overlay_close();
         }
     }

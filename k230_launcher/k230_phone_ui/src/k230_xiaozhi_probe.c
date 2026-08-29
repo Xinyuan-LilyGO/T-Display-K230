@@ -37,6 +37,10 @@
 #define OPUS_MAX_PACKET 1276
 #define WS_MAX_FRAME (1024 * 1024)
 #define HTTP_MAX_RESPONSE (512 * 1024)
+#define CAPTURE_WARMUP_MIN_FRAMES 2
+#define CAPTURE_WARMUP_MAX_FRAMES 6
+#define CAPTURE_WARMUP_ARTIFACT_MEAN 12000
+#define CAPTURE_WARMUP_ARTIFACT_PEAK 30000
 #define WAKE_VAD_WARMUP_FRAMES 4
 #define WAKE_VAD_PREROLL_FRAMES 5
 #define WAKE_VAD_START_FRAMES 2
@@ -127,6 +131,9 @@ typedef struct {
 
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_record_stop = 0;
+
+static void pcm_level_stats(const int16_t *pcm, int samples, int *mean_abs,
+                            int *peak_abs);
 
 static void on_signal(int sig)
 {
@@ -1211,6 +1218,52 @@ static int pcm_read_frames(pcm_handle_t *ph, int16_t *buf, snd_pcm_uframes_t fra
     return 0;
 }
 
+static int pcm_discard_capture_warmup(pcm_handle_t *ph, const char *reason)
+{
+    int16_t scratch[OPUS_FRAME_SAMPLES];
+    int first_mean = 0;
+    int first_peak = 0;
+    int last_mean = 0;
+    int last_peak = 0;
+    int discarded = 0;
+
+    if (!ph || !ph->pcm || ph->stream != SND_PCM_STREAM_CAPTURE) {
+        return 0;
+    }
+
+    snd_pcm_drop(ph->pcm);
+    snd_pcm_prepare(ph->pcm);
+
+    for (int i = 0; i < CAPTURE_WARMUP_MAX_FRAMES && !g_stop; ++i) {
+        int mean_abs = 0;
+        int peak_abs = 0;
+
+        if (pcm_read_frames(ph, scratch, OPUS_FRAME_SAMPLES) < 0) {
+            return -1;
+        }
+        pcm_level_stats(scratch, OPUS_FRAME_SAMPLES, &mean_abs, &peak_abs);
+        if (i == 0) {
+            first_mean = mean_abs;
+            first_peak = peak_abs;
+        }
+        last_mean = mean_abs;
+        last_peak = peak_abs;
+        discarded++;
+
+        if (discarded >= CAPTURE_WARMUP_MIN_FRAMES &&
+            mean_abs < CAPTURE_WARMUP_ARTIFACT_MEAN &&
+            peak_abs < CAPTURE_WARMUP_ARTIFACT_PEAK) {
+            break;
+        }
+    }
+
+    log_line("INFO",
+             "capture warmup discarded=%d reason=%s first=%d/%d last=%d/%d",
+             discarded, reason ? reason : "record", first_mean, first_peak,
+             last_mean, last_peak);
+    return 0;
+}
+
 static int pcm_write_frames(pcm_handle_t *ph, const int16_t *buf, snd_pcm_uframes_t frames)
 {
     snd_pcm_uframes_t done = 0;
@@ -1596,6 +1649,11 @@ static int command_ptt(const app_opts_t *opts)
         ws_close(&ws);
         return 1;
     }
+    if (pcm_discard_capture_warmup(&cap, "ptt") < 0) {
+        close_pcm(&cap);
+        ws_close(&ws);
+        return 1;
+    }
 
     int err = 0;
     OpusEncoder *enc = opus_encoder_create(DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS, OPUS_APPLICATION_VOIP, &err);
@@ -1790,6 +1848,12 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
                  DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS) < 0) {
         return 1;
     }
+    if (pcm_discard_capture_warmup(
+            &cap, record_mode == SESSION_RECORD_WAKE_VAD ? "wake" : "ptt") <
+        0) {
+        close_pcm(&cap);
+        return 1;
+    }
 
     enc = opus_encoder_create(DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS,
                               OPUS_APPLICATION_VOIP, &err);
@@ -1844,13 +1908,6 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
         }
 
         if (record_mode == SESSION_RECORD_WAKE_VAD && !listen_started) {
-            memcpy(preroll[preroll_next].data, packet, (size_t)nb);
-            preroll[preroll_next].len = nb;
-            preroll_next = (preroll_next + 1) % WAKE_VAD_PREROLL_FRAMES;
-            if (preroll_count < WAKE_VAD_PREROLL_FRAMES) {
-                preroll_count++;
-            }
-
             if (i < WAKE_VAD_WARMUP_FRAMES) {
                 if ((i % 2) == 0) {
                     log_line("INFO",
@@ -1858,6 +1915,13 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
                              i, mean_abs, peak_abs);
                 }
                 continue;
+            }
+
+            memcpy(preroll[preroll_next].data, packet, (size_t)nb);
+            preroll[preroll_next].len = nb;
+            preroll_next = (preroll_next + 1) % WAKE_VAD_PREROLL_FRAMES;
+            if (preroll_count < WAKE_VAD_PREROLL_FRAMES) {
+                preroll_count++;
             }
 
             voice_now = mean_abs >= WAKE_VAD_START_MEAN ||
