@@ -1333,6 +1333,8 @@ static void xiaozhi_record_overlay_open(const char *source)
 
 typedef enum {
     XIAOZHI_FACE_NEUTRAL = 0,
+    XIAOZHI_FACE_LISTENING,
+    XIAOZHI_FACE_SPEAKING,
     XIAOZHI_FACE_HAPPY,
     XIAOZHI_FACE_SAD,
     XIAOZHI_FACE_ANGRY,
@@ -1455,6 +1457,12 @@ static xiaozhi_face_kind_t xiaozhi_face_kind_from_emotion(const char *emotion)
     if(!emotion || !emotion[0]) {
         return XIAOZHI_FACE_NEUTRAL;
     }
+    if(strstr(emotion, "listening") || strstr(emotion, "wake")) {
+        return XIAOZHI_FACE_LISTENING;
+    }
+    if(strstr(emotion, "speaking") || strstr(emotion, "talking")) {
+        return XIAOZHI_FACE_SPEAKING;
+    }
     if(strstr(emotion, "happy") || strstr(emotion, "laughing") ||
        strstr(emotion, "funny") || strstr(emotion, "relaxed") ||
        strstr(emotion, "delicious") || strstr(emotion, "confident") ||
@@ -1483,9 +1491,45 @@ static xiaozhi_face_kind_t xiaozhi_face_kind_from_emotion(const char *emotion)
     return XIAOZHI_FACE_NEUTRAL;
 }
 
+static xiaozhi_face_kind_t xiaozhi_face_kind_for_state(const char *status,
+                                                       const char *detail,
+                                                       const char *emotion,
+                                                       int recording,
+                                                       int speaking,
+                                                       int waiting,
+                                                       int session_ready)
+{
+    xiaozhi_face_kind_t emotion_kind =
+        xiaozhi_face_kind_from_emotion(emotion);
+
+    if(recording || (status && strstr(status, "Wake detected")) ||
+       (detail && strstr(detail, "Speak now"))) {
+        return XIAOZHI_FACE_LISTENING;
+    }
+    if(speaking) {
+        return emotion_kind == XIAOZHI_FACE_NEUTRAL ?
+               XIAOZHI_FACE_SPEAKING : emotion_kind;
+    }
+    if(waiting) {
+        return XIAOZHI_FACE_THINKING;
+    }
+    if(status && (strstr(status, "Failed") ||
+                  strstr(status, "Session stopped"))) {
+        return XIAOZHI_FACE_SAD;
+    }
+    if(!session_ready) {
+        return XIAOZHI_FACE_SLEEPY;
+    }
+    return emotion_kind;
+}
+
 static uint32_t xiaozhi_face_accent_for_kind(xiaozhi_face_kind_t kind)
 {
     switch(kind) {
+    case XIAOZHI_FACE_LISTENING:
+        return 0x22C55E;
+    case XIAOZHI_FACE_SPEAKING:
+        return 0x2DD4BF;
     case XIAOZHI_FACE_HAPPY:
         return 0x34D399;
     case XIAOZHI_FACE_SAD:
@@ -1509,6 +1553,10 @@ static uint32_t xiaozhi_face_accent_for_kind(xiaozhi_face_kind_t kind)
 static const char *xiaozhi_face_caption_for_kind(xiaozhi_face_kind_t kind)
 {
     switch(kind) {
+    case XIAOZHI_FACE_LISTENING:
+        return "listening";
+    case XIAOZHI_FACE_SPEAKING:
+        return "speaking";
     case XIAOZHI_FACE_HAPPY:
         return "happy";
     case XIAOZHI_FACE_SAD:
@@ -1551,6 +1599,8 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
     uint32_t accent;
     uint64_t now_ms;
     int speaking;
+    int listening;
+    int waiting;
     int blink_ms;
     int blink_reduce = 0;
     int pulse;
@@ -1576,20 +1626,28 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
         return;
     }
 
-    kind = xiaozhi_face_kind_from_emotion(emotion);
-    accent = xiaozhi_face_accent_for_kind(kind);
     now_ms = ui_monotonic_us() / 1000ULL;
-    speaking = status && (strstr(status, "Playing") ||
-                          strstr(status, "Receiving") ||
-                          strstr(status, "Sending"));
+    speaking = status && strstr(status, "Playing");
+    listening = recording ||
+                (status && strstr(status, "Wake detected")) ||
+                (detail && strstr(detail, "Speak now"));
+    waiting = status && (strstr(status, "Receiving") ||
+                         strstr(status, "Sending") ||
+                         strstr(status, "Preparing"));
+    kind = xiaozhi_face_kind_for_state(status, detail, emotion, recording,
+                                       speaking, waiting, session_ready);
+    accent = xiaozhi_face_accent_for_kind(kind);
     blink_ms = (int)(now_ms % 3600ULL);
-    if(blink_ms < 120 && kind != XIAOZHI_FACE_SURPRISED && !recording) {
+    if(blink_ms < 120 && kind != XIAOZHI_FACE_SURPRISED &&
+       !listening && !speaking) {
         blink_reduce = 85;
     } else if(blink_ms < 190 && kind != XIAOZHI_FACE_SURPRISED &&
-              !recording) {
+              !listening && !speaking) {
         blink_reduce = 55;
     }
-    pulse = (int)((now_ms / (speaking || recording ? 90ULL : 240ULL)) % 8ULL);
+    pulse = (int)((now_ms / (speaking ? 70ULL :
+                             (listening ? 95ULL :
+                              (waiting ? 150ULL : 240ULL)))) % 8ULL);
     if(pulse > 4) {
         pulse = 8 - pulse;
     }
@@ -1615,6 +1673,12 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
     }
 
     switch(kind) {
+    case XIAOZHI_FACE_LISTENING:
+        eye_h = (eye_h * 112) / 100;
+        break;
+    case XIAOZHI_FACE_SPEAKING:
+        eye_h = (eye_h * 72) / 100;
+        break;
     case XIAOZHI_FACE_HAPPY:
         eye_h = eye_h / 2;
         break;
@@ -1641,8 +1705,8 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
         if(eye_h < 10) {
             eye_h = 10;
         }
-    } else if(speaking || recording) {
-        eye_h += pulse * (landscape ? 4 : 5);
+    } else if(speaking || listening || waiting) {
+        eye_h += pulse * (landscape ? 5 : 6);
     }
 
     eye_gap = landscape ? (sw * 16) / 100 : (sw * 18) / 100;
@@ -1666,6 +1730,7 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
     brow_w = eye_w;
     brow_h = landscape ? 14 : 18;
     if(kind == XIAOZHI_FACE_ANGRY || kind == XIAOZHI_FACE_THINKING ||
+       kind == XIAOZHI_FACE_LISTENING ||
        kind == XIAOZHI_FACE_SURPRISED) {
         uint32_t brow_color = kind == XIAOZHI_FACE_ANGRY ? 0xF43F5E :
                               0xE2E8F0;
@@ -1675,7 +1740,8 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
                               brow_h / 2, brow_color);
         xiaozhi_face_set_rect(xiaozhi_face_right_brow, right_x,
                               eye_y - brow_h -
-                              (kind == XIAOZHI_FACE_THINKING ? 54 : 26),
+                              ((kind == XIAOZHI_FACE_THINKING ||
+                                kind == XIAOZHI_FACE_LISTENING) ? 54 : 26),
                               brow_w, brow_h, brow_h / 2, brow_color);
         xiaozhi_face_show(xiaozhi_face_left_brow, 1);
         xiaozhi_face_show(xiaozhi_face_right_brow, 1);
@@ -1693,6 +1759,13 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
         mouth_w = 330;
     }
     switch(kind) {
+    case XIAOZHI_FACE_LISTENING:
+        mouth_w = landscape ? (sw * 16) / 100 : (sw * 20) / 100;
+        mouth_h = landscape ? 12 : 16;
+        break;
+    case XIAOZHI_FACE_SPEAKING:
+        mouth_h = landscape ? 34 : 44;
+        break;
     case XIAOZHI_FACE_HAPPY:
     case XIAOZHI_FACE_LOVING:
         mouth_h = landscape ? 38 : 48;
@@ -1708,8 +1781,12 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
     default:
         break;
     }
-    if(speaking || recording) {
-        mouth_h += pulse * (landscape ? 6 : 8);
+    if(speaking) {
+        mouth_h += pulse * (landscape ? 10 : 14);
+    } else if(listening) {
+        mouth_h += pulse * (landscape ? 3 : 4);
+    } else if(waiting) {
+        mouth_h += pulse * (landscape ? 2 : 3);
     }
     mouth_y = eye_y + eye_h + (landscape ? 76 : 118);
     if(mouth_y + mouth_h > sh - 126) {
