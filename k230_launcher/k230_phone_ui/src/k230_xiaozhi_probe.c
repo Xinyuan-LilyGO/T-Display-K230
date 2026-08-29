@@ -1129,13 +1129,28 @@ static void make_listen(char *buf, size_t len, const char *session_id, const cha
 
 static int open_pcm(pcm_handle_t *ph, snd_pcm_stream_t stream, const char *name, unsigned int rate, int channels)
 {
+    int rc = 0;
+    int attempts = stream == SND_PCM_STREAM_CAPTURE ? 20 : 6;
+
     memset(ph, 0, sizeof(*ph));
     ph->name = name;
     ph->rate = rate;
     ph->channels = channels;
     ph->stream = stream;
 
-    int rc = snd_pcm_open(&ph->pcm, name, stream, 0);
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        rc = snd_pcm_open(&ph->pcm, name, stream, 0);
+        if (rc == 0) {
+            break;
+        }
+        if (rc != -EBUSY) {
+            break;
+        }
+        if (attempt == 0) {
+            log_line("WARN", "snd_pcm_open(%s) busy, retrying", name);
+        }
+        usleep(50000);
+    }
     if (rc < 0) {
         log_line("ERR", "snd_pcm_open(%s): %s", name, snd_strerror(rc));
         return -1;
@@ -1576,11 +1591,6 @@ static int command_ptt(const app_opts_t *opts)
         return 1;
     }
 
-    char listen[256];
-    make_listen(listen, sizeof(listen), session_id, "start");
-    log_line("INFO", "send listen start");
-    ws_send_frame(&ws, 1, listen, strlen(listen));
-
     pcm_handle_t cap;
     if (open_pcm(&cap, SND_PCM_STREAM_CAPTURE, opts->capture_dev, DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS) < 0) {
         ws_close(&ws);
@@ -1597,6 +1607,16 @@ static int command_ptt(const app_opts_t *opts)
     }
     opus_encoder_ctl(enc, OPUS_SET_BITRATE(30000));
     opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(0));
+
+    char listen[256];
+    make_listen(listen, sizeof(listen), session_id, "start");
+    log_line("INFO", "send listen start");
+    if (ws_send_frame(&ws, 1, listen, strlen(listen)) < 0) {
+        opus_encoder_destroy(enc);
+        close_pcm(&cap);
+        ws_close(&ws);
+        return 1;
+    }
 
     int16_t pcm[OPUS_FRAME_SAMPLES];
     unsigned char packet[OPUS_MAX_PACKET];
@@ -1761,12 +1781,7 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
     int wake_no_speech_logged = 0;
 
     g_record_stop = 0;
-    if (record_mode == SESSION_RECORD_MANUAL) {
-        if (send_listen_state(ws, session_id, "start") < 0) {
-            return 1;
-        }
-        listen_started = 1;
-    } else {
+    if (record_mode == SESSION_RECORD_WAKE_VAD) {
         log_line("INFO", "wake VAD armed: preroll=%d idle_timeout_frames=%d",
                  WAKE_VAD_PREROLL_FRAMES, WAKE_VAD_IDLE_TIMEOUT_FRAMES);
     }
@@ -1785,6 +1800,15 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
     }
     opus_encoder_ctl(enc, OPUS_SET_BITRATE(30000));
     opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(0));
+
+    if (record_mode == SESSION_RECORD_MANUAL) {
+        if (send_listen_state(ws, session_id, "start") < 0) {
+            opus_encoder_destroy(enc);
+            close_pcm(&cap);
+            return 1;
+        }
+        listen_started = 1;
+    }
 
     int16_t pcm[OPUS_FRAME_SAMPLES];
     unsigned char packet[OPUS_MAX_PACKET];

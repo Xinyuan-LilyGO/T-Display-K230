@@ -193,6 +193,25 @@ static int xiaozhi_process_alive(pid_t pid)
     return pid > 0 && kill(pid, 0) == 0;
 }
 
+static int xiaozhi_wait_process_exit(pid_t pid, int timeout_ms)
+{
+    int waited = 0;
+
+    if(pid <= 0) {
+        return 1;
+    }
+
+    while(waited < timeout_ms) {
+        if(kill(pid, 0) != 0 && errno == ESRCH) {
+            return 1;
+        }
+        usleep(50000);
+        waited += 50;
+    }
+
+    return kill(pid, 0) != 0 && errno == ESRCH;
+}
+
 static int xiaozhi_write_control(const char *cmd)
 {
     int fd;
@@ -240,6 +259,7 @@ static void xiaozhi_kws_stop(void)
 {
     pid_t pid;
     int route_active;
+    int exited = 1;
 
     pthread_mutex_lock(&xiaozhi_lock);
     pid = xiaozhi_kws_pid;
@@ -250,8 +270,19 @@ static void xiaozhi_kws_stop(void)
 
     if(pid > 0) {
         kill(pid, SIGTERM);
+        exited = xiaozhi_wait_process_exit(pid, 900);
+        if(!exited) {
+            kill(pid, SIGKILL);
+            exited = xiaozhi_wait_process_exit(pid, 250);
+        }
     }
     xiaozhi_kws_leave_route_if_needed(route_active);
+    if(pid > 0) {
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_append_log_locked(exited ? "KWS_STOP_SYNC done" :
+                                  "KWS_STOP_SYNC timeout");
+        pthread_mutex_unlock(&xiaozhi_lock);
+    }
 }
 
 static int xiaozhi_kws_clear_dead_process(void)
