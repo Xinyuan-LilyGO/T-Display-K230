@@ -28,6 +28,7 @@
 #define XIAOZHI_CTL "/tmp/k230_xiaozhi_session.ctl"
 #define XIAOZHI_LOG_TEXT_MAX 4096
 #define XIAOZHI_CHAT_TEXT_MAX 8192
+#define XIAOZHI_CHAT_SEEN_TEXT_MAX 8192
 #define XIAOZHI_FACE_CONTROLS_HIDE_MS 3500
 #define XIAOZHI_FACE_EDGE_START_PX 28
 #define XIAOZHI_FACE_EDGE_SWIPE_PX 90
@@ -103,6 +104,7 @@ static char xiaozhi_detail_text[256] =
 static char xiaozhi_log_text[XIAOZHI_LOG_TEXT_MAX] = "No log yet";
 static char xiaozhi_chat_text[XIAOZHI_CHAT_TEXT_MAX];
 static char xiaozhi_rendered_chat_text[XIAOZHI_CHAT_TEXT_MAX];
+static char xiaozhi_seen_chat_lines[XIAOZHI_CHAT_SEEN_TEXT_MAX];
 static char xiaozhi_emotion_text[64] = "neutral";
 static size_t xiaozhi_log_scan_len;
 
@@ -740,6 +742,12 @@ static void xiaozhi_reload_log_tail_locked(void)
     fclose(fp);
 
     if(tail[0]) {
+        size_t old_len = strlen(xiaozhi_log_text);
+
+        if(strcmp(xiaozhi_log_text, tail) != 0 &&
+           strncmp(tail, xiaozhi_log_text, old_len) != 0) {
+            xiaozhi_log_scan_len = 0;
+        }
         snprintf(xiaozhi_log_text, sizeof(xiaozhi_log_text), "%s", tail);
     }
 }
@@ -803,6 +811,57 @@ static const char *xiaozhi_emotion_payload_from_log_line(const char *line)
         p++;
     }
     return *p ? p : NULL;
+}
+
+static int xiaozhi_chat_log_line_seen_locked(const char *line)
+{
+    char needle[700];
+
+    if(!line || !line[0]) {
+        return 0;
+    }
+
+    snprintf(needle, sizeof(needle), "\n%s\n", line);
+    return strstr(xiaozhi_seen_chat_lines, needle) != NULL;
+}
+
+static void xiaozhi_chat_mark_log_line_seen_locked(const char *line)
+{
+    size_t old_len;
+    size_t line_len;
+
+    if(!line || !line[0]) {
+        return;
+    }
+
+    old_len = strlen(xiaozhi_seen_chat_lines);
+    line_len = strlen(line);
+    while(old_len + line_len + 2U >= sizeof(xiaozhi_seen_chat_lines) &&
+          xiaozhi_seen_chat_lines[0]) {
+        char *first = xiaozhi_seen_chat_lines;
+        char *next;
+
+        if(*first == '\n') {
+            first++;
+        }
+        next = strchr(first, '\n');
+        if(!next) {
+            xiaozhi_seen_chat_lines[0] = '\0';
+            old_len = 0;
+            break;
+        }
+        memmove(xiaozhi_seen_chat_lines, next,
+                strlen(next) + 1U);
+        old_len = strlen(xiaozhi_seen_chat_lines);
+    }
+
+    if(old_len == 0) {
+        snprintf(xiaozhi_seen_chat_lines,
+                 sizeof(xiaozhi_seen_chat_lines), "\n%s\n", line);
+    } else {
+        snprintf(xiaozhi_seen_chat_lines + old_len,
+                 sizeof(xiaozhi_seen_chat_lines) - old_len, "%s\n", line);
+    }
 }
 
 static void xiaozhi_chat_append_locked(char role, const char *text)
@@ -872,7 +931,10 @@ static void xiaozhi_chat_sync_from_log_locked(void)
         line[copy_len] = '\0';
         payload = xiaozhi_chat_payload_from_log_line(line, &role);
         if(payload && payload[0]) {
-            xiaozhi_chat_append_locked(role, payload);
+            if(!xiaozhi_chat_log_line_seen_locked(line)) {
+                xiaozhi_chat_append_locked(role, payload);
+                xiaozhi_chat_mark_log_line_seen_locked(line);
+            }
         }
         payload = xiaozhi_emotion_payload_from_log_line(line);
         if(payload && payload[0]) {
@@ -2398,6 +2460,7 @@ static void xiaozhi_new_chat_event_cb(lv_event_t *event)
     }
     xiaozhi_chat_text[0] = '\0';
     xiaozhi_rendered_chat_text[0] = '\0';
+    xiaozhi_seen_chat_lines[0] = '\0';
     snprintf(xiaozhi_emotion_text, sizeof(xiaozhi_emotion_text), "neutral");
     xiaozhi_log_scan_len = strlen(xiaozhi_log_text);
     xiaozhi_set_status_locked("New chat", "Session restarting", 0);
