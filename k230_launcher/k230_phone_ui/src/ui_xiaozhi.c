@@ -1682,7 +1682,7 @@ static void xiaozhi_face_refresh_view(const char *status, const char *detail,
                                     lv_color_hex(accent), 0);
     }
     if(xiaozhi_face_ptt_btn && lv_obj_is_valid(xiaozhi_face_ptt_btn)) {
-        if(running && !recording) {
+        if(running || xiaozhi_ptt_pending_hold) {
             lv_obj_add_state(xiaozhi_face_ptt_btn, LV_STATE_DISABLED);
         } else {
             lv_obj_clear_state(xiaozhi_face_ptt_btn, LV_STATE_DISABLED);
@@ -2163,7 +2163,9 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
                                       0);
             xiaozhi_append_log_locked("PTT_PENDING wait session ready");
             pthread_mutex_unlock(&xiaozhi_lock);
-            xiaozhi_record_overlay_open(overlay_title);
+            if(manual_hold) {
+                xiaozhi_record_overlay_open(overlay_title);
+            }
             app_request_fast_refresh();
             return -1;
         }
@@ -2204,7 +2206,11 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
     snprintf(header, sizeof(header), "%s", header_text);
     xiaozhi_append_log_locked(header);
     pthread_mutex_unlock(&xiaozhi_lock);
-    xiaozhi_record_overlay_open(overlay_title);
+    if(manual_hold) {
+        xiaozhi_record_overlay_open(overlay_title);
+    } else {
+        xiaozhi_record_overlay_close();
+    }
     app_request_fast_refresh();
     return 0;
 }
@@ -2587,7 +2593,7 @@ static void xiaozhi_update(void)
                                   session_ready);
     }
     if(xiaozhi_ptt_btn) {
-        if(running && ptt_pid <= 0 && !recording) {
+        if(running || xiaozhi_ptt_pending_hold) {
             lv_obj_add_state(xiaozhi_ptt_btn, LV_STATE_DISABLED);
         } else {
             lv_obj_clear_state(xiaozhi_ptt_btn, LV_STATE_DISABLED);
