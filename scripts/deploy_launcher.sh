@@ -244,6 +244,13 @@ NOTIFICATION_SRC="${LAUNCHER_DIR}/resources/notification"
 MAP_SRC="${LAUNCHER_DIR}/resources/maps"
 INSTALL_SCRIPT="${LAUNCHER_DIR}/scripts/install_to_sdk.sh"
 RUNTIME_LIB_DIR="${OUT_DIR}/target/usr/lib"
+RUNTIME_LIB_PATTERNS=(
+    "libcodec2.so*"
+    "libasound.so*"
+    "libopus.so*"
+    "libssl.so.3"
+    "libcrypto.so.3"
+)
 
 [[ -x "${INSTALL_SCRIPT}" ]] || die "missing launcher install script: ${INSTALL_SCRIPT}"
 git -C "${SDK_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "SDK is not a git checkout: ${SDK_DIR}"
@@ -322,7 +329,9 @@ if [ "${DEPLOY_APP}" = "1" ]; then
     if [ -d "${REMOTE_FACE_DIR}" ]; then
         cp -a "${REMOTE_FACE_DIR}" "${REMOTE_BACKUP}/app/face_detect" 2>/dev/null || true
     fi
-    cp -a /usr/lib/libcodec2.so* "${REMOTE_BACKUP}/lib/" 2>/dev/null || true
+    for pattern in libcodec2.so* libasound.so* libopus.so* libssl.so.3 libcrypto.so.3; do
+        cp -a /usr/lib/${pattern} "${REMOTE_BACKUP}/lib/" 2>/dev/null || true
+    done
 fi
 
 if [ "${DEPLOY_FIRMWARE}" = "1" ] && [ -d "${REMOTE_BOOT}" ]; then
@@ -351,8 +360,14 @@ if [[ "${DEPLOY_APP}" -eq 1 ]]; then
         tar -C "${FACE_DIR}" -cf - . | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
             "tar -C '${REMOTE_TMP}/face_detect' -xf -"
     fi
-    if compgen -G "${RUNTIME_LIB_DIR}/libcodec2.so*" >/dev/null; then
-        (cd "${RUNTIME_LIB_DIR}" && tar -cf - libcodec2.so*) | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
+    runtime_libs=()
+    for pattern in "${RUNTIME_LIB_PATTERNS[@]}"; do
+        while IFS= read -r -d '' lib; do
+            runtime_libs+=("$(basename "${lib}")")
+        done < <(find "${RUNTIME_LIB_DIR}" -maxdepth 1 -name "${pattern}" -print0)
+    done
+    if [[ "${#runtime_libs[@]}" -gt 0 ]]; then
+        (cd "${RUNTIME_LIB_DIR}" && tar -cf - "${runtime_libs[@]}") | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
             "tar -C '${REMOTE_TMP}/lib' -xf -"
     fi
 fi
@@ -506,7 +521,13 @@ set -e
 if [ "${DEPLOY_APP}" = "1" ]; then
     sha256sum "${REMOTE_APP_DIR}/k230_phone_ui" \
               "${REMOTE_APP_DIR}/k230_phone_ui_fullswitch_test" \
-              "${REMOTE_APP_DIR}/k230_pcm_volume" 2>/dev/null || true
+              "${REMOTE_APP_DIR}/k230_pcm_volume" \
+              "${REMOTE_APP_DIR}/k230_xiaozhi_probe" \
+              "${REMOTE_APP_DIR}/k230_xiaozhi_kws" 2>/dev/null || true
+    sha256sum /usr/lib/libasound.so.2.0.0 \
+              /usr/lib/libopus.so.0.9.0 \
+              /usr/lib/libssl.so.3 \
+              /usr/lib/libcrypto.so.3 2>/dev/null || true
     if [ -f "${REMOTE_FACE_DIR}/face_detection_320.kmodel" ]; then
         sha256sum "${REMOTE_FACE_DIR}/face_detection_320.kmodel"
     fi
