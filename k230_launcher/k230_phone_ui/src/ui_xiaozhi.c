@@ -37,6 +37,8 @@
 #define XIAOZHI_SESSION_RECORD_SECONDS 30
 #define XIAOZHI_SESSION_FIRST_WAIT_SECONDS 120
 #define XIAOZHI_SESSION_TIMEOUT_MS 10000
+#define XIAOZHI_SESSION_RECONNECT_STEP_US 2000000ULL
+#define XIAOZHI_SESSION_RECONNECT_MAX_US 20000000ULL
 #define XIAOZHI_DEFAULT_URL "wss://api.tenclass.net:443/xiaozhi/v1/"
 #define XIAOZHI_PREF_URL "xiaozhi.url"
 #define XIAOZHI_PREF_TOKEN "xiaozhi.token"
@@ -99,6 +101,8 @@ static uint64_t xiaozhi_record_start_us;
 static uint64_t xiaozhi_face_controls_last_touch_us;
 static uint64_t xiaozhi_face_back_guard_until_us;
 static uint64_t xiaozhi_kws_restart_after_us;
+static uint64_t xiaozhi_session_reconnect_after_us;
+static int xiaozhi_session_reconnect_attempts;
 static lv_point_t xiaozhi_face_edge_start_point;
 static size_t xiaozhi_kws_log_scan_len;
 static char xiaozhi_status_text[192] = "Ready";
@@ -525,6 +529,7 @@ static void xiaozhi_start_session(void)
 
     pthread_mutex_lock(&xiaozhi_lock);
     if(xiaozhi_process_alive(xiaozhi_session_pid)) {
+        xiaozhi_session_reconnect_after_us = 0;
         pthread_mutex_unlock(&xiaozhi_lock);
         return;
     }
@@ -534,6 +539,7 @@ static void xiaozhi_start_session(void)
 
     if(access(XIAOZHI_BIN, X_OK) != 0) {
         pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_session_reconnect_after_us = 0;
         xiaozhi_set_status_locked("Helper missing",
                                   "k230_xiaozhi_probe is not installed.",
                                   127);
@@ -545,6 +551,7 @@ static void xiaozhi_start_session(void)
     unlink(XIAOZHI_CTL);
     if(mkfifo(XIAOZHI_CTL, 0600) != 0 && errno != EEXIST) {
         pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_session_reconnect_after_us = 0;
         xiaozhi_set_status_locked("Start failed", "Control FIFO failed", -1);
         pthread_mutex_unlock(&xiaozhi_lock);
         app_request_fast_refresh();
@@ -574,6 +581,7 @@ static void xiaozhi_start_session(void)
             pclose(fp);
         }
         pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_session_reconnect_after_us = 0;
         xiaozhi_set_status_locked("Start failed", "popen failed", -1);
         pthread_mutex_unlock(&xiaozhi_lock);
         app_request_fast_refresh();
@@ -584,6 +592,7 @@ static void xiaozhi_start_session(void)
     pid = strtol(line, NULL, 10);
     if(pid <= 0) {
         pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_session_reconnect_after_us = 0;
         xiaozhi_set_status_locked("Start failed", "Invalid session pid", -1);
         pthread_mutex_unlock(&xiaozhi_lock);
         app_request_fast_refresh();
@@ -593,6 +602,7 @@ static void xiaozhi_start_session(void)
     pthread_mutex_lock(&xiaozhi_lock);
     xiaozhi_session_pid = (pid_t)pid;
     xiaozhi_session_ready = 0;
+    xiaozhi_session_reconnect_after_us = 0;
     xiaozhi_set_status_locked("Connecting", "Session handshake", 0);
     xiaozhi_log_text[0] = '\0';
     xiaozhi_log_scan_len = 0;
@@ -612,6 +622,8 @@ static void xiaozhi_stop_session(void)
     pid = xiaozhi_session_pid;
     xiaozhi_session_pid = -1;
     xiaozhi_session_ready = 0;
+    xiaozhi_session_reconnect_after_us = 0;
+    xiaozhi_session_reconnect_attempts = 0;
     xiaozhi_ptt_recording = 0;
     xiaozhi_ptt_pending_hold = 0;
     xiaozhi_running = 0;
@@ -628,6 +640,19 @@ static void xiaozhi_restart_session(void)
 {
     xiaozhi_stop_session();
     xiaozhi_start_session();
+}
+
+static uint64_t xiaozhi_session_reconnect_delay_locked(void)
+{
+    uint64_t delay =
+        (uint64_t)(xiaozhi_session_reconnect_attempts + 1) *
+        XIAOZHI_SESSION_RECONNECT_STEP_US;
+
+    if(delay > XIAOZHI_SESSION_RECONNECT_MAX_US) {
+        delay = XIAOZHI_SESSION_RECONNECT_MAX_US;
+    }
+    xiaozhi_session_reconnect_attempts++;
+    return delay;
 }
 
 static void xiaozhi_truncate_log(void)
@@ -1516,6 +1541,9 @@ static xiaozhi_face_kind_t xiaozhi_face_kind_for_state(const char *status,
                XIAOZHI_FACE_SPEAKING : emotion_kind;
     }
     if(waiting) {
+        return XIAOZHI_FACE_THINKING;
+    }
+    if(status && strstr(status, "Reconnecting")) {
         return XIAOZHI_FACE_THINKING;
     }
     if(status && (strstr(status, "Failed") ||
@@ -2566,6 +2594,8 @@ static void xiaozhi_update(void)
     int start_wake_turn = 0;
     int start_pending_ptt = 0;
     int leave_ptt_route = 0;
+    int stop_kws_after_session_exit = 0;
+    int reconnect_session_now = 0;
     pid_t ptt_pid;
     pid_t session_pid;
     char status[192];
@@ -2584,6 +2614,8 @@ static void xiaozhi_update(void)
         if(!xiaozhi_session_ready &&
            strstr(xiaozhi_log_text, "session ready")) {
             xiaozhi_session_ready = 1;
+            xiaozhi_session_reconnect_after_us = 0;
+            xiaozhi_session_reconnect_attempts = 0;
             if(xiaozhi_ptt_pending_hold && !xiaozhi_running &&
                !xiaozhi_ptt_recording) {
                 start_pending_ptt = 1;
@@ -2645,15 +2677,33 @@ static void xiaozhi_update(void)
             xiaozhi_record_overlay_close();
         }
         if(kill(session_pid, 0) != 0 && errno == ESRCH) {
+            uint64_t delay_us = xiaozhi_session_reconnect_delay_locked();
+
             xiaozhi_session_pid = -1;
             xiaozhi_session_ready = 0;
             xiaozhi_ptt_recording = 0;
             xiaozhi_ptt_pending_hold = 0;
             xiaozhi_running = 0;
-            xiaozhi_set_status_locked("Session stopped", "Tap Reconnect",
+            xiaozhi_session_reconnect_after_us = now_us + delay_us;
+            xiaozhi_set_status_locked("Reconnecting",
+                                      "Session closed, retrying automatically",
                                       -1);
+            xiaozhi_append_log_locked("AUTO_RECONNECT scheduled");
             xiaozhi_record_overlay_close();
+            start_wake_turn = 0;
+            start_pending_ptt = 0;
+            leave_ptt_route = 1;
+            stop_kws_after_session_exit = 1;
         }
+    }
+    if(xiaozhi_session_pid <= 0 && xiaozhi_session_reconnect_after_us &&
+       now_us >= xiaozhi_session_reconnect_after_us &&
+       xiaozhi_kws_should_run && !xiaozhi_running && !xiaozhi_ptt_recording &&
+       !xiaozhi_ptt_pending_hold) {
+        xiaozhi_session_reconnect_after_us = 0;
+        xiaozhi_set_status_locked("Reconnecting", "Session handshake", 0);
+        xiaozhi_append_log_locked("AUTO_RECONNECT start session");
+        reconnect_session_now = 1;
     }
     if(xiaozhi_ptt_pid > 0) {
         xiaozhi_reload_log_tail_locked();
@@ -2688,6 +2738,12 @@ static void xiaozhi_update(void)
     snprintf(emotion, sizeof(emotion), "%s", xiaozhi_emotion_text);
     pthread_mutex_unlock(&xiaozhi_lock);
 
+    if(stop_kws_after_session_exit || reconnect_session_now) {
+        xiaozhi_kws_stop();
+    }
+    if(reconnect_session_now) {
+        xiaozhi_start_session();
+    }
     if(leave_ptt_route) {
         xiaozhi_ptt_route_leave_if_needed();
     }

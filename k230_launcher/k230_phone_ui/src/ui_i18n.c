@@ -230,6 +230,8 @@ static const ui_translation_t ui_translations[] = {
     { "Cancelled", "已取消", "キャンセル済み" },
     { "Session stopped", "会话已停止", "セッション停止" },
     { "Tap Reconnect", "点击重连", "再接続をタップ" },
+    { "Reconnecting", "正在重连", "再接続中" },
+    { "Session closed, retrying automatically", "会话已断开，正在自动重连", "セッション切断、自動再接続中" },
     { "Session not ready", "会话未就绪", "セッション未準備" },
     { "Tap Reconnect and try again", "请点击重连后重试", "再接続してから再試行" },
     { "Wait for session ready", "等待会话就绪", "セッション準備待ち" },
