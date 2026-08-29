@@ -28,20 +28,38 @@ if [ "${CURRENT_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
     echo "The overlay will still be copied, but build failures may require rebasing." >&2
 fi
 
-echo "[1/3] Copy BSP overlay"
+PRUNE_PATHS=(
+    "buildroot-overlay/board/canaan/k230-soc/rootfs_overlay/etc/init.d/S00resizemmc"
+    "buildroot-overlay/board/canaan/k230-soc/rootfs_overlay/first_boot_flag"
+)
+
+echo "[1/4] Copy BSP overlay"
 echo "Prune stale test-only patch overlay"
 rm -f "${SDK_DIR}"/buildroot-overlay/linux/*ov5647*camera-profile*.patch
 rm -f "${SDK_DIR}"/buildroot-overlay/linux/*imx219*camera-profile*.patch
 rsync -a "${BSP_DIR}/overlay/" "${SDK_DIR}/"
 
-echo "[2/3] Invalidate generated Buildroot overlay sync stamps"
+echo "[2/4] Prune unsupported upstream first-boot resize files"
+for rel in "${PRUNE_PATHS[@]}"; do
+    rm -f "${SDK_DIR}/${rel}"
+done
+
+find "${SDK_DIR}/output" -path "*/board/canaan/k230-soc/rootfs_overlay/etc/init.d/S00resizemmc" -delete 2>/dev/null || true
+find "${SDK_DIR}/output" -path "*/board/canaan/k230-soc/rootfs_overlay/first_boot_flag" -delete 2>/dev/null || true
+find "${SDK_DIR}/output" -path "*/target/etc/init.d/S00resizemmc" -delete 2>/dev/null || true
+find "${SDK_DIR}/output" -path "*/target/first_boot_flag" -delete 2>/dev/null || true
+find "${SDK_DIR}/output" -maxdepth 3 \( -type f -o -type l \) \
+    \( -name "rootfs.ext2" -o -name "rootfs.ext4" -o -name "rootfs.tar" \) \
+    -delete 2>/dev/null || true
+
+echo "[3/4] Invalidate generated Buildroot overlay sync stamps"
 while IFS= read -r stamp; do
     backup="${stamp}.stale.$(date -u +%Y%m%d%H%M%S)"
     mv "${stamp}" "${backup}"
     echo "Moved ${stamp} -> ${backup}"
 done < <(find "${SDK_DIR}/output" -maxdepth 2 -name .overlay_sync -type f 2>/dev/null || true)
 
-echo "[3/3] Resulting SDK status"
+echo "[4/4] Resulting SDK status"
 git -C "${SDK_DIR}" status --short | sed -n '1,160p'
 
 echo "Done."
