@@ -1710,10 +1710,24 @@ static int command_ptt(const app_opts_t *opts)
     }
 
     int16_t decoded[5760];
-    time_t deadline = time(NULL) + opts->wait_seconds;
     int rx_audio_seen = 0;
-    log_line("INFO", "receive response: wait=%d", opts->wait_seconds);
-    while (!g_stop && time(NULL) <= deadline) {
+    int response_seen = 0;
+    int idle_seconds = opts->timeout_ms / 1000 + 2;
+    if (idle_seconds < 12) idle_seconds = 12;
+    time_t first_deadline = time(NULL) + opts->wait_seconds;
+    time_t last_response_activity = time(NULL);
+    log_line("INFO", "receive response: first_wait=%d idle=%d",
+             opts->wait_seconds, idle_seconds);
+    while (!g_stop) {
+        time_t now = time(NULL);
+        if (!response_seen && now > first_deadline) {
+            log_line("WARN", "response wait timeout before first payload");
+            break;
+        }
+        if (response_seen && now - last_response_activity > idle_seconds) {
+            log_line("WARN", "response idle timeout");
+            break;
+        }
         int opcode = 0;
         unsigned char *payload = NULL;
         size_t len = 0;
@@ -1724,6 +1738,8 @@ static int command_ptt(const app_opts_t *opts)
         if (opcode == 1) {
             log_line("INFO", "text: %s", payload);
             log_chat_message_from_json((const char *)payload);
+            response_seen = 1;
+            last_response_activity = time(NULL);
             if (json_has_type_state((const char *)payload, "tts", "start")) {
                 log_line("EVENT", "response_start");
             } else if (json_has_type_state((const char *)payload, "tts",
@@ -1734,6 +1750,8 @@ static int command_ptt(const app_opts_t *opts)
             }
         } else if (opcode == 2) {
             log_line("INFO", "rx opus bytes=%zu", len);
+            response_seen = 1;
+            last_response_activity = time(NULL);
             if (!rx_audio_seen) {
                 rx_audio_seen = 1;
                 log_line("EVENT", "audio_start");
@@ -2052,10 +2070,24 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
     }
 
     int16_t decoded[5760];
-    time_t deadline = time(NULL) + opts->wait_seconds;
     int rx_audio_seen = 0;
-    log_line("INFO", "receive response: wait=%d", opts->wait_seconds);
-    while (!g_stop && time(NULL) <= deadline) {
+    int response_seen = 0;
+    int idle_seconds = opts->timeout_ms / 1000 + 2;
+    if (idle_seconds < 12) idle_seconds = 12;
+    time_t first_deadline = time(NULL) + opts->wait_seconds;
+    time_t last_response_activity = time(NULL);
+    log_line("INFO", "receive response: first_wait=%d idle=%d",
+             opts->wait_seconds, idle_seconds);
+    while (!g_stop) {
+        time_t now = time(NULL);
+        if (!response_seen && now > first_deadline) {
+            log_line("WARN", "response wait timeout before first payload");
+            break;
+        }
+        if (response_seen && now - last_response_activity > idle_seconds) {
+            log_line("WARN", "response idle timeout");
+            break;
+        }
         int opcode = 0;
         unsigned char *payload = NULL;
         size_t len = 0;
@@ -2077,6 +2109,8 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
         if (opcode == 1) {
             log_line("INFO", "text: %s", payload);
             log_chat_message_from_json((const char *)payload);
+            response_seen = 1;
+            last_response_activity = time(NULL);
             if (json_has_type_state((const char *)payload, "tts", "start")) {
                 log_line("EVENT", "response_start");
             } else if (json_has_type_state((const char *)payload, "tts",
@@ -2087,6 +2121,8 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
             }
         } else if (opcode == 2) {
             log_line("INFO", "rx opus bytes=%zu", len);
+            response_seen = 1;
+            last_response_activity = time(NULL);
             if (!rx_audio_seen) {
                 rx_audio_seen = 1;
                 log_line("EVENT", "audio_start");
@@ -2223,7 +2259,7 @@ static void print_usage(FILE *out)
             "  --capture DEV          ALSA capture device, default: default\n"
             "  --playback DEV         ALSA playback device, default: default\n"
             "  --seconds N            record/loopback seconds, default: 3\n"
-            "  --wait N               ptt response wait seconds, default: 12\n"
+            "  --wait N               first response wait seconds, default: 12\n"
             "  --timeout-ms N         socket/hello timeout, default: 10000\n"
             "  --activate-timeout N   activation wait seconds, default: 120\n"
             "  --tls-verify           enable TLS certificate verification\n"

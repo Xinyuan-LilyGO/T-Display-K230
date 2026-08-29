@@ -34,6 +34,9 @@
 #define XIAOZHI_FACE_EDGE_SWIPE_PX 90
 #define XIAOZHI_KWS_RESTART_COOLDOWN_US 1500000ULL
 #define XIAOZHI_KWS_CRASH_BACKOFF_US 5000000ULL
+#define XIAOZHI_SESSION_RECORD_SECONDS 30
+#define XIAOZHI_SESSION_FIRST_WAIT_SECONDS 120
+#define XIAOZHI_SESSION_TIMEOUT_MS 10000
 #define XIAOZHI_DEFAULT_URL "wss://api.tenclass.net:443/xiaozhi/v1/"
 #define XIAOZHI_PREF_URL "xiaozhi.url"
 #define XIAOZHI_PREF_TOKEN "xiaozhi.token"
@@ -559,9 +562,11 @@ static void xiaozhi_start_session(void)
     xiaozhi_shell_quote(ctl_q, sizeof(ctl_q), XIAOZHI_CTL);
     xiaozhi_shell_quote(log_q, sizeof(log_q), XIAOZHI_LOG);
     snprintf(cmd, sizeof(cmd),
-             "%s %s session --control %s --seconds 30 --wait 15 "
-             "--timeout-ms 10000 >> %s 2>&1 & echo $!",
-             env_prefix, XIAOZHI_BIN, ctl_q, log_q);
+             "%s %s session --control %s --seconds %d --wait %d "
+             "--timeout-ms %d >> %s 2>&1 & echo $!",
+             env_prefix, XIAOZHI_BIN, ctl_q, XIAOZHI_SESSION_RECORD_SECONDS,
+             XIAOZHI_SESSION_FIRST_WAIT_SECONDS, XIAOZHI_SESSION_TIMEOUT_MS,
+             log_q);
 
     fp = popen(cmd, "r");
     if(!fp || !fgets(line, sizeof(line), fp)) {
