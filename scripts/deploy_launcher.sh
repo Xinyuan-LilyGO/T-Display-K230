@@ -25,6 +25,7 @@ DEPLOY_APP=1
 DEPLOY_FIRMWARE=0
 DEPLOY_MEDIA=0
 DEPLOY_MAPS=0
+DEPLOY_RUNTIME_LIBS=0
 RESTART_APP=1
 DO_REBOOT=0
 DRY_RUN=0
@@ -56,6 +57,8 @@ Options:
   --media                    Also deploy launcher resources/music, resources/videos, and resources/notification.
   --maps                     Also deploy launcher resources/maps to /root/maps.
                              Map tiles are not part of --media or images by default.
+  --runtime-libs             Also update launcher runtime libraries in /usr/lib.
+                             Use this only when the target image lacks required libraries.
   --no-restart              Do not restart k230_phone_ui after app deployment.
   --reboot                   Reboot after deployment.
   --no-reboot                Do not reboot after deployment. This is the default.
@@ -148,6 +151,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --maps)
             DEPLOY_MAPS=1
+            shift
+            ;;
+        --runtime-libs|--with-runtime-libs)
+            DEPLOY_RUNTIME_LIBS=1
             shift
             ;;
         --no-restart)
@@ -301,6 +308,7 @@ Deploy app  : ${DEPLOY_APP}
 Deploy boot : ${DEPLOY_FIRMWARE}
 Deploy media: ${DEPLOY_MEDIA}
 Deploy maps : ${DEPLOY_MAPS}
+Deploy libs : ${DEPLOY_RUNTIME_LIBS}
 Restart app : ${RESTART_APP}
 Reboot      : ${DO_REBOOT}
 EOF
@@ -313,7 +321,7 @@ fi
 echo
 echo "[1/5] Prepare target and backup current files"
 ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
-    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_BACKUP='${REMOTE_BACKUP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' DEPLOY_MAPS='${DEPLOY_MAPS}' sh -s" <<'REMOTE'
+    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_BACKUP='${REMOTE_BACKUP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' DEPLOY_MAPS='${DEPLOY_MAPS}' DEPLOY_RUNTIME_LIBS='${DEPLOY_RUNTIME_LIBS}' sh -s" <<'REMOTE'
 set -e
 mkdir -p "${REMOTE_TMP}/app" "${REMOTE_TMP}/face_detect" \
          "${REMOTE_TMP}/boot" "${REMOTE_TMP}/music" "${REMOTE_TMP}/videos" \
@@ -329,6 +337,9 @@ if [ "${DEPLOY_APP}" = "1" ]; then
     if [ -d "${REMOTE_FACE_DIR}" ]; then
         cp -a "${REMOTE_FACE_DIR}" "${REMOTE_BACKUP}/app/face_detect" 2>/dev/null || true
     fi
+fi
+
+if [ "${DEPLOY_RUNTIME_LIBS}" = "1" ]; then
     for pattern in libcodec2.so* libasound.so* libopus.so* libssl.so.3 libcrypto.so.3; do
         cp -a /usr/lib/${pattern} "${REMOTE_BACKUP}/lib/" 2>/dev/null || true
     done
@@ -360,15 +371,17 @@ if [[ "${DEPLOY_APP}" -eq 1 ]]; then
         tar -C "${FACE_DIR}" -cf - . | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
             "tar -C '${REMOTE_TMP}/face_detect' -xf -"
     fi
-    runtime_libs=()
-    for pattern in "${RUNTIME_LIB_PATTERNS[@]}"; do
-        while IFS= read -r -d '' lib; do
-            runtime_libs+=("$(basename "${lib}")")
-        done < <(find "${RUNTIME_LIB_DIR}" -maxdepth 1 -name "${pattern}" -print0)
-    done
-    if [[ "${#runtime_libs[@]}" -gt 0 ]]; then
-        (cd "${RUNTIME_LIB_DIR}" && tar -cf - "${runtime_libs[@]}") | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
-            "tar -C '${REMOTE_TMP}/lib' -xf -"
+    if [[ "${DEPLOY_RUNTIME_LIBS}" -eq 1 ]]; then
+        runtime_libs=()
+        for pattern in "${RUNTIME_LIB_PATTERNS[@]}"; do
+            while IFS= read -r -d '' lib; do
+                runtime_libs+=("$(basename "${lib}")")
+            done < <(find "${RUNTIME_LIB_DIR}" -maxdepth 1 -name "${pattern}" -print0)
+        done
+        if [[ "${#runtime_libs[@]}" -gt 0 ]]; then
+            (cd "${RUNTIME_LIB_DIR}" && tar -cf - "${runtime_libs[@]}") | ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
+                "tar -C '${REMOTE_TMP}/lib' -xf -"
+        fi
     fi
 fi
 
@@ -413,7 +426,7 @@ fi
 
 echo "[3/5] Install on target"
 ssh "${SSH_OPTS[@]}" "${TARGET_HOST}" \
-    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' REMOTE_MUSIC_DIR='${REMOTE_MUSIC_DIR}' REMOTE_VIDEO_DIR='${REMOTE_VIDEO_DIR}' REMOTE_NOTIFICATION_DIR='${REMOTE_NOTIFICATION_DIR}' REMOTE_MAP_DIR='${REMOTE_MAP_DIR}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' DEPLOY_MAPS='${DEPLOY_MAPS}' RESTART_APP='${RESTART_APP}' SET_AUDIO_OUTPUT='${SET_AUDIO_OUTPUT}' sh -s" <<'REMOTE'
+    "REMOTE_TMP='${REMOTE_TMP}' REMOTE_APP_DIR='${REMOTE_APP_DIR}' REMOTE_FACE_DIR='${REMOTE_FACE_DIR}' REMOTE_BOOT='${REMOTE_BOOT}' REMOTE_MUSIC_DIR='${REMOTE_MUSIC_DIR}' REMOTE_VIDEO_DIR='${REMOTE_VIDEO_DIR}' REMOTE_NOTIFICATION_DIR='${REMOTE_NOTIFICATION_DIR}' REMOTE_MAP_DIR='${REMOTE_MAP_DIR}' DEPLOY_APP='${DEPLOY_APP}' DEPLOY_FIRMWARE='${DEPLOY_FIRMWARE}' DEPLOY_MEDIA='${DEPLOY_MEDIA}' DEPLOY_MAPS='${DEPLOY_MAPS}' DEPLOY_RUNTIME_LIBS='${DEPLOY_RUNTIME_LIBS}' RESTART_APP='${RESTART_APP}' SET_AUDIO_OUTPUT='${SET_AUDIO_OUTPUT}' sh -s" <<'REMOTE'
 set -e
 
 if [ "${DEPLOY_APP}" = "1" ]; then
@@ -440,7 +453,8 @@ if [ "${DEPLOY_APP}" = "1" ]; then
         mkdir -p "${REMOTE_FACE_DIR}"
         cp -a "${REMOTE_TMP}/face_detect/." "${REMOTE_FACE_DIR}/"
     fi
-    if [ "$(find "${REMOTE_TMP}/lib" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    if [ "${DEPLOY_RUNTIME_LIBS}" = "1" ] &&
+       [ "$(find "${REMOTE_TMP}/lib" -mindepth 1 -print -quit 2>/dev/null)" ]; then
         mkdir -p /usr/lib
         cp -a "${REMOTE_TMP}/lib/." /usr/lib/
     fi
