@@ -11,7 +11,7 @@ LILYGO T-Display K230.
 
 ## Release Scope
 
-This launcher is the user interface layer used by the `v0.2.0` image. It is
+This launcher is the user interface layer used by the `v0.2.2` image. It is
 designed for the BSP-provided RM69A10 display, Goodix touch input, GC2093 camera,
 audio routes, optional keyboard base, LoRa module, nRF52840, and nRF9151.
 
@@ -28,6 +28,19 @@ Main app groups:
 Apps that require optional hardware check for the related module before use. If
 the module is not present, the launcher should show a user-facing notice instead
 of entering a broken page.
+
+## v0.2.2 Updates
+
+- Xiaozhi voice assistant now provides the official device-code binding flow,
+  wake-word entry, push-to-talk, hardware MIC key support, a chat-style
+  transcript, full-screen robot face mode, and automatic session recovery.
+- Power settings include first-run charger defaults, a 6000 mAh default battery
+  capacity, optional low-voltage shutdown, and coordinated screen/keyboard
+  backlight handling during shutdown.
+- nRF52840 UART ownership is coordinated between Meshtastic BLE and nRF DFU so
+  one feature can pause and restore the other cleanly.
+- SD-card image generation is prepared for repeatable clean builds and reboot
+  validation.
 
 ## Prerequisites
 
@@ -58,7 +71,8 @@ launcher app development rules and optional-peripheral handling.
 
 Meshtastic is included as a beta app. Its voice/photo transfer requires LR2021
 modules on both K230 boards; SX1262 boards support basic text mesh messages
-only.
+only. Xiaozhi is also beta and requires network access plus a compatible
+Xiaozhi service.
 
 ## Install Into The SDK
 

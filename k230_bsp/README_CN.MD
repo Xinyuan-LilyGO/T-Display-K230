@@ -18,13 +18,16 @@ dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 
 ## 发布范围
 
-本 BSP 是 `v0.2.0` 镜像使用的硬件支持层，包含 T-Display K230 所需的
+本 BSP 是 `v0.2.2` 镜像使用的硬件支持层，包含 T-Display K230 所需的
 kernel、U-Boot、Buildroot、设备树、启动 logo 和 rootfs overlay 变更。
 LVGL Launcher 由 `k230_launcher` 单独安装，但本仓库顶层脚本会统一应用
 BSP 和 Launcher。
 
 BSP 会启用可选硬件需要的总线和引脚。面向用户的应用仍需要在运行时检测对应
 模块是否存在，再启用依赖外设的功能。
+
+`v0.2.2` 的 BSP 应用流程会在 overlay 应用时刷新已生成的 rootfs 镜像产物，
+让干净构建和重启验证的结果更可预期。
 
 ## 本 BSP 包含什么
 

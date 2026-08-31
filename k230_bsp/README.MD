@@ -18,7 +18,7 @@ dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 
 ## Release Scope
 
-This BSP is the hardware layer used by the `v0.2.0` image. It provides the
+This BSP is the hardware layer used by the `v0.2.2` image. It provides the
 kernel, U-Boot, Buildroot, device-tree, boot-logo, and rootfs overlay changes
 required by the T-Display K230 board. The LVGL launcher is installed separately
 from `k230_launcher`, but both layers are applied by the top-level helper
@@ -26,6 +26,10 @@ scripts in this repository.
 
 The BSP enables optional hardware buses and pins. User-facing apps should still
 detect optional modules at runtime before enabling hardware-dependent features.
+
+The `v0.2.2` BSP flow also refreshes generated rootfs image artifacts when the
+overlay is applied, which keeps clean rebuilds and reboot validation
+predictable.
 
 ## What This BSP Includes
 
