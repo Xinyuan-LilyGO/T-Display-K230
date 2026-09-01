@@ -120,6 +120,15 @@
 #define MESHTASTIC_QR_PREVIEW_BYTES (MESHTASTIC_QR_PREVIEW_W * MESHTASTIC_QR_PREVIEW_H * 2)
 #define MESHTASTIC_MAP_ROOT "/root/maps"
 #define MESHTASTIC_MAP_STYLE "openstreetmap"
+#define MESHTASTIC_MAP_DOWNLOADER_PATH \
+    "/root/app/k230_phone_ui/k230_map_tile_downloader"
+#define MESHTASTIC_MAP_DOWNLOAD_STATUS \
+    "/tmp/k230_map_download_status.json"
+#define MESHTASTIC_MAP_DOWNLOAD_LOG \
+    "/tmp/k230_map_tile_downloader.log"
+#define MESHTASTIC_MAP_DOWNLOAD_CANCEL \
+    "/tmp/k230_map_download.cancel"
+#define MESHTASTIC_MAP_DOWNLOAD_MAX_TILES 2000
 #define MESHTASTIC_MAP_TILE_SIZE 256
 #define MESHTASTIC_MAP_MIN_ZOOM 5
 #define MESHTASTIC_MAP_MAX_ZOOM 14
@@ -132,10 +141,42 @@
 #define MESHTASTIC_MAP_RESPONSE_MAX 32768
 #define MESHTASTIC_PREF_MAP_FAKE_GPS "meshtastic.map.fake_gps"
 #define MESHTASTIC_PREF_MAP_ZOOM "meshtastic.map.zoom"
+#define MESHTASTIC_PREF_MAP_TILE_URL "meshtastic.map.tile_url"
+#define MESHTASTIC_PREF_MAP_CUSTOM_TILE_URL \
+    "meshtastic.map.custom_tile_url"
+#define MESHTASTIC_PREF_MAP_DOWNLOAD_RADIUS "meshtastic.map.download_radius"
+#define MESHTASTIC_PREF_MAP_DOWNLOAD_MIN_ZOOM \
+    "meshtastic.map.download_min_zoom"
+#define MESHTASTIC_PREF_MAP_DOWNLOAD_MAX_ZOOM \
+    "meshtastic.map.download_max_zoom"
 #define MESHTASTIC_NODE_RECENT_WINDOW_S 900
 #define MESHTASTIC_OVERLAY_AUTO_REFRESH_TICKS 6
 #define MESHTASTIC_NODE_DETAIL_REFRESH_TICKS 1
 #define MESHTASTIC_NODE_DETAIL_REFRESH_ATTEMPTS 5
+
+typedef struct {
+    const char *button;
+    const char *name;
+    const char *url;
+} mesh_map_tile_source_t;
+
+static const mesh_map_tile_source_t mesh_map_tile_sources[] = {
+    {
+        "OSM",
+        "OpenStreetMap DE",
+        "https://tile.openstreetmap.de/{z}/{x}/{y}.png",
+    },
+    {
+        "OSM-FR",
+        "OpenStreetMap FR",
+        "https://a.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png",
+    },
+    {
+        "AMap",
+        "AMap",
+        "https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
+    },
+};
 
 typedef enum {
     MESH_NODES_OVERLAY_NONE = 0,
@@ -154,6 +195,9 @@ static void mesh_update_target_button(void);
 static void mesh_save_profile_prefs(void);
 static void mesh_channel_import_confirm_show(const char *url,
                                              const char *preview_response);
+static void mesh_map_download_start_event_cb(lv_event_t *event);
+static void mesh_map_download_show_result_modal(const char *state,
+                                                const char *status_json);
 static int mesh_parse_u32_text(const char *text, unsigned long *value);
 static uint16_t mesh_rgb565(uint32_t rgb);
 static int mesh_node_line_value(const char *line, const char *key,
@@ -248,6 +292,26 @@ static char mesh_map_notice_text[128];
 static uint32_t mesh_map_notice_color = 0x25C281;
 static lv_obj_t *mesh_map_view_obj;
 static lv_obj_t *mesh_map_layer_obj;
+static lv_obj_t *mesh_map_download_overlay;
+static lv_obj_t *mesh_map_download_status_label;
+static lv_obj_t *mesh_map_download_progress_bar;
+static lv_obj_t *mesh_map_download_source_label;
+static lv_obj_t *mesh_map_download_estimate_label;
+static lv_obj_t *mesh_map_download_prompt_overlay;
+static lv_obj_t *mesh_map_download_progress_overlay;
+static lv_timer_t *mesh_map_download_timer;
+static pid_t mesh_map_download_pid = -1;
+static int mesh_map_download_center_valid;
+static double mesh_map_download_center_lat;
+static double mesh_map_download_center_lon;
+static int mesh_map_download_radius_km = 5;
+static int mesh_map_download_min_zoom = 8;
+static int mesh_map_download_max_zoom = 12;
+static int mesh_map_download_total;
+static int mesh_map_download_existing;
+static int mesh_map_download_missing;
+static char mesh_map_download_url[768];
+static char mesh_map_download_custom_url[768];
 static lv_obj_t *mesh_settings_overlay;
 static lv_obj_t *mesh_settings_status_card;
 static lv_obj_t *mesh_settings_status_labels[3];
@@ -10282,6 +10346,1630 @@ static void mesh_map_add_share_button(lv_obj_t *map, int map_w, int map_h)
     lv_obj_move_foreground(btn);
 }
 
+static void mesh_map_download_rebuild(void);
+
+static int mesh_map_download_read_file(const char *path, char *out,
+                                       size_t out_len)
+{
+    FILE *fp;
+    size_t n;
+
+    if(!path || !out || out_len == 0U) {
+        return -1;
+    }
+    fp = fopen(path, "r");
+    if(!fp) {
+        out[0] = '\0';
+        return -1;
+    }
+    n = fread(out, 1, out_len - 1U, fp);
+    out[n] = '\0';
+    fclose(fp);
+    return n > 0U ? 0 : -1;
+}
+
+static int mesh_map_download_default_route_available(void)
+{
+    FILE *fp = fopen("/proc/net/route", "r");
+    char line[256];
+
+    if(!fp) {
+        return 0;
+    }
+    if(!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return 0;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        char iface[32];
+        char dest[32];
+        char gateway[32];
+        unsigned int flags;
+
+        if(sscanf(line, "%31s %31s %31s %x", iface, dest, gateway,
+                  &flags) == 4 &&
+           strcmp(dest, "00000000") == 0 && (flags & 0x1U)) {
+            fclose(fp);
+            return 1;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+static int mesh_map_download_ip_usable(const char *ip)
+{
+    if(!ip || !ip[0] || strcmp(ip, "--") == 0 ||
+       strncmp(ip, "169.254.", 8) == 0 ||
+       strcmp(ip, "0.0.0.0") == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+static int mesh_map_download_network_available(char *detail,
+                                               size_t detail_len)
+{
+    char eth_ip[64] = "";
+    char wifi_ip[64] = "";
+    int eth_ok;
+    int wifi_ok;
+
+    ui_network_force_default_route("mesh-map-download");
+    eth_ok = ui_read_iface_ip(NET_ETH_IFACE, eth_ip, sizeof(eth_ip)) == 0 &&
+             mesh_map_download_ip_usable(eth_ip);
+    wifi_ok = ui_read_iface_ip(NET_WIFI_IFACE, wifi_ip, sizeof(wifi_ip)) == 0 &&
+              mesh_map_download_ip_usable(wifi_ip);
+    if((eth_ok || wifi_ok) && mesh_map_download_default_route_available()) {
+        if(detail && detail_len > 0U) {
+            snprintf(detail, detail_len, "%s %s%s%s",
+                     ui_tr("Network ready"),
+                     eth_ok ? NET_ETH_IFACE : NET_WIFI_IFACE,
+                     eth_ok ? " " : " ",
+                     eth_ok ? eth_ip : wifi_ip);
+        }
+        return 1;
+    }
+
+    if(detail && detail_len > 0U) {
+        snprintf(detail, detail_len, "%s\n%s",
+                 ui_tr("No network connection"),
+                 ui_tr("Connect Wi-Fi or Ethernet before downloading maps"));
+    }
+    return 0;
+}
+
+static int mesh_map_download_url_valid(const char *url)
+{
+    if(!url || !url[0]) {
+        return 0;
+    }
+    if(strncmp(url, "http://", 7) != 0 &&
+       strncmp(url, "https://", 8) != 0) {
+        return 0;
+    }
+    return strstr(url, "{z}") && strstr(url, "{x}") && strstr(url, "{y}") &&
+           !strstr(url, "example.com");
+}
+
+static int mesh_map_download_url_equal(const char *a, const char *b)
+{
+    return a && b && strcmp(a, b) == 0;
+}
+
+static const mesh_map_tile_source_t *
+mesh_map_download_builtin_for_url(const char *url)
+{
+    for(size_t i = 0; i < sizeof(mesh_map_tile_sources) /
+                          sizeof(mesh_map_tile_sources[0]); i++) {
+        if(mesh_map_download_url_equal(url, mesh_map_tile_sources[i].url)) {
+            return &mesh_map_tile_sources[i];
+        }
+    }
+    return NULL;
+}
+
+static const char *mesh_map_download_selected_source_name(void)
+{
+    const mesh_map_tile_source_t *source =
+        mesh_map_download_builtin_for_url(mesh_map_download_url);
+
+    if(source) {
+        return source->name;
+    }
+    if(mesh_map_download_url_valid(mesh_map_download_url) &&
+       mesh_map_download_url_equal(mesh_map_download_url,
+                                   mesh_map_download_custom_url)) {
+        return ui_tr("Custom source");
+    }
+    if(mesh_map_download_url_valid(mesh_map_download_url)) {
+        return ui_tr("Custom source");
+    }
+    return ui_tr("No tile source");
+}
+
+static void mesh_map_download_load_prefs(void)
+{
+    char value[32];
+    int parsed;
+
+    ui_prefs_get(MESHTASTIC_PREF_MAP_TILE_URL, mesh_map_download_url,
+                 sizeof(mesh_map_download_url), "");
+    ui_trim_text(mesh_map_download_url);
+    ui_prefs_get(MESHTASTIC_PREF_MAP_CUSTOM_TILE_URL,
+                 mesh_map_download_custom_url,
+                 sizeof(mesh_map_download_custom_url), "");
+    ui_trim_text(mesh_map_download_custom_url);
+    if(mesh_map_download_url_equal(mesh_map_download_url,
+                                   "https://tile.openstreetmap.org/{z}/{x}/{y}.png") ||
+       mesh_map_download_url_equal(mesh_map_download_url,
+                                   "https://a.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png")) {
+        snprintf(mesh_map_download_url, sizeof(mesh_map_download_url), "%s",
+                 mesh_map_tile_sources[0].url);
+        ui_prefs_set(MESHTASTIC_PREF_MAP_TILE_URL, mesh_map_download_url);
+    }
+    if(mesh_map_download_url_valid(mesh_map_download_url) &&
+       !mesh_map_download_builtin_for_url(mesh_map_download_url) &&
+       !mesh_map_download_url_valid(mesh_map_download_custom_url)) {
+        snprintf(mesh_map_download_custom_url,
+                 sizeof(mesh_map_download_custom_url), "%s",
+                 mesh_map_download_url);
+        ui_prefs_set(MESHTASTIC_PREF_MAP_CUSTOM_TILE_URL,
+                     mesh_map_download_custom_url);
+    }
+    if(!mesh_map_download_url_valid(mesh_map_download_url)) {
+        snprintf(mesh_map_download_url, sizeof(mesh_map_download_url), "%s",
+                 mesh_map_tile_sources[0].url);
+        ui_prefs_set(MESHTASTIC_PREF_MAP_TILE_URL, mesh_map_download_url);
+    }
+    ui_prefs_get(MESHTASTIC_PREF_MAP_DOWNLOAD_RADIUS, value, sizeof(value),
+                 "5");
+    parsed = atoi(value);
+    if(parsed == 1 || parsed == 3 || parsed == 5 || parsed == 10 ||
+       parsed == 20) {
+        mesh_map_download_radius_km = parsed;
+    }
+    ui_prefs_get(MESHTASTIC_PREF_MAP_DOWNLOAD_MIN_ZOOM, value, sizeof(value),
+                 "8");
+    parsed = atoi(value);
+    if(parsed >= MESHTASTIC_MAP_MIN_ZOOM &&
+       parsed <= MESHTASTIC_MAP_MAX_ZOOM) {
+        mesh_map_download_min_zoom = parsed;
+    }
+    ui_prefs_get(MESHTASTIC_PREF_MAP_DOWNLOAD_MAX_ZOOM, value, sizeof(value),
+                 "12");
+    parsed = atoi(value);
+    if(parsed >= MESHTASTIC_MAP_MIN_ZOOM &&
+       parsed <= MESHTASTIC_MAP_MAX_ZOOM) {
+        mesh_map_download_max_zoom = parsed;
+    }
+    if(mesh_map_download_min_zoom > mesh_map_download_max_zoom) {
+        mesh_map_download_min_zoom = mesh_map_download_max_zoom;
+    }
+}
+
+static void mesh_map_download_save_prefs(void)
+{
+    char value[32];
+
+    ui_prefs_set(MESHTASTIC_PREF_MAP_TILE_URL, mesh_map_download_url);
+    ui_prefs_set(MESHTASTIC_PREF_MAP_CUSTOM_TILE_URL,
+                 mesh_map_download_custom_url);
+    snprintf(value, sizeof(value), "%d", mesh_map_download_radius_km);
+    ui_prefs_set(MESHTASTIC_PREF_MAP_DOWNLOAD_RADIUS, value);
+    snprintf(value, sizeof(value), "%d", mesh_map_download_min_zoom);
+    ui_prefs_set(MESHTASTIC_PREF_MAP_DOWNLOAD_MIN_ZOOM, value);
+    snprintf(value, sizeof(value), "%d", mesh_map_download_max_zoom);
+    ui_prefs_set(MESHTASTIC_PREF_MAP_DOWNLOAD_MAX_ZOOM, value);
+}
+
+static void mesh_map_download_tile_xy(double lat, double lon, int zoom,
+                                      int *tile_x, int *tile_y)
+{
+    double px;
+    double py;
+    int n = 1 << zoom;
+    int x;
+    int y;
+
+    mesh_map_lonlat_to_pixel(lat, lon, zoom, &px, &py);
+    x = (int)floor(px / (double)MESHTASTIC_MAP_TILE_SIZE);
+    y = (int)floor(py / (double)MESHTASTIC_MAP_TILE_SIZE);
+    if(x < 0) {
+        x = 0;
+    } else if(x >= n) {
+        x = n - 1;
+    }
+    if(y < 0) {
+        y = 0;
+    } else if(y >= n) {
+        y = n - 1;
+    }
+    if(tile_x) {
+        *tile_x = x;
+    }
+    if(tile_y) {
+        *tile_y = y;
+    }
+}
+
+static int mesh_map_download_estimate(int *total, int *existing, int *missing)
+{
+    double lat_delta;
+    double lon_delta;
+    double cos_lat;
+    int sum = 0;
+    int have = 0;
+
+    if(total) {
+        *total = 0;
+    }
+    if(existing) {
+        *existing = 0;
+    }
+    if(missing) {
+        *missing = 0;
+    }
+    if(!mesh_map_download_center_valid) {
+        return -1;
+    }
+
+    lat_delta = (double)mesh_map_download_radius_km / 111.32;
+    cos_lat = cos(mesh_map_download_center_lat * M_PI / 180.0);
+    if(fabs(cos_lat) < 0.08) {
+        cos_lat = cos_lat < 0.0 ? -0.08 : 0.08;
+    }
+    lon_delta = (double)mesh_map_download_radius_km / (111.32 * fabs(cos_lat));
+    for(int z = mesh_map_download_min_zoom; z <= mesh_map_download_max_zoom;
+        z++) {
+        int x0;
+        int x1;
+        int y0;
+        int y1;
+        int n = 1 << z;
+
+        mesh_map_download_tile_xy(mesh_map_download_center_lat + lat_delta,
+                                  mesh_map_download_center_lon - lon_delta,
+                                  z, &x0, &y0);
+        mesh_map_download_tile_xy(mesh_map_download_center_lat - lat_delta,
+                                  mesh_map_download_center_lon + lon_delta,
+                                  z, &x1, &y1);
+        if(x0 > x1) {
+            int tmp = x0;
+            x0 = x1;
+            x1 = tmp;
+        }
+        if(y0 > y1) {
+            int tmp = y0;
+            y0 = y1;
+            y1 = tmp;
+        }
+        if(x0 < 0) {
+            x0 = 0;
+        }
+        if(y0 < 0) {
+            y0 = 0;
+        }
+        if(x1 >= n) {
+            x1 = n - 1;
+        }
+        if(y1 >= n) {
+            y1 = n - 1;
+        }
+        for(int y = y0; y <= y1; y++) {
+            for(int x = x0; x <= x1; x++) {
+                char path[256];
+
+                sum++;
+                mesh_map_tile_path(z, x, y, path, sizeof(path));
+                if(ui_path_exists(path)) {
+                    have++;
+                }
+            }
+        }
+    }
+    if(total) {
+        *total = sum;
+    }
+    if(existing) {
+        *existing = have;
+    }
+    if(missing) {
+        *missing = sum - have;
+    }
+    return 0;
+}
+
+static int mesh_map_json_int(const char *json, const char *key, int *value)
+{
+    char pattern[64];
+    const char *p;
+
+    if(!json || !key || !value) {
+        return 0;
+    }
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    p = strstr(json, pattern);
+    if(!p) {
+        return 0;
+    }
+    p += strlen(pattern);
+    while(*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    *value = (int)strtol(p, NULL, 10);
+    return 1;
+}
+
+static int mesh_map_json_double(const char *json, const char *key,
+                                double *value)
+{
+    char pattern[64];
+    const char *p;
+
+    if(!json || !key || !value) {
+        return 0;
+    }
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    p = strstr(json, pattern);
+    if(!p) {
+        return 0;
+    }
+    p += strlen(pattern);
+    while(*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    *value = strtod(p, NULL);
+    return 1;
+}
+
+static int mesh_map_json_string(const char *json, const char *key,
+                                char *out, size_t out_len)
+{
+    char pattern[64];
+    const char *p;
+    size_t pos = 0;
+
+    if(!json || !key || !out || out_len == 0U) {
+        return 0;
+    }
+    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
+    p = strstr(json, pattern);
+    if(!p) {
+        out[0] = '\0';
+        return 0;
+    }
+    p += strlen(pattern);
+    while(*p && *p != '"' && pos + 1U < out_len) {
+        if(*p == '\\' && p[1]) {
+            p++;
+        }
+        out[pos++] = *p++;
+    }
+    out[pos] = '\0';
+    return 1;
+}
+
+static void mesh_map_download_set_status(const char *text, uint32_t color)
+{
+    if(mesh_map_download_status_label &&
+       lv_obj_is_valid(mesh_map_download_status_label)) {
+        lv_label_set_text(mesh_map_download_status_label,
+                          text && text[0] ? text : ui_tr("Ready"));
+        lv_obj_set_style_text_color(mesh_map_download_status_label,
+                                    lv_color_hex(color), 0);
+    }
+}
+
+static void mesh_map_download_prompt_close_cb(lv_event_t *event)
+{
+    lv_obj_t *overlay = (lv_obj_t *)lv_event_get_user_data(event);
+
+    if(overlay && lv_obj_is_valid(overlay)) {
+        lv_obj_delete(overlay);
+    }
+    mesh_map_download_prompt_overlay = NULL;
+}
+
+static void mesh_map_download_prompt_delete_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_map_download_prompt_overlay = NULL;
+}
+
+static void mesh_map_download_show_prompt(const char *title,
+                                          const char *message,
+                                          uint32_t accent_color)
+{
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 560 : 456;
+    int card_h = ui_is_landscape() ? 230 : 260;
+    int pad = 24;
+    lv_obj_t *card;
+    lv_obj_t *label;
+    lv_obj_t *btn;
+
+    if(mesh_map_download_prompt_overlay &&
+       lv_obj_is_valid(mesh_map_download_prompt_overlay)) {
+        lv_obj_delete(mesh_map_download_prompt_overlay);
+        mesh_map_download_prompt_overlay = NULL;
+    }
+    if(card_w > screen_w - 48) {
+        card_w = screen_w - 48;
+    }
+    if(card_w < 300) {
+        card_w = screen_w - 24;
+    }
+    if(card_h > screen_h - 48) {
+        card_h = screen_h - 48;
+    }
+    if(card_h < 210) {
+        card_h = 210;
+    }
+
+    mesh_map_download_prompt_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_map_download_prompt_overlay);
+    lv_obj_set_style_bg_color(mesh_map_download_prompt_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_map_download_prompt_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(mesh_map_download_prompt_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_map_download_prompt_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_map_download_prompt_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(mesh_map_download_prompt_overlay,
+                        mesh_map_download_prompt_delete_cb,
+                        LV_EVENT_DELETE, NULL);
+
+    card = ui_panel(mesh_map_download_prompt_overlay, 0, 0, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(accent_color), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    label = ui_label(card, title ? title : ui_tr("Map tiles"),
+                     &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(label, pad, 22);
+    lv_obj_set_width(label, card_w - pad * 2);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card, message ? message : "",
+                     &lv_font_montserrat_18, 0xCBD5E1);
+    lv_obj_set_pos(label, pad, 72);
+    lv_obj_set_width(label, card_w - pad * 2);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+    btn = ui_command_button(card, (card_w - 176) / 2, card_h - 76, 176,
+                            "OK", accent_color);
+    lv_obj_add_event_cb(btn, mesh_map_download_prompt_close_cb,
+                        LV_EVENT_CLICKED, mesh_map_download_prompt_overlay);
+    lv_obj_move_foreground(mesh_map_download_prompt_overlay);
+}
+
+static const char *mesh_map_download_state_text(const char *state)
+{
+    if(!state || !state[0]) {
+        return ui_tr("Ready");
+    }
+    if(strcmp(state, "running") == 0) {
+        return ui_tr("Downloading");
+    }
+    if(strcmp(state, "done") == 0) {
+        return ui_tr("Done");
+    }
+    if(strcmp(state, "cancelled") == 0) {
+        return ui_tr("Cancelled");
+    }
+    if(strcmp(state, "failed") == 0) {
+        return ui_tr("Failed");
+    }
+    if(strcmp(state, "existing") == 0) {
+        return ui_tr("Tiles already available");
+    }
+    return ui_tr(state);
+}
+
+static void mesh_map_download_apply_download_view(void)
+{
+    int target_zoom;
+
+    if(!mesh_map_download_center_valid) {
+        return;
+    }
+    mesh_map_center_valid = 1;
+    mesh_map_center_lat = mesh_map_download_center_lat;
+    mesh_map_center_lon = mesh_map_download_center_lon;
+    mesh_map_drag_active = 0;
+    mesh_map_drag_dirty = 0;
+    mesh_map_drag_total_dx = 0;
+    mesh_map_drag_total_dy = 0;
+    mesh_map_pinch_active = 0;
+
+    target_zoom = mesh_map_download_max_zoom;
+    if(target_zoom < mesh_map_download_min_zoom) {
+        target_zoom = mesh_map_download_min_zoom;
+    }
+    if(target_zoom < MESHTASTIC_MAP_MIN_ZOOM) {
+        target_zoom = MESHTASTIC_MAP_MIN_ZOOM;
+    } else if(target_zoom > MESHTASTIC_MAP_MAX_ZOOM) {
+        target_zoom = MESHTASTIC_MAP_MAX_ZOOM;
+    }
+    mesh_map_zoom = target_zoom;
+    mesh_map_save_prefs();
+    mesh_ui_trace("map recentered to downloaded area lat=%.6f lon=%.6f zoom=%d",
+                  mesh_map_center_lat, mesh_map_center_lon, mesh_map_zoom);
+}
+
+static void mesh_map_download_update_status_from_file(void)
+{
+    char json[1024];
+    char state[32];
+    char current[128];
+    char message[160];
+    char text[512];
+    int total = 0;
+    int done = 0;
+    int skipped = 0;
+    int failed = 0;
+    int eta = 0;
+    double speed = 0.0;
+    uint32_t color = 0xCBD5E1;
+
+    if(mesh_map_download_read_file(MESHTASTIC_MAP_DOWNLOAD_STATUS, json,
+                                   sizeof(json)) != 0) {
+        return;
+    }
+    mesh_map_json_string(json, "state", state, sizeof(state));
+    mesh_map_json_string(json, "current", current, sizeof(current));
+    mesh_map_json_string(json, "message", message, sizeof(message));
+    mesh_map_json_int(json, "total", &total);
+    mesh_map_json_int(json, "done", &done);
+    mesh_map_json_int(json, "skipped", &skipped);
+    mesh_map_json_int(json, "failed", &failed);
+    mesh_map_json_int(json, "eta_sec", &eta);
+    mesh_map_json_double(json, "speed_kbps", &speed);
+
+    if(total <= 0) {
+        total = mesh_map_download_total > 0 ? mesh_map_download_total : 1;
+    }
+    if(mesh_map_download_progress_bar &&
+       lv_obj_is_valid(mesh_map_download_progress_bar)) {
+        lv_bar_set_range(mesh_map_download_progress_bar, 0, total);
+        lv_bar_set_value(mesh_map_download_progress_bar,
+                         done > total ? total : done, LV_ANIM_ON);
+    }
+    if(strcmp(state, "done") == 0) {
+        color = 0x25C281;
+    } else if(strcmp(state, "failed") == 0) {
+        color = 0xEF4D5A;
+    } else if(strcmp(state, "cancelled") == 0) {
+        color = 0xF5A524;
+    }
+    snprintf(text, sizeof(text),
+             "%s\n%d/%d  %s %d  %s %d\n%.1f KB/s  ETA %ds\n%s",
+             mesh_map_download_state_text(state), done, total,
+             ui_tr("Skipped"), skipped, ui_tr("Failed"), failed, speed, eta,
+             current[0] ? current : message);
+    mesh_map_download_set_status(text, color);
+}
+
+static void mesh_map_download_timer_cb(lv_timer_t *timer)
+{
+    char state[32] = "";
+    char json[1024];
+    int terminal = 0;
+
+    (void)timer;
+    mesh_map_download_update_status_from_file();
+    if(mesh_map_download_read_file(MESHTASTIC_MAP_DOWNLOAD_STATUS, json,
+                                   sizeof(json)) == 0) {
+        mesh_map_json_string(json, "state", state, sizeof(state));
+        terminal = strcmp(state, "done") == 0 ||
+                   strcmp(state, "failed") == 0 ||
+                   strcmp(state, "cancelled") == 0;
+    }
+    if(mesh_map_download_pid > 0) {
+        int status;
+        pid_t rc = waitpid(mesh_map_download_pid, &status, WNOHANG);
+
+        if(rc == mesh_map_download_pid) {
+            mesh_map_download_pid = -1;
+        }
+    }
+    if(terminal && mesh_map_download_pid <= 0) {
+        if(mesh_map_download_timer) {
+            lv_timer_delete(mesh_map_download_timer);
+            mesh_map_download_timer = NULL;
+        }
+        if(strcmp(state, "done") == 0) {
+            mesh_map_download_apply_download_view();
+            mesh_map_set_notice(ui_tr("Map tiles updated"), 0x25C281);
+        }
+        mesh_map_download_show_result_modal(state, json);
+    }
+}
+
+static void mesh_map_download_close(void)
+{
+    if(mesh_map_download_prompt_overlay &&
+       lv_obj_is_valid(mesh_map_download_prompt_overlay)) {
+        lv_obj_delete(mesh_map_download_prompt_overlay);
+    }
+    mesh_map_download_prompt_overlay = NULL;
+    if(mesh_map_download_progress_overlay &&
+       lv_obj_is_valid(mesh_map_download_progress_overlay)) {
+        lv_obj_delete(mesh_map_download_progress_overlay);
+    }
+    mesh_map_download_progress_overlay = NULL;
+    if(mesh_map_download_overlay &&
+       lv_obj_is_valid(mesh_map_download_overlay)) {
+        lv_obj_delete(mesh_map_download_overlay);
+    }
+    mesh_map_download_overlay = NULL;
+    mesh_map_download_status_label = NULL;
+    mesh_map_download_progress_bar = NULL;
+    mesh_map_download_source_label = NULL;
+    mesh_map_download_estimate_label = NULL;
+    if(mesh_map_download_pid <= 0 && mesh_map_download_timer) {
+        lv_timer_delete(mesh_map_download_timer);
+        mesh_map_download_timer = NULL;
+    }
+}
+
+static void mesh_map_download_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_map_download_close();
+}
+
+static void mesh_map_download_url_submit_cb(const char *text, void *user_data)
+{
+    (void)user_data;
+    snprintf(mesh_map_download_custom_url, sizeof(mesh_map_download_custom_url), "%s",
+             text ? text : "");
+    ui_trim_text(mesh_map_download_custom_url);
+    if(!mesh_map_download_url_valid(mesh_map_download_custom_url)) {
+        mesh_map_download_set_status(ui_tr("Use {z}/{x}/{y} placeholders"),
+                                     0xF5A524);
+        mesh_map_download_show_prompt(ui_tr("Custom source"),
+                                      ui_tr("Use {z}/{x}/{y} placeholders"),
+                                      0xF5A524);
+        mesh_ui_trace("map tile custom source rejected: '%s'",
+                      mesh_map_download_custom_url);
+        return;
+    }
+    snprintf(mesh_map_download_url, sizeof(mesh_map_download_url), "%s",
+             mesh_map_download_custom_url);
+    mesh_map_download_save_prefs();
+    mesh_map_download_rebuild();
+}
+
+static void mesh_map_download_edit_source_event_cb(lv_event_t *event)
+{
+    ui_input_dialog_config_t config;
+
+    (void)event;
+    memset(&config, 0, sizeof(config));
+    if(!mesh_map_download_custom_url[0] &&
+       mesh_map_download_url_valid(mesh_map_download_url) &&
+       !mesh_map_download_builtin_for_url(mesh_map_download_url)) {
+        snprintf(mesh_map_download_custom_url,
+                 sizeof(mesh_map_download_custom_url), "%s",
+                 mesh_map_download_url);
+    }
+    config.title = ui_tr("Custom source");
+    config.placeholder = "https://tiles.example.org/{z}/{x}/{y}.png";
+    config.initial_text = mesh_map_download_custom_url;
+    config.max_length = sizeof(mesh_map_download_custom_url) - 1U;
+    config.min_length = 1;
+    config.min_length_text = ui_tr("Use {z}/{x}/{y} placeholders");
+    config.submit_cb = mesh_map_download_url_submit_cb;
+    config.submit_text = ui_tr("Save");
+    config.cancel_text = ui_tr("Cancel");
+    ui_input_dialog_open(&config);
+}
+
+static void mesh_map_download_builtin_source_event_cb(lv_event_t *event)
+{
+    const mesh_map_tile_source_t *source =
+        (const mesh_map_tile_source_t *)lv_event_get_user_data(event);
+
+    if(!source) {
+        return;
+    }
+    snprintf(mesh_map_download_url, sizeof(mesh_map_download_url), "%s",
+             source->url);
+    mesh_map_download_save_prefs();
+    mesh_ui_trace("map tile source selected builtin=%s", source->name);
+    mesh_map_download_rebuild();
+}
+
+static void mesh_map_download_custom_source_event_cb(lv_event_t *event)
+{
+    (void)event;
+    if(!mesh_map_download_url_valid(mesh_map_download_custom_url)) {
+        mesh_map_download_edit_source_event_cb(NULL);
+        return;
+    }
+    snprintf(mesh_map_download_url, sizeof(mesh_map_download_url), "%s",
+             mesh_map_download_custom_url);
+    mesh_map_download_save_prefs();
+    mesh_ui_trace("map tile source selected custom");
+    mesh_map_download_rebuild();
+}
+
+static void mesh_map_download_delete_custom_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_map_download_custom_url[0] = '\0';
+    if(!mesh_map_download_builtin_for_url(mesh_map_download_url)) {
+        snprintf(mesh_map_download_url, sizeof(mesh_map_download_url), "%s",
+                 mesh_map_tile_sources[0].url);
+    }
+    mesh_map_download_save_prefs();
+    mesh_ui_trace("map tile custom source deleted");
+    mesh_map_download_rebuild();
+    mesh_map_download_show_prompt(ui_tr("Custom source"),
+                                  ui_tr("Custom source deleted"),
+                                  0x25C281);
+}
+
+static void mesh_map_download_radius_event_cb(lv_event_t *event)
+{
+    int delta = (int)(intptr_t)lv_event_get_user_data(event);
+    static const int values[] = {1, 3, 5, 10, 20};
+    int index = 2;
+
+    for(size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+        if(mesh_map_download_radius_km == values[i]) {
+            index = (int)i;
+            break;
+        }
+    }
+    index += delta;
+    if(index < 0) {
+        index = 0;
+    } else if(index >= (int)(sizeof(values) / sizeof(values[0]))) {
+        index = (int)(sizeof(values) / sizeof(values[0])) - 1;
+    }
+    mesh_map_download_radius_km = values[index];
+    mesh_map_download_save_prefs();
+    mesh_map_download_rebuild();
+}
+
+static void mesh_map_download_zoom_event_cb(lv_event_t *event)
+{
+    intptr_t packed = (intptr_t)lv_event_get_user_data(event);
+    int field = (int)(packed >> 8);
+    int delta = (int)(packed & 0xff);
+
+    if(delta > 127) {
+        delta -= 256;
+    }
+    if(field == 0) {
+        mesh_map_download_min_zoom += delta;
+        if(mesh_map_download_min_zoom < MESHTASTIC_MAP_MIN_ZOOM) {
+            mesh_map_download_min_zoom = MESHTASTIC_MAP_MIN_ZOOM;
+        }
+        if(mesh_map_download_min_zoom > mesh_map_download_max_zoom) {
+            mesh_map_download_min_zoom = mesh_map_download_max_zoom;
+        }
+    } else {
+        mesh_map_download_max_zoom += delta;
+        if(mesh_map_download_max_zoom > MESHTASTIC_MAP_MAX_ZOOM) {
+            mesh_map_download_max_zoom = MESHTASTIC_MAP_MAX_ZOOM;
+        }
+        if(mesh_map_download_max_zoom < mesh_map_download_min_zoom) {
+            mesh_map_download_max_zoom = mesh_map_download_min_zoom;
+        }
+    }
+    mesh_map_download_save_prefs();
+    mesh_map_download_rebuild();
+}
+
+static void mesh_map_download_cancel_event_cb(lv_event_t *event)
+{
+    FILE *fp;
+
+    (void)event;
+    fp = fopen(MESHTASTIC_MAP_DOWNLOAD_CANCEL, "w");
+    if(fp) {
+        fputs("cancel\n", fp);
+        fclose(fp);
+    }
+    mesh_map_download_set_status(ui_tr("Cancelling"), 0xF5A524);
+}
+
+static void mesh_map_download_progress_delete_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_map_download_progress_overlay = NULL;
+    mesh_map_download_status_label = NULL;
+    mesh_map_download_progress_bar = NULL;
+}
+
+static void mesh_map_download_show_progress_modal(const char *initial_status)
+{
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 560 : 430;
+    int card_h = ui_is_landscape() ? 260 : 300;
+    int pad = 24;
+    lv_obj_t *card;
+    lv_obj_t *label;
+    lv_obj_t *btn;
+
+    if(mesh_map_download_prompt_overlay &&
+       lv_obj_is_valid(mesh_map_download_prompt_overlay)) {
+        lv_obj_delete(mesh_map_download_prompt_overlay);
+        mesh_map_download_prompt_overlay = NULL;
+    }
+    if(mesh_map_download_progress_overlay &&
+       lv_obj_is_valid(mesh_map_download_progress_overlay)) {
+        lv_obj_delete(mesh_map_download_progress_overlay);
+    }
+    if(card_w > screen_w - 48) {
+        card_w = screen_w - 48;
+    }
+    if(card_w < 300) {
+        card_w = screen_w - 24;
+    }
+    if(card_h > screen_h - 48) {
+        card_h = screen_h - 48;
+    }
+    if(card_h < 230) {
+        card_h = 230;
+    }
+
+    mesh_map_download_progress_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(mesh_map_download_progress_overlay);
+    lv_obj_add_flag(mesh_map_download_progress_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(mesh_map_download_progress_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_map_download_progress_overlay, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(mesh_map_download_progress_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_map_download_progress_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_map_download_progress_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(mesh_map_download_progress_overlay,
+                        mesh_map_download_progress_delete_cb,
+                        LV_EVENT_DELETE, NULL);
+
+    card = ui_panel(mesh_map_download_progress_overlay, 0, 0, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 14, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    label = ui_label(card, ui_tr("Downloading"), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(label, pad, 22);
+    lv_obj_set_width(label, card_w - pad * 2);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    mesh_map_download_status_label =
+        ui_label(card, initial_status ? initial_status : ui_tr("Downloading"),
+                 &lv_font_montserrat_16, 0xCBD5E1);
+    lv_obj_set_pos(mesh_map_download_status_label, pad, 72);
+    lv_obj_set_width(mesh_map_download_status_label, card_w - pad * 2);
+    lv_label_set_long_mode(mesh_map_download_status_label, LV_LABEL_LONG_WRAP);
+
+    mesh_map_download_progress_bar = lv_bar_create(card);
+    lv_obj_set_pos(mesh_map_download_progress_bar, pad, card_h - 112);
+    lv_obj_set_size(mesh_map_download_progress_bar, card_w - pad * 2, 14);
+    lv_bar_set_range(mesh_map_download_progress_bar, 0,
+                     mesh_map_download_total > 0 ?
+                     mesh_map_download_total : 1);
+    lv_bar_set_value(mesh_map_download_progress_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(mesh_map_download_progress_bar,
+                              lv_color_hex(0x233044), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(mesh_map_download_progress_bar,
+                              lv_color_hex(0x25C281), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(mesh_map_download_progress_bar, 7, 0);
+
+    btn = ui_command_button(card, pad, card_h - 72, card_w - pad * 2,
+                            ui_tr("Cancel download"), 0xF5A524);
+    lv_obj_set_height(btn, 48);
+    lv_obj_add_event_cb(btn, mesh_map_download_cancel_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(mesh_map_download_progress_overlay);
+}
+
+static void mesh_map_download_result_close(void)
+{
+    if(mesh_map_download_progress_overlay &&
+       lv_obj_is_valid(mesh_map_download_progress_overlay)) {
+        lv_obj_delete(mesh_map_download_progress_overlay);
+    }
+    mesh_map_download_progress_overlay = NULL;
+    if(mesh_map_download_overlay && lv_obj_is_valid(mesh_map_download_overlay)) {
+        mesh_map_download_rebuild();
+    }
+    if(mesh_map_overlay && lv_obj_is_valid(mesh_map_overlay)) {
+        mesh_map_rebuild();
+    }
+}
+
+static void mesh_map_download_result_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    mesh_map_download_result_close();
+}
+
+static void mesh_map_download_show_result_modal(const char *state,
+                                                const char *status_json)
+{
+    char title_text[96];
+    char detail_text[224];
+    int total = mesh_map_download_total;
+    int done = total;
+    int skipped = mesh_map_download_existing;
+    int failed = 0;
+    int existing_only = 0;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 520 : 420;
+    int card_h = ui_is_landscape() ? 292 : 324;
+    int pad = 24;
+    uint32_t accent = 0x25C281;
+    const char *icon_text = LV_SYMBOL_OK;
+    lv_obj_t *card;
+    lv_obj_t *icon;
+    lv_obj_t *label;
+    lv_obj_t *btn;
+
+    if(status_json && status_json[0]) {
+        mesh_map_json_int(status_json, "total", &total);
+        mesh_map_json_int(status_json, "done", &done);
+        mesh_map_json_int(status_json, "skipped", &skipped);
+        mesh_map_json_int(status_json, "failed", &failed);
+    }
+    if(total <= 0) {
+        total = mesh_map_download_total > 0 ? mesh_map_download_total : 1;
+    }
+    if(done <= 0) {
+        done = total;
+    }
+    existing_only = (strcmp(state ? state : "", "existing") == 0) ||
+                    (strcmp(state ? state : "", "done") == 0 &&
+                     failed == 0 && skipped >= total);
+
+    if(strcmp(state ? state : "", "failed") == 0 || failed > 0) {
+        snprintf(title_text, sizeof(title_text), "%s",
+                 ui_tr("Download failed"));
+        snprintf(detail_text, sizeof(detail_text), "%s %d / %d",
+                 ui_tr("Failed"), failed, total);
+        accent = 0xEF4D5A;
+        icon_text = "!";
+    } else if(strcmp(state ? state : "", "cancelled") == 0) {
+        snprintf(title_text, sizeof(title_text), "%s",
+                 ui_tr("Download cancelled"));
+        snprintf(detail_text, sizeof(detail_text), "%d / %d", done, total);
+        accent = 0xF5A524;
+        icon_text = "!";
+    } else if(existing_only) {
+        snprintf(title_text, sizeof(title_text), "%s",
+                 ui_tr("Tiles already available"));
+        snprintf(detail_text, sizeof(detail_text), "%s %d  %s %d",
+                 ui_tr("Existing"), skipped, ui_tr("Missing"), 0);
+    } else {
+        snprintf(title_text, sizeof(title_text), "%s",
+                 ui_tr("Download complete"));
+        snprintf(detail_text, sizeof(detail_text), "%d / %d  %s %d",
+                 done, total, ui_tr("Skipped"), skipped);
+    }
+
+    if(mesh_map_download_prompt_overlay &&
+       lv_obj_is_valid(mesh_map_download_prompt_overlay)) {
+        lv_obj_delete(mesh_map_download_prompt_overlay);
+        mesh_map_download_prompt_overlay = NULL;
+    }
+    if(mesh_map_download_progress_overlay &&
+       lv_obj_is_valid(mesh_map_download_progress_overlay)) {
+        lv_obj_clean(mesh_map_download_progress_overlay);
+    } else {
+        mesh_map_download_progress_overlay = lv_obj_create(lv_layer_top());
+        ui_set_fullscreen(mesh_map_download_progress_overlay);
+        lv_obj_add_flag(mesh_map_download_progress_overlay,
+                        LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(mesh_map_download_progress_overlay,
+                            mesh_map_download_progress_delete_cb,
+                            LV_EVENT_DELETE, NULL);
+    }
+    mesh_map_download_status_label = NULL;
+    mesh_map_download_progress_bar = NULL;
+    if(card_w > screen_w - 48) {
+        card_w = screen_w - 48;
+    }
+    if(card_w < 300) {
+        card_w = screen_w - 24;
+    }
+    if(card_h > screen_h - 48) {
+        card_h = screen_h - 48;
+    }
+    if(card_h < 220) {
+        card_h = 220;
+    }
+
+    lv_obj_set_style_bg_color(mesh_map_download_progress_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mesh_map_download_progress_overlay, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(mesh_map_download_progress_overlay, 0, 0);
+    lv_obj_set_style_pad_all(mesh_map_download_progress_overlay, 0, 0);
+    lv_obj_clear_flag(mesh_map_download_progress_overlay,
+                      LV_OBJ_FLAG_SCROLLABLE);
+
+    card = ui_panel(mesh_map_download_progress_overlay, 0, 0, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(accent), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 14, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    icon = lv_obj_create(card);
+    lv_obj_set_pos(icon, (card_w - 74) / 2, 24);
+    lv_obj_set_size(icon, 74, 74);
+    lv_obj_set_style_radius(icon, 37, 0);
+    lv_obj_set_style_bg_color(icon, lv_color_hex(accent), 0);
+    lv_obj_set_style_bg_opa(icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(icon, 0, 0);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+    label = ui_label(icon, icon_text, &lv_font_montserrat_36, 0xFFFFFF);
+    lv_obj_center(label);
+
+    label = ui_label(card, title_text, &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(label, pad, 112);
+    lv_obj_set_width(label, card_w - pad * 2);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    label = ui_label(card, detail_text, &lv_font_montserrat_16, 0xCBD5E1);
+    lv_obj_set_pos(label, pad, 154);
+    lv_obj_set_width(label, card_w - pad * 2);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+    mesh_map_download_progress_bar = lv_bar_create(card);
+    lv_obj_set_pos(mesh_map_download_progress_bar, pad, card_h - 90);
+    lv_obj_set_size(mesh_map_download_progress_bar, card_w - pad * 2, 12);
+    lv_bar_set_range(mesh_map_download_progress_bar, 0, 100);
+    lv_bar_set_value(mesh_map_download_progress_bar,
+                     accent == 0xEF4D5A ? 28 : 100, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(mesh_map_download_progress_bar,
+                              lv_color_hex(0x233044), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(mesh_map_download_progress_bar,
+                              lv_color_hex(accent), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(mesh_map_download_progress_bar, 6, 0);
+
+    btn = ui_command_button(card, (card_w - 176) / 2, card_h - 64, 176,
+                            ui_tr("OK"), accent);
+    lv_obj_set_height(btn, 44);
+    lv_obj_add_event_cb(btn, mesh_map_download_result_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    lv_obj_move_foreground(mesh_map_download_progress_overlay);
+}
+
+static void mesh_map_download_start_event_cb(lv_event_t *event)
+{
+    char lat[32];
+    char lon[32];
+    char radius[16];
+    char min_zoom[16];
+    char max_zoom[16];
+    char max_tiles[16];
+    char network[192];
+    char status_text[256];
+
+    (void)event;
+    mesh_ui_trace("map tile download click center=%d total=%d source='%s'",
+                  mesh_map_download_center_valid, mesh_map_download_total,
+                  mesh_map_download_url);
+    if(mesh_map_download_pid > 0) {
+        mesh_map_download_set_status(ui_tr("Download already running"),
+                                     0xF5A524);
+        mesh_ui_trace("map tile download blocked: already running pid=%ld",
+                      (long)mesh_map_download_pid);
+        return;
+    }
+    if(!mesh_map_download_center_valid) {
+        mesh_map_download_set_status(ui_tr("No map center"), 0xF5A524);
+        mesh_map_download_show_prompt(ui_tr("Map tiles"),
+                                      ui_tr("No map center"), 0xF5A524);
+        mesh_ui_trace("map tile download blocked: no map center");
+        mesh_append_log("map tile download blocked: no map center");
+        return;
+    }
+    if(!mesh_map_download_url_valid(mesh_map_download_url)) {
+        mesh_map_download_set_status(ui_tr("Use {z}/{x}/{y} placeholders"),
+                                     0xF5A524);
+        mesh_ui_trace("map tile download blocked: invalid tile source '%s'",
+                      mesh_map_download_url);
+        mesh_append_log("map tile download blocked: invalid tile source");
+        mesh_map_download_edit_source_event_cb(NULL);
+        return;
+    }
+    if(mesh_map_download_estimate(&mesh_map_download_total,
+                                  &mesh_map_download_existing,
+                                  &mesh_map_download_missing) != 0 ||
+       mesh_map_download_total <= 0) {
+        mesh_map_download_set_status(ui_tr("Estimate failed"), 0xEF4D5A);
+        mesh_map_download_show_prompt(ui_tr("Map tiles"),
+                                      ui_tr("Estimate failed"), 0xEF4D5A);
+        mesh_ui_trace("map tile download blocked: estimate failed center=%d",
+                      mesh_map_download_center_valid);
+        mesh_append_log("map tile download blocked: estimate failed");
+        return;
+    }
+    if(mesh_map_download_missing <= 0) {
+        mesh_map_download_apply_download_view();
+        mesh_map_download_set_status(ui_tr("Tiles already available"),
+                                     0x25C281);
+        mesh_map_set_notice(ui_tr("Tiles already available"), 0x25C281);
+        mesh_map_download_show_result_modal("existing", NULL);
+        mesh_ui_trace("map tile download skipped: all selected tiles exist "
+                      "lat=%.6f lon=%.6f zoom=%d-%d total=%d",
+                      mesh_map_download_center_lat,
+                      mesh_map_download_center_lon,
+                      mesh_map_download_min_zoom,
+                      mesh_map_download_max_zoom,
+                      mesh_map_download_total);
+        mesh_append_log("map tile download skipped: all selected tiles exist "
+                        "lat=%.6f lon=%.6f zoom=%d-%d total=%d",
+                        mesh_map_download_center_lat,
+                        mesh_map_download_center_lon,
+                        mesh_map_download_min_zoom,
+                        mesh_map_download_max_zoom,
+                        mesh_map_download_total);
+        return;
+    }
+    if(mesh_map_download_total > MESHTASTIC_MAP_DOWNLOAD_MAX_TILES) {
+        snprintf(status_text, sizeof(status_text), "%s\n%d > %d",
+                 ui_tr("Tile count exceeds limit"),
+                 mesh_map_download_total, MESHTASTIC_MAP_DOWNLOAD_MAX_TILES);
+        mesh_map_download_set_status(status_text, 0xEF4D5A);
+        mesh_map_download_show_prompt(ui_tr("Map tiles"), status_text,
+                                      0xEF4D5A);
+        mesh_ui_trace("map tile download blocked: too many tiles %d > %d",
+                      mesh_map_download_total,
+                      MESHTASTIC_MAP_DOWNLOAD_MAX_TILES);
+        mesh_append_log("map tile download blocked: tile count %d > %d",
+                        mesh_map_download_total,
+                        MESHTASTIC_MAP_DOWNLOAD_MAX_TILES);
+        return;
+    }
+    if(!mesh_map_download_network_available(network, sizeof(network))) {
+        mesh_map_download_set_status(network, 0xEF4D5A);
+        mesh_map_download_show_prompt(ui_tr("No network connection"),
+                                      ui_tr("Connect Wi-Fi or Ethernet before downloading maps"),
+                                      0xEF4D5A);
+        mesh_ui_trace("map tile download blocked: no network");
+        mesh_append_log("map tile download blocked: no network");
+        return;
+    }
+    if(!ui_path_exists(MESHTASTIC_MAP_DOWNLOADER_PATH)) {
+        mesh_map_download_set_status(ui_tr("Downloader missing"), 0xEF4D5A);
+        mesh_map_download_show_prompt(ui_tr("Map tiles"),
+                                      ui_tr("Downloader missing"), 0xEF4D5A);
+        mesh_ui_trace("map tile download blocked: downloader missing %s",
+                      MESHTASTIC_MAP_DOWNLOADER_PATH);
+        mesh_append_log("map tile download blocked: downloader missing");
+        return;
+    }
+    unlink(MESHTASTIC_MAP_DOWNLOAD_STATUS);
+    unlink(MESHTASTIC_MAP_DOWNLOAD_CANCEL);
+    snprintf(lat, sizeof(lat), "%.7f", mesh_map_download_center_lat);
+    snprintf(lon, sizeof(lon), "%.7f", mesh_map_download_center_lon);
+    snprintf(radius, sizeof(radius), "%d", mesh_map_download_radius_km);
+    snprintf(min_zoom, sizeof(min_zoom), "%d", mesh_map_download_min_zoom);
+    snprintf(max_zoom, sizeof(max_zoom), "%d", mesh_map_download_max_zoom);
+    snprintf(max_tiles, sizeof(max_tiles), "%d",
+             MESHTASTIC_MAP_DOWNLOAD_MAX_TILES);
+
+    mesh_map_download_pid = fork();
+    if(mesh_map_download_pid == 0) {
+        execl(MESHTASTIC_MAP_DOWNLOADER_PATH, "k230_map_tile_downloader",
+              "download",
+              "--root", MESHTASTIC_MAP_ROOT,
+              "--style", MESHTASTIC_MAP_STYLE,
+              "--url-template", mesh_map_download_url,
+              "--lat", lat,
+              "--lon", lon,
+              "--radius-km", radius,
+              "--min-zoom", min_zoom,
+              "--max-zoom", max_zoom,
+              "--max-tiles", max_tiles,
+              "--status", MESHTASTIC_MAP_DOWNLOAD_STATUS,
+              "--log", MESHTASTIC_MAP_DOWNLOAD_LOG,
+              "--cancel", MESHTASTIC_MAP_DOWNLOAD_CANCEL,
+              (char *)NULL);
+        _exit(127);
+    }
+    if(mesh_map_download_pid < 0) {
+        mesh_map_download_pid = -1;
+        mesh_map_download_set_status(ui_tr("Download start failed"),
+                                     0xEF4D5A);
+        mesh_map_download_show_prompt(ui_tr("Map tiles"),
+                                      ui_tr("Download start failed"),
+                                      0xEF4D5A);
+        mesh_ui_trace("map tile download fork failed: %s", strerror(errno));
+        mesh_append_log("map tile download start failed: %s", strerror(errno));
+        return;
+    }
+    snprintf(status_text, sizeof(status_text), "%s\n%s",
+             ui_tr("Downloading"), network);
+    mesh_map_download_show_progress_modal(status_text);
+    mesh_map_download_set_status(status_text, 0x25C281);
+    mesh_ui_trace("map tile download started lat=%.6f lon=%.6f radius=%d "
+                  "zoom=%d-%d total=%d",
+                  mesh_map_download_center_lat, mesh_map_download_center_lon,
+                  mesh_map_download_radius_km, mesh_map_download_min_zoom,
+                  mesh_map_download_max_zoom, mesh_map_download_total);
+    mesh_append_log("map tile download started lat=%.6f lon=%.6f radius=%d "
+                    "zoom=%d-%d total=%d",
+                    mesh_map_download_center_lat, mesh_map_download_center_lon,
+                    mesh_map_download_radius_km, mesh_map_download_min_zoom,
+                    mesh_map_download_max_zoom, mesh_map_download_total);
+    if(mesh_map_download_progress_bar &&
+       lv_obj_is_valid(mesh_map_download_progress_bar)) {
+        lv_bar_set_range(mesh_map_download_progress_bar, 0,
+                         mesh_map_download_total);
+        lv_bar_set_value(mesh_map_download_progress_bar, 0, LV_ANIM_OFF);
+    }
+    if(!mesh_map_download_timer) {
+        mesh_map_download_timer =
+            lv_timer_create(mesh_map_download_timer_cb, 500, NULL);
+    }
+    mesh_append_log("map tile download started lat=%.6f lon=%.6f radius=%d zoom=%d-%d total=%d",
+                    mesh_map_download_center_lat,
+                    mesh_map_download_center_lon,
+                    mesh_map_download_radius_km,
+                    mesh_map_download_min_zoom,
+                    mesh_map_download_max_zoom,
+                    mesh_map_download_total);
+}
+
+static void mesh_map_download_add_stepper(lv_obj_t *parent, int y,
+                                          const char *title,
+                                          const char *value,
+                                          lv_event_cb_t cb,
+                                          intptr_t dec_data,
+                                          intptr_t inc_data)
+{
+    lv_obj_t *label;
+    lv_obj_t *btn;
+    int w = lv_obj_get_width(parent);
+    int value_w;
+
+    if(w <= 0) {
+        lv_obj_update_layout(parent);
+        w = lv_obj_get_width(parent);
+    }
+    if(w <= 0) {
+        w = ui_screen_width() - 56;
+    }
+    if(w < 220) {
+        w = 220;
+    }
+    value_w = w - 156;
+    if(value_w < 72) {
+        value_w = 72;
+    }
+    label = ui_label(parent, ui_tr(title), &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(label, 16, y);
+    lv_obj_set_width(label, w - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(parent, 16, y + 30, 52, "-", 0xF2F5F8);
+    lv_obj_set_height(btn, 44);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)dec_data);
+
+    label = ui_label(parent, value, &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_pos(label, 78, y + 38);
+    lv_obj_set_width(label, value_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+
+    btn = ui_command_button(parent, w - 68, y + 30, 52, "+", 0xF2F5F8);
+    lv_obj_set_height(btn, 44);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)inc_data);
+}
+
+static void mesh_map_download_rebuild(void)
+{
+    char status[4096];
+    char reason[128];
+    char center[128];
+    char estimate[160];
+    char value[64];
+    char source[256];
+    double lat = 0.0;
+    double lon = 0.0;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int landscape = ui_is_landscape();
+    int margin = ui_page_side_margin();
+    int content_w = screen_w - margin * 2;
+    int gap = 14;
+    int top_y = landscape ? 64 : 76;
+    int left_w = landscape ? (content_w - gap) / 2 : content_w;
+    int right_w = landscape ? content_w - left_w - gap : content_w;
+    int right_x = landscape ? margin + left_w + gap : margin;
+    int left_h = landscape ? screen_h - top_y - 16 : 344;
+    int right_h;
+    int right_y = landscape ? top_y : top_y + left_h + 14;
+    int source_controls_end_y = 250;
+    int estimate_y;
+    int progress_y;
+    int status_y;
+    lv_obj_t *panel;
+    lv_obj_t *card;
+    lv_obj_t *label;
+    lv_obj_t *btn;
+
+    right_h = landscape ? left_h : screen_h - right_y - 18;
+    if(right_h < 560) {
+        right_h = 560;
+    }
+
+    mesh_map_download_load_prefs();
+    mesh_map_download_center_valid = 0;
+    if(mesh_map_center_valid) {
+        mesh_map_download_center_valid = 1;
+        mesh_map_download_center_lat = mesh_map_center_lat;
+        mesh_map_download_center_lon = mesh_map_center_lon;
+    } else {
+        if(mesh_ipc_command("STATUS\n", status, sizeof(status)) != 0) {
+            snprintf(status, sizeof(status), "%s", mesh_status_text);
+        }
+        mesh_map_download_center_valid =
+            mesh_map_current_position(status, &lat, &lon, reason,
+                                      sizeof(reason), NULL);
+        if(mesh_map_download_center_valid) {
+            mesh_map_download_center_lat = lat;
+            mesh_map_download_center_lon = lon;
+        }
+    }
+    if(mesh_map_download_estimate(&mesh_map_download_total,
+                                  &mesh_map_download_existing,
+                                  &mesh_map_download_missing) != 0) {
+        mesh_map_download_total = 0;
+        mesh_map_download_existing = 0;
+        mesh_map_download_missing = 0;
+    }
+
+    if(!mesh_map_download_overlay ||
+       !lv_obj_is_valid(mesh_map_download_overlay)) {
+        mesh_map_download_overlay = lv_obj_create(lv_layer_top());
+        ui_set_fullscreen(mesh_map_download_overlay);
+        lv_obj_set_style_bg_color(mesh_map_download_overlay,
+                                  lv_color_hex(0x05070A), 0);
+        lv_obj_set_style_bg_opa(mesh_map_download_overlay, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(mesh_map_download_overlay, 0, 0);
+        lv_obj_set_style_pad_all(mesh_map_download_overlay, 0, 0);
+        lv_obj_clear_flag(mesh_map_download_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    lv_obj_clean(mesh_map_download_overlay);
+
+    panel = ui_scroll_panel(mesh_map_download_overlay, 0, 0, screen_w,
+                            screen_h);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x05070A), 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    label = ui_label(panel, ui_tr("Map tiles"), &lv_font_montserrat_24,
+                     0xF2F5F8);
+    lv_obj_set_pos(label, margin, landscape ? 18 : 24);
+    lv_obj_set_width(label, content_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    card = ui_panel(panel, margin, top_y, left_w, left_h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    if(mesh_map_download_center_valid) {
+        snprintf(center, sizeof(center), "%.5f, %.5f",
+                 mesh_map_download_center_lat, mesh_map_download_center_lon);
+    } else {
+        snprintf(center, sizeof(center), "%s", ui_tr("Waiting for position"));
+    }
+    label = ui_label(card, ui_tr("Current area"), &lv_font_montserrat_18,
+                     0xF2F5F8);
+    lv_obj_set_pos(label, 16, 14);
+    lv_obj_set_width(label, left_w - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    label = ui_label(card, center, &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(label, 16, 44);
+    lv_obj_set_width(label, left_w - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    snprintf(value, sizeof(value), "%d km", mesh_map_download_radius_km);
+    mesh_map_download_add_stepper(card, 84, "Radius", value,
+                                  mesh_map_download_radius_event_cb,
+                                  (intptr_t)-1, (intptr_t)1);
+    snprintf(value, sizeof(value), "%d", mesh_map_download_min_zoom);
+    mesh_map_download_add_stepper(card, 168, "Min zoom", value,
+                                  mesh_map_download_zoom_event_cb,
+                                  (intptr_t)((0 << 8) | 0xff),
+                                  (intptr_t)((0 << 8) | 1));
+    snprintf(value, sizeof(value), "%d", mesh_map_download_max_zoom);
+    mesh_map_download_add_stepper(card, 252, "Max zoom", value,
+                                  mesh_map_download_zoom_event_cb,
+                                  (intptr_t)((1 << 8) | 0xff),
+                                  (intptr_t)((1 << 8) | 1));
+
+    card = ui_panel(panel, right_x, right_y, right_w, right_h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    label = ui_label(card, ui_tr("Tile source"), &lv_font_montserrat_18,
+                     0xF2F5F8);
+    lv_obj_set_pos(label, 16, 14);
+    lv_obj_set_width(label, right_w - 32);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+
+    snprintf(source, sizeof(source), "%s  %s",
+             mesh_map_download_selected_source_name(),
+             mesh_map_download_url_valid(mesh_map_download_url) ?
+             mesh_map_download_url : ui_tr("No tile source"));
+    mesh_map_download_source_label =
+        ui_label(card, source, &lv_font_montserrat_14,
+                 mesh_map_download_url_valid(mesh_map_download_url) ?
+                 0x94A3B8 : 0xF5A524);
+    lv_obj_set_pos(mesh_map_download_source_label, 16, 44);
+    lv_obj_set_width(mesh_map_download_source_label, right_w - 32);
+    lv_label_set_long_mode(mesh_map_download_source_label, LV_LABEL_LONG_DOT);
+
+    {
+        const int btn_gap = 10;
+        const int btn_y = 76;
+        const int btn_h = 44;
+        const int row_h = 54;
+        const int usable_w = right_w - 32;
+        const int source_count = (int)(sizeof(mesh_map_tile_sources) /
+                                       sizeof(mesh_map_tile_sources[0]));
+        int source_cols = usable_w >= 280 ? 2 : 1;
+        int btn_w = source_cols == 2 ? (usable_w - btn_gap) / 2 : usable_w;
+        int source_rows = (source_count + source_cols - 1) / source_cols;
+        int custom_y = btn_y + source_rows * row_h + 10;
+        int custom_btn_w = usable_w >= 360 ? (usable_w - btn_gap * 2) / 3 :
+                           usable_w;
+        int selected;
+
+        for(size_t i = 0; i < sizeof(mesh_map_tile_sources) /
+                          sizeof(mesh_map_tile_sources[0]); i++) {
+            int col = (int)(i % (size_t)source_cols);
+            int row = (int)(i / (size_t)source_cols);
+            int x = 16 + col * (btn_w + btn_gap);
+            int y = btn_y + row * 54;
+
+            selected = mesh_map_download_url_equal(mesh_map_download_url,
+                                                   mesh_map_tile_sources[i].url);
+            btn = ui_command_button(card, x, y, btn_w,
+                                    mesh_map_tile_sources[i].button,
+                                    selected ? 0x25C281 : 0x3DA5FF);
+            lv_obj_set_height(btn, btn_h);
+            if(selected) {
+                lv_obj_set_style_bg_color(btn, lv_color_hex(0x14382A), 0);
+                lv_obj_set_style_border_color(btn, lv_color_hex(0x25C281), 0);
+            }
+            lv_obj_add_event_cb(btn, mesh_map_download_builtin_source_event_cb,
+                                LV_EVENT_CLICKED,
+                                (void *)&mesh_map_tile_sources[i]);
+        }
+
+        if(custom_btn_w < 96) {
+            custom_btn_w = (right_w - 32 - btn_gap) / 2;
+        }
+        selected = mesh_map_download_url_valid(mesh_map_download_custom_url) &&
+                   mesh_map_download_url_equal(mesh_map_download_url,
+                                               mesh_map_download_custom_url);
+        btn = ui_command_button(card, 16, custom_y, custom_btn_w,
+                                ui_tr("Custom"), selected ? 0x25C281 :
+                                0x3DA5FF);
+        lv_obj_set_height(btn, btn_h);
+        if(selected) {
+            lv_obj_set_style_bg_color(btn, lv_color_hex(0x14382A), 0);
+            lv_obj_set_style_border_color(btn, lv_color_hex(0x25C281), 0);
+        }
+        lv_obj_add_event_cb(btn, mesh_map_download_custom_source_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+
+        if(usable_w >= 360) {
+            btn = ui_command_button(card, 16 + custom_btn_w + btn_gap,
+                                    custom_y, custom_btn_w, ui_tr("Edit"),
+                                    0x3DA5FF);
+        } else {
+            btn = ui_command_button(card, 16, custom_y + row_h,
+                                    custom_btn_w, ui_tr("Edit"), 0x3DA5FF);
+        }
+        lv_obj_set_height(btn, btn_h);
+        lv_obj_add_event_cb(btn, mesh_map_download_edit_source_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+
+        if(usable_w >= 360) {
+            btn = ui_command_button(card,
+                                    16 + (custom_btn_w + btn_gap) * 2,
+                                    custom_y, custom_btn_w, ui_tr("Delete"),
+                                    mesh_map_download_url_valid(mesh_map_download_custom_url) ?
+                                    0xF5A524 : 0x64748B);
+            source_controls_end_y = custom_y + row_h;
+        } else {
+            btn = ui_command_button(card, 16, custom_y + row_h * 2,
+                                    custom_btn_w, ui_tr("Delete"),
+                                    mesh_map_download_url_valid(mesh_map_download_custom_url) ?
+                                    0xF5A524 : 0x64748B);
+            source_controls_end_y = custom_y + row_h * 3;
+        }
+        lv_obj_set_height(btn, btn_h);
+        lv_obj_add_event_cb(btn, mesh_map_download_delete_custom_event_cb,
+                            LV_EVENT_CLICKED, NULL);
+    }
+
+    estimate_y = source_controls_end_y + 6;
+    snprintf(estimate, sizeof(estimate), "%s: %d  %s: %d  %s: %d",
+             ui_tr("Tiles"), mesh_map_download_total,
+             ui_tr("Existing"), mesh_map_download_existing,
+             ui_tr("Missing"), mesh_map_download_missing);
+    mesh_map_download_estimate_label =
+        ui_label(card, estimate, &lv_font_montserrat_16,
+                 mesh_map_download_total >
+                 MESHTASTIC_MAP_DOWNLOAD_MAX_TILES ? 0xEF4D5A : 0xCBD5E1);
+    lv_obj_set_pos(mesh_map_download_estimate_label, 16, estimate_y);
+    lv_obj_set_width(mesh_map_download_estimate_label, right_w - 32);
+    lv_label_set_long_mode(mesh_map_download_estimate_label, LV_LABEL_LONG_DOT);
+
+    progress_y = estimate_y + 36;
+    mesh_map_download_progress_bar = lv_bar_create(card);
+    lv_obj_set_pos(mesh_map_download_progress_bar, 16, progress_y);
+    lv_obj_set_size(mesh_map_download_progress_bar, right_w - 32, 12);
+    lv_bar_set_range(mesh_map_download_progress_bar, 0,
+                     mesh_map_download_total > 0 ?
+                     mesh_map_download_total : 1);
+    lv_bar_set_value(mesh_map_download_progress_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(mesh_map_download_progress_bar,
+                              lv_color_hex(0x233044), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(mesh_map_download_progress_bar,
+                              lv_color_hex(0x25C281), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(mesh_map_download_progress_bar, 6, 0);
+
+    status_y = progress_y + 26;
+    mesh_map_download_status_label =
+        ui_label(card, ui_tr("Ready"), &lv_font_montserrat_14, 0xCBD5E1);
+    lv_obj_set_pos(mesh_map_download_status_label, 16, status_y);
+    lv_obj_set_width(mesh_map_download_status_label, right_w - 32);
+    lv_label_set_long_mode(mesh_map_download_status_label, LV_LABEL_LONG_WRAP);
+
+    btn = ui_command_button(card, 16, right_h - 62, right_w - 32,
+                            ui_tr("Download"), 0x25C281);
+    lv_obj_set_height(btn, 48);
+    lv_obj_add_event_cb(btn, mesh_map_download_start_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    if(mesh_map_download_pid > 0) {
+        mesh_map_download_update_status_from_file();
+    }
+    mesh_node_detail_append_spacer(panel, right_y + right_h + 44);
+    lv_obj_move_foreground(mesh_map_download_overlay);
+}
+
+static void mesh_map_download_event_cb(lv_event_t *event)
+{
+    (void)event;
+    ui_input_hide_inline_active();
+    mesh_map_download_rebuild();
+}
+
 static void mesh_waypoints_close(void)
 {
     if(mesh_waypoints_overlay && lv_obj_is_valid(mesh_waypoints_overlay)) {
@@ -10744,11 +12432,13 @@ static void mesh_map_rebuild(void)
     int map_h = screen_h - map_y - bottom_margin;
     int close_w = 82;
     int refresh_w = 92;
-    int debug_w = 132;
+    int download_w = landscape ? 92 : 88;
+    int debug_w = landscape ? 132 : 110;
     int gap = 8;
     int close_x = screen_w - margin - close_w;
     int refresh_x = close_x - gap - refresh_w;
-    int debug_x = refresh_x - gap - debug_w;
+    int download_x = refresh_x - gap - download_w;
+    int debug_x = download_x - gap - debug_w;
     lv_obj_t *panel;
     lv_obj_t *title;
     lv_obj_t *btn;
@@ -10835,18 +12525,20 @@ static void mesh_map_rebuild(void)
     lv_obj_set_style_pad_all(panel, 0, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    if(debug_x < margin + 96) {
-        debug_x = margin + 96;
-        debug_w = refresh_x - gap - debug_x;
+    if(debug_x < margin + 80) {
+        debug_x = margin;
+        debug_w = download_x - gap - debug_x;
         if(debug_w < 96) {
             debug_w = 96;
         }
     }
-    title = ui_label(panel, ui_tr("Mesh Map"), &lv_font_montserrat_24,
-                     0xF2F5F8);
-    lv_obj_set_pos(title, margin, title_y);
-    lv_obj_set_width(title, debug_x - margin - 10);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    if(debug_x - margin > 90) {
+        title = ui_label(panel, ui_tr("Mesh Map"), &lv_font_montserrat_24,
+                         0xF2F5F8);
+        lv_obj_set_pos(title, margin, title_y);
+        lv_obj_set_width(title, debug_x - margin - 10);
+        lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    }
 
     btn = ui_command_button(panel, debug_x, top_y, debug_w,
                             mesh_map_fake_gps_enabled ?
@@ -10859,6 +12551,10 @@ static void mesh_map_rebuild(void)
     btn = ui_command_button(panel, refresh_x, top_y, refresh_w,
                             ui_tr("Refresh"), 0x3DA5FF);
     lv_obj_add_event_cb(btn, mesh_map_refresh_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+    btn = ui_command_button(panel, download_x, top_y, download_w,
+                            ui_tr("Tiles"), 0x25C281);
+    lv_obj_add_event_cb(btn, mesh_map_download_event_cb, LV_EVENT_CLICKED,
                         NULL);
     btn = ui_command_button(panel, close_x, top_y, close_w,
                             ui_tr("Close"), 0x374151);
@@ -13925,6 +15621,7 @@ void ui_meshtastic_cleanup(void)
     mesh_close_nodes_page();
     mesh_detector_close();
     mesh_waypoints_close();
+    mesh_map_download_close();
     mesh_map_close();
     mesh_close_channel_page();
 }
@@ -13997,6 +15694,16 @@ int ui_meshtastic_handle_back(void)
     }
     if(mesh_waypoints_overlay && lv_obj_is_valid(mesh_waypoints_overlay)) {
         mesh_waypoints_close();
+        return 1;
+    }
+    if(mesh_map_download_prompt_overlay &&
+       lv_obj_is_valid(mesh_map_download_prompt_overlay)) {
+        lv_obj_delete(mesh_map_download_prompt_overlay);
+        mesh_map_download_prompt_overlay = NULL;
+        return 1;
+    }
+    if(mesh_map_download_overlay && lv_obj_is_valid(mesh_map_download_overlay)) {
+        mesh_map_download_close();
         return 1;
     }
     if(mesh_map_overlay && lv_obj_is_valid(mesh_map_overlay)) {

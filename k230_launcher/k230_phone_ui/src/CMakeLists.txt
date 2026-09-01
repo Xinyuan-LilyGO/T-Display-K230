@@ -174,6 +174,7 @@ add_executable(k230_qr_scan
 add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(k230_nrf52840_dfu k230_nrf52840_dfu.cpp)
 add_executable(k230_xiaozhi_probe k230_xiaozhi_probe.c)
+add_executable(k230_map_tile_downloader k230_map_tile_downloader.c)
 if(AI_DEMO_KWS_SRC_DIR AND AI_DEMO_COMMON_SRC_DIR)
     set(K230_XIAOZHI_KWS_ENABLED 1)
     add_executable(k230_xiaozhi_kws
@@ -263,6 +264,10 @@ target_include_directories(k230_qr_scan PRIVATE
 target_include_directories(k230_xiaozhi_probe PRIVATE
     ${CMAKE_SYSROOT}/usr/include
     ${CMAKE_SYSROOT}/usr/include/opus
+)
+
+target_include_directories(k230_map_tile_downloader PRIVATE
+    ${CMAKE_SYSROOT}/usr/include
 )
 
 if(K230_XIAOZHI_KWS_ENABLED)
@@ -460,6 +465,15 @@ target_link_libraries(k230_xiaozhi_probe PRIVATE
     pthread
 )
 
+target_link_directories(k230_map_tile_downloader PRIVATE
+    ${CMAKE_SYSROOT}/usr/lib
+)
+
+target_link_libraries(k230_map_tile_downloader PRIVATE
+    curl
+    m
+)
+
 if(K230_XIAOZHI_KWS_ENABLED)
 target_link_directories(k230_xiaozhi_kws PRIVATE
     ${CMAKE_SYSROOT}/usr/lib
@@ -501,6 +515,7 @@ set(K230_PHONE_UI_INSTALL_TARGETS
     k230_pcm_volume
     k230_nrf52840_dfu
     k230_xiaozhi_probe
+    k230_map_tile_downloader
 )
 
 if(K230_XIAOZHI_KWS_ENABLED)

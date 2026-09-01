@@ -17,6 +17,41 @@ The current launcher expects:
 
 Map tiles are not bundled into the default image.
 
+## Download Tiles On The Device
+
+Open `Meshtastic` > `Map`, then tap `Tiles` to open the tile download page.
+
+The board must be connected to Wi-Fi or Ethernet before downloading. When the
+user taps `Download`, the launcher checks network availability first. If no
+usable network is detected, it shows a prompt and does not start the download
+job.
+
+The device-side downloader includes a few common tile sources:
+
+- `OSM`: OpenStreetMap DE tiles
+- `OSM-FR`: OpenStreetMap France tiles
+- `AMap`: AMap standard map tiles
+
+You can also add a `Custom` tile source. The custom source is persisted and can
+be edited or deleted later. A custom URL template must include the `{z}`, `{x}`,
+and `{y}` placeholders, for example:
+
+```text
+https://your-tile-server.example/tiles/{z}/{x}/{y}.png
+```
+
+Downloaded tiles are stored under:
+
+```text
+/root/maps/openstreetmap/<zoom>/<x>/<y>.png
+```
+
+When `Download` is tapped, the launcher shows a confirmation prompt with the
+estimated tile count. Start with a small area and lower zoom levels. The
+launcher blocks overly large jobs to avoid excessive network, storage, and
+tile-service usage. Public tile services are usually not intended for bulk
+large-area high-zoom downloads; follow the selected tile source terms.
+
 ## Recommended Download Method
 
 Use a Meshtastic UI compatible tile downloader, then copy the exported tiles to

@@ -16,6 +16,36 @@ Meshtastic 地图页面会从 SD 卡根文件系统读取离线地图瓦片：
 
 默认镜像不内置地图瓦片。
 
+## 在设备上下载瓦片
+
+打开 `Meshtastic` > `Map`，点击 `Tiles` 进入瓦片下载页面。
+
+下载前需要先连接 Wi-Fi 或以太网。点击 `Download` 时，Launcher 会先检查网络状态；
+如果没有可用网络，会提示用户先连接网络，不会启动下载任务。
+
+设备端内置了几个常用瓦片源，进入 `Tiles` 后可以直接选择：
+
+- `OSM`：OpenStreetMap DE 瓦片
+- `OSM-FR`：OpenStreetMap France 瓦片
+- `AMap`：高德标准地图瓦片
+
+也可以使用 `Custom` 添加自定义瓦片源。自定义源会持久化保存，可以再次编辑或删除。
+自定义 URL 模板必须包含 `{z}`、`{x}`、`{y}` 三个占位符，例如：
+
+```text
+https://your-tile-server.example/tiles/{z}/{x}/{y}.png
+```
+
+下载时会保存到：
+
+```text
+/root/maps/openstreetmap/<zoom>/<x>/<y>.png
+```
+
+点击 `Download` 后会先显示确认提示和预计下载数量。建议先选择小范围和较低 zoom 等级测试。
+设备会估算瓦片数量，单次下载数量过大时会阻止开始，避免占用过多网络、存储和瓦片服务资源。
+公共瓦片服务通常不适合批量下载大范围高 zoom 瓦片，请遵守所选瓦片源的使用条款。
+
 ## 推荐下载方式
 
 使用兼容 Meshtastic UI 的瓦片下载工具，然后将导出的瓦片复制到设备：
