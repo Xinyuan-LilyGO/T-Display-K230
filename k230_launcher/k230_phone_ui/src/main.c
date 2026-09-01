@@ -7994,6 +7994,19 @@ static void create_motion_page(lv_obj_t *scr)
         0xEC4899, 0xA3E635
     };
     uint64_t now = monotonic_us();
+    int landscape = ui_is_landscape();
+    int body_x = landscape ? ui_page_panel_x() : 24;
+    int body_y = ui_page_top_y(154);
+    int body_w = landscape ? ui_page_panel_width() : 520;
+    int body_h = landscape ? ui_screen_height() - body_y - 24 : 780;
+    int content_w;
+    int content_h;
+    int rate_y;
+    int bar_start_y;
+    int bar_h;
+    int bar_gap;
+    int box_size;
+    int box_y;
 
     create_header(scr, "Motion");
     motion_reset_stats(now);
@@ -8004,32 +8017,62 @@ static void create_motion_page(lv_obj_t *scr)
     memset(motion_bar_dir, 0, sizeof(motion_bar_dir));
     memset(motion_box_angle, 0, sizeof(motion_box_angle));
 
-    lv_obj_t *body = panel(scr, 24, 154, 520, 780);
+    if(body_h < 360) {
+        body_h = 360;
+    }
+
+    lv_obj_t *body = panel(scr, body_x, body_y, body_w, body_h);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    content_w = ui_safe_content_width(body, body_w - 32);
+    content_h = body_h - 32;
+    if(content_h < 300) {
+        content_h = 300;
+    }
+    rate_y = landscape ? 32 : 38;
+    bar_start_y = landscape ? 74 : 96;
+    bar_h = landscape ? 24 : 34;
+    box_size = landscape ? 50 : 62;
+    box_y = landscape ? content_h - box_size - 12 : 608;
+    if(box_y < bar_start_y + (int)MOTION_BAR_COUNT * (bar_h + 4)) {
+        box_y = content_h - box_size - 8;
+    }
+    if(landscape) {
+        int available = box_y - bar_start_y - bar_h;
+
+        bar_gap = available / ((int)MOTION_BAR_COUNT - 1);
+        if(bar_gap < bar_h + 8) {
+            bar_gap = bar_h + 8;
+        }
+    } else {
+        bar_gap = 58;
+    }
 
     lv_obj_t *title = label(body, "LVGL motion pacing", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     motion_rate_label = label(body, "locked --fps  avg --ms  min --  max --  step --/s",
                               &lv_font_montserrat_18, 0x9AA4AF);
-    lv_obj_align(motion_rate_label, LV_ALIGN_TOP_LEFT, 0, 38);
-    lv_obj_set_width(motion_rate_label, ui_inner_width());
+    lv_obj_align(motion_rate_label, LV_ALIGN_TOP_LEFT, 0, rate_y);
+    lv_obj_set_width(motion_rate_label, content_w);
     lv_label_set_long_mode(motion_rate_label, LV_LABEL_LONG_CLIP);
 
     for(size_t i = 0; i < MOTION_BAR_COUNT; i++) {
         lv_obj_t *bar = lv_obj_create(body);
-        int32_t y = 96 + (int32_t)i * 58;
-        int32_t w = 50 + (int32_t)(i % 3) * 16;
+        int32_t y = bar_start_y + (int32_t)i * bar_gap;
+        int32_t w = (landscape ? 64 : 50) + (int32_t)(i % 3) * 16;
 
         lv_obj_set_pos(bar, 0, y);
-        lv_obj_set_size(bar, w, 34);
+        lv_obj_set_size(bar, w, bar_h);
         lv_obj_set_style_bg_color(bar, lv_color_hex(colors[i]), 0);
         lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(bar, 8, 0);
         lv_obj_set_style_border_width(bar, 0, 0);
         lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
         motion_bars[i] = bar;
-        motion_bar_travel[i] = 488 - w;
+        motion_bar_travel[i] = content_w - w;
+        if(motion_bar_travel[i] < 0) {
+            motion_bar_travel[i] = 0;
+        }
         motion_bar_x[i] = (motion_bar_travel[i] * (int32_t)(i + 1)) /
                           (int32_t)(MOTION_BAR_COUNT + 1);
         motion_bar_dir[i] = (i % 2) ? -1 : 1;
@@ -8038,16 +8081,23 @@ static void create_motion_page(lv_obj_t *scr)
 
     for(size_t i = 0; i < MOTION_BOX_COUNT; i++) {
         lv_obj_t *box = lv_obj_create(body);
-        int32_t x = 38 + (int32_t)i * 116;
+        int32_t x;
 
-        lv_obj_set_pos(box, x, 608);
-        lv_obj_set_size(box, 62, 62);
+        if(landscape) {
+            x = ((content_w - box_size) * (int32_t)(i + 1)) /
+                (int32_t)(MOTION_BOX_COUNT + 1);
+        } else {
+            x = 38 + (int32_t)i * 116;
+        }
+
+        lv_obj_set_pos(box, x, box_y);
+        lv_obj_set_size(box, box_size, box_size);
         lv_obj_set_style_bg_color(box, lv_color_hex(colors[(i + 2) % 8]), 0);
         lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(box, 8, 0);
         lv_obj_set_style_border_width(box, 0, 0);
-        lv_obj_set_style_transform_pivot_x(box, 31, 0);
-        lv_obj_set_style_transform_pivot_y(box, 31, 0);
+        lv_obj_set_style_transform_pivot_x(box, box_size / 2, 0);
+        lv_obj_set_style_transform_pivot_y(box, box_size / 2, 0);
         lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
         motion_boxes[i] = box;
         motion_box_angle[i] = (int32_t)i * 450;
