@@ -219,6 +219,7 @@
 #define BATTERY_CAPACITY_MIN_MAH 500
 #define BATTERY_CAPACITY_MAX_MAH 20000
 #define BATTERY_SHUTDOWN_DISABLED_MV 0
+#define BATTERY_SHUTDOWN_DEFAULT_MV 3600
 #define BATTERY_SHUTDOWN_MIN_MV 3300
 #define BATTERY_SHUTDOWN_MAX_MV 4000
 #define BATTERY_SHUTDOWN_OPTION_COUNT 7
@@ -3074,7 +3075,7 @@ static void hardware_apply_first_boot_defaults(void)
                                 BATTERY_CAPACITY_MAX_MAH,
                                 "battery.capacity_mah");
     ensure_pref_int_default(PREF_BATTERY_SHUTDOWN_MV,
-                            BATTERY_SHUTDOWN_DISABLED_MV,
+                            BATTERY_SHUTDOWN_DEFAULT_MV,
                             BATTERY_SHUTDOWN_DISABLED_MV,
                             BATTERY_SHUTDOWN_MAX_MV,
                             "battery.shutdown_mv");
@@ -7355,7 +7356,7 @@ static int battery_user_capacity_mah(void)
 static int battery_shutdown_voltage_mv(void)
 {
     int mv = read_pref_int(PREF_BATTERY_SHUTDOWN_MV,
-                           BATTERY_SHUTDOWN_DISABLED_MV,
+                           BATTERY_SHUTDOWN_DEFAULT_MV,
                            BATTERY_SHUTDOWN_DISABLED_MV,
                            BATTERY_SHUTDOWN_MAX_MV);
 
