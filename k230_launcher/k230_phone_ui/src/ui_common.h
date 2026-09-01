@@ -110,6 +110,7 @@ typedef enum {
     PAGE_LOGS,
     PAGE_REBOOT,
     PAGE_NRF52840_DFU,
+    PAGE_STORAGE_EXPAND,
 } page_id_t;
 
 void app_nav_to_page(page_id_t page);

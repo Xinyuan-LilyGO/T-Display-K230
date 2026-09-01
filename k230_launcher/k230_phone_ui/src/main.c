@@ -96,6 +96,10 @@
 #define SCREENSHOT_DIR "/root/screenshots"
 #define SCREENSHOT_LOG "/tmp/k230_screenshot.log"
 #define REBOOT_DIAG_LOG "/tmp/k230_reboot_diag.log"
+#define STORAGE_EXPAND_HELPER "/root/app/k230_phone_ui/k230_storage_expand.sh"
+#define STORAGE_EXPAND_STATUS "/tmp/k230_storage_expand.status"
+#define STORAGE_EXPAND_PENDING "/etc/k230_storage_expand_pending"
+#define STORAGE_EXPAND_UI_LOG "/tmp/k230_storage_expand_ui.log"
 #define CAMERA_CAPTURE_DEVICE 1
 #define CAMERA_CAPTURE_W 1920
 #define CAMERA_CAPTURE_H 1080
@@ -539,6 +543,14 @@ static lv_obj_t *shutdown_progress_arc;
 static lv_obj_t *shutdown_detail_label;
 static lv_obj_t *shutdown_hint_label;
 static lv_obj_t *screenshot_toast_obj;
+static lv_obj_t *storage_expand_overlay;
+static lv_obj_t *storage_expand_spinner;
+static lv_obj_t *storage_expand_title_label;
+static lv_obj_t *storage_expand_detail_label;
+static lv_obj_t *storage_expand_action_btn;
+static lv_obj_t *storage_expand_action_label;
+static lv_timer_t *storage_expand_timer;
+static int storage_expand_action_reboot;
 static lv_obj_t *entry_block_dialog;
 static lv_obj_t *entry_probe_dialog;
 static lv_timer_t *entry_probe_timer;
@@ -666,6 +678,11 @@ static void stop_power_key_monitor(void);
 static void power_key_shutdown_visual_poll(void);
 static void low_battery_shutdown_visual_poll(void);
 static void status_bar_relayout(void);
+static lv_obj_t *label(lv_obj_t *parent, const char *text,
+                       const lv_font_t *font, uint32_t color);
+static lv_obj_t *panel(lv_obj_t *parent, int x, int y, int w, int h);
+static lv_obj_t *command_button(lv_obj_t *parent, int x, int y, int w,
+                                const char *text, uint32_t color);
 
 static void sig_handler(int sig)
 {
@@ -730,6 +747,8 @@ static const char *page_name(page_id_t page)
         return "NES";
     case PAGE_SYSTEM:
         return "System";
+    case PAGE_STORAGE_EXPAND:
+        return "Expand storage";
     case PAGE_DISPLAY:
         return "Display";
     case PAGE_DISPLAY_TEST:
@@ -2523,6 +2542,627 @@ static void read_storage_summary(char *buf, size_t len)
     snprintf(buf, len, "%luMB free %luMB", total_mb, free_mb);
 }
 
+typedef struct {
+    char state[32];
+    char message[160];
+    char rootdev[80];
+    char disk[80];
+    unsigned long disk_mb;
+    unsigned long part_mb;
+    unsigned long fs_total_mb;
+    unsigned long fs_free_mb;
+} storage_expand_status_t;
+
+static void storage_expand_status_init(storage_expand_status_t *status)
+{
+    if(!status) {
+        return;
+    }
+    memset(status, 0, sizeof(*status));
+    snprintf(status->state, sizeof(status->state), "%s", "unknown");
+}
+
+static void storage_expand_trim_line(char *text)
+{
+    size_t len;
+
+    if(!text) {
+        return;
+    }
+    len = strlen(text);
+    while(len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r')) {
+        text[--len] = '\0';
+    }
+}
+
+static int storage_expand_read_status(storage_expand_status_t *status)
+{
+    FILE *fp;
+    char line[256];
+
+    if(!status) {
+        return -1;
+    }
+    storage_expand_status_init(status);
+
+    fp = fopen(STORAGE_EXPAND_STATUS, "r");
+    if(!fp) {
+        return -1;
+    }
+
+    while(fgets(line, sizeof(line), fp)) {
+        char *eq;
+        char *key;
+        char *value;
+
+        storage_expand_trim_line(line);
+        eq = strchr(line, '=');
+        if(!eq) {
+            continue;
+        }
+        *eq = '\0';
+        key = line;
+        value = eq + 1;
+
+        if(strcmp(key, "state") == 0) {
+            snprintf(status->state, sizeof(status->state), "%s", value);
+        } else if(strcmp(key, "message") == 0) {
+            snprintf(status->message, sizeof(status->message), "%s", value);
+        } else if(strcmp(key, "rootdev") == 0) {
+            snprintf(status->rootdev, sizeof(status->rootdev), "%s", value);
+        } else if(strcmp(key, "disk") == 0) {
+            snprintf(status->disk, sizeof(status->disk), "%s", value);
+        } else if(strcmp(key, "disk_mb") == 0) {
+            status->disk_mb = strtoul(value, NULL, 10);
+        } else if(strcmp(key, "part_mb") == 0) {
+            status->part_mb = strtoul(value, NULL, 10);
+        } else if(strcmp(key, "fs_total_mb") == 0) {
+            status->fs_total_mb = strtoul(value, NULL, 10);
+        } else if(strcmp(key, "fs_free_mb") == 0) {
+            status->fs_free_mb = strtoul(value, NULL, 10);
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static void storage_expand_refresh_status_file(void)
+{
+    int rc;
+
+    if(access(STORAGE_EXPAND_HELPER, X_OK) != 0) {
+        return;
+    }
+
+    rc = system(STORAGE_EXPAND_HELPER
+                " status >/dev/null 2>>" STORAGE_EXPAND_UI_LOG);
+    if(rc != 0) {
+        touch_trace_log("STORAGE_EXPAND_STATUS_REFRESH_FAILED rc=%d", rc);
+    }
+}
+
+static int storage_expand_state_is_terminal(const char *state)
+{
+    return state &&
+           (strcmp(state, "done") == 0 ||
+            strcmp(state, "already") == 0 ||
+            strcmp(state, "failed") == 0 ||
+            strcmp(state, "reboot_required") == 0);
+}
+
+static const char *storage_expand_state_title(const char *state)
+{
+    if(!state) {
+        return "Preparing storage expansion";
+    }
+    if(strcmp(state, "ready") == 0) {
+        return "Ready to expand storage";
+    }
+    if(strcmp(state, "partitioning") == 0) {
+        return "Expanding root partition";
+    }
+    if(strcmp(state, "resizing") == 0) {
+        return "Growing ext4 filesystem";
+    }
+    if(strcmp(state, "done") == 0) {
+        return "Storage expansion complete";
+    }
+    if(strcmp(state, "already") == 0) {
+        return "Cannot expand further";
+    }
+    if(strcmp(state, "reboot_required") == 0) {
+        return "Reboot required to complete storage expansion";
+    }
+    if(strcmp(state, "failed") == 0) {
+        return "Storage expansion failed";
+    }
+    return "Expanding storage";
+}
+
+static void storage_expand_format_detail(const storage_expand_status_t *status,
+                                         char *buf, size_t len)
+{
+    const char *line;
+
+    if(!buf || len == 0) {
+        return;
+    }
+    if(!status) {
+        snprintf(buf, len, "%s", ui_tr("Checking current storage"));
+        return;
+    }
+
+    line = ui_tr("Do not power off, reset, or remove the SD card while storage is being expanded.");
+    if(strcmp(status->state, "already") == 0) {
+        snprintf(buf, len,
+                 "%s\n%s: %lu MB  %s: %lu MB",
+                 ui_tr("Full SD card is already in use."),
+                 ui_tr("Rootfs"), status->fs_total_mb,
+                 ui_tr("Free"), status->fs_free_mb);
+        return;
+    }
+    if(storage_expand_state_is_terminal(status->state)) {
+        line = ui_tr(storage_expand_state_title(status->state));
+    }
+
+    snprintf(buf, len,
+             "%s\n%s: %lu MB  %s: %lu MB  %s: %lu MB",
+             line,
+             ui_tr("SD card"), status->disk_mb,
+             ui_tr("Rootfs"), status->fs_total_mb,
+             ui_tr("Free"), status->fs_free_mb);
+}
+
+static void storage_expand_close_overlay(void)
+{
+    if(storage_expand_timer) {
+        lv_timer_delete(storage_expand_timer);
+        storage_expand_timer = NULL;
+    }
+    if(storage_expand_overlay && lv_obj_is_valid(storage_expand_overlay)) {
+        lv_obj_delete(storage_expand_overlay);
+    }
+    storage_expand_overlay = NULL;
+    storage_expand_spinner = NULL;
+    storage_expand_title_label = NULL;
+    storage_expand_detail_label = NULL;
+    storage_expand_action_btn = NULL;
+    storage_expand_action_label = NULL;
+    storage_expand_action_reboot = 0;
+}
+
+static void storage_expand_action_event_cb(lv_event_t *event)
+{
+    (void)event;
+
+    if(storage_expand_action_reboot) {
+        int rc;
+
+        if(storage_expand_title_label &&
+           lv_obj_is_valid(storage_expand_title_label)) {
+            lv_label_set_text(storage_expand_title_label,
+                              ui_tr("Rebooting..."));
+        }
+        rc = system("(sync; reboot -f || reboot) >" STORAGE_EXPAND_UI_LOG
+                    " 2>&1 &");
+        if(rc != 0) {
+            touch_trace_log("STORAGE_EXPAND_REBOOT_FAILED rc=%d", rc);
+        }
+        return;
+    }
+
+    storage_expand_close_overlay();
+    if(current_page == PAGE_STORAGE_EXPAND) {
+        app_refresh_current_page();
+    }
+}
+
+static void storage_expand_update_overlay(void)
+{
+    storage_expand_status_t status;
+    char detail[320];
+    const char *title_text;
+    int terminal;
+    int reboot_required;
+
+    if(!storage_expand_overlay || !lv_obj_is_valid(storage_expand_overlay)) {
+        return;
+    }
+
+    if(storage_expand_read_status(&status) != 0) {
+        storage_expand_status_init(&status);
+        snprintf(status.state, sizeof(status.state), "%s", "running");
+    }
+
+    title_text = storage_expand_state_title(status.state);
+    storage_expand_format_detail(&status, detail, sizeof(detail));
+    terminal = storage_expand_state_is_terminal(status.state);
+    reboot_required = strcmp(status.state, "reboot_required") == 0;
+
+    if(storage_expand_title_label &&
+       lv_obj_is_valid(storage_expand_title_label)) {
+        lv_label_set_text(storage_expand_title_label, ui_tr(title_text));
+    }
+    if(storage_expand_detail_label &&
+       lv_obj_is_valid(storage_expand_detail_label)) {
+        lv_label_set_text(storage_expand_detail_label, detail);
+    }
+    if(storage_expand_spinner && lv_obj_is_valid(storage_expand_spinner)) {
+        if(terminal) {
+            lv_obj_add_flag(storage_expand_spinner, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(storage_expand_spinner, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if(storage_expand_action_btn &&
+       lv_obj_is_valid(storage_expand_action_btn)) {
+        if(terminal) {
+            lv_obj_clear_flag(storage_expand_action_btn, LV_OBJ_FLAG_HIDDEN);
+            storage_expand_action_reboot = reboot_required;
+            if(storage_expand_action_label &&
+               lv_obj_is_valid(storage_expand_action_label)) {
+                lv_label_set_text(storage_expand_action_label,
+                                  ui_tr(reboot_required ? "Reboot" : "OK"));
+                lv_obj_center(storage_expand_action_label);
+            }
+        } else {
+            lv_obj_add_flag(storage_expand_action_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void storage_expand_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    storage_expand_update_overlay();
+}
+
+static void storage_expand_show_progress_overlay(void)
+{
+    int w = display_logical_width();
+    int h = display_logical_height();
+    int card_w = display_orientation_is_landscape() ? 520 : 456;
+    int card_h = 298;
+    lv_obj_t *card;
+
+    storage_expand_close_overlay();
+
+    if(card_w > w - 48) {
+        card_w = w - 48;
+    }
+    if(card_w < 300) {
+        card_w = w - 24;
+    }
+    if(card_h > h - 48) {
+        card_h = h - 48;
+    }
+
+    storage_expand_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(storage_expand_overlay);
+    lv_obj_set_style_bg_color(storage_expand_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(storage_expand_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(storage_expand_overlay, 0, 0);
+    lv_obj_set_style_pad_all(storage_expand_overlay, 0, 0);
+    lv_obj_clear_flag(storage_expand_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(storage_expand_overlay, LV_OBJ_FLAG_CLICKABLE);
+
+    card = lv_obj_create(storage_expand_overlay);
+    lv_obj_set_size(card, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101720), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x314154), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    storage_expand_spinner = lv_spinner_create(card);
+    lv_obj_set_size(storage_expand_spinner, 64, 64);
+    lv_obj_align(storage_expand_spinner, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_set_style_arc_color(storage_expand_spinner,
+                               lv_color_hex(0x263342), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(storage_expand_spinner,
+                               lv_color_hex(0x25C281), LV_PART_INDICATOR);
+
+    storage_expand_title_label = label(card, "Expanding storage",
+                                       &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_width(storage_expand_title_label, card_w - 48);
+    lv_label_set_long_mode(storage_expand_title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(storage_expand_title_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(storage_expand_title_label, LV_ALIGN_TOP_MID, 0, 102);
+
+    storage_expand_detail_label = label(card,
+                                        "Do not power off, reset, or remove the SD card while storage is being expanded.",
+                                        &lv_font_montserrat_16, 0xCBD5E1);
+    lv_obj_set_size(storage_expand_detail_label, card_w - 48, card_h - 226);
+    lv_label_set_long_mode(storage_expand_detail_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(storage_expand_detail_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(storage_expand_detail_label, LV_ALIGN_TOP_MID, 0, 146);
+
+    storage_expand_action_btn = command_button(card, (card_w - 176) / 2,
+                                               card_h - 82, 176, "OK",
+                                               0x25C281);
+    storage_expand_action_label = lv_obj_get_child(storage_expand_action_btn, 0);
+    lv_obj_add_flag(storage_expand_action_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(storage_expand_action_btn,
+                        storage_expand_action_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+
+    storage_expand_timer = lv_timer_create(storage_expand_timer_cb, 500, NULL);
+    storage_expand_update_overlay();
+}
+
+static void storage_expand_confirm_cancel_event_cb(lv_event_t *event)
+{
+    (void)event;
+    storage_expand_close_overlay();
+}
+
+static void storage_expand_confirm_expand_event_cb(lv_event_t *event)
+{
+    int rc;
+
+    (void)event;
+    storage_expand_close_overlay();
+    unlink(STORAGE_EXPAND_STATUS);
+    storage_expand_show_progress_overlay();
+    if(access(STORAGE_EXPAND_HELPER, X_OK) != 0) {
+        FILE *fp = fopen(STORAGE_EXPAND_STATUS, "w");
+        if(fp) {
+            fprintf(fp, "state=failed\nmessage=Expansion helper missing\n");
+            fclose(fp);
+        }
+        storage_expand_update_overlay();
+        return;
+    }
+    rc = system("(" STORAGE_EXPAND_HELPER " expand) >" STORAGE_EXPAND_UI_LOG
+                " 2>&1 &");
+    if(rc != 0) {
+        FILE *fp = fopen(STORAGE_EXPAND_STATUS, "w");
+        if(fp) {
+            fprintf(fp, "state=failed\nmessage=Failed to start helper\n");
+            fclose(fp);
+        }
+    }
+}
+
+static void storage_expand_show_confirm_dialog(void)
+{
+    int w = display_logical_width();
+    int h = display_logical_height();
+    int card_w = display_orientation_is_landscape() ? 560 : 456;
+    int card_h = 286;
+    int button_w = 176;
+    int button_gap = 18;
+    int buttons_total;
+    int button_x;
+    lv_obj_t *card;
+    lv_obj_t *title;
+    lv_obj_t *detail;
+    lv_obj_t *cancel;
+    lv_obj_t *expand;
+
+    storage_expand_close_overlay();
+
+    if(card_w > w - 48) {
+        card_w = w - 48;
+    }
+    if(card_w < 300) {
+        card_w = w - 24;
+    }
+    if(card_h > h - 48) {
+        card_h = h - 48;
+    }
+
+    storage_expand_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(storage_expand_overlay);
+    lv_obj_set_style_bg_color(storage_expand_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(storage_expand_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(storage_expand_overlay, 0, 0);
+    lv_obj_set_style_pad_all(storage_expand_overlay, 0, 0);
+    lv_obj_clear_flag(storage_expand_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(storage_expand_overlay, LV_OBJ_FLAG_CLICKABLE);
+
+    card = lv_obj_create(storage_expand_overlay);
+    lv_obj_set_size(card, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x101720), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x314154), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    title = label(card, "Expand storage", &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(title, 24, 24);
+    lv_obj_set_width(title, card_w - 48);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    detail = label(card,
+                   "Expand the root filesystem to use the full SD card capacity. Do not power off, reset, or remove the SD card during this operation.",
+                   &lv_font_montserrat_18, 0xCBD5E1);
+    lv_obj_set_pos(detail, 24, 76);
+    lv_obj_set_width(detail, card_w - 48);
+    lv_label_set_long_mode(detail, LV_LABEL_LONG_WRAP);
+
+    if(button_w * 2 + button_gap > card_w - 48) {
+        button_w = (card_w - 48 - button_gap) / 2;
+    }
+    buttons_total = button_w * 2 + button_gap;
+    button_x = (card_w - buttons_total) / 2;
+    if(button_x < 24) {
+        button_x = 24;
+    }
+
+    cancel = command_button(card, button_x, card_h - 82, button_w,
+                            "Cancel", 0xCBD5E1);
+    lv_obj_add_event_cb(cancel, storage_expand_confirm_cancel_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    expand = command_button(card, button_x + button_w + button_gap,
+                            card_h - 82, button_w, "Expand", 0x25C281);
+    lv_obj_add_event_cb(expand, storage_expand_confirm_expand_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+}
+
+static void storage_expand_button_event_cb(lv_event_t *event)
+{
+    storage_expand_status_t status;
+
+    (void)event;
+    storage_expand_refresh_status_file();
+    if(storage_expand_read_status(&status) == 0 &&
+       strcmp(status.state, "already") == 0) {
+        storage_expand_show_progress_overlay();
+        return;
+    }
+
+    storage_expand_show_confirm_dialog();
+}
+
+static void storage_expand_create_card(lv_obj_t *body, int y, int side_gap)
+{
+    lv_obj_t *card;
+    lv_obj_t *summary;
+    lv_obj_t *detail;
+    lv_obj_t *warning;
+    lv_obj_t *badge;
+    lv_obj_t *bang;
+    lv_obj_t *btn;
+    char storage[80];
+    storage_expand_status_t status;
+    int parent_w = body ? lv_obj_get_width(body) : page_body_width();
+    int parent_h = body ? lv_obj_get_height(body) : page_body_height_from(154);
+    int card_x = side_gap;
+    int card_w;
+    int card_h;
+    int already_expanded;
+    int badge_size;
+    int top_y;
+    int summary_y;
+    int detail_y;
+    int warning_y;
+    int warning_h;
+    int button_gap_y;
+    int button_w;
+    int button_x;
+    int button_y;
+
+    if(parent_w <= 0) {
+        parent_w = page_body_width();
+    }
+    if(parent_h <= 0) {
+        parent_h = page_body_height_from(154);
+    }
+    card_w = parent_w - side_gap * 2;
+    if(card_w < 320) {
+        card_w = parent_w;
+        card_x = 0;
+    }
+    if(card_w < 300) {
+        card_w = 300;
+    }
+    card_h = parent_h - y;
+    if(card_h < 280) {
+        card_h = 280;
+    }
+
+    card = panel(body, card_x, y, card_w, card_h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x111820), 0);
+
+    storage_expand_refresh_status_file();
+    storage_expand_status_init(&status);
+    already_expanded = storage_expand_read_status(&status) == 0 &&
+                       strcmp(status.state, "already") == 0;
+    read_storage_summary(storage, sizeof(storage));
+
+    badge_size = display_orientation_is_landscape() ? 54 : 68;
+    top_y = display_orientation_is_landscape() ? 22 : 44;
+    summary_y = top_y + badge_size + 18;
+    detail_y = summary_y + 50;
+    warning_y = detail_y + (display_orientation_is_landscape() ? 54 : 70);
+
+    badge = lv_obj_create(card);
+    lv_obj_set_size(badge, badge_size, badge_size);
+    lv_obj_set_pos(badge, (card_w - badge_size) / 2, top_y);
+    lv_obj_set_style_radius(badge, badge_size / 2, 0);
+    lv_obj_set_style_bg_color(badge, lv_color_hex(0xF5A524), 0);
+    lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(badge, 0, 0);
+    lv_obj_set_style_pad_all(badge, 0, 0);
+    lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE);
+
+    bang = label(badge, LV_SYMBOL_WARNING, &lv_font_montserrat_32, 0x111820);
+    lv_obj_center(bang);
+
+    summary = label(card, storage, &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(summary, 24, summary_y);
+    lv_obj_set_width(summary, card_w - 48);
+    lv_obj_set_style_text_align(summary, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(summary, LV_LABEL_LONG_DOT);
+
+    detail = label(card,
+                   already_expanded ? "Storage already uses full SD card" :
+                   "Use full SD card capacity for apps and media.",
+                   &lv_font_montserrat_18, 0xCBD5E1);
+    lv_obj_set_pos(detail, 24, detail_y);
+    lv_obj_set_width(detail, card_w - 48);
+    lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(detail, LV_LABEL_LONG_WRAP);
+
+    warning = label(card,
+                    already_expanded ? "No further expansion is available." :
+                    "Do not power off, reset, or remove the SD card while storage is being expanded.",
+                    &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_pos(warning, 24, warning_y);
+    lv_obj_set_width(warning, card_w - 48);
+    lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(warning, LV_LABEL_LONG_WRAP);
+
+    button_w = display_orientation_is_landscape() ? 210 : 190;
+    if(button_w > card_w - 36) {
+        button_w = card_w - 36;
+    }
+    button_x = (card_w - button_w) / 2;
+    if(button_x < 24) {
+        button_x = 24;
+    }
+    warning_h = display_orientation_is_landscape() ? 42 : 64;
+    button_gap_y = display_orientation_is_landscape() ? 18 : 24;
+    button_y = warning_y + warning_h + button_gap_y;
+    if(button_y + 60 > card_h - 24) {
+        button_y = card_h - 84;
+    }
+    if(button_y < warning_y + 42) {
+        button_y = warning_y + 42;
+    }
+    btn = command_button(card, button_x, button_y, button_w,
+                         already_expanded ? "OK" : "Expand",
+                         0x25C281);
+    lv_obj_add_event_cb(btn, storage_expand_button_event_cb, LV_EVENT_CLICKED,
+                        NULL);
+}
+
+static void storage_expand_finish_pending_startup(void)
+{
+    int rc;
+
+    if(access(STORAGE_EXPAND_PENDING, F_OK) != 0 ||
+       access(STORAGE_EXPAND_HELPER, X_OK) != 0) {
+        return;
+    }
+
+    rc = system("(" STORAGE_EXPAND_HELPER " finish) >" STORAGE_EXPAND_UI_LOG
+                " 2>&1 &");
+    if(rc != 0) {
+        touch_trace_log("STORAGE_EXPAND_FINISH_START_FAILED rc=%d", rc);
+    }
+}
+
 static int read_iface_ip(const char *iface, char *buf, size_t len)
 {
     struct ifaddrs *ifaddr = NULL;
@@ -3856,6 +4496,7 @@ static page_id_t nav_fallback_parent(page_id_t page)
     case PAGE_BATTERY:
     case PAGE_APP_STARTUP:
     case PAGE_SYSTEM:
+    case PAGE_STORAGE_EXPAND:
     case PAGE_ABOUT:
         return PAGE_SETTINGS;
     default:
@@ -10883,6 +11524,24 @@ static void create_system_page(lv_obj_t *scr)
                            side_gap);
 }
 
+static void create_storage_expand_page(lv_obj_t *scr)
+{
+    int body_y = page_content_top_y(154);
+    int side_gap = display_orientation_is_landscape() ? 44 : 0;
+
+    create_header(scr, "Storage");
+    lv_obj_t *body = lv_obj_create(scr);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_pos(body, 24, body_y);
+    lv_obj_set_size(body, page_body_width(), page_body_height_from(154));
+    lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(body, 0, 0);
+    lv_obj_set_style_pad_all(body, 0, 0);
+    lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+
+    storage_expand_create_card(body, 0, side_gap);
+}
+
 static void create_display_page(lv_obj_t *scr)
 {
     lv_obj_t *body;
@@ -11162,10 +11821,13 @@ static void create_settings_page(lv_obj_t *scr)
     settings_nav_row(body, 336, LV_SYMBOL_REFRESH, "Date & time",
                      "NTP server and time zone", 0xEC4899,
                      PAGE_TIME);
-    settings_nav_row(body, 448, LV_SYMBOL_LIST, "System",
+    settings_nav_row(body, 448, "SD", "Expand storage",
+                     "Use full SD card capacity for apps and media.",
+                     0x25C281, PAGE_STORAGE_EXPAND);
+    settings_nav_row(body, 560, LV_SYMBOL_LIST, "System",
                      "Kernel, CPU, memory, storage", 0xF5A524,
                      PAGE_SYSTEM);
-    settings_nav_row(body, 560, LV_SYMBOL_WARNING, "About phone",
+    settings_nav_row(body, 672, LV_SYMBOL_WARNING, "About phone",
                      "Buildroot version and device identity", 0x3DA5FF,
                      PAGE_ABOUT);
 }
@@ -11859,6 +12521,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     case PAGE_SYSTEM:
         create_system_page(scr);
         break;
+    case PAGE_STORAGE_EXPAND:
+        create_storage_expand_page(scr);
+        break;
     case PAGE_SETTINGS:
         ui_settings_create(scr);
         break;
@@ -12039,6 +12704,7 @@ int main(void)
     ui_nrf52840_manager_startup();
     ui_hardware_startup();
     ui_audio_apply_startup_defaults();
+    storage_expand_finish_pending_startup();
     ui_hardware_reboot_diag_dump("app-start-after-hardware-startup");
     apply_display_brightness_pref();
     ui_power_manager_init(power_manager_refresh_cb, power_manager_trace_cb,

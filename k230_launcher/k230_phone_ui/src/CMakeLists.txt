@@ -549,6 +549,8 @@ if(K230_ENABLE_DEV_APPS)
             ${CMAKE_CURRENT_SOURCE_DIR}/k230_halow_camera_stream.sh
             DESTINATION /root/app/k230_phone_ui)
 endif()
+install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_storage_expand.sh
+        DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fonts DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/icons DESTINATION /root/app/k230_phone_ui)

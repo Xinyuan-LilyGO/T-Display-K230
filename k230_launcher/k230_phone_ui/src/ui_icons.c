@@ -44,6 +44,8 @@ static const char *ui_icon_name_for_page(page_id_t page)
         return "nes";
     case PAGE_SYSTEM:
         return "system";
+    case PAGE_STORAGE_EXPAND:
+        return "mtp";
     case PAGE_DISPLAY:
         return "display";
     case PAGE_DISPLAY_TEST:
@@ -159,6 +161,8 @@ const char *ui_icon_path_for_page(page_id_t page)
         return UI_ICON_FILE("nes");
     case PAGE_SYSTEM:
         return UI_ICON_FILE("system");
+    case PAGE_STORAGE_EXPAND:
+        return UI_ICON_FILE("mtp");
     case PAGE_DISPLAY:
         return UI_ICON_FILE("display");
     case PAGE_DISPLAY_TEST:

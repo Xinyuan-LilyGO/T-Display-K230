@@ -294,6 +294,10 @@ void ui_settings_create(lv_obj_t *scr)
                         "Launch selected services at boot", 0x10B981,
                         PAGE_APP_STARTUP);
     y = settings_next_row_y(y);
+    ui_settings_nav_row(body, y, "SD", "Expand storage",
+                        "Use full SD card capacity for apps and media.",
+                        0x25C281, PAGE_STORAGE_EXPAND);
+    y = settings_next_row_y(y);
     ui_settings_nav_row(body, y, LV_SYMBOL_LIST, "System",
                         "Kernel, CPU, memory, storage", 0xF5A524,
                         PAGE_SYSTEM);
