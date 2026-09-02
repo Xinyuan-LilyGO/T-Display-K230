@@ -95,6 +95,7 @@ static const char *ui_icon_name_for_page(page_id_t page)
     case PAGE_AI:
         return "ai";
     case PAGE_XIAOZHI:
+    case PAGE_PICOCLAW:
         return "ai";
     case PAGE_RTSP:
         return "rtsp";
@@ -212,6 +213,7 @@ const char *ui_icon_path_for_page(page_id_t page)
     case PAGE_AI:
         return UI_ICON_FILE("ai");
     case PAGE_XIAOZHI:
+    case PAGE_PICOCLAW:
         return UI_ICON_FILE("ai");
     case PAGE_RTSP:
         return UI_ICON_FILE("rtsp");

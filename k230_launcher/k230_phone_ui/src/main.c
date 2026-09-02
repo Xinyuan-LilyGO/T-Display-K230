@@ -214,6 +214,7 @@
 #include "ui_mic_spectrum.h"
 #include "ui_nes.h"
 #include "ui_nrf52840_dfu.h"
+#include "ui_picoclaw.h"
 #include "ui_prefs.h"
 #include "ui_rtsp.h"
 #include "ui_settings.h"
@@ -623,6 +624,7 @@ static const app_item_t app_items[] = {
     {"NES", "NES", 0xF97316, PAGE_NES},
     {"AI", LV_SYMBOL_BARS, 0xFF6B6B, PAGE_AI},
     {"Xiaozhi", "AI", 0x60A5FA, PAGE_XIAOZHI},
+    {"PicoClaw", "PC", 0x38BDF8, PAGE_PICOCLAW},
     {"RTSP", LV_SYMBOL_VIDEO, 0x22C55E, PAGE_RTSP},
     {"Wi-Fi", "WiFi", 0x25C281, PAGE_WIFI},
 #if K230_ENABLE_DEV_APPS
@@ -803,6 +805,8 @@ static const char *page_name(page_id_t page)
         return "AI";
     case PAGE_XIAOZHI:
         return "Xiaozhi";
+    case PAGE_PICOCLAW:
+        return "PicoClaw";
     case PAGE_RTSP:
         return "RTSP";
     case PAGE_TERMINAL:
@@ -11293,6 +11297,7 @@ static void cleanup_page_state(void)
     ui_time_settings_cleanup();
     ui_ai_demo_cleanup();
     ui_xiaozhi_cleanup();
+    ui_picoclaw_cleanup();
     ui_rtsp_cleanup();
     ui_video_player_cleanup();
     ui_ble_cleanup();
@@ -12660,6 +12665,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_XIAOZHI:
         ui_xiaozhi_create(scr);
+        break;
+    case PAGE_PICOCLAW:
+        ui_picoclaw_create(scr);
         break;
     case PAGE_RTSP:
         ui_rtsp_create(scr);

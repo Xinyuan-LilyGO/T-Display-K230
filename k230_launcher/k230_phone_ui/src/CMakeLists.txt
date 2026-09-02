@@ -131,6 +131,7 @@ set(K230_PHONE_UI_SOURCES
     ui_usb_storage.c
     ui_meshtastic.c
     ui_xiaozhi.c
+    ui_picoclaw.c
     ui_lora.cpp
     ui_nes.cpp
     ${LIBTMT_DIR}/tmt.c
@@ -550,6 +551,7 @@ if(K230_ENABLE_DEV_APPS)
             DESTINATION /root/app/k230_phone_ui)
 endif()
 install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/k230_storage_expand.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/k230_picoclaw_ctl.sh
         DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fonts DESTINATION /root/app/k230_phone_ui)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data DESTINATION /root/app/k230_phone_ui)
