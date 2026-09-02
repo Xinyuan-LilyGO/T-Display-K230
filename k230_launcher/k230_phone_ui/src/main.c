@@ -4584,6 +4584,9 @@ static void nav_back(void)
     if(ui_xiaozhi_handle_back()) {
         return;
     }
+    if(current_page == PAGE_PICOCLAW && ui_picoclaw_handle_back()) {
+        return;
+    }
     if(camera_gallery_handle_back()) {
         return;
     }
@@ -4914,6 +4917,11 @@ static void edge_back_event_cb(lv_event_t *event)
             edge_back_direction = 0;
             return;
         }
+        if(current_page == PAGE_PICOCLAW && ui_picoclaw_handle_back()) {
+            trace_ui_action("LVGL_EDGE_BACK_PICOCLAW", current_page);
+            edge_back_direction = 0;
+            return;
+        }
         if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
             trace_ui_action("LVGL_EDGE_BACK_INNER", PAGE_CELLULAR);
             edge_back_direction = 0;
@@ -5011,6 +5019,12 @@ static void edge_back_consume_raw_pending(void)
     }
     if(ui_xiaozhi_handle_back()) {
         trace_ui_action("RAW_EDGE_BACK_XIAOZHI_FACE", current_page);
+        edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
+        edge_back_hint_hide();
+        return;
+    }
+    if(current_page == PAGE_PICOCLAW && ui_picoclaw_handle_back()) {
+        trace_ui_action("RAW_EDGE_BACK_PICOCLAW", current_page);
         edge_back_hint_update(pending_direction, pending_y, EDGE_BACK_TRIGGER_PX);
         edge_back_hint_hide();
         return;
@@ -5378,6 +5392,10 @@ static void back_event_cb(lv_event_t *event)
         trace_ui_action("LVGL_CLICKED_BACK_XIAOZHI_FACE", current_page);
         return;
     }
+    if(current_page == PAGE_PICOCLAW && ui_picoclaw_handle_back()) {
+        trace_ui_action("LVGL_CLICKED_BACK_PICOCLAW", current_page);
+        return;
+    }
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {
         trace_ui_action("LVGL_CLICKED_BACK_INNER", PAGE_CELLULAR);
         return;
@@ -5428,6 +5446,10 @@ void app_nav_back(void)
     }
     if(ui_xiaozhi_handle_back()) {
         trace_ui_action("APP_BACK_XIAOZHI_FACE", current_page);
+        return;
+    }
+    if(current_page == PAGE_PICOCLAW && ui_picoclaw_handle_back()) {
+        trace_ui_action("APP_BACK_PICOCLAW", current_page);
         return;
     }
     if(current_page == PAGE_CELLULAR && ui_cellular_handle_back()) {

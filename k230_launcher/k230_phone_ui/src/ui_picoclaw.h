@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 void ui_picoclaw_create(lv_obj_t *scr);
+int ui_picoclaw_handle_back(void);
 void ui_picoclaw_cleanup(void);
 
 #ifdef __cplusplus

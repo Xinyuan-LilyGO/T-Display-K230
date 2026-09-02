@@ -190,7 +190,11 @@ save_config_cmd()
     model_name="$(json_escape "${1:-k230-agent}")"
     model_id="$(json_escape "${2:-openai/gpt-4o-mini}")"
     api_base="$(json_escape "${3:-https://api.openai.com/v1}")"
-    api_key="$(json_escape "${4:-}")"
+    api_key_raw="${4:-}"
+    if [ -z "$api_key_raw" ] && [ -s "$PICO_CONFIG" ]; then
+        api_key_raw="$(sed -n 's/.*"api_keys"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$PICO_CONFIG" | head -n 1)"
+    fi
+    api_key="$(json_escape "$api_key_raw")"
     if [ -n "$api_key" ]; then
         api_key_line="\"api_keys\": [\"$api_key\"],"
     else
