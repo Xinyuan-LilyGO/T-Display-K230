@@ -122,6 +122,7 @@ static lv_obj_t *picoclaw_gateway_label;
 static lv_obj_t *picoclaw_network_label;
 static lv_obj_t *picoclaw_url_label;
 static lv_obj_t *picoclaw_config_label;
+static lv_obj_t *picoclaw_model_key_label;
 static lv_obj_t *picoclaw_weixin_label;
 static lv_obj_t *picoclaw_output_label;
 static lv_obj_t *picoclaw_install_btn;
@@ -147,6 +148,7 @@ static int picoclaw_installed;
 static int picoclaw_gateway_running;
 static int picoclaw_config_ready;
 static int picoclaw_network_ready;
+static int picoclaw_model_key_ready;
 static int picoclaw_weixin_ready;
 static int picoclaw_weixin_auth_running;
 static int picoclaw_weixin_qr_dirty;
@@ -159,6 +161,7 @@ static char picoclaw_version_text[256] = "not installed";
 static char picoclaw_gateway_text[80] = "stopped";
 static char picoclaw_network_text[80] = "unknown";
 static char picoclaw_config_text[80] = "unknown";
+static char picoclaw_model_key_text[80] = "missing";
 static char picoclaw_weixin_text[80] = "missing";
 static char picoclaw_weixin_auth_text[80] = "stopped";
 static char picoclaw_weixin_qr_text[PICOCLAW_QR_TEXT_MAX] = "";
@@ -345,6 +348,11 @@ static void picoclaw_apply_status_locked(const char *output)
         picoclaw_config_ready = strcmp(value, "ready") == 0;
         snprintf(picoclaw_config_text, sizeof(picoclaw_config_text), "%s",
                  value);
+    }
+    if(picoclaw_find_value(output, "model_key", value, sizeof(value))) {
+        picoclaw_model_key_ready = strcmp(value, "ready") == 0;
+        snprintf(picoclaw_model_key_text, sizeof(picoclaw_model_key_text),
+                 "%s", value);
     }
     if(picoclaw_find_value(output, "weixin", value, sizeof(value))) {
         picoclaw_weixin_ready = strcmp(value, "ready") == 0;
@@ -1255,6 +1263,7 @@ static void picoclaw_update_status_labels(int busy, int rc)
     char gateway[80];
     char network[80];
     char config[80];
+    char model_key[80];
     char weixin[80];
     char weixin_auth[80];
     char url[160];
@@ -1272,6 +1281,7 @@ static void picoclaw_update_status_labels(int busy, int rc)
     snprintf(gateway, sizeof(gateway), "%s", picoclaw_gateway_text);
     snprintf(network, sizeof(network), "%s", picoclaw_network_text);
     snprintf(config, sizeof(config), "%s", picoclaw_config_text);
+    snprintf(model_key, sizeof(model_key), "%s", picoclaw_model_key_text);
     snprintf(weixin, sizeof(weixin), "%s", picoclaw_weixin_text);
     snprintf(weixin_auth, sizeof(weixin_auth), "%s",
              picoclaw_weixin_auth_text);
@@ -1323,6 +1333,12 @@ static void picoclaw_update_status_labels(int busy, int rc)
         lv_label_set_text(picoclaw_config_label, ui_tr(config));
         lv_obj_set_style_text_color(picoclaw_config_label,
                                     lv_color_hex(picoclaw_config_ready ?
+                                                 0x25C281 : 0xF5A524), 0);
+    }
+    if(picoclaw_model_key_label) {
+        lv_label_set_text(picoclaw_model_key_label, ui_tr(model_key));
+        lv_obj_set_style_text_color(picoclaw_model_key_label,
+                                    lv_color_hex(picoclaw_model_key_ready ?
                                                  0x25C281 : 0xF5A524), 0);
     }
     if(picoclaw_url_label) {
@@ -1965,7 +1981,7 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
         }
     }
 
-    section = ui_panel(body, 0, 0, content_w, 242);
+    section = ui_panel(body, 0, 0, content_w, 280);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x0D1117), 0);
     title = ui_label(section, "Status", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
@@ -1979,7 +1995,9 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
                             &picoclaw_network_label, 0x9AA4AF);
     picoclaw_make_info_pair(section, 0, 158, inner_w, "Config",
                             &picoclaw_config_label, 0x9AA4AF);
-    picoclaw_make_info_pair(section, 0, 196, inner_w, "URL",
+    picoclaw_make_info_pair(section, 0, 196, inner_w, "Model key",
+                            &picoclaw_model_key_label, 0x9AA4AF);
+    picoclaw_make_info_pair(section, 0, 234, inner_w, "URL",
                             &picoclaw_url_label, 0x38BDF8);
 
     section = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 190 : 260);
@@ -2049,6 +2067,7 @@ void ui_picoclaw_cleanup(void)
     picoclaw_network_label = NULL;
     picoclaw_url_label = NULL;
     picoclaw_config_label = NULL;
+    picoclaw_model_key_label = NULL;
     picoclaw_weixin_label = NULL;
     picoclaw_output_label = NULL;
     picoclaw_install_btn = NULL;

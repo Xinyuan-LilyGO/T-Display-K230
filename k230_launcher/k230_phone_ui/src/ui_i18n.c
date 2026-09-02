@@ -208,6 +208,7 @@ static const ui_translation_t ui_translations[] = {
     { "Type a message below.", "在下方输入消息。", "下にメッセージを入力。" },
     { "Type message", "输入消息", "メッセージを入力" },
     { "Current model", "当前模型", "現在のモデル" },
+    { "Model key", "模型密钥", "モデルキー" },
     { "PicoClaw settings", "PicoClaw 设置", "PicoClaw 設定" },
     { "Choose a preset model, save the API key, or run gateway tools.", "选择预设模型、保存 API 密钥，或运行网关工具。", "プリセットモデル、API キー、ゲートウェイ操作を設定。" },
     { "Model preset", "模型预设", "モデルプリセット" },
