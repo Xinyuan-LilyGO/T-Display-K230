@@ -985,12 +985,9 @@ static void picoclaw_start_action(picoclaw_action_t action, const char *text)
 static void picoclaw_update_buttons(int busy)
 {
     lv_obj_t *buttons[] = {
-        picoclaw_install_btn,
         picoclaw_save_btn,
         picoclaw_send_btn,
         picoclaw_settings_btn,
-        picoclaw_gateway_start_btn,
-        picoclaw_gateway_stop_btn,
         picoclaw_weixin_auth_btn,
         picoclaw_log_btn,
     };
@@ -1010,19 +1007,9 @@ static void picoclaw_update_buttons(int busy)
         if(picoclaw_send_btn) {
             lv_obj_add_state(picoclaw_send_btn, LV_STATE_DISABLED);
         }
-        if(picoclaw_gateway_start_btn) {
-            lv_obj_add_state(picoclaw_gateway_start_btn, LV_STATE_DISABLED);
-        }
         if(picoclaw_weixin_auth_btn) {
             lv_obj_add_state(picoclaw_weixin_auth_btn, LV_STATE_DISABLED);
         }
-    }
-    if(picoclaw_gateway_running) {
-        if(picoclaw_gateway_start_btn) {
-            lv_obj_add_state(picoclaw_gateway_start_btn, LV_STATE_DISABLED);
-        }
-    } else if(!busy && picoclaw_gateway_stop_btn) {
-        lv_obj_add_state(picoclaw_gateway_stop_btn, LV_STATE_DISABLED);
     }
     if(picoclaw_weixin_auth_btn && !busy && picoclaw_installed) {
         lv_obj_t *label = lv_obj_get_child(picoclaw_weixin_auth_btn, 0);
@@ -2343,7 +2330,6 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
     lv_obj_t *section;
     lv_obj_t *title;
     lv_obj_t *subtitle;
-    lv_obj_t *actions;
     int top_y = ui_is_landscape() ? 64 : 124;
     int body_x = ui_page_panel_x();
     int body_w = ui_page_panel_width();
@@ -2375,7 +2361,7 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
     lv_obj_set_width(title, inner_w);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     subtitle = ui_label(section,
-                        "Manage model profiles, gateway tools, and chat app logins.",
+                        "Manage model profiles, chat app logins, and runtime status.",
                         &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_pos(subtitle, 0, 42);
     lv_obj_set_width(subtitle, inner_w);
@@ -2428,51 +2414,6 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
         }
     }
 
-    actions = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 120 : 182);
-    lv_obj_set_style_bg_color(actions, lv_color_hex(0x111820), 0);
-    title = ui_label(actions, "Runtime", &lv_font_montserrat_22, 0xF2F5F8);
-    lv_obj_set_pos(title, 0, 0);
-    lv_obj_set_width(title, inner_w);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    btn_w = ui_is_landscape() ? (inner_w - 36) / 4 :
-            (inner_w - 12) / 2;
-    if(btn_w < 116) {
-        btn_w = inner_w;
-    }
-    picoclaw_install_btn =
-        picoclaw_small_button(actions, 0, 48, btn_w, "Install", 0x38BDF8,
-                              picoclaw_action_event_cb,
-                              (void *)(intptr_t)PICOCLAW_ACTION_INSTALL);
-    if(btn_w * 2 + 12 <= inner_w) {
-        picoclaw_gateway_start_btn =
-            picoclaw_small_button(actions, btn_w + 12, 48, btn_w,
-                                  "Start gateway", 0x60A5FA,
-                                  picoclaw_action_event_cb,
-                                  (void *)(intptr_t)PICOCLAW_ACTION_GATEWAY_START);
-        if(ui_is_landscape() && btn_w * 4 + 48 <= inner_w) {
-            picoclaw_gateway_stop_btn =
-                picoclaw_small_button(actions, (btn_w + 12) * 2, 48, btn_w,
-                                      "Stop gateway", 0xEF4D5A,
-                                      picoclaw_action_event_cb,
-                                      (void *)(intptr_t)PICOCLAW_ACTION_GATEWAY_STOP);
-            picoclaw_log_btn =
-                picoclaw_small_button(actions, (btn_w + 12) * 3, 48,
-                                      btn_w, "Log",
-                                      0x94A3B8, picoclaw_action_event_cb,
-                                      (void *)(intptr_t)PICOCLAW_ACTION_LOG);
-        } else {
-            picoclaw_gateway_stop_btn =
-                picoclaw_small_button(actions, 0, 112, btn_w,
-                                      "Stop gateway", 0xEF4D5A,
-                                      picoclaw_action_event_cb,
-                                      (void *)(intptr_t)PICOCLAW_ACTION_GATEWAY_STOP);
-            picoclaw_log_btn =
-                picoclaw_small_button(actions, btn_w + 12, 112, btn_w, "Log",
-                                      0x94A3B8, picoclaw_action_event_cb,
-                                      (void *)(intptr_t)PICOCLAW_ACTION_LOG);
-        }
-    }
-
     section = ui_panel(body, 0, 0, content_w, 200);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
     title = ui_label(section, "Chat apps", &lv_font_montserrat_22, 0xF2F5F8);
@@ -2480,7 +2421,7 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
     lv_obj_set_width(title, inner_w);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     subtitle = ui_label(section,
-                        "Scan WeChat QR code, then start the gateway.",
+                        "Scan WeChat QR code. Gateway starts automatically.",
                         &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_pos(subtitle, 0, 34);
     lv_obj_set_width(subtitle, inner_w);
@@ -2507,6 +2448,14 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
     lv_obj_set_pos(title, 0, 0);
     lv_obj_set_width(title, inner_w);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    btn_w = ui_is_landscape() ? 132 : 112;
+    if(btn_w > inner_w / 2) {
+        btn_w = inner_w / 2;
+    }
+    picoclaw_log_btn =
+        picoclaw_small_button(section, inner_w - btn_w, 0, btn_w, "Log",
+                              0x94A3B8, picoclaw_action_event_cb,
+                              (void *)(intptr_t)PICOCLAW_ACTION_LOG);
     picoclaw_make_info_pair(section, 0, 44, inner_w, "Version",
                             &picoclaw_version_label, 0xF2F5F8);
     picoclaw_make_info_pair(section, 0, 82, inner_w, "Gateway",
