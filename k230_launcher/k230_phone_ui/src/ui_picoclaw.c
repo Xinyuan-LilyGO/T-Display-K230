@@ -1971,7 +1971,7 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
         }
     }
 
-    section = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 150 : 168);
+    section = ui_panel(body, 0, 0, content_w, 200);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
     title = ui_label(section, "Chat apps", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
@@ -1993,7 +1993,7 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
         btn_w = 260;
     }
     picoclaw_weixin_auth_btn =
-        picoclaw_small_button(section, (inner_w - btn_w) / 2, 96, btn_w,
+        picoclaw_small_button(section, (inner_w - btn_w) / 2, 104, btn_w,
                               "Weixin login", 0x22C55E,
                               picoclaw_weixin_button_event_cb, NULL);
     picoclaw_weixin_status_btn = NULL;
