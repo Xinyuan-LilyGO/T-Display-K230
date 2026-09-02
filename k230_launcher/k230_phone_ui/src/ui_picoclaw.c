@@ -5,7 +5,9 @@
 #include "ui_i18n.h"
 #include "ui_input.h"
 #include "ui_prefs.h"
+#include "qrcodegen.h"
 
+#include <stdbool.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,6 +24,10 @@
 #define PICOCLAW_OUTPUT_MAX 4096
 #define PICOCLAW_CHAT_MAX 32
 #define PICOCLAW_CHAT_TEXT_MAX 1024
+#define PICOCLAW_QR_TEXT_MAX 1024
+#define PICOCLAW_WEIXIN_QR_MAX 360
+#define PICOCLAW_WEIXIN_QR_BORDER 4
+#define PICOCLAW_WEIXIN_POLL_MS 2500
 
 typedef enum {
     PICOCLAW_ACTION_STATUS = 0,
@@ -30,6 +36,9 @@ typedef enum {
     PICOCLAW_ACTION_ASK,
     PICOCLAW_ACTION_GATEWAY_START,
     PICOCLAW_ACTION_GATEWAY_STOP,
+    PICOCLAW_ACTION_WEIXIN_AUTH,
+    PICOCLAW_ACTION_WEIXIN_STATUS,
+    PICOCLAW_ACTION_WEIXIN_CANCEL,
     PICOCLAW_ACTION_LOG,
 } picoclaw_action_t;
 
@@ -113,12 +122,20 @@ static lv_obj_t *picoclaw_gateway_label;
 static lv_obj_t *picoclaw_network_label;
 static lv_obj_t *picoclaw_url_label;
 static lv_obj_t *picoclaw_config_label;
+static lv_obj_t *picoclaw_weixin_label;
 static lv_obj_t *picoclaw_output_label;
 static lv_obj_t *picoclaw_install_btn;
 static lv_obj_t *picoclaw_save_btn;
 static lv_obj_t *picoclaw_gateway_start_btn;
 static lv_obj_t *picoclaw_gateway_stop_btn;
+static lv_obj_t *picoclaw_weixin_auth_btn;
+static lv_obj_t *picoclaw_weixin_status_btn;
+static lv_obj_t *picoclaw_weixin_cancel_btn;
 static lv_obj_t *picoclaw_log_btn;
+static lv_obj_t *picoclaw_weixin_qr_overlay;
+static lv_obj_t *picoclaw_weixin_qr_canvas;
+static lv_obj_t *picoclaw_weixin_qr_status_label;
+static uint16_t *picoclaw_weixin_qr_buf;
 static ui_input_inline_t *picoclaw_inline_input;
 
 static picoclaw_view_t picoclaw_view = PICOCLAW_VIEW_CHAT;
@@ -130,14 +147,21 @@ static int picoclaw_installed;
 static int picoclaw_gateway_running;
 static int picoclaw_config_ready;
 static int picoclaw_network_ready;
+static int picoclaw_weixin_ready;
+static int picoclaw_weixin_auth_running;
+static int picoclaw_weixin_qr_dirty;
 static int picoclaw_chat_dirty;
 static int picoclaw_chat_count;
+static uint32_t picoclaw_weixin_last_poll;
 static char picoclaw_status_text[160] = "Ready";
 static char picoclaw_output_text[PICOCLAW_OUTPUT_MAX] = "";
 static char picoclaw_version_text[256] = "not installed";
 static char picoclaw_gateway_text[80] = "stopped";
 static char picoclaw_network_text[80] = "unknown";
 static char picoclaw_config_text[80] = "unknown";
+static char picoclaw_weixin_text[80] = "missing";
+static char picoclaw_weixin_auth_text[80] = "stopped";
+static char picoclaw_weixin_qr_text[PICOCLAW_QR_TEXT_MAX] = "";
 static char picoclaw_url_text[160] = "http://<board-ip>:18790";
 static picoclaw_chat_message_t picoclaw_chat[PICOCLAW_CHAT_MAX];
 
@@ -295,6 +319,7 @@ static const char *picoclaw_find_value(const char *text, const char *key,
 static void picoclaw_apply_status_locked(const char *output)
 {
     char value[256];
+    char qr[PICOCLAW_QR_TEXT_MAX];
 
     if(!output) {
         return;
@@ -320,6 +345,23 @@ static void picoclaw_apply_status_locked(const char *output)
         picoclaw_config_ready = strcmp(value, "ready") == 0;
         snprintf(picoclaw_config_text, sizeof(picoclaw_config_text), "%s",
                  value);
+    }
+    if(picoclaw_find_value(output, "weixin", value, sizeof(value))) {
+        picoclaw_weixin_ready = strcmp(value, "ready") == 0;
+        snprintf(picoclaw_weixin_text, sizeof(picoclaw_weixin_text), "%s",
+                 value);
+    }
+    if(picoclaw_find_value(output, "weixin_auth", value, sizeof(value))) {
+        picoclaw_weixin_auth_running = strcmp(value, "running") == 0;
+        snprintf(picoclaw_weixin_auth_text,
+                 sizeof(picoclaw_weixin_auth_text), "%s", value);
+    }
+    if(picoclaw_find_value(output, "weixin_qr", qr, sizeof(qr)) && qr[0]) {
+        if(strcmp(picoclaw_weixin_qr_text, qr) != 0) {
+            snprintf(picoclaw_weixin_qr_text,
+                     sizeof(picoclaw_weixin_qr_text), "%s", qr);
+            picoclaw_weixin_qr_dirty = 1;
+        }
     }
     if(picoclaw_find_value(output, "url", value, sizeof(value))) {
         snprintf(picoclaw_url_text, sizeof(picoclaw_url_text), "%s", value);
@@ -418,6 +460,15 @@ static int picoclaw_build_command(picoclaw_request_t *req, char *cmd,
     case PICOCLAW_ACTION_GATEWAY_STOP:
         snprintf(cmd, cmd_len, "%s gateway-stop", PICOCLAW_SCRIPT);
         return 0;
+    case PICOCLAW_ACTION_WEIXIN_AUTH:
+        snprintf(cmd, cmd_len, "%s weixin-auth", PICOCLAW_SCRIPT);
+        return 0;
+    case PICOCLAW_ACTION_WEIXIN_STATUS:
+        snprintf(cmd, cmd_len, "%s weixin-status", PICOCLAW_SCRIPT);
+        return 0;
+    case PICOCLAW_ACTION_WEIXIN_CANCEL:
+        snprintf(cmd, cmd_len, "%s weixin-cancel", PICOCLAW_SCRIPT);
+        return 0;
     case PICOCLAW_ACTION_LOG:
         snprintf(cmd, cmd_len, "%s log", PICOCLAW_SCRIPT);
         return 0;
@@ -469,6 +520,15 @@ static void picoclaw_status_for_action(picoclaw_action_t action, char *out,
         break;
     case PICOCLAW_ACTION_GATEWAY_STOP:
         text = "Stopping gateway...";
+        break;
+    case PICOCLAW_ACTION_WEIXIN_AUTH:
+        text = "Starting Weixin login...";
+        break;
+    case PICOCLAW_ACTION_WEIXIN_STATUS:
+        text = "Checking Weixin login...";
+        break;
+    case PICOCLAW_ACTION_WEIXIN_CANCEL:
+        text = "Cancelling Weixin login...";
         break;
     case PICOCLAW_ACTION_LOG:
         text = "Reading log...";
@@ -584,6 +644,7 @@ static void *picoclaw_worker(void *arg)
     pthread_mutex_lock(&picoclaw_lock);
     picoclaw_busy = 0;
     picoclaw_last_rc = rc;
+    picoclaw_apply_status_locked(output);
     if(req->action == PICOCLAW_ACTION_ASK) {
         picoclaw_clean_reply(output, rc, reply, sizeof(reply));
         picoclaw_update_chat_locked(req->chat_index, reply, 0);
@@ -592,6 +653,22 @@ static void *picoclaw_worker(void *arg)
     } else if(req->action == PICOCLAW_ACTION_LOG) {
         snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
                  "Log updated");
+    } else if(req->action == PICOCLAW_ACTION_WEIXIN_AUTH ||
+              req->action == PICOCLAW_ACTION_WEIXIN_STATUS ||
+              req->action == PICOCLAW_ACTION_WEIXIN_CANCEL) {
+        if(rc == 0 && picoclaw_weixin_ready) {
+            snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
+                     "Weixin token ready");
+        } else if(rc == 0 && picoclaw_weixin_auth_running) {
+            snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
+                     "Weixin waiting for scan");
+        } else if(rc == 0) {
+            snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
+                     "Weixin not linked");
+        } else {
+            snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
+                     "%s rc=%d", "Weixin action failed", rc);
+        }
     } else if(rc == 0) {
         snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
                  "Done");
@@ -606,7 +683,6 @@ static void *picoclaw_worker(void *arg)
     }
     snprintf(picoclaw_output_text, sizeof(picoclaw_output_text), "%s",
              output[0] ? output : status);
-    picoclaw_apply_status_locked(output);
     pthread_mutex_unlock(&picoclaw_lock);
 
     free(req);
@@ -681,6 +757,9 @@ static void picoclaw_update_buttons(int busy)
         picoclaw_settings_btn,
         picoclaw_gateway_start_btn,
         picoclaw_gateway_stop_btn,
+        picoclaw_weixin_auth_btn,
+        picoclaw_weixin_status_btn,
+        picoclaw_weixin_cancel_btn,
         picoclaw_log_btn,
     };
     size_t i;
@@ -702,6 +781,12 @@ static void picoclaw_update_buttons(int busy)
         if(picoclaw_gateway_start_btn) {
             lv_obj_add_state(picoclaw_gateway_start_btn, LV_STATE_DISABLED);
         }
+        if(picoclaw_weixin_auth_btn) {
+            lv_obj_add_state(picoclaw_weixin_auth_btn, LV_STATE_DISABLED);
+        }
+        if(picoclaw_weixin_status_btn) {
+            lv_obj_add_state(picoclaw_weixin_status_btn, LV_STATE_DISABLED);
+        }
     }
     if(picoclaw_gateway_running) {
         if(picoclaw_gateway_start_btn) {
@@ -710,6 +795,224 @@ static void picoclaw_update_buttons(int busy)
     } else if(!busy && picoclaw_gateway_stop_btn) {
         lv_obj_add_state(picoclaw_gateway_stop_btn, LV_STATE_DISABLED);
     }
+    if(!picoclaw_weixin_auth_running && !busy && picoclaw_weixin_cancel_btn) {
+        lv_obj_add_state(picoclaw_weixin_cancel_btn, LV_STATE_DISABLED);
+    }
+}
+
+static uint16_t picoclaw_rgb565(uint32_t rgb)
+{
+    uint8_t r = (uint8_t)((rgb >> 16U) & 0xffU);
+    uint8_t g = (uint8_t)((rgb >> 8U) & 0xffU);
+    uint8_t b = (uint8_t)(rgb & 0xffU);
+
+    return (uint16_t)(((uint16_t)(r & 0xf8U) << 8U) |
+                      ((uint16_t)(g & 0xfcU) << 3U) |
+                      ((uint16_t)b >> 3U));
+}
+
+static void picoclaw_qr_render_into(lv_obj_t *canvas, uint16_t *buf,
+                                    const char *url, int px)
+{
+    uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
+    uint8_t tmp[qrcodegen_BUFFER_LEN_MAX];
+    uint16_t black = picoclaw_rgb565(0x05070A);
+    uint16_t white = picoclaw_rgb565(0xF8FAFC);
+    uint16_t empty = picoclaw_rgb565(0x17212B);
+    int qr_size = 0;
+    int scale = 1;
+    int image_px;
+    int offset;
+    bool ok = false;
+
+    if(!canvas || !lv_obj_is_valid(canvas) || !buf) {
+        return;
+    }
+    if(px < 64) {
+        px = 64;
+    }
+    if(px > PICOCLAW_WEIXIN_QR_MAX) {
+        px = PICOCLAW_WEIXIN_QR_MAX;
+    }
+
+    for(int i = 0; i < px * px; i++) {
+        buf[i] = empty;
+    }
+    if(url && url[0]) {
+        ok = qrcodegen_encodeText(url, tmp, qr, qrcodegen_Ecc_MEDIUM,
+                                  qrcodegen_VERSION_MIN,
+                                  qrcodegen_VERSION_MAX,
+                                  qrcodegen_Mask_AUTO, true);
+    }
+    if(ok) {
+        qr_size = qrcodegen_getSize(qr);
+        if(qr_size > 0) {
+            scale = px / (qr_size + PICOCLAW_WEIXIN_QR_BORDER * 2);
+            if(scale < 1) {
+                scale = 1;
+            }
+            image_px = (qr_size + PICOCLAW_WEIXIN_QR_BORDER * 2) * scale;
+            offset = (px - image_px) / 2;
+            if(offset < 0) {
+                offset = 0;
+            }
+            for(int y = 0; y < px; y++) {
+                for(int x = 0; x < px; x++) {
+                    int mx = (x - offset) / scale - PICOCLAW_WEIXIN_QR_BORDER;
+                    int my = (y - offset) / scale - PICOCLAW_WEIXIN_QR_BORDER;
+                    bool module = false;
+
+                    if(x >= offset && y >= offset && x < offset + image_px &&
+                       y < offset + image_px && mx >= 0 && my >= 0 &&
+                       mx < qr_size && my < qr_size) {
+                        module = qrcodegen_getModule(qr, mx, my);
+                    }
+                    buf[y * px + x] = module ? black : white;
+                }
+            }
+        }
+    }
+    lv_canvas_set_buffer(canvas, buf, px, px, LV_COLOR_FORMAT_RGB565);
+    lv_obj_invalidate(canvas);
+}
+
+static void picoclaw_weixin_qr_close(void)
+{
+    if(picoclaw_weixin_qr_overlay &&
+       lv_obj_is_valid(picoclaw_weixin_qr_overlay)) {
+        lv_obj_delete(picoclaw_weixin_qr_overlay);
+    }
+    picoclaw_weixin_qr_overlay = NULL;
+    picoclaw_weixin_qr_canvas = NULL;
+    picoclaw_weixin_qr_status_label = NULL;
+    free(picoclaw_weixin_qr_buf);
+    picoclaw_weixin_qr_buf = NULL;
+}
+
+static void picoclaw_weixin_qr_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_weixin_qr_close();
+}
+
+static void picoclaw_weixin_qr_cancel_event_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_weixin_qr_close();
+    picoclaw_start_action(PICOCLAW_ACTION_WEIXIN_CANCEL, NULL);
+}
+
+static void picoclaw_weixin_qr_show(const char *url)
+{
+    lv_obj_t *card;
+    lv_obj_t *title;
+    lv_obj_t *hint;
+    lv_obj_t *button;
+    lv_obj_t *label;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int qr_px;
+    int card_w;
+    int card_h;
+    int qr_btn_w;
+    int qr_btn_gap;
+    int qr_btn_x;
+
+    if(!url || !url[0]) {
+        return;
+    }
+
+    picoclaw_weixin_qr_close();
+
+    qr_px = screen_w - 120;
+    if(qr_px > screen_h - 260) {
+        qr_px = screen_h - 260;
+    }
+    if(qr_px > PICOCLAW_WEIXIN_QR_MAX) {
+        qr_px = PICOCLAW_WEIXIN_QR_MAX;
+    }
+    if(qr_px < 160) {
+        qr_px = 160;
+    }
+    card_w = qr_px + 72;
+    card_h = qr_px + 212;
+    if(card_w > screen_w - 48) {
+        card_w = screen_w - 48;
+    }
+    if(card_h > screen_h - 48) {
+        card_h = screen_h - 48;
+    }
+    qr_btn_w = card_w < 300 ? 106 : 130;
+    qr_btn_gap = card_w < 300 ? 8 : 28;
+    qr_btn_x = (card_w - qr_btn_w * 2 - qr_btn_gap) / 2;
+    if(qr_btn_x < 12) {
+        qr_btn_x = 12;
+    }
+
+    picoclaw_weixin_qr_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(picoclaw_weixin_qr_overlay);
+    lv_obj_set_style_bg_color(picoclaw_weixin_qr_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(picoclaw_weixin_qr_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(picoclaw_weixin_qr_overlay, 0, 0);
+    lv_obj_set_style_pad_all(picoclaw_weixin_qr_overlay, 0, 0);
+    lv_obj_add_flag(picoclaw_weixin_qr_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(picoclaw_weixin_qr_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    card = ui_panel(picoclaw_weixin_qr_overlay, 0, 0, card_w, card_h);
+    lv_obj_align(card, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    title = ui_label(card, "Weixin login", &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_width(title, card_w - 48);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    picoclaw_weixin_qr_canvas = lv_canvas_create(card);
+    picoclaw_weixin_qr_buf = calloc((size_t)qr_px * (size_t)qr_px,
+                                    sizeof(uint16_t));
+    if(picoclaw_weixin_qr_buf) {
+        picoclaw_qr_render_into(picoclaw_weixin_qr_canvas,
+                                picoclaw_weixin_qr_buf, url, qr_px);
+        lv_obj_align(picoclaw_weixin_qr_canvas, LV_ALIGN_TOP_MID, 0, 56);
+    }
+
+    hint = ui_label(card, "Scan with WeChat", &lv_font_montserrat_16,
+                    0xCBD5E1);
+    lv_obj_set_width(hint, card_w - 48);
+    lv_obj_set_pos(hint, 24, qr_px + 74);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+
+    picoclaw_weixin_qr_status_label =
+        ui_label(card, "Weixin waiting for scan", &lv_font_montserrat_14,
+                 0x94A3B8);
+    lv_obj_set_width(picoclaw_weixin_qr_status_label, card_w - 48);
+    lv_obj_set_pos(picoclaw_weixin_qr_status_label, 24, qr_px + 102);
+    lv_obj_set_style_text_align(picoclaw_weixin_qr_status_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(picoclaw_weixin_qr_status_label,
+                           LV_LABEL_LONG_DOT);
+
+    button = ui_command_button(card, 0, 0, qr_btn_w, "Cancel", 0xEF4D5A);
+    lv_obj_set_pos(button, qr_btn_x, card_h - 62);
+    lv_obj_add_event_cb(button, picoclaw_weixin_qr_cancel_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    label = lv_obj_get_child(button, 0);
+    if(label) {
+        lv_obj_set_style_text_font(label,
+                                   ui_font_for_text("Cancel",
+                                                    &lv_font_montserrat_18),
+                                   0);
+    }
+
+    button = ui_command_button(card, 0, 0, qr_btn_w, "Close", 0x475569);
+    lv_obj_set_pos(button, qr_btn_x + qr_btn_w + qr_btn_gap, card_h - 62);
+    lv_obj_add_event_cb(button, picoclaw_weixin_qr_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 }
 
 static void picoclaw_chat_add_empty(void)
@@ -952,12 +1255,16 @@ static void picoclaw_update_status_labels(int busy, int rc)
     char gateway[80];
     char network[80];
     char config[80];
+    char weixin[80];
+    char weixin_auth[80];
     char url[160];
     char model_name[128];
     char model_id[256];
     char api_base[256];
     char output[PICOCLAW_OUTPUT_MAX];
     char line[360];
+    int weixin_ready;
+    int weixin_auth_running;
 
     pthread_mutex_lock(&picoclaw_lock);
     snprintf(status, sizeof(status), "%s", picoclaw_status_text);
@@ -965,8 +1272,13 @@ static void picoclaw_update_status_labels(int busy, int rc)
     snprintf(gateway, sizeof(gateway), "%s", picoclaw_gateway_text);
     snprintf(network, sizeof(network), "%s", picoclaw_network_text);
     snprintf(config, sizeof(config), "%s", picoclaw_config_text);
+    snprintf(weixin, sizeof(weixin), "%s", picoclaw_weixin_text);
+    snprintf(weixin_auth, sizeof(weixin_auth), "%s",
+             picoclaw_weixin_auth_text);
     snprintf(url, sizeof(url), "%s", picoclaw_url_text);
     snprintf(output, sizeof(output), "%s", picoclaw_output_text);
+    weixin_ready = picoclaw_weixin_ready;
+    weixin_auth_running = picoclaw_weixin_auth_running;
     pthread_mutex_unlock(&picoclaw_lock);
 
     picoclaw_effective_model(model_name, sizeof(model_name),
@@ -1016,6 +1328,29 @@ static void picoclaw_update_status_labels(int busy, int rc)
     if(picoclaw_url_label) {
         lv_label_set_text(picoclaw_url_label, url);
     }
+    if(picoclaw_weixin_label) {
+        snprintf(line, sizeof(line), "%s / %s", ui_tr(weixin),
+                 ui_tr(weixin_auth));
+        lv_label_set_text(picoclaw_weixin_label, line);
+        lv_obj_set_style_text_color(picoclaw_weixin_label,
+                                    lv_color_hex(weixin_ready ?
+                                                 0x25C281 :
+                                                 (weixin_auth_running ?
+                                                  0xF5A524 : 0x9AA4AF)), 0);
+    }
+    if(picoclaw_weixin_qr_status_label &&
+       lv_obj_is_valid(picoclaw_weixin_qr_status_label)) {
+        const char *text = weixin_ready ? "Weixin token ready" :
+                           (weixin_auth_running ?
+                            "Weixin waiting for scan" : "Weixin not linked");
+
+        lv_label_set_text(picoclaw_weixin_qr_status_label, ui_tr(text));
+        lv_obj_set_style_text_color(picoclaw_weixin_qr_status_label,
+                                    lv_color_hex(weixin_ready ?
+                                                 0x25C281 :
+                                                 (weixin_auth_running ?
+                                                  0xF5A524 : 0x94A3B8)), 0);
+    }
     if(picoclaw_output_label) {
         lv_label_set_text(picoclaw_output_label,
                           output[0] ? output : ui_tr("No output yet"));
@@ -1028,20 +1363,46 @@ static void picoclaw_update_ui(void)
 {
     int busy;
     int rc;
+    int qr_dirty;
+    char qr_text[PICOCLAW_QR_TEXT_MAX];
 
     pthread_mutex_lock(&picoclaw_lock);
     busy = picoclaw_busy;
     rc = picoclaw_last_rc;
+    qr_dirty = picoclaw_weixin_qr_dirty;
+    if(qr_dirty) {
+        snprintf(qr_text, sizeof(qr_text), "%s", picoclaw_weixin_qr_text);
+        picoclaw_weixin_qr_dirty = 0;
+    } else {
+        qr_text[0] = '\0';
+    }
     pthread_mutex_unlock(&picoclaw_lock);
 
     picoclaw_update_status_labels(busy, rc);
+    if(qr_dirty && qr_text[0]) {
+        picoclaw_weixin_qr_show(qr_text);
+    }
     picoclaw_chat_rebuild(0);
 }
 
 static void picoclaw_timer_cb(lv_timer_t *timer)
 {
+    uint32_t now;
+    int should_poll = 0;
+
     (void)timer;
     picoclaw_update_ui();
+    now = lv_tick_get();
+    pthread_mutex_lock(&picoclaw_lock);
+    if(picoclaw_weixin_auth_running && !picoclaw_busy && picoclaw_installed &&
+       now - picoclaw_weixin_last_poll >= PICOCLAW_WEIXIN_POLL_MS) {
+        picoclaw_weixin_last_poll = now;
+        should_poll = 1;
+    }
+    pthread_mutex_unlock(&picoclaw_lock);
+    if(should_poll) {
+        picoclaw_start_action(PICOCLAW_ACTION_WEIXIN_STATUS, NULL);
+    }
 }
 
 static void picoclaw_send_submit_cb(const char *text, void *user_data)
@@ -1558,6 +1919,52 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
         }
     }
 
+    section = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 150 : 226);
+    lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
+    title = ui_label(section, "Chat apps", &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_pos(title, 0, 0);
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    subtitle = ui_label(section,
+                        "Scan WeChat QR code, then start the gateway.",
+                        &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_pos(subtitle, 0, 34);
+    lv_obj_set_width(subtitle, inner_w);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+    picoclaw_weixin_label = ui_label(section, "missing / stopped",
+                                     &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(picoclaw_weixin_label, 0, 62);
+    lv_obj_set_width(picoclaw_weixin_label, inner_w);
+    lv_label_set_long_mode(picoclaw_weixin_label, LV_LABEL_LONG_DOT);
+    btn_w = ui_is_landscape() ? (inner_w - 24) / 3 :
+            (inner_w - 12) / 2;
+    if(btn_w < 112) {
+        btn_w = inner_w;
+    }
+    picoclaw_weixin_auth_btn =
+        picoclaw_small_button(section, 0, 96, btn_w, "Weixin login",
+                              0x22C55E, picoclaw_action_event_cb,
+                              (void *)(intptr_t)PICOCLAW_ACTION_WEIXIN_AUTH);
+    if(btn_w * 2 + 12 <= inner_w) {
+        picoclaw_weixin_status_btn =
+            picoclaw_small_button(section, btn_w + 12, 96, btn_w,
+                                  "Weixin status", 0x38BDF8,
+                                  picoclaw_action_event_cb,
+                                  (void *)(intptr_t)PICOCLAW_ACTION_WEIXIN_STATUS);
+        if(ui_is_landscape() && btn_w * 3 + 24 <= inner_w) {
+            picoclaw_weixin_cancel_btn =
+                picoclaw_small_button(section, (btn_w + 12) * 2, 96, btn_w,
+                                      "Cancel", 0xEF4D5A,
+                                      picoclaw_action_event_cb,
+                                      (void *)(intptr_t)PICOCLAW_ACTION_WEIXIN_CANCEL);
+        } else {
+            picoclaw_weixin_cancel_btn =
+                picoclaw_small_button(section, 0, 160, btn_w, "Cancel",
+                                      0xEF4D5A, picoclaw_action_event_cb,
+                                      (void *)(intptr_t)PICOCLAW_ACTION_WEIXIN_CANCEL);
+        }
+    }
+
     section = ui_panel(body, 0, 0, content_w, 242);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x0D1117), 0);
     title = ui_label(section, "Status", &lv_font_montserrat_22, 0xF2F5F8);
@@ -1603,6 +2010,11 @@ void ui_picoclaw_create(lv_obj_t *scr)
 
 int ui_picoclaw_handle_back(void)
 {
+    if(picoclaw_weixin_qr_overlay &&
+       lv_obj_is_valid(picoclaw_weixin_qr_overlay)) {
+        picoclaw_weixin_qr_close();
+        return 1;
+    }
     if(picoclaw_view == PICOCLAW_VIEW_SETTINGS) {
         picoclaw_view = PICOCLAW_VIEW_CHAT;
         app_refresh_current_page();
@@ -1621,6 +2033,7 @@ void ui_picoclaw_cleanup(void)
         ui_input_inline_destroy(picoclaw_inline_input);
         picoclaw_inline_input = NULL;
     }
+    picoclaw_weixin_qr_close();
     picoclaw_body = NULL;
     picoclaw_status_panel = NULL;
     picoclaw_chat_scroll = NULL;
@@ -1636,11 +2049,15 @@ void ui_picoclaw_cleanup(void)
     picoclaw_network_label = NULL;
     picoclaw_url_label = NULL;
     picoclaw_config_label = NULL;
+    picoclaw_weixin_label = NULL;
     picoclaw_output_label = NULL;
     picoclaw_install_btn = NULL;
     picoclaw_save_btn = NULL;
     picoclaw_gateway_start_btn = NULL;
     picoclaw_gateway_stop_btn = NULL;
+    picoclaw_weixin_auth_btn = NULL;
+    picoclaw_weixin_status_btn = NULL;
+    picoclaw_weixin_cancel_btn = NULL;
     picoclaw_log_btn = NULL;
     picoclaw_keyboard_reserved_h = 0;
 }

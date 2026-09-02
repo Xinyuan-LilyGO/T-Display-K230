@@ -7,10 +7,13 @@ PICO_HOME="/root/picoclaw"
 PICO_BIN_DIR="$PICO_HOME/bin"
 PICO_BIN="$PICO_BIN_DIR/picoclaw"
 PICO_CONFIG="$PICO_HOME/config.json"
+PICO_SECURITY="$PICO_HOME/.security.yml"
 PICO_WORKSPACE="$PICO_HOME/workspace"
 PICO_LOG="/tmp/k230_picoclaw_ui.log"
 PICO_GATEWAY_LOG="/tmp/k230_picoclaw_gateway.log"
 PICO_GATEWAY_PID="/tmp/k230_picoclaw_gateway.pid"
+PICO_WEIXIN_AUTH_LOG="/tmp/k230_picoclaw_weixin_auth.log"
+PICO_WEIXIN_AUTH_PID="/tmp/k230_picoclaw_weixin_auth.pid"
 PICO_RELEASE_TAG="${PICO_RELEASE_TAG:-v0.3.1}"
 PICO_RELEASE_URL="${PICO_RELEASE_URL:-https://github.com/sipeed/picoclaw/releases/download/${PICO_RELEASE_TAG}/picoclaw_Linux_riscv64.tar.gz}"
 PICO_GATEWAY_PORT="${PICO_GATEWAY_PORT:-18790}"
@@ -54,8 +57,21 @@ gateway_pid()
             printf '%s\n' "$pid"
             return 0
         fi
+        rm -f "$PICO_GATEWAY_PID"
     fi
-    pidof picoclaw 2>/dev/null | awk '{print $1}'
+    ps 2>/dev/null | awk '$0 ~ /\/picoclaw([[:space:]]|$)/ && $0 ~ /[[:space:]]gateway([[:space:]]|$)/ {print $1; exit}'
+}
+
+weixin_auth_pid()
+{
+    if [ -s "$PICO_WEIXIN_AUTH_PID" ]; then
+        pid="$(cat "$PICO_WEIXIN_AUTH_PID" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+    fi
+    ps 2>/dev/null | awk '$0 ~ /\/picoclaw([[:space:]]|$)/ && $0 ~ /[[:space:]]auth[[:space:]]/ && $0 ~ /[[:space:]]weixin([[:space:]]|$)/ {print $1; exit}'
 }
 
 json_escape()
@@ -64,6 +80,84 @@ json_escape()
         -e 's/\\/\\\\/g' \
         -e 's/"/\\"/g' \
         -e 's/	/\\t/g'
+}
+
+json_string_value()
+{
+    key="$1"
+    file="$2"
+    [ -s "$file" ] || return 1
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -n 1
+}
+
+weixin_security_has_token()
+{
+    [ -s "$PICO_SECURITY" ] || return 1
+    awk '
+        /^[^[:space:]].*:/{section=$1}
+        /weixin:/{in_weixin=1}
+        in_weixin && /token:/{found=1; exit}
+        END{exit found ? 0 : 1}
+    ' "$PICO_SECURITY"
+}
+
+weixin_config_state()
+{
+    if grep -q '"weixin"' "$PICO_CONFIG" 2>/dev/null &&
+       weixin_security_has_token; then
+        printf 'ready\n'
+    else
+        printf 'missing\n'
+    fi
+}
+
+weixin_auth_state()
+{
+    pid="$(weixin_auth_pid || true)"
+    if [ -n "${pid:-}" ]; then
+        printf 'running\n'
+        return
+    fi
+    if grep -qi 'login failed\|qrcode expired\|expired' "$PICO_WEIXIN_AUTH_LOG" 2>/dev/null; then
+        printf 'failed\n'
+        return
+    fi
+    printf 'stopped\n'
+}
+
+weixin_qr_link()
+{
+    if [ "$(weixin_config_state)" = "ready" ]; then
+        return 0
+    fi
+    if [ -z "$(weixin_auth_pid || true)" ]; then
+        return 0
+    fi
+    sed -n 's/^QR Code Link:[[:space:]]*//p' "$PICO_WEIXIN_AUTH_LOG" 2>/dev/null | tail -n 1
+}
+
+weixin_channel_block()
+{
+    if [ "$(weixin_config_state)" != "ready" ]; then
+        return 0
+    fi
+    base_url="$(json_string_value base_url "$PICO_CONFIG" || true)"
+    proxy="$(json_string_value proxy "$PICO_CONFIG" || true)"
+    [ -n "$base_url" ] || base_url="https://ilinkai.weixin.qq.com/"
+    base_url="$(json_escape "$base_url")"
+    proxy="$(json_escape "$proxy")"
+    cat <<EOF
+
+    "weixin": {
+      "enabled": true,
+      "type": "weixin",
+      "allow_from": [],
+      "settings": {
+        "base_url": "$base_url",
+        "proxy": "$proxy"
+      }
+    }
+EOF
 }
 
 status_cmd()
@@ -117,8 +211,16 @@ status_cmd()
         config="missing"
     fi
 
-    printf 'installed=%s\nversion=%s\ngateway=%s\npid=%s\nnetwork=%s\nip=%s\nconfig=%s\nurl=http://%s:%s\n' \
-        "$installed" "$version" "$gateway" "$pid" "$network" "$ipaddr" "$config" "$ipaddr" "$PICO_GATEWAY_PORT"
+    health="missing"
+    if [ "$gateway" = "running" ]; then
+        if wget -q -T 2 -O - "http://127.0.0.1:${PICO_GATEWAY_PORT}/health" >/dev/null 2>&1; then
+            health="ready"
+        fi
+    fi
+
+    printf 'installed=%s\nversion=%s\ngateway=%s\npid=%s\nhealth=%s\nnetwork=%s\nip=%s\nconfig=%s\nweixin=%s\nweixin_auth=%s\nweixin_qr=%s\nurl=http://%s:%s\n' \
+        "$installed" "$version" "$gateway" "$pid" "$health" "$network" "$ipaddr" "$config" \
+        "$(weixin_config_state)" "$(weixin_auth_state)" "$(weixin_qr_link)" "$ipaddr" "$PICO_GATEWAY_PORT"
 }
 
 download_file()
@@ -200,6 +302,7 @@ save_config_cmd()
     else
         api_key_line=""
     fi
+    weixin_block="$(weixin_channel_block)"
 
     cat >"$PICO_CONFIG" <<EOF
 {
@@ -228,21 +331,28 @@ save_config_cmd()
       "api_base": "$api_base"
     }
   ],
-  "channel_list": {
-    "maixcam": {
-      "enabled": true,
-      "type": "maixcam",
-      "allow_from": [],
-      "settings": {
-        "host": "0.0.0.0",
-        "port": $PICO_GATEWAY_PORT
-      }
-    }
+  "channel_list": {$weixin_block
   }
 }
 EOF
     log "config saved model_name=$model_name model=$model_id api_base=$api_base"
     printf 'OK: config saved\n'
+}
+
+migrate_legacy_config_if_needed()
+{
+    [ -s "$PICO_CONFIG" ] || return 0
+    if ! grep -q '"maixcam"' "$PICO_CONFIG" 2>/dev/null; then
+        return 0
+    fi
+    model_name_raw="$(json_string_value model_name "$PICO_CONFIG" || true)"
+    model_id_raw="$(json_string_value model "$PICO_CONFIG" || true)"
+    api_base_raw="$(json_string_value api_base "$PICO_CONFIG" || true)"
+    [ -n "$model_name_raw" ] || model_name_raw="k230-agent"
+    [ -n "$model_id_raw" ] || model_id_raw="openai/gpt-4o-mini"
+    [ -n "$api_base_raw" ] || api_base_raw="https://api.openai.com/v1"
+    log "migrate legacy maixcam channel out of default gateway config"
+    save_config_cmd "$model_name_raw" "$model_id_raw" "$api_base_raw" "" >/dev/null
 }
 
 ask_cmd()
@@ -253,8 +363,7 @@ ask_cmd()
         return 2
     fi
     if [ ! -s "$PICO_CONFIG" ]; then
-        printf 'ERROR: config missing\n'
-        return 3
+        save_config_cmd >/dev/null
     fi
     if ! have_network; then
         printf 'ERROR: no network connection\n'
@@ -286,9 +395,9 @@ gateway_start_cmd()
         return 2
     fi
     if [ ! -s "$PICO_CONFIG" ]; then
-        printf 'ERROR: config missing\n'
-        return 3
+        save_config_cmd >/dev/null
     fi
+    migrate_legacy_config_if_needed
     pid="$(gateway_pid || true)"
     if [ -n "${pid:-}" ]; then
         printf 'OK: gateway already running pid=%s\n' "$pid"
@@ -316,9 +425,76 @@ gateway_stop_cmd()
     "$0" status
 }
 
+weixin_status_cmd()
+{
+    "$0" status
+    if [ -s "$PICO_WEIXIN_AUTH_LOG" ]; then
+        printf '\n--- weixin-auth log ---\n'
+        tail -40 "$PICO_WEIXIN_AUTH_LOG" 2>/dev/null || true
+    fi
+}
+
+weixin_auth_cmd()
+{
+    ensure_dirs
+    if [ ! -x "$PICO_BIN" ]; then
+        printf 'ERROR: picoclaw is not installed\n'
+        return 2
+    fi
+    if [ ! -s "$PICO_CONFIG" ]; then
+        save_config_cmd >/dev/null
+    fi
+    if ! have_network; then
+        printf 'ERROR: no network connection\n'
+        return 4
+    fi
+
+    pid="$(weixin_auth_pid || true)"
+    if [ -n "${pid:-}" ]; then
+        weixin_status_cmd
+        return 0
+    fi
+
+    : >"$PICO_WEIXIN_AUTH_LOG"
+    log "weixin auth start"
+    TZ="$PICO_TZ" SSL_CERT_FILE="$PICO_CA_FILE" PICOCLAW_HOME="$PICO_HOME" PICOCLAW_CONFIG="$PICO_CONFIG" \
+        nohup "$PICO_BIN" --no-color auth weixin --timeout 300 \
+        >"$PICO_WEIXIN_AUTH_LOG" 2>&1 &
+    echo "$!" >"$PICO_WEIXIN_AUTH_PID"
+
+    i=0
+    while [ "$i" -lt 15 ]; do
+        if [ -n "$(weixin_qr_link)" ] || [ "$(weixin_config_state)" = "ready" ]; then
+            break
+        fi
+        pid="$(weixin_auth_pid || true)"
+        [ -n "${pid:-}" ] || break
+        sleep 1
+        i=$((i + 1))
+    done
+    weixin_status_cmd
+}
+
+weixin_cancel_cmd()
+{
+    pid="$(weixin_auth_pid || true)"
+    if [ -n "${pid:-}" ]; then
+        kill "$pid" >/dev/null 2>&1 || true
+        sleep 1
+        kill -9 "$pid" >/dev/null 2>&1 || true
+        rm -f "$PICO_WEIXIN_AUTH_PID"
+        : >"$PICO_WEIXIN_AUTH_LOG"
+        log "weixin auth cancelled pid=$pid"
+    fi
+    if [ "$(weixin_config_state)" != "ready" ]; then
+        : >"$PICO_WEIXIN_AUTH_LOG"
+    fi
+    weixin_status_cmd
+}
+
 log_cmd()
 {
-    tail -80 "$PICO_LOG" "$PICO_GATEWAY_LOG" 2>/dev/null || true
+    tail -80 "$PICO_LOG" "$PICO_GATEWAY_LOG" "$PICO_WEIXIN_AUTH_LOG" 2>/dev/null || true
 }
 
 case "${1:-status}" in
@@ -342,11 +518,20 @@ case "${1:-status}" in
     gateway-stop)
         gateway_stop_cmd
         ;;
+    weixin-auth)
+        weixin_auth_cmd
+        ;;
+    weixin-status)
+        weixin_status_cmd
+        ;;
+    weixin-cancel)
+        weixin_cancel_cmd
+        ;;
     log)
         log_cmd
         ;;
     *)
-        printf 'Usage: %s {status|install|save-config MODEL_NAME MODEL_ID API_BASE API_KEY|ask PROMPT|gateway-start|gateway-stop|log}\n' "$0"
+        printf 'Usage: %s {status|install|save-config MODEL_NAME MODEL_ID API_BASE API_KEY|ask PROMPT|gateway-start|gateway-stop|weixin-auth|weixin-status|weixin-cancel|log}\n' "$0"
         exit 64
         ;;
 esac
