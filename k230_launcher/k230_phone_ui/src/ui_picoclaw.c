@@ -1416,65 +1416,76 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
     int body_x = ui_page_panel_x();
     int body_w = ui_page_panel_width();
     int content_w;
+    int inner_w;
     int selected = picoclaw_current_preset_index();
     int preset_count =
         (int)(sizeof(picoclaw_presets) / sizeof(picoclaw_presets[0]));
-    int y = 0;
     int i;
     int card_gap = 10;
     int btn_w;
+    int section_h;
 
     ui_create_header(scr, "PicoClaw settings");
     body = ui_scroll_panel(scr, body_x, top_y, body_w, ui_body_height(top_y));
     lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
     lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(body, 16, 0);
     content_w = ui_safe_content_width(body, body_w - 32);
+    inner_w = content_w - 32;
+    if(inner_w < 240) {
+        inner_w = content_w;
+    }
 
-    section = ui_panel(body, 0, y, content_w, 116);
+    section = ui_panel(body, 0, 0, content_w, 116);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x0F172A), 0);
     title = ui_label(section, "PicoClaw settings", &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
-    lv_obj_set_width(title, content_w - 32);
+    lv_obj_set_width(title, inner_w);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     subtitle = ui_label(section,
                         "Choose a preset model, save the API key, or run gateway tools.",
                         &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_pos(subtitle, 0, 42);
-    lv_obj_set_width(subtitle, content_w - 32);
+    lv_obj_set_width(subtitle, inner_w);
     lv_label_set_long_mode(subtitle, LV_LABEL_LONG_WRAP);
 
-    y += 132;
-    section = ui_panel(body, 0, y, content_w,
-                       54 + preset_count * 78 + (preset_count - 1) * card_gap);
+    section_h = 54 + preset_count * 78 + (preset_count - 1) * card_gap;
+    section = ui_panel(body, 0, 0, content_w, section_h);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
     title = ui_label(section, "Model preset", &lv_font_montserrat_22,
                      0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     for(i = 0; i < preset_count; i++) {
         picoclaw_preset_card(section, 0, 44 + i * (78 + card_gap),
-                             content_w - 32, i, i == selected);
+                             inner_w, i, i == selected);
     }
 
-    y += lv_obj_get_height(section) + 16;
-    custom = ui_panel(body, 0, y, content_w, ui_is_landscape() ? 112 : 176);
+    custom = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 112 : 176);
     lv_obj_set_style_bg_color(custom, lv_color_hex(0x111820), 0);
     title = ui_label(custom, "Custom model", &lv_font_montserrat_22,
                      0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
-    btn_w = ui_is_landscape() ? (content_w - 32 - 36) / 4 :
-            (content_w - 32 - 12) / 2;
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    btn_w = ui_is_landscape() ? (inner_w - 36) / 4 :
+            (inner_w - 12) / 2;
     if(btn_w < 118) {
-        btn_w = content_w - 32;
+        btn_w = inner_w;
     }
     picoclaw_small_button(custom, 0, 48, btn_w, "Model name", 0x3DA5FF,
                           picoclaw_config_event_cb,
                           (void *)(intptr_t)PICOCLAW_FIELD_MODEL_NAME);
-    if(btn_w * 2 + 12 <= content_w - 32) {
+    if(btn_w * 2 + 12 <= inner_w) {
         picoclaw_small_button(custom, btn_w + 12, 48, btn_w, "Model ID",
                               0x3DA5FF, picoclaw_config_event_cb,
                               (void *)(intptr_t)PICOCLAW_FIELD_MODEL_ID);
-        if(ui_is_landscape() && btn_w * 4 + 36 <= content_w - 32) {
+        if(ui_is_landscape() && btn_w * 4 + 36 <= inner_w) {
             picoclaw_small_button(custom, (btn_w + 12) * 2, 48, btn_w,
                                   "API base", 0x3DA5FF,
                                   picoclaw_config_event_cb,
@@ -1493,27 +1504,28 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
         }
     }
 
-    y += lv_obj_get_height(custom) + 16;
-    actions = ui_panel(body, 0, y, content_w, ui_is_landscape() ? 182 : 244);
+    actions = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 182 : 244);
     lv_obj_set_style_bg_color(actions, lv_color_hex(0x111820), 0);
     title = ui_label(actions, "Runtime", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
-    btn_w = ui_is_landscape() ? (content_w - 32 - 48) / 4 :
-            (content_w - 32 - 12) / 2;
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    btn_w = ui_is_landscape() ? (inner_w - 48) / 4 :
+            (inner_w - 12) / 2;
     if(btn_w < 116) {
-        btn_w = content_w - 32;
+        btn_w = inner_w;
     }
     picoclaw_install_btn =
         picoclaw_small_button(actions, 0, 48, btn_w, "Install", 0x38BDF8,
                               picoclaw_action_event_cb,
                               (void *)(intptr_t)PICOCLAW_ACTION_INSTALL);
-    if(btn_w * 2 + 12 <= content_w - 32) {
+    if(btn_w * 2 + 12 <= inner_w) {
         picoclaw_save_btn =
             picoclaw_small_button(actions, btn_w + 12, 48, btn_w,
                                   "Save config", 0x25C281,
                                   picoclaw_action_event_cb,
                                   (void *)(intptr_t)PICOCLAW_ACTION_SAVE_CONFIG);
-        if(ui_is_landscape() && btn_w * 4 + 48 <= content_w - 32) {
+        if(ui_is_landscape() && btn_w * 4 + 48 <= inner_w) {
             picoclaw_gateway_start_btn =
                 picoclaw_small_button(actions, (btn_w + 16) * 2, 48, btn_w,
                                       "Start gateway", 0x60A5FA,
@@ -1546,32 +1558,35 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
         }
     }
 
-    y += lv_obj_get_height(actions) + 16;
-    section = ui_panel(body, 0, y, content_w, 242);
+    section = ui_panel(body, 0, 0, content_w, 242);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x0D1117), 0);
     title = ui_label(section, "Status", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
-    picoclaw_make_info_pair(section, 0, 44, content_w - 32, "Version",
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    picoclaw_make_info_pair(section, 0, 44, inner_w, "Version",
                             &picoclaw_version_label, 0xF2F5F8);
-    picoclaw_make_info_pair(section, 0, 82, content_w - 32, "Gateway",
+    picoclaw_make_info_pair(section, 0, 82, inner_w, "Gateway",
                             &picoclaw_gateway_label, 0x9AA4AF);
-    picoclaw_make_info_pair(section, 0, 120, content_w - 32, "Network",
+    picoclaw_make_info_pair(section, 0, 120, inner_w, "Network",
                             &picoclaw_network_label, 0x9AA4AF);
-    picoclaw_make_info_pair(section, 0, 158, content_w - 32, "Config",
+    picoclaw_make_info_pair(section, 0, 158, inner_w, "Config",
                             &picoclaw_config_label, 0x9AA4AF);
-    picoclaw_make_info_pair(section, 0, 196, content_w - 32, "URL",
+    picoclaw_make_info_pair(section, 0, 196, inner_w, "URL",
                             &picoclaw_url_label, 0x38BDF8);
 
-    y += 258;
-    section = ui_panel(body, 0, y, content_w, ui_is_landscape() ? 190 : 260);
+    section = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 190 : 260);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x0D1117), 0);
     title = ui_label(section, "Output", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     picoclaw_output_label = ui_label(section, "No output yet",
                                      &lv_font_montserrat_16, 0xCBD5E1);
     lv_obj_set_pos(picoclaw_output_label, 0, 42);
-    lv_obj_set_width(picoclaw_output_label, content_w - 32);
+    lv_obj_set_width(picoclaw_output_label, inner_w);
     lv_label_set_long_mode(picoclaw_output_label, LV_LABEL_LONG_WRAP);
+    lv_obj_update_layout(body);
 }
 
 void ui_picoclaw_create(lv_obj_t *scr)
