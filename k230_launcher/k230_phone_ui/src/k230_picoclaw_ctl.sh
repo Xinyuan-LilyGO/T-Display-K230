@@ -2,19 +2,24 @@
 
 set -u
 
-APP_DIR="/root/app/k230_phone_ui"
-PICO_HOME="/root/picoclaw"
-PICO_BIN_DIR="$PICO_HOME/bin"
-PICO_BIN="$PICO_BIN_DIR/picoclaw"
-PICO_CONFIG="$PICO_HOME/config.json"
-PICO_SECURITY="$PICO_HOME/.security.yml"
-PICO_WORKSPACE="$PICO_HOME/workspace"
-PICO_LOG="/tmp/k230_picoclaw_ui.log"
-PICO_GATEWAY_LOG="/tmp/k230_picoclaw_gateway.log"
-PICO_GATEWAY_PID="/tmp/k230_picoclaw_gateway.pid"
-PICO_WEIXIN_AUTH_LOG="/tmp/k230_picoclaw_weixin_auth.log"
-PICO_WEIXIN_AUTH_PID="/tmp/k230_picoclaw_weixin_auth.pid"
-PICO_WEIXIN_GATEWAY_DIGEST="/tmp/k230_picoclaw_weixin_gateway.digest"
+APP_DIR="${APP_DIR:-/root/app/k230_phone_ui}"
+PICO_HOME="${PICO_HOME:-/root/picoclaw}"
+PICO_BIN_DIR="${PICO_BIN_DIR:-$PICO_HOME/bin}"
+PICO_BIN="${PICO_BIN:-$PICO_BIN_DIR/picoclaw}"
+PICO_CONFIG="${PICO_CONFIG:-$PICO_HOME/config.json}"
+PICO_SECURITY="${PICO_SECURITY:-$PICO_HOME/.security.yml}"
+PICO_WORKSPACE="${PICO_WORKSPACE:-$PICO_HOME/workspace}"
+PICO_LOG="${PICO_LOG:-/tmp/k230_picoclaw_ui.log}"
+PICO_GATEWAY_LOG="${PICO_GATEWAY_LOG:-/tmp/k230_picoclaw_gateway.log}"
+PICO_GATEWAY_PID="${PICO_GATEWAY_PID:-/tmp/k230_picoclaw_gateway.pid}"
+PICO_WEIXIN_AUTH_LOG="${PICO_WEIXIN_AUTH_LOG:-/tmp/k230_picoclaw_weixin_auth.log}"
+PICO_WEIXIN_AUTH_PID="${PICO_WEIXIN_AUTH_PID:-/tmp/k230_picoclaw_weixin_auth.pid}"
+PICO_WEIXIN_GATEWAY_DIGEST="${PICO_WEIXIN_GATEWAY_DIGEST:-/tmp/k230_picoclaw_weixin_gateway.digest}"
+UI_PREFS_DIR="${UI_PREFS_DIR:-/root/.config/k230_phone_ui}"
+UI_PREFS_FILE="${UI_PREFS_FILE:-$UI_PREFS_DIR/settings.conf}"
+PICO_PROFILE_COUNT_KEY="picoclaw.profile.count"
+PICO_PROFILE_ACTIVE_KEY="picoclaw.profile.active"
+PICO_PROFILE_MAX=8
 PICO_RELEASE_TAG="${PICO_RELEASE_TAG:-v0.3.1}"
 PICO_RELEASE_URL="${PICO_RELEASE_URL:-https://github.com/sipeed/picoclaw/releases/download/${PICO_RELEASE_TAG}/picoclaw_Linux_riscv64.tar.gz}"
 PICO_GATEWAY_PORT="${PICO_GATEWAY_PORT:-18790}"
@@ -30,6 +35,160 @@ log()
 ensure_dirs()
 {
     mkdir -p "$PICO_BIN_DIR" "$PICO_WORKSPACE"
+}
+
+prefs_ensure_dir()
+{
+    mkdir -p "$UI_PREFS_DIR"
+}
+
+pref_get()
+{
+    key="${1:-}"
+    [ -n "$key" ] || return 1
+    [ -s "$UI_PREFS_FILE" ] || return 1
+    awk -F= -v target="$key" '
+        function trim(v) {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            return v
+        }
+        {
+            line = $0
+            if(line ~ /^[[:space:]]*#/ || line !~ /=/) {
+                next
+            }
+            split(line, parts, "=")
+            key = trim(parts[1])
+            if(key == target) {
+                sub(/^[^=]*=/, "", line)
+                print trim(line)
+                exit
+            }
+        }
+    ' "$UI_PREFS_FILE"
+}
+
+pref_set()
+{
+    key="${1:-}"
+    value="${2:-}"
+    [ -n "$key" ] || return 1
+    prefs_ensure_dir
+
+    tmp="${UI_PREFS_FILE}.tmp.$$"
+    if [ -s "$UI_PREFS_FILE" ]; then
+        awk -v target="$key" -v new_value="$value" '
+            function trim(v) {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+                return v
+            }
+            BEGIN {
+                found = 0
+            }
+            {
+                line = $0
+                if(line ~ /^[[:space:]]*#/ || line !~ /=/) {
+                    print line
+                    next
+                }
+                split(line, parts, "=")
+                key = trim(parts[1])
+                if(key == target) {
+                    print target "=" new_value
+                    found = 1
+                    next
+                }
+                print line
+            }
+            END {
+                if(!found) {
+                    print target "=" new_value
+                }
+            }
+        ' "$UI_PREFS_FILE" >"$tmp"
+    else
+        {
+            printf '# k230_phone_ui persistent settings\n'
+            printf '%s=%s\n' "$key" "$value"
+        } >"$tmp"
+    fi
+    mv "$tmp" "$UI_PREFS_FILE"
+}
+
+profile_key()
+{
+    printf 'picoclaw.profile.%s.%s\n' "${1:-0}" "${2:-title}"
+}
+
+profile_count_raw()
+{
+    count="$(pref_get "$PICO_PROFILE_COUNT_KEY" 2>/dev/null || true)"
+    case "$count" in
+        ''|*[!0-9]*)
+            count=0
+            ;;
+    esac
+    if [ "$count" -lt 0 ]; then
+        count=0
+    fi
+    if [ "$count" -gt "$PICO_PROFILE_MAX" ]; then
+        count="$PICO_PROFILE_MAX"
+    fi
+    printf '%s\n' "$count"
+}
+
+profile_write()
+{
+    index="${1:-0}"
+    title="${2:-}"
+    model_name="${3:-}"
+    model_id="${4:-}"
+    api_base="${5:-}"
+    api_key="${6:-}"
+
+    pref_set "$(profile_key "$index" title)" "$title"
+    pref_set "$(profile_key "$index" model_name)" "$model_name"
+    pref_set "$(profile_key "$index" model_id)" "$model_id"
+    pref_set "$(profile_key "$index" api_base)" "$api_base"
+    pref_set "$(profile_key "$index" api_key)" "$api_key"
+}
+
+profile_seed_defaults()
+{
+    if [ "$(profile_count_raw)" -gt 0 ]; then
+        return 0
+    fi
+
+    profile_write 0 "DeepSeek Chat" "deepseek-chat" "deepseek/deepseek-chat" "https://api.deepseek.com/v1" ""
+    profile_write 1 "DeepSeek Reasoner" "deepseek-reasoner" "deepseek/deepseek-reasoner" "https://api.deepseek.com/v1" ""
+    profile_write 2 "GPT-4o mini" "gpt-4o-mini" "openai/gpt-4o-mini" "https://api.openai.com/v1" ""
+    profile_write 3 "OpenAI compatible" "custom-agent" "openai/gpt-4o-mini" "https://api.openai.com/v1" ""
+    pref_set "$PICO_PROFILE_ACTIVE_KEY" "0"
+    pref_set "$PICO_PROFILE_COUNT_KEY" "4"
+}
+
+profile_field()
+{
+    pref_get "$(profile_key "${1:-0}" "${2:-title}")" 2>/dev/null || true
+}
+
+profile_find()
+{
+    model_name="${1:-}"
+    model_id="${2:-}"
+    api_base="${3:-}"
+    count="$(profile_count_raw)"
+    i=0
+    while [ "$i" -lt "$count" ]; do
+        if [ "$(profile_field "$i" model_name)" = "$model_name" ] &&
+           [ "$(profile_field "$i" model_id)" = "$model_id" ] &&
+           [ "$(profile_field "$i" api_base)" = "$api_base" ]; then
+            printf '%s\n' "$i"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
 }
 
 have_network()
@@ -456,9 +615,6 @@ save_config_cmd()
     model_id="$(json_escape "$model_id_raw")"
     api_base="$(json_escape "$api_base_raw")"
     api_key_raw="${4:-}"
-    if [ -z "$api_key_raw" ] && [ -s "$PICO_CONFIG" ]; then
-        api_key_raw="$(sed -n 's/.*"api_keys"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$PICO_CONFIG" | head -n 1)"
-    fi
     if [ -z "$api_key_raw" ]; then
         api_key_raw="$(model_api_key_from_security "$model_name_raw" || true)"
     fi
@@ -509,6 +665,102 @@ EOF
     else
         printf 'OK: config saved\n'
     fi
+}
+
+profile_add_cmd()
+{
+    ensure_dirs
+    profile_seed_defaults
+
+    model_name="${1:-}"
+    model_id="${2:-}"
+    api_base="${3:-}"
+    api_key="${4:-}"
+    title="${5:-$model_name}"
+
+    if [ -z "$model_name" ] || [ -z "$model_id" ] ||
+       [ -z "$api_base" ] || [ -z "$api_key" ]; then
+        printf 'ERROR: usage profile-add MODEL_NAME MODEL_ID API_BASE API_KEY [TITLE]\n'
+        return 64
+    fi
+
+    index="$(profile_find "$model_name" "$model_id" "$api_base" || true)"
+    if [ -z "$index" ]; then
+        index="$(profile_count_raw)"
+        if [ "$index" -ge "$PICO_PROFILE_MAX" ]; then
+            printf 'ERROR: profile limit reached (%s)\n' "$PICO_PROFILE_MAX"
+            return 2
+        fi
+        pref_set "$PICO_PROFILE_COUNT_KEY" "$((index + 1))"
+        action="added"
+    else
+        action="updated"
+    fi
+
+    profile_write "$index" "$title" "$model_name" "$model_id" "$api_base" "$api_key"
+    pref_set "$PICO_PROFILE_ACTIVE_KEY" "$index"
+    save_config_cmd "$model_name" "$model_id" "$api_base" "$api_key" >/dev/null
+    log "profile $action index=$index model_name=$model_name model=$model_id api_base=$api_base"
+    printf 'OK: profile %s index=%s active=yes key=ready\n' "$action" "$index"
+}
+
+profile_use_cmd()
+{
+    ensure_dirs
+    profile_seed_defaults
+    index="${1:-}"
+    count="$(profile_count_raw)"
+
+    case "$index" in
+        ''|*[!0-9]*)
+            printf 'ERROR: usage profile-use INDEX\n'
+            return 64
+            ;;
+    esac
+    if [ "$index" -lt 0 ] || [ "$index" -ge "$count" ]; then
+        printf 'ERROR: profile index out of range\n'
+        return 2
+    fi
+
+    model_name="$(profile_field "$index" model_name)"
+    model_id="$(profile_field "$index" model_id)"
+    api_base="$(profile_field "$index" api_base)"
+    api_key="$(profile_field "$index" api_key)"
+    pref_set "$PICO_PROFILE_ACTIVE_KEY" "$index"
+    save_config_cmd "$model_name" "$model_id" "$api_base" "$api_key" >/dev/null
+    log "profile selected index=$index model_name=$model_name model=$model_id api_base=$api_base"
+    printf 'OK: active profile index=%s\n' "$index"
+}
+
+profile_list_cmd()
+{
+    ensure_dirs
+    profile_seed_defaults
+    count="$(profile_count_raw)"
+    active="$(pref_get "$PICO_PROFILE_ACTIVE_KEY" 2>/dev/null || true)"
+    case "$active" in
+        ''|*[!0-9]*)
+            active=0
+            ;;
+    esac
+
+    i=0
+    while [ "$i" -lt "$count" ]; do
+        marker=" "
+        [ "$i" = "$active" ] && marker="*"
+        title="$(profile_field "$i" title)"
+        model_name="$(profile_field "$i" model_name)"
+        model_id="$(profile_field "$i" model_id)"
+        api_base="$(profile_field "$i" api_base)"
+        if [ -n "$(profile_field "$i" api_key)" ]; then
+            key_state="ready"
+        else
+            key_state="missing"
+        fi
+        printf '%s %s | %s | %s | %s | %s | key=%s\n' \
+            "$marker" "$i" "$title" "$model_name" "$model_id" "$api_base" "$key_state"
+        i=$((i + 1))
+    done
 }
 
 migrate_legacy_config_if_needed()
@@ -766,6 +1018,17 @@ case "${1:-status}" in
         shift
         save_config_cmd "$@"
         ;;
+    profile-add|profile-set)
+        shift
+        profile_add_cmd "$@"
+        ;;
+    profile-use)
+        shift
+        profile_use_cmd "$@"
+        ;;
+    profile-list)
+        profile_list_cmd
+        ;;
     ask)
         shift
         ask_cmd "$*"
@@ -792,7 +1055,7 @@ case "${1:-status}" in
         log_cmd
         ;;
     *)
-        printf 'Usage: %s {status|install|save-config MODEL_NAME MODEL_ID API_BASE API_KEY|ask PROMPT|gateway-start|gateway-stop|weixin-auth|weixin-status|weixin-cancel|weixin-unbind|log}\n' "$0"
+        printf 'Usage: %s {status|install|save-config MODEL_NAME MODEL_ID API_BASE API_KEY|profile-add MODEL_NAME MODEL_ID API_BASE API_KEY [TITLE]|profile-use INDEX|profile-list|ask PROMPT|gateway-start|gateway-stop|weixin-auth|weixin-status|weixin-cancel|weixin-unbind|log}\n' "$0"
         exit 64
         ;;
 esac
