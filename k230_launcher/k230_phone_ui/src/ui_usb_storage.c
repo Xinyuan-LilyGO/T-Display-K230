@@ -204,14 +204,37 @@ void ui_usb_storage_create(lv_obj_t *scr)
     int landscape = ui_is_landscape();
     int body_x = ui_page_panel_x();
     int body_w = ui_page_panel_width();
-    int left_w = landscape ? body_w * 34 / 100 : 520;
-    int left_x = landscape ? 0 : 0;
+    int body_top = ui_page_top_y(154);
+    int body_h = ui_body_height(154);
+    int safe_w;
+    int side_gap = landscape ? 44 : 0;
+    int left_w;
+    int left_x = 0;
     int right_x;
     int right_w;
     int button_w;
+    int label_w;
     int value_w;
     int value_x = 0;
+    int status_y = landscape ? 30 : 172;
+    int row_state_y = landscape ? 94 : 244;
+    int row_protocol_y = landscape ? 148 : 306;
+    int row_storage_y = landscape ? 202 : 368;
+    int row_screenshot_y = landscape ? 256 : 430;
+    int button_y = landscape ? 352 : 528;
 
+    ui_create_header(scr, "MTP");
+
+    body = ui_scroll_panel(scr, body_x, body_top, body_w, body_h);
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    if(landscape) {
+        lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_pad_bottom(body, 0, 0);
+    }
+    safe_w = ui_safe_content_width(body, body_w - 32);
+
+    left_w = landscape ? safe_w * 34 / 100 : 520;
     if(left_w < 260) {
         left_w = 260;
     }
@@ -219,36 +242,34 @@ void ui_usb_storage_create(lv_obj_t *scr)
         left_w = 360;
     }
     right_x = landscape ? left_w + 36 : 0;
-    right_w = landscape ? body_w - right_x : ui_inner_width();
-    button_w = landscape ? (right_w - 20) / 2 : 226;
-    if(right_w < 260) {
-        right_w = 260;
+    right_w = landscape ? safe_w - right_x - side_gap : ui_inner_width();
+    if(right_w < 220) {
+        right_w = 220;
     }
+    label_w = landscape ? 136 : 160;
+    value_w = landscape ? right_w - label_w - 18 : 300;
+    if(value_w < 160) {
+        value_w = 160;
+    }
+    if(landscape && value_w > right_w - 96) {
+        value_w = right_w - 96;
+    }
+    value_x = landscape ? right_x + right_w - value_w : 0;
+    button_w = landscape ? (right_w - 20) / 2 : 226;
     if(button_w < 118) {
         button_w = 118;
     }
-    value_w = landscape ? right_w - 150 : 300;
-    if(value_w < 180) {
-        value_w = 180;
-    }
-    if(landscape) {
-        value_x = right_x + right_w - value_w - 18;
-        if(value_x < right_x + 124) {
-            value_x = right_x + 124;
-            value_w = right_w - 142;
+    if(landscape && button_y + 60 > body_h - 16) {
+        button_y = body_h - 76;
+        if(button_y < row_screenshot_y + 58) {
+            button_y = row_screenshot_y + 58;
         }
     }
-
-    ui_create_header(scr, "MTP");
-
-    body = ui_scroll_panel(scr, body_x, ui_page_top_y(154), body_w,
-                           ui_body_height(154));
-    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
 
     icon_box = lv_obj_create(body);
     lv_obj_set_size(icon_box, 104, 104);
     if(landscape) {
-        lv_obj_set_pos(icon_box, left_x + (left_w - 104) / 2, 38);
+        lv_obj_set_pos(icon_box, left_x + (left_w - 104) / 2, 28);
     } else {
         lv_obj_align(icon_box, LV_ALIGN_TOP_MID, 0, 8);
     }
@@ -266,7 +287,7 @@ void ui_usb_storage_create(lv_obj_t *scr)
         lv_obj_set_width(title, left_w);
         lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(title, left_x, 164);
+        lv_obj_set_pos(title, left_x, 148);
     } else {
         lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 132);
     }
@@ -280,52 +301,60 @@ void ui_usb_storage_create(lv_obj_t *scr)
                                 landscape ? LV_TEXT_ALIGN_LEFT :
                                 LV_TEXT_ALIGN_CENTER, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_status_label, right_x, 34);
+        lv_obj_set_pos(usb_storage_status_label, right_x, status_y);
     } else {
         lv_obj_align(usb_storage_status_label, LV_ALIGN_TOP_MID, 0, 172);
     }
 
     label_obj = ui_label(body, "State", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_pos(label_obj, landscape ? right_x : 0, landscape ? 104 : 244);
+    lv_obj_set_width(label_obj, landscape ? label_w : 160);
+    lv_label_set_long_mode(label_obj, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(label_obj, landscape ? right_x : 0, row_state_y);
     usb_storage_state_label = ui_label(body, "--", &lv_font_montserrat_20,
                                        0xF2F5F8);
     lv_obj_set_width(usb_storage_state_label, landscape ? value_w : 260);
     lv_label_set_long_mode(usb_storage_state_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(usb_storage_state_label, LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_state_label, value_x, 100);
+        lv_obj_set_pos(usb_storage_state_label, value_x, row_state_y - 4);
     } else {
         lv_obj_align(usb_storage_state_label, LV_ALIGN_TOP_RIGHT, 0, 240);
     }
 
     label_obj = ui_label(body, "Protocol", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_pos(label_obj, landscape ? right_x : 0, landscape ? 166 : 306);
+    lv_obj_set_width(label_obj, landscape ? label_w : 160);
+    lv_label_set_long_mode(label_obj, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(label_obj, landscape ? right_x : 0, row_protocol_y);
     usb_storage_image_label = ui_label(body, "MTP + ADB",
                                        &lv_font_montserrat_18, 0xF2F5F8);
     lv_obj_set_width(usb_storage_image_label, landscape ? value_w : 330);
     lv_label_set_long_mode(usb_storage_image_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(usb_storage_image_label, LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_image_label, value_x, 164);
+        lv_obj_set_pos(usb_storage_image_label, value_x, row_protocol_y - 2);
     } else {
         lv_obj_align(usb_storage_image_label, LV_ALIGN_TOP_RIGHT, 0, 304);
     }
 
     label_obj = ui_label(body, "Storage", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_pos(label_obj, landscape ? right_x : 0, landscape ? 228 : 368);
+    lv_obj_set_width(label_obj, landscape ? label_w : 160);
+    lv_label_set_long_mode(label_obj, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(label_obj, landscape ? right_x : 0, row_storage_y);
     usb_storage_mount_label = ui_label(body, USB_MTP_STORE,
                                        &lv_font_montserrat_18, 0xF2F5F8);
     lv_obj_set_width(usb_storage_mount_label, value_w);
     lv_label_set_long_mode(usb_storage_mount_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(usb_storage_mount_label, LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_mount_label, value_x, 226);
+        lv_obj_set_pos(usb_storage_mount_label, value_x, row_storage_y - 2);
     } else {
         lv_obj_align(usb_storage_mount_label, LV_ALIGN_TOP_RIGHT, 0, 366);
     }
 
     label_obj = ui_label(body, "Screenshots", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_pos(label_obj, landscape ? right_x : 0, landscape ? 286 : 430);
+    lv_obj_set_width(label_obj, landscape ? label_w : 160);
+    lv_label_set_long_mode(label_obj, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(label_obj, landscape ? right_x : 0, row_screenshot_y);
     usb_storage_screenshot_label = ui_label(body, USB_MTP_SCREENSHOT_DIR,
                                             &lv_font_montserrat_18, 0x22C55E);
     lv_obj_set_width(usb_storage_screenshot_label, value_w);
@@ -333,14 +362,15 @@ void ui_usb_storage_create(lv_obj_t *scr)
     lv_obj_set_style_text_align(usb_storage_screenshot_label,
                                 LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_screenshot_label, value_x, 284);
+        lv_obj_set_pos(usb_storage_screenshot_label, value_x,
+                       row_screenshot_y - 2);
     } else {
         lv_obj_align(usb_storage_screenshot_label, LV_ALIGN_TOP_RIGHT, 0, 428);
     }
 
     usb_storage_start_btn = ui_command_button(body,
                                               landscape ? right_x : 0,
-                                              landscape ? 352 : 528,
+                                              button_y,
                                               button_w, "Start MTP",
                                               0x25C281);
     lv_obj_add_event_cb(usb_storage_start_btn, usb_storage_start_event_cb,
@@ -348,7 +378,7 @@ void ui_usb_storage_create(lv_obj_t *scr)
 
     usb_storage_stop_btn = ui_command_button(body,
                                              landscape ? right_x + button_w + 20 : 262,
-                                             landscape ? 352 : 528,
+                                             button_y,
                                              button_w, "Stop MTP",
                                              0xEF4D5A);
     lv_obj_add_event_cb(usb_storage_stop_btn, usb_storage_stop_event_cb,
