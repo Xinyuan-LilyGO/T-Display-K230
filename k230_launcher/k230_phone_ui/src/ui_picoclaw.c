@@ -39,6 +39,7 @@ typedef enum {
     PICOCLAW_ACTION_WEIXIN_AUTH,
     PICOCLAW_ACTION_WEIXIN_STATUS,
     PICOCLAW_ACTION_WEIXIN_CANCEL,
+    PICOCLAW_ACTION_WEIXIN_UNBIND,
     PICOCLAW_ACTION_LOG,
 } picoclaw_action_t;
 
@@ -477,6 +478,9 @@ static int picoclaw_build_command(picoclaw_request_t *req, char *cmd,
     case PICOCLAW_ACTION_WEIXIN_CANCEL:
         snprintf(cmd, cmd_len, "%s weixin-cancel", PICOCLAW_SCRIPT);
         return 0;
+    case PICOCLAW_ACTION_WEIXIN_UNBIND:
+        snprintf(cmd, cmd_len, "%s weixin-unbind", PICOCLAW_SCRIPT);
+        return 0;
     case PICOCLAW_ACTION_LOG:
         snprintf(cmd, cmd_len, "%s log", PICOCLAW_SCRIPT);
         return 0;
@@ -537,6 +541,9 @@ static void picoclaw_status_for_action(picoclaw_action_t action, char *out,
         break;
     case PICOCLAW_ACTION_WEIXIN_CANCEL:
         text = "Cancelling Weixin login...";
+        break;
+    case PICOCLAW_ACTION_WEIXIN_UNBIND:
+        text = "Unbinding Weixin...";
         break;
     case PICOCLAW_ACTION_LOG:
         text = "Reading log...";
@@ -663,7 +670,8 @@ static void *picoclaw_worker(void *arg)
                  "Log updated");
     } else if(req->action == PICOCLAW_ACTION_WEIXIN_AUTH ||
               req->action == PICOCLAW_ACTION_WEIXIN_STATUS ||
-              req->action == PICOCLAW_ACTION_WEIXIN_CANCEL) {
+              req->action == PICOCLAW_ACTION_WEIXIN_CANCEL ||
+              req->action == PICOCLAW_ACTION_WEIXIN_UNBIND) {
         if(rc == 0 && picoclaw_weixin_ready) {
             snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
                      "Weixin token ready");
@@ -766,8 +774,6 @@ static void picoclaw_update_buttons(int busy)
         picoclaw_gateway_start_btn,
         picoclaw_gateway_stop_btn,
         picoclaw_weixin_auth_btn,
-        picoclaw_weixin_status_btn,
-        picoclaw_weixin_cancel_btn,
         picoclaw_log_btn,
     };
     size_t i;
@@ -792,9 +798,6 @@ static void picoclaw_update_buttons(int busy)
         if(picoclaw_weixin_auth_btn) {
             lv_obj_add_state(picoclaw_weixin_auth_btn, LV_STATE_DISABLED);
         }
-        if(picoclaw_weixin_status_btn) {
-            lv_obj_add_state(picoclaw_weixin_status_btn, LV_STATE_DISABLED);
-        }
     }
     if(picoclaw_gateway_running) {
         if(picoclaw_gateway_start_btn) {
@@ -803,8 +806,28 @@ static void picoclaw_update_buttons(int busy)
     } else if(!busy && picoclaw_gateway_stop_btn) {
         lv_obj_add_state(picoclaw_gateway_stop_btn, LV_STATE_DISABLED);
     }
-    if(!picoclaw_weixin_auth_running && !busy && picoclaw_weixin_cancel_btn) {
-        lv_obj_add_state(picoclaw_weixin_cancel_btn, LV_STATE_DISABLED);
+    if(picoclaw_weixin_auth_btn && !busy && picoclaw_installed) {
+        lv_obj_t *label = lv_obj_get_child(picoclaw_weixin_auth_btn, 0);
+        const char *text = picoclaw_weixin_ready ? "Unbind Weixin" :
+                           (picoclaw_weixin_auth_running ?
+                            "Cancel" : "Weixin login");
+        uint32_t color = picoclaw_weixin_ready ? 0xEF4D5A :
+                         (picoclaw_weixin_auth_running ?
+                          0xEF4D5A : 0x22C55E);
+
+        lv_obj_set_style_border_color(picoclaw_weixin_auth_btn,
+                                      lv_color_hex(color), 0);
+        if(label) {
+            const char *shown = ui_tr(text);
+
+            lv_label_set_text(label, shown);
+            lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+            lv_obj_set_style_text_font(label,
+                                       ui_font_for_text(shown,
+                                                        &lv_font_montserrat_18),
+                                       0);
+            lv_obj_center(label);
+        }
     }
 }
 
@@ -1264,8 +1287,6 @@ static void picoclaw_update_status_labels(int busy, int rc)
     char network[80];
     char config[80];
     char model_key[80];
-    char weixin[80];
-    char weixin_auth[80];
     char url[160];
     char model_name[128];
     char model_id[256];
@@ -1282,9 +1303,6 @@ static void picoclaw_update_status_labels(int busy, int rc)
     snprintf(network, sizeof(network), "%s", picoclaw_network_text);
     snprintf(config, sizeof(config), "%s", picoclaw_config_text);
     snprintf(model_key, sizeof(model_key), "%s", picoclaw_model_key_text);
-    snprintf(weixin, sizeof(weixin), "%s", picoclaw_weixin_text);
-    snprintf(weixin_auth, sizeof(weixin_auth), "%s",
-             picoclaw_weixin_auth_text);
     snprintf(url, sizeof(url), "%s", picoclaw_url_text);
     snprintf(output, sizeof(output), "%s", picoclaw_output_text);
     weixin_ready = picoclaw_weixin_ready;
@@ -1345,9 +1363,11 @@ static void picoclaw_update_status_labels(int busy, int rc)
         lv_label_set_text(picoclaw_url_label, url);
     }
     if(picoclaw_weixin_label) {
-        snprintf(line, sizeof(line), "%s / %s", ui_tr(weixin),
-                 ui_tr(weixin_auth));
-        lv_label_set_text(picoclaw_weixin_label, line);
+        const char *text = weixin_ready ? "Weixin token ready" :
+                           (weixin_auth_running ?
+                            "Weixin waiting for scan" : "Weixin not linked");
+
+        lv_label_set_text(picoclaw_weixin_label, ui_tr(text));
         lv_obj_set_style_text_color(picoclaw_weixin_label,
                                     lv_color_hex(weixin_ready ?
                                                  0x25C281 :
@@ -1464,6 +1484,22 @@ static void picoclaw_action_event_cb(lv_event_t *event)
         (picoclaw_action_t)(intptr_t)lv_event_get_user_data(event);
 
     picoclaw_start_action(action, NULL);
+}
+
+static void picoclaw_weixin_button_event_cb(lv_event_t *event)
+{
+    (void)event;
+
+    if(picoclaw_busy) {
+        return;
+    }
+    if(picoclaw_weixin_ready) {
+        picoclaw_start_action(PICOCLAW_ACTION_WEIXIN_UNBIND, NULL);
+    } else if(picoclaw_weixin_auth_running) {
+        picoclaw_start_action(PICOCLAW_ACTION_WEIXIN_CANCEL, NULL);
+    } else {
+        picoclaw_start_action(PICOCLAW_ACTION_WEIXIN_AUTH, NULL);
+    }
 }
 
 static void picoclaw_open_settings_event_cb(lv_event_t *event)
@@ -1935,7 +1971,7 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
         }
     }
 
-    section = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 150 : 226);
+    section = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 150 : 168);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
     title = ui_label(section, "Chat apps", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
@@ -1952,34 +1988,16 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
     lv_obj_set_pos(picoclaw_weixin_label, 0, 62);
     lv_obj_set_width(picoclaw_weixin_label, inner_w);
     lv_label_set_long_mode(picoclaw_weixin_label, LV_LABEL_LONG_DOT);
-    btn_w = ui_is_landscape() ? (inner_w - 24) / 3 :
-            (inner_w - 12) / 2;
-    if(btn_w < 112) {
-        btn_w = inner_w;
+    btn_w = inner_w;
+    if(ui_is_landscape() && btn_w > 260) {
+        btn_w = 260;
     }
     picoclaw_weixin_auth_btn =
-        picoclaw_small_button(section, 0, 96, btn_w, "Weixin login",
-                              0x22C55E, picoclaw_action_event_cb,
-                              (void *)(intptr_t)PICOCLAW_ACTION_WEIXIN_AUTH);
-    if(btn_w * 2 + 12 <= inner_w) {
-        picoclaw_weixin_status_btn =
-            picoclaw_small_button(section, btn_w + 12, 96, btn_w,
-                                  "Weixin status", 0x38BDF8,
-                                  picoclaw_action_event_cb,
-                                  (void *)(intptr_t)PICOCLAW_ACTION_WEIXIN_STATUS);
-        if(ui_is_landscape() && btn_w * 3 + 24 <= inner_w) {
-            picoclaw_weixin_cancel_btn =
-                picoclaw_small_button(section, (btn_w + 12) * 2, 96, btn_w,
-                                      "Cancel", 0xEF4D5A,
-                                      picoclaw_action_event_cb,
-                                      (void *)(intptr_t)PICOCLAW_ACTION_WEIXIN_CANCEL);
-        } else {
-            picoclaw_weixin_cancel_btn =
-                picoclaw_small_button(section, 0, 160, btn_w, "Cancel",
-                                      0xEF4D5A, picoclaw_action_event_cb,
-                                      (void *)(intptr_t)PICOCLAW_ACTION_WEIXIN_CANCEL);
-        }
-    }
+        picoclaw_small_button(section, (inner_w - btn_w) / 2, 96, btn_w,
+                              "Weixin login", 0x22C55E,
+                              picoclaw_weixin_button_event_cb, NULL);
+    picoclaw_weixin_status_btn = NULL;
+    picoclaw_weixin_cancel_btn = NULL;
 
     section = ui_panel(body, 0, 0, content_w, 280);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x0D1117), 0);

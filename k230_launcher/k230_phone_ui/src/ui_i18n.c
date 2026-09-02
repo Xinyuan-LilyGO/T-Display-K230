@@ -239,6 +239,8 @@ static const ui_translation_t ui_translations[] = {
     { "Starting Weixin login...", "正在启动微信登录...", "Weixin ログイン起動中..." },
     { "Checking Weixin login...", "正在检查微信登录...", "Weixin ログイン確認中..." },
     { "Cancelling Weixin login...", "正在取消微信登录...", "Weixin ログイン取消中..." },
+    { "Unbind Weixin", "取消绑定", "Weixin 連携解除" },
+    { "Unbinding Weixin...", "正在取消微信绑定...", "Weixin 連携解除中..." },
     { "Weixin token ready", "微信已登录", "Weixin ログイン済み" },
     { "Weixin waiting for scan", "等待微信扫码", "Weixin QR 待機中" },
     { "Weixin not linked", "微信未绑定", "Weixin 未連携" },

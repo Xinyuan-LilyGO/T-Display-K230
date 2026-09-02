@@ -118,7 +118,13 @@ model_api_key_from_security()
     [ -n "$model_name" ] || model_name="$(json_string_value model_name "$PICO_CONFIG" || true)"
     [ -n "$model_name" ] || return 1
     [ -s "$PICO_SECURITY" ] || return 1
-    awk -v target="${model_name}:0:" '
+    awk -v target0="${model_name}:0:" -v target1="${model_name}:" '
+        function clean_value(v) {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            gsub(/^"|"$/, "", v)
+            gsub(/^'\''|'\''$/, "", v)
+            return v
+        }
         /^model_list:/ {
             in_models = 1
             next
@@ -126,16 +132,27 @@ model_api_key_from_security()
         in_models && /^[^[:space:]]/ {
             exit
         }
-        in_models && $1 == target {
+        in_models && ($1 == target0 || $1 == target1) {
             in_target = 1
             next
         }
         in_target && /^[[:space:]]{2}[^[:space:]].*:/ {
             exit
         }
+        in_target && /api_keys:[[:space:]]*\[/ {
+            line = $0
+            sub(/^.*api_keys:[[:space:]]*\[[[:space:]]*/, "", line)
+            sub(/[[:space:]]*\].*$/, "", line)
+            split(line, parts, ",")
+            value = clean_value(parts[1])
+            if(value != "") {
+                print value
+                exit
+            }
+        }
         in_target && /^[[:space:]]+-[[:space:]]+/ {
             sub(/^[[:space:]]+-[[:space:]]+/, "")
-            print
+            print clean_value($0)
             exit
         }
     ' "$PICO_SECURITY"
@@ -144,15 +161,51 @@ model_api_key_from_security()
 model_api_key_state()
 {
     model_name="$(json_string_value model_name "$PICO_CONFIG" || true)"
-    if sed -n 's/.*"api_keys"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]\+\)".*/\1/p' "$PICO_CONFIG" 2>/dev/null | grep -q .; then
-        printf 'ready\n'
-        return
-    fi
     if [ -n "$(model_api_key_from_security "$model_name" || true)" ]; then
         printf 'ready\n'
         return
     fi
     printf 'missing\n'
+}
+
+yaml_single_quote()
+{
+    printf "'%s'" "$(printf '%s' "${1:-}" | sed "s/'/''/g")"
+}
+
+model_security_write_key()
+{
+    model_name="${1:-}"
+    api_key="${2:-}"
+    [ -n "$model_name" ] || return 0
+    [ -n "$api_key" ] || return 0
+
+    tmp="${PICO_SECURITY}.tmp.$$"
+    if [ -s "$PICO_SECURITY" ]; then
+        awk '
+            /^model_list:/ {
+                skip = 1
+                next
+            }
+            skip && /^[^[:space:]]/ {
+                skip = 0
+            }
+            !skip {
+                print
+            }
+        ' "$PICO_SECURITY" >"$tmp"
+    else
+        : >"$tmp"
+    fi
+
+    {
+        printf '\nmodel_list:\n'
+        printf '  %s:0:\n' "$model_name"
+        printf '    api_keys:\n'
+        printf '      - %s\n' "$(yaml_single_quote "$api_key")"
+    } >>"$tmp"
+    chmod 0600 "$tmp"
+    mv "$tmp" "$PICO_SECURITY"
 }
 
 weixin_auth_state()
@@ -396,21 +449,21 @@ install_cmd()
 save_config_cmd()
 {
     ensure_dirs
-    model_name="$(json_escape "${1:-k230-agent}")"
-    model_id="$(json_escape "${2:-openai/gpt-4o-mini}")"
-    api_base="$(json_escape "${3:-https://api.openai.com/v1}")"
+    model_name_raw="${1:-k230-agent}"
+    model_id_raw="${2:-openai/gpt-4o-mini}"
+    api_base_raw="${3:-https://api.openai.com/v1}"
+    model_name="$(json_escape "$model_name_raw")"
+    model_id="$(json_escape "$model_id_raw")"
+    api_base="$(json_escape "$api_base_raw")"
     api_key_raw="${4:-}"
     if [ -z "$api_key_raw" ] && [ -s "$PICO_CONFIG" ]; then
         api_key_raw="$(sed -n 's/.*"api_keys"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$PICO_CONFIG" | head -n 1)"
     fi
     if [ -z "$api_key_raw" ]; then
-        api_key_raw="$(model_api_key_from_security "$model_name" || true)"
+        api_key_raw="$(model_api_key_from_security "$model_name_raw" || true)"
     fi
-    api_key="$(json_escape "$api_key_raw")"
-    if [ -n "$api_key" ]; then
-        api_key_line="\"api_keys\": [\"$api_key\"],"
-    else
-        api_key_line=""
+    if [ -n "$api_key_raw" ]; then
+        model_security_write_key "$model_name_raw" "$api_key_raw"
     fi
     weixin_block="$(weixin_channel_block)"
 
@@ -437,7 +490,6 @@ save_config_cmd()
     {
       "model_name": "$model_name",
       "model": "$model_id",
-      $api_key_line
       "api_base": "$api_base"
     }
   ],
@@ -574,6 +626,10 @@ weixin_auth_cmd()
         printf 'ERROR: no network connection\n'
         return 4
     fi
+    if [ "$(weixin_config_state)" = "ready" ]; then
+        weixin_status_cmd
+        return 0
+    fi
 
     pid="$(weixin_auth_pid || true)"
     if [ -n "${pid:-}" ]; then
@@ -601,6 +657,80 @@ weixin_auth_cmd()
     weixin_cleanup_auth_if_ready
     weixin_sync_gateway_if_ready
     weixin_status_cmd
+}
+
+weixin_remove_security_token()
+{
+    [ -s "$PICO_SECURITY" ] || return 0
+    tmp="${PICO_SECURITY}.tmp.$$"
+    awk '
+        /^channel_list:/ {
+            in_channels = 1
+            in_weixin = 0
+            print
+            next
+        }
+        in_channels && /^[^[:space:]]/ {
+            in_channels = 0
+            in_weixin = 0
+        }
+        in_channels && /^  weixin:/ {
+            in_weixin = 1
+            print
+            next
+        }
+        in_channels && /^  [^ ].*:/ {
+            in_weixin = 0
+        }
+        in_weixin && /^[[:space:]]+token:/ {
+            next
+        }
+        { print }
+    ' "$PICO_SECURITY" >"$tmp" && mv "$tmp" "$PICO_SECURITY"
+}
+
+weixin_disable_config()
+{
+    [ -s "$PICO_CONFIG" ] || return 0
+    tmp="${PICO_CONFIG}.tmp.$$"
+    awk '
+        /"weixin"[[:space:]]*:[[:space:]]*\{/ {
+            in_weixin = 1
+            changed = 0
+        }
+        in_weixin && !changed && /"enabled"[[:space:]]*:/ {
+            sub(/true|false/, "false")
+            changed = 1
+        }
+        in_weixin && /^[[:space:]]*\}/ {
+            in_weixin = 0
+        }
+        { print }
+    ' "$PICO_CONFIG" >"$tmp" && mv "$tmp" "$PICO_CONFIG"
+}
+
+weixin_unbind_cmd()
+{
+    ensure_dirs
+    pid="$(weixin_auth_pid || true)"
+    if [ -n "${pid:-}" ]; then
+        kill "$pid" >/dev/null 2>&1 || true
+        sleep 1
+        kill -9 "$pid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$PICO_WEIXIN_AUTH_PID" "$PICO_WEIXIN_GATEWAY_DIGEST"
+    : >"$PICO_WEIXIN_AUTH_LOG"
+    weixin_remove_security_token
+    weixin_disable_config
+    rm -rf "$PICO_HOME/channels/weixin"
+    if [ -n "$(gateway_pid || true)" ]; then
+        log "weixin unbound; restart running gateway"
+        gateway_stop_only
+        gateway_start_only
+    else
+        log "weixin unbound"
+    fi
+    "$0" status
 }
 
 weixin_cancel_cmd()
@@ -655,11 +785,14 @@ case "${1:-status}" in
     weixin-cancel)
         weixin_cancel_cmd
         ;;
+    weixin-unbind)
+        weixin_unbind_cmd
+        ;;
     log)
         log_cmd
         ;;
     *)
-        printf 'Usage: %s {status|install|save-config MODEL_NAME MODEL_ID API_BASE API_KEY|ask PROMPT|gateway-start|gateway-stop|weixin-auth|weixin-status|weixin-cancel|log}\n' "$0"
+        printf 'Usage: %s {status|install|save-config MODEL_NAME MODEL_ID API_BASE API_KEY|ask PROMPT|gateway-start|gateway-stop|weixin-auth|weixin-status|weixin-cancel|weixin-unbind|log}\n' "$0"
         exit 64
         ;;
 esac
