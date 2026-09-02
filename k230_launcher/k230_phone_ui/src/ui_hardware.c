@@ -44,6 +44,7 @@
 #define PREF_FAN_OFF_TEMP "fan.off_temp_c"
 #define PREF_BQ25896_ICHG_MA "bq25896.ichg_ma"
 #define PREF_BQ25896_VREG_MV "bq25896.vreg_mv"
+#define PREF_XL9555_ADDR "xl9555.addr"
 #define PREF_BATTERY_CAPACITY_MAH "battery.capacity_mah"
 #define PREF_BATTERY_SHUTDOWN_MV "battery.shutdown_mv"
 #define PREF_KEYBOARD_BACKLIGHT "keyboard.backlight_pct"
@@ -256,7 +257,9 @@
 #define TCA8418_STAT_K_INT 0x01
 #define TCA8418_STAT_K_LCK_INT 0x04
 #define TCA8418_STAT_OVR_FLOW_INT 0x08
-#define XL9555_ADDR 0x20
+#define XL9555_ADDR_DEFAULT 0x20
+#define XL9555_ADDR_MIN 0x20
+#define XL9555_ADDR_MAX 0x27
 #define XL9555_REG_INPUT0 0x00
 #define XL9555_REG_OUTPUT0 0x02
 #define XL9555_REG_CONFIG0 0x06
@@ -311,6 +314,7 @@ typedef struct {
     int bq27220;
     int tca8418;
     int xl9555;
+    int xl9555_addr;
     char status[128];
 } keyboard_base_state_t;
 
@@ -568,6 +572,7 @@ static char extension_keyboard_status[128] = "Extension keyboard off";
 static ui_extension_keyboard_key_cb_t extension_keyboard_key_cb;
 static void *extension_keyboard_key_user_data;
 static int xl9555_ready;
+static int xl9555_cached_addr = -1;
 static int xl9555_led_state[3];
 static lv_timer_t *hardware_page_timer;
 static lv_obj_t *keyboard_settings_status_label;
@@ -2834,15 +2839,163 @@ static int keyboard_i2c_update_bits(uint8_t addr, uint8_t reg, uint8_t mask,
     return keyboard_i2c_write_reg(addr, reg, new_value);
 }
 
+static int xl9555_addr_valid(int addr)
+{
+    return addr >= XL9555_ADDR_MIN && addr <= XL9555_ADDR_MAX;
+}
+
+static int xl9555_read_persisted_addr(int *addr)
+{
+    char value[32];
+    char *end = NULL;
+    long parsed;
+
+    if(!addr || ui_prefs_get(PREF_XL9555_ADDR, value, sizeof(value), "") != 0 ||
+       !value[0]) {
+        return 0;
+    }
+
+    parsed = strtol(value, &end, 0);
+    if(end == value || !xl9555_addr_valid((int)parsed)) {
+        return 0;
+    }
+
+    *addr = (int)parsed;
+    return 1;
+}
+
+static void xl9555_persist_addr(int addr)
+{
+    char value[16];
+    int old_addr = -1;
+
+    if(!xl9555_addr_valid(addr)) {
+        return;
+    }
+
+    xl9555_cached_addr = addr;
+    if(xl9555_read_persisted_addr(&old_addr) && old_addr == addr) {
+        return;
+    }
+
+    snprintf(value, sizeof(value), "0x%02X", addr);
+    ui_prefs_set(PREF_XL9555_ADDR, value);
+    button_test_log("XL9555 address persisted %s", value);
+}
+
+static void xl9555_invalidate_addr(int addr)
+{
+    if(addr < 0 || xl9555_cached_addr == addr) {
+        xl9555_cached_addr = -1;
+    }
+}
+
+static int xl9555_try_addr_unlocked(sensor_gpio_i2c_t *bus, uint8_t addr)
+{
+    uint8_t dummy = 0;
+
+    if(!bus || !keyboard_i2c_probe_addr_unlocked(bus, addr)) {
+        return 0;
+    }
+
+    /*
+     * ACK alone is enough for the known board variants, but reading INPUT0
+     * filters out stale bus artifacts before we persist the detected address.
+     */
+    sensor_gpio_i2c_start(bus);
+    if(sensor_gpio_i2c_write_byte(bus, (uint8_t)(addr << 1)) != 0) {
+        goto fail;
+    }
+    if(sensor_gpio_i2c_write_byte(bus, XL9555_REG_INPUT0) != 0) {
+        goto fail;
+    }
+    sensor_gpio_i2c_start(bus);
+    if(sensor_gpio_i2c_write_byte(bus, (uint8_t)((addr << 1) | 1U)) != 0) {
+        goto fail;
+    }
+    dummy = sensor_gpio_i2c_read_byte(bus, 0);
+    (void)dummy;
+    sensor_gpio_i2c_stop(bus);
+    return 1;
+
+fail:
+    sensor_gpio_i2c_stop(bus);
+    return 0;
+}
+
+static int xl9555_probe_addr_unlocked(sensor_gpio_i2c_t *bus, int *addr)
+{
+    static const uint8_t candidates[] = {
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27
+    };
+    int persisted = -1;
+
+    if(!bus || !addr) {
+        return 0;
+    }
+
+    if(xl9555_read_persisted_addr(&persisted) &&
+       xl9555_try_addr_unlocked(bus, (uint8_t)persisted)) {
+        *addr = persisted;
+        return 1;
+    }
+
+    for(size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        int candidate = candidates[i];
+
+        if(candidate == persisted) {
+            continue;
+        }
+        if(xl9555_try_addr_unlocked(bus, (uint8_t)candidate)) {
+            *addr = candidate;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int xl9555_resolve_addr(int *addr)
+{
+    sensor_gpio_i2c_t bus;
+    int found_addr = -1;
+    int found = 0;
+
+    if(!addr) {
+        return -1;
+    }
+
+    if(xl9555_addr_valid(xl9555_cached_addr)) {
+        *addr = xl9555_cached_addr;
+        return 0;
+    }
+
+    pthread_mutex_lock(&sensor_aht20_lock);
+    if(keyboard_i2c_begin(&bus) == 0) {
+        found = xl9555_probe_addr_unlocked(&bus, &found_addr);
+        keyboard_i2c_end(&bus);
+    }
+    pthread_mutex_unlock(&sensor_aht20_lock);
+
+    if(!found) {
+        xl9555_cached_addr = -1;
+        return -1;
+    }
+
+    xl9555_persist_addr(found_addr);
+    *addr = found_addr;
+    return 0;
+}
+
 static void keyboard_base_probe(void)
 {
     static const uint8_t addrs[] = {
         BQ25896_ADDR,
         BQ27220_ADDR,
-        TCA8418_ADDR,
-        XL9555_ADDR
+        TCA8418_ADDR
     };
     int present[4] = {0, 0, 0, 0};
+    int xl9555_addr = -1;
     sensor_gpio_i2c_t bus;
 
     pthread_mutex_lock(&sensor_aht20_lock);
@@ -2850,9 +3003,16 @@ static void keyboard_base_probe(void)
         for(size_t i = 0; i < sizeof(addrs) / sizeof(addrs[0]); i++) {
             present[i] = keyboard_i2c_probe_addr_unlocked(&bus, addrs[i]);
         }
+        present[3] = xl9555_probe_addr_unlocked(&bus, &xl9555_addr);
         keyboard_i2c_end(&bus);
     }
     pthread_mutex_unlock(&sensor_aht20_lock);
+
+    if(present[3]) {
+        xl9555_persist_addr(xl9555_addr);
+    } else {
+        xl9555_invalidate_addr(xl9555_addr);
+    }
 
     pthread_mutex_lock(&keyboard_base_lock);
     keyboard_base_state.scanned = 1;
@@ -2860,12 +3020,19 @@ static void keyboard_base_probe(void)
     keyboard_base_state.bq27220 = present[1];
     keyboard_base_state.tca8418 = present[2];
     keyboard_base_state.xl9555 = present[3];
+    keyboard_base_state.xl9555_addr = present[3] ? xl9555_addr : -1;
     if(present[0] || present[1] || present[2] || present[3]) {
         snprintf(keyboard_base_state.status, sizeof(keyboard_base_state.status),
-                 "Detected 6B:%s 55:%s %02X:%s 20:%s",
+                 "Detected 6B:%s 55:%s %02X:%s XL:%s",
                  present[0] ? "yes" : "no", present[1] ? "yes" : "no",
                  TCA8418_ADDR, present[2] ? "yes" : "no",
                  present[3] ? "yes" : "no");
+        if(present[3]) {
+            size_t len = strlen(keyboard_base_state.status);
+            snprintf(keyboard_base_state.status + len,
+                     sizeof(keyboard_base_state.status) - len,
+                     " 0x%02X", xl9555_addr);
+        }
     } else {
         snprintf(keyboard_base_state.status, sizeof(keyboard_base_state.status),
                  "Keyboard base not detected");
@@ -2901,6 +3068,7 @@ void ui_hardware_reboot_diag_dump(const char *tag)
     int rc_bq27220;
     int rc_tca8418;
     int rc_xl9555;
+    int xl9555_addr;
 
     keyboard_base_probe();
     keyboard_base_get_state(&base);
@@ -2911,8 +3079,10 @@ void ui_hardware_reboot_diag_dump(const char *tag)
                                        BQ27220_REG_VOLTAGE, &reg_bq27220);
     rc_tca8418 = keyboard_i2c_read_reg(TCA8418_ADDR, TCA8418_REG_CFG,
                                        &reg_tca8418);
-    rc_xl9555 = keyboard_i2c_read_reg(XL9555_ADDR, XL9555_REG_INPUT0,
-                                      &reg_xl9555);
+    xl9555_addr = xl9555_addr_valid(base.xl9555_addr) ? base.xl9555_addr : -1;
+    rc_xl9555 = xl9555_addr_valid(xl9555_addr) ?
+                keyboard_i2c_read_reg((uint8_t)xl9555_addr,
+                                      XL9555_REG_INPUT0, &reg_xl9555) : -1;
 
     up = fopen("/proc/uptime", "r");
     if(up) {
@@ -2933,13 +3103,16 @@ void ui_hardware_reboot_diag_dump(const char *tag)
             "present{bq25896=%d bq27220=%d tca8418=%d xl9555=%d} "
             "read_rc{bq25896=%d bq27220=%d tca8418=%d xl9555=%d} "
             "read_val{bq25896=0x%02X bq27220=0x%02X tca8418=0x%02X xl9555=0x%02X} "
+            "addr{xl9555=0x%02X} "
             "runtime{hw_thread=%d ext_req=%d ext_active=%d tca_ready=%d} "
             "status=\"%s\"\n",
             (unsigned long long)ui_monotonic_us(), (long long)now, uptime,
             tag ? tag : "unknown", base.scanned, base.bq25896,
             base.bq27220, base.tca8418, base.xl9555, rc_bq25896,
             rc_bq27220, rc_tca8418, rc_xl9555, reg_bq25896, reg_bq27220,
-            reg_tca8418, reg_xl9555, hardware_thread_started,
+            reg_tca8418, reg_xl9555,
+            xl9555_addr_valid(xl9555_addr) ? xl9555_addr : 0,
+            hardware_thread_started,
             extension_keyboard_requested, extension_keyboard_active,
             keyboard_tca8418_ready, base.status);
     fclose(fp);
@@ -5788,23 +5961,34 @@ static int xl9555_read_regs(uint8_t *input0, uint8_t *output0,
                             uint8_t *config0)
 {
     uint8_t value = 0;
+    int addr = -1;
+
+    if(xl9555_resolve_addr(&addr) != 0) {
+        return -1;
+    }
 
     if(input0) {
-        if(keyboard_i2c_read_reg(XL9555_ADDR, XL9555_REG_INPUT0,
+        if(keyboard_i2c_read_reg((uint8_t)addr, XL9555_REG_INPUT0,
                                  input0) != 0) {
+            xl9555_invalidate_addr(addr);
             return -1;
         }
-    } else if(keyboard_i2c_read_reg(XL9555_ADDR, XL9555_REG_INPUT0,
+    } else if(keyboard_i2c_read_reg((uint8_t)addr, XL9555_REG_INPUT0,
                                     &value) != 0) {
+        xl9555_invalidate_addr(addr);
         return -1;
     }
 
     if(output0 &&
-       keyboard_i2c_read_reg(XL9555_ADDR, XL9555_REG_OUTPUT0, output0) != 0) {
+       keyboard_i2c_read_reg((uint8_t)addr, XL9555_REG_OUTPUT0,
+                             output0) != 0) {
+        xl9555_invalidate_addr(addr);
         return -1;
     }
     if(config0 &&
-       keyboard_i2c_read_reg(XL9555_ADDR, XL9555_REG_CONFIG0, config0) != 0) {
+       keyboard_i2c_read_reg((uint8_t)addr, XL9555_REG_CONFIG0,
+                             config0) != 0) {
+        xl9555_invalidate_addr(addr);
         return -1;
     }
     return 0;
@@ -5819,6 +6003,12 @@ static int xl9555_init_device(void)
     };
     uint8_t output0 = 0;
     uint8_t config0 = 0;
+    int addr = -1;
+
+    if(xl9555_resolve_addr(&addr) != 0) {
+        xl9555_ready = 0;
+        return -1;
+    }
 
     if(xl9555_read_regs(NULL, &output0, &config0) != 0) {
         xl9555_ready = 0;
@@ -5826,18 +6016,22 @@ static int xl9555_init_device(void)
     }
 
     (void)config0;
-    if(keyboard_i2c_update_bits(XL9555_ADDR, XL9555_REG_OUTPUT0,
+    if(keyboard_i2c_update_bits((uint8_t)addr, XL9555_REG_OUTPUT0,
                                 XL9555_LED_MASK, XL9555_LED_MASK) != 0) {
+        xl9555_invalidate_addr(addr);
         xl9555_ready = 0;
         return -1;
     }
-    if(keyboard_i2c_update_bits(XL9555_ADDR, XL9555_REG_CONFIG0,
+    if(keyboard_i2c_update_bits((uint8_t)addr, XL9555_REG_CONFIG0,
                                 XL9555_LED_MASK, 0) != 0) {
+        xl9555_invalidate_addr(addr);
         xl9555_ready = 0;
         return -1;
     }
 
-    if(keyboard_i2c_read_reg(XL9555_ADDR, XL9555_REG_OUTPUT0, &output0) != 0) {
+    if(keyboard_i2c_read_reg((uint8_t)addr, XL9555_REG_OUTPUT0,
+                             &output0) != 0) {
+        xl9555_invalidate_addr(addr);
         xl9555_ready = 0;
         return -1;
     }
@@ -5856,6 +6050,7 @@ static int xl9555_set_led(int index, int enabled)
         XL9555_LED_P05_BIT
     };
     uint8_t mask;
+    int addr = -1;
 
     if(index < 0 || index >= 3) {
         return -1;
@@ -5863,10 +6058,15 @@ static int xl9555_set_led(int index, int enabled)
     if(!xl9555_ready && xl9555_init_device() != 0) {
         return -1;
     }
+    if(xl9555_resolve_addr(&addr) != 0) {
+        xl9555_ready = 0;
+        return -1;
+    }
 
     mask = (uint8_t)(1U << bits[index]);
-    if(keyboard_i2c_update_bits(XL9555_ADDR, XL9555_REG_OUTPUT0, mask,
+    if(keyboard_i2c_update_bits((uint8_t)addr, XL9555_REG_OUTPUT0, mask,
                                 enabled ? 0 : mask) != 0) {
+        xl9555_invalidate_addr(addr);
         xl9555_ready = 0;
         return -1;
     }
@@ -5876,12 +6076,19 @@ static int xl9555_set_led(int index, int enabled)
 
 static int xl9555_set_all(int enabled)
 {
+    int addr = -1;
+
     if(!xl9555_ready && xl9555_init_device() != 0) {
         return -1;
     }
-    if(keyboard_i2c_update_bits(XL9555_ADDR, XL9555_REG_OUTPUT0,
+    if(xl9555_resolve_addr(&addr) != 0) {
+        xl9555_ready = 0;
+        return -1;
+    }
+    if(keyboard_i2c_update_bits((uint8_t)addr, XL9555_REG_OUTPUT0,
                                 XL9555_LED_MASK,
                                 enabled ? 0 : XL9555_LED_MASK) != 0) {
+        xl9555_invalidate_addr(addr);
         xl9555_ready = 0;
         return -1;
     }
@@ -7972,6 +8179,7 @@ static void xl9555_update_page(void)
     uint8_t input0 = 0;
     uint8_t output0 = 0;
     uint8_t config0 = 0;
+    int addr = -1;
     char text[160];
 
     keyboard_base_get_state(&base);
@@ -8009,6 +8217,9 @@ static void xl9555_update_page(void)
         }
         return;
     }
+    if(xl9555_resolve_addr(&addr) != 0) {
+        addr = XL9555_ADDR_DEFAULT;
+    }
 
     xl9555_led_state[0] =
         (output0 & (uint8_t)(1U << XL9555_LED_P03_BIT)) ? 0 : 1;
@@ -8019,7 +8230,7 @@ static void xl9555_update_page(void)
 
     if(xl9555_status_label) {
         snprintf(text, sizeof(text), "Ready  addr=0x%02X  active-low LEDs",
-                 XL9555_ADDR);
+                 addr);
         lv_label_set_text(xl9555_status_label, text);
         lv_obj_set_style_text_color(xl9555_status_label,
                                     lv_color_hex(0x25C281), 0);
@@ -9217,7 +9428,8 @@ void ui_xl9555_led_create(lv_obj_t *scr)
     ui_info_row(body, 202, "Direction register", "--", 0xF5A524);
     xl9555_config_label = lv_obj_get_child(body,
                                            lv_obj_get_child_count(body) - 1);
-    ui_info_row(body, 256, "I2C", "I2C4 SDA47/SCL46 addr=0x20", 0xF2F5F8);
+    ui_info_row(body, 256, "I2C", "I2C4 SDA47/SCL46 addr=0x20-0x27",
+                0xF2F5F8);
     ui_info_row(body, 310, "Pins", "P03 P04 P05 output low=on", 0x9AA4AF);
 
     for(size_t i = 0; i < 3; i++) {

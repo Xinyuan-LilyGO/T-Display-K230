@@ -118,7 +118,7 @@ MAX98357A 外部 I2S 功放
 | TCA8418 键盘 | SDA | `GPIO47` / I2C4 SDA | I2C | 键盘矩阵控制器 |
 | TCA8418 键盘 | Reset | `GPIO43` | 输出 | 键盘控制器 reset |
 | TCA8418 键盘 | IRQ | `GPIO42` | 输入 | 键盘中断线 |
-| XL9555 GPIO 扩展器 | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C 地址 `0x20` |
+| XL9555 GPIO 扩展器 | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C 地址可能为 `0x20`-`0x27`，软件会自动探测并缓存地址 |
 | XL9555 GPIO 扩展器 | SDA | `GPIO47` / I2C4 SDA | I2C | LED 和键盘底板支持 |
 | 键盘背光 | PWM | `GPIO52` / PWM4 | 输出 | 用户态调节键盘背光亮度 |
 
@@ -130,7 +130,6 @@ MAX98357A 外部 I2S 功放
 | `0x5D` | GT9895 / Goodix 触摸控制器 | K230 主板 |
 | `0x6B` | BQ25896 充电器 | nRF9151 键盘底板 |
 | `0x38` | AHT20 温湿度传感器 | nRF52840 底板 |
-| `0x20` | XL9555 GPIO 扩展器 | nRF9151 键盘底板 |
+| `0x20`-`0x27` | XL9555 GPIO 扩展器 | nRF9151 键盘底板，地址取决于硬件版本/地址脚配置 |
 | `0x34` | TCA8418 键盘控制器 | nRF9151 键盘底板 |
 | `0x55` | BQ27220 电池电量计 | nRF9151 键盘底板 |
-
