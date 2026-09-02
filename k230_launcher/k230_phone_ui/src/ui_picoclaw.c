@@ -1418,7 +1418,11 @@ static void picoclaw_layout_main(void)
     int gap = ui_is_landscape() ? 8 : 10;
     int input_h = ui_is_landscape() ? 60 : 68;
     int chat_h;
-    int settings_w = ui_is_landscape() ? 58 : 56;
+    int settings_w = ui_is_landscape() ? 52 : 56;
+    int settings_h = ui_is_landscape() ? 48 : 52;
+    int status_pad_x = ui_is_landscape() ? 16 : 18;
+    int status_pad_y = ui_is_landscape() ? 12 : 16;
+    int status_text_w;
     int send_w = ui_is_landscape() ? 86 : 78;
 
     picoclaw_status_panel_h = ui_is_landscape() ? 96 : 128;
@@ -1444,24 +1448,28 @@ static void picoclaw_layout_main(void)
         lv_obj_set_size(picoclaw_input_panel, content_w, input_h);
     }
     if(picoclaw_settings_btn) {
-        lv_obj_set_pos(picoclaw_settings_btn, content_w - settings_w, 0);
-        lv_obj_set_size(picoclaw_settings_btn, settings_w,
-                        ui_is_landscape() ? 48 : 52);
+        lv_obj_set_pos(picoclaw_settings_btn,
+                       content_w - settings_w - status_pad_x,
+                       (picoclaw_status_panel_h - settings_h) / 2);
+        lv_obj_set_size(picoclaw_settings_btn, settings_w, settings_h);
+    }
+    status_text_w = content_w - settings_w - status_pad_x * 3 - 8;
+    if(status_text_w < 120) {
+        status_text_w = content_w - status_pad_x * 2;
     }
     if(picoclaw_status_label) {
-        lv_obj_set_pos(picoclaw_status_label, 0, 0);
-        lv_obj_set_width(picoclaw_status_label,
-                         content_w - settings_w - 12);
+        lv_obj_set_pos(picoclaw_status_label, status_pad_x, status_pad_y);
+        lv_obj_set_width(picoclaw_status_label, status_text_w);
     }
     if(picoclaw_model_label) {
-        lv_obj_set_pos(picoclaw_model_label, 0, 30);
-        lv_obj_set_width(picoclaw_model_label,
-                         content_w - settings_w - 12);
+        lv_obj_set_pos(picoclaw_model_label, status_pad_x,
+                       status_pad_y + (ui_is_landscape() ? 28 : 32));
+        lv_obj_set_width(picoclaw_model_label, status_text_w);
     }
     if(picoclaw_detail_label) {
-        lv_obj_set_pos(picoclaw_detail_label, 0, 58);
-        lv_obj_set_width(picoclaw_detail_label,
-                         content_w - settings_w - 12);
+        lv_obj_set_pos(picoclaw_detail_label, status_pad_x,
+                       status_pad_y + (ui_is_landscape() ? 54 : 64));
+        lv_obj_set_width(picoclaw_detail_label, status_text_w);
     }
     if(picoclaw_textarea) {
         lv_obj_set_pos(picoclaw_textarea, 0, 0);
