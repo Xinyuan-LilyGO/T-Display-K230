@@ -64,7 +64,8 @@ mkdir -p "$ROOTFS_DIR/root/music" "$ROOTFS_DIR/root/nes" "$ROOTFS_DIR/root/video
     "$ROOTFS_DIR/root/photos" "$ROOTFS_DIR/root/screenshots" \
     "$ROOTFS_DIR/root/recordings" "$ROOTFS_DIR/root/lorawan" \
     "$ROOTFS_DIR/root/meshtastic" "$ROOTFS_DIR/root/notification" \
-    "$ROOTFS_DIR/root/nrf52840/firmware"
+    "$ROOTFS_DIR/root/nrf52840/firmware" "$ROOTFS_DIR/root/picoclaw/bin" \
+    "$ROOTFS_DIR/root/picoclaw/workspace"
 
 # Map tiles are runtime data. Keep them out of generated images so users can
 # later choose an area/zoom level and download only the cache they need.
@@ -89,6 +90,27 @@ sync_media_dir() {
 sync_media_dir "$RESOURCE_DIR/videos" "$ROOTFS_DIR/root/videos" "video"
 sync_media_dir "$RESOURCE_DIR/music" "$ROOTFS_DIR/root/music" "music"
 sync_media_dir "$RESOURCE_DIR/notification" "$ROOTFS_DIR/root/notification" "notification"
+if [ -x "$RESOURCE_DIR/picoclaw/picoclaw" ]; then
+    install -D -m 0755 "$RESOURCE_DIR/picoclaw/picoclaw" \
+        "$ROOTFS_DIR/root/picoclaw/bin/picoclaw"
+    echo "Installed PicoClaw runtime from $RESOURCE_DIR/picoclaw/picoclaw"
+elif [ -f "$RESOURCE_DIR/picoclaw/picoclaw_Linux_riscv64.tar.gz" ]; then
+    tmp_extract="$(mktemp -d)"
+    tar -xzf "$RESOURCE_DIR/picoclaw/picoclaw_Linux_riscv64.tar.gz" -C "$tmp_extract"
+    pico_bin="$(find "$tmp_extract" -type f -name picoclaw -perm /111 2>/dev/null | head -n 1)"
+    if [ -z "$pico_bin" ]; then
+        pico_bin="$(find "$tmp_extract" -type f -name picoclaw 2>/dev/null | head -n 1)"
+    fi
+    if [ -n "$pico_bin" ]; then
+        install -D -m 0755 "$pico_bin" "$ROOTFS_DIR/root/picoclaw/bin/picoclaw"
+        echo "Installed PicoClaw runtime from $RESOURCE_DIR/picoclaw/picoclaw_Linux_riscv64.tar.gz"
+    else
+        echo "No PicoClaw binary found in $RESOURCE_DIR/picoclaw/picoclaw_Linux_riscv64.tar.gz"
+    fi
+    rm -rf "$tmp_extract"
+else
+    echo "No PicoClaw runtime found at $RESOURCE_DIR/picoclaw; keeping runtime install optional"
+fi
 echo "Skipped map tiles; runtime cache is /root/maps on the device"
 
 if [ -e "$STAMP" ]; then

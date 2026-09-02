@@ -74,6 +74,29 @@ modules on both K230 boards; SX1262 boards support basic text mesh messages
 only. Xiaozhi is also beta and requires network access plus a compatible
 Xiaozhi service.
 
+PicoClaw model profiles can be provisioned quickly over SSH, which avoids
+typing long API keys with the on-screen keyboard:
+
+```sh
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-add \
+  deepseek-chat \
+  deepseek/deepseek-chat \
+  https://api.deepseek.com/v1 \
+  'sk-xxxx' \
+  'DeepSeek Chat'
+```
+
+The command adds or updates the matching profile and makes it active. Check the
+current configuration with:
+
+```sh
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-list
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh status
+```
+
+`profile-list` shows the active profile. In `status`, `model_key=ready` means
+the active profile has an API key. Use `profile-use INDEX` to switch profiles.
+
 ## Install Into The SDK
 
 Clone or copy this launcher next to the SDK, then run:
@@ -91,6 +114,7 @@ The script installs:
 - optional bundled media from `resources/videos` into `/root/videos`
 - optional bundled media from `resources/music` into `/root/music`
 - optional bundled notification sounds from `resources/notification` into `/root/notification`
+- optional bundled PicoClaw files from `resources/picoclaw`
 - a runtime map cache policy for `/root/maps`; map tiles are not bundled into the default image
 
 To use a different local resource directory:

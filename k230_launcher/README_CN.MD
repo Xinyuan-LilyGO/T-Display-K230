@@ -66,6 +66,29 @@ Meshtastic 当前作为 Beta 应用提供。语音/图片传输需要两端 K230
 模块；SX1262 版本仅支持基础文字 mesh 消息。小智当前同样作为 Beta 功能提供，
 需要网络连接和兼容小智协议的服务。
 
+PicoClaw 的模型 profile 可以在设备上通过 SSH 快速写入，避免在屏幕键盘中输入
+较长的 API key：
+
+```sh
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-add \
+  deepseek-chat \
+  deepseek/deepseek-chat \
+  https://api.deepseek.com/v1 \
+  'sk-xxxx' \
+  'DeepSeek Chat'
+```
+
+该命令会新增或更新匹配的 profile，并自动设为当前 profile。写入后可以用下面
+两个命令检查当前配置：
+
+```sh
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-list
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh status
+```
+
+`profile-list` 会显示当前启用的 profile，`status` 中 `model_key=ready` 表示
+当前 profile 已配置 API key。需要切换 profile 时使用 `profile-use INDEX`。
+
 ## 安装到 SDK
 
 将本仓库放在 SDK 旁边，然后执行：
@@ -83,6 +106,7 @@ Meshtastic 当前作为 Beta 应用提供。语音/图片传输需要两端 K230
 - 可选打包媒体：将 `resources/videos` 同步到镜像内 `/root/videos`
 - 可选打包媒体：将 `resources/music` 同步到镜像内 `/root/music`
 - 可选打包通知音效：将 `resources/notification` 同步到镜像内 `/root/notification`
+- 可选打包 PicoClaw：如果存在 `resources/picoclaw`，会将其中的运行文件加入镜像
 - `/root/maps` 运行时地图缓存策略；默认镜像不打包地图瓦片
 
 如果资源目录不在默认位置，可以这样指定：

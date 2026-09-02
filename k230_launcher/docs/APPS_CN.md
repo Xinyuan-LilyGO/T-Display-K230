@@ -55,7 +55,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `NES` | 从 `/root/nes` 加载 `.nes` ROM，并支持触摸按键和硬件键盘控制 | 镜像默认不内置 NES ROM请自行将 ROM 文件放入 `/root/nes`，再从列表选择 ROM键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 为 Start，`Space` 或 `Shift` 为 Select，`U/I/O` 为 A，`H/J/K` 为 B，`Esc` 停止游戏或返回 ROM 列表 |
 | `AI` | 打开随镜像提供的 K230 AI 示例界面 | 当模型资源存在时，可以运行支持的本地 AI 示例，并在屏幕上查看结果 |
 | `Xiaozhi` / 小智 | 面向兼容小智协议 WebSocket 服务的语音助手客户端，支持官方 6 位验证码绑定、唤醒词入口、按住说话、硬件 MIC 键、聊天气泡记录、全屏机器人表情模式和会话自动恢复 | 首次使用时在 xiaozhi.me 控制台点击添加设备，然后在 K230 小智页面发送第一条语音消息，服务端会在设备上返回 6 位绑定验证码，将验证码输入网页即可。绑定成功后会自动保存服务器地址和令牌。可以说出唤醒词 `xiaozhi`、按住 `PTT`，或按下硬件 MIC 键开始说话。点击 `Face` 进入全屏机器人表情，点击 `New chat` 清空当前对话。小智只会在应用打开期间占用麦克风 |
-| `PicoClaw` | PicoClaw 轻量 Agent 运行时聊天入口，支持在线安装 riscv64 运行时、选择 OpenAI 兼容模型预设、保存 API 密钥、发送文本问题、启动或停止 gateway，并支持微信扫码登录 | 先连接网络，进入 PicoClaw 设置页点击 `安装`，选择模型预设并填写 API 密钥，然后回到聊天界面直接输入发送。需要微信接入时，在设置页点击 `微信登录`，用手机微信扫描屏幕二维码，登录成功后启动 gateway。gateway 默认监听 `18790`，`/health` 和 `/ready` 是状态接口，不是浏览器网页界面。输入栏使用 launcher 自实现输入法，启用拼音后可以在输入框上方选择候选字。当前版本不占用麦克风，也不内置 PicoClaw 二进制 |
+| `PicoClaw` | PicoClaw 轻量 Agent 聊天入口，支持 OpenAI 兼容模型 profile、保存 API 密钥、发送文本问题，并支持微信扫码登录 | 先连接网络，进入 PicoClaw 设置页选择模型 profile 并填写 API 密钥，或者通过 SSH 命令快速写入 profile，然后回到聊天界面直接输入发送。需要微信接入时，在设置页点击 `微信登录`，用手机微信扫描屏幕二维码完成登录 |
 | `RTSP` | 开启或停止摄像头 RTSP 推流，并显示推流地址 | 开启后，在同一网络的电脑上打开界面显示的 URL使用相机前需要先关闭 RTSP |
 | `Wi-Fi` | 扫描 Wi-Fi、保存密码、连接网络和自动回连 | 打开 Wi-Fi，点击网络名称，输入不少于 8 位的密码，等待连接结果 |
 | `Bluetooth` / 蓝牙 | 管理 BLE 行为。`Meshtastic` 模式会将 nRF52840 BLE 链路保留给 Meshtastic 手机 App 连接；`Custom BLE` 模式会关闭 Meshtastic 对 BLE 的占用，并允许普通 BLE 扫描、连接和 GATT 查看。两种模式互斥，不能同时使用 | 打开蓝牙后选择需要的模式。在 `Custom BLE` 模式下点击设备名称即可连接并查看 GATT 信息；需要 Meshtastic 手机 App 连接 K230 时请选择 `Meshtastic` 模式 |
@@ -100,6 +100,36 @@ launcher 会在目标 rootfs 中创建以下目录：
 12. 点击 `Run` 后，应用会准备 LoRa 模块，通过 OTAA 入网，并使用保存的 profile 发送 payload
 
 运行前必须先保存 profile如果存在未保存更改，或者密钥长度不正确，应用会拒绝运行
+
+## PicoClaw Profile 快速配置
+
+可以通过 SSH 在设备上快速新增或更新 profile：
+
+```sh
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-add \
+  deepseek-chat \
+  deepseek/deepseek-chat \
+  https://api.deepseek.com/v1 \
+  'sk-xxxx' \
+  'DeepSeek Chat'
+```
+
+命令参数依次是 `MODEL_NAME`、`MODEL_ID`、`API_BASE`、`API_KEY` 和可选的显示名称。
+如果已有相同 `MODEL_NAME + MODEL_ID + API_BASE` 的 profile，会直接更新它；否则会
+创建新 profile。命令执行后会自动设为当前 profile。
+
+常用辅助命令：
+
+```sh
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-list
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh status
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-use 0
+```
+
+检查预期：
+
+- `profile-list` 中当前 profile 左侧会显示 `*`
+- `status` 中 `model_key=ready` 表示当前 profile 已经配置 API key
 
 ## 设置中的子页面
 

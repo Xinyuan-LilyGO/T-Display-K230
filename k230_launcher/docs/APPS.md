@@ -55,7 +55,7 @@ See [MAPS.md](MAPS.md) for offline map tile download and install instructions.
 | `NES` | Loads `.nes` ROMs from `/root/nes` and runs them with touch controls or the hardware keyboard. | NES ROMs are not bundled by default. Add your own ROM files to `/root/nes`, then select a ROM from the list. Keyboard controls: arrows or `W/A/S/D` for direction, `Enter` for Start, `Space` or `Shift` for Select, `U/I/O` for A, `H/J/K` for B, and `Esc` to stop or return to the ROM list. |
 | `AI` | Opens the bundled K230 AI demo interface when model resources are installed. | Use it to run supported local AI demos and view their results on the screen. |
 | `Xiaozhi` | Voice assistant client for a Xiaozhi-compatible WebSocket service. The app supports the official 6-digit device binding flow, wake-word entry, push-to-talk, hardware MIC key input, a chat-style transcript, full-screen robot face mode, and automatic session recovery. | For first use, open the xiaozhi.me console and choose Add device. Then send the first voice turn from the K230 Xiaozhi page; the service will return a 6-digit binding code on the device. Enter that code in the webpage. After binding, the app saves the server URL and token automatically. Say the wake word `xiaozhi`, hold `PTT`, or press the hardware MIC key to talk. Tap `Face` to enter the full-screen robot face view, and tap `New chat` to clear the current conversation. Xiaozhi owns the microphone only while the app is open. |
-| `PicoClaw` | Chat-style control page for the lightweight PicoClaw agent runtime. It can install the riscv64 runtime online, use preset OpenAI-compatible model profiles, save an API key, send text prompts, start or stop the gateway, and link Weixin through QR login. | Connect the board to the network, open PicoClaw settings, tap `Install`, choose a model preset, set the API key, then send text from the chat input. To link Weixin, tap `Weixin login`, scan the on-screen QR code with the WeChat mobile app, then start the gateway after login succeeds. The gateway listens on port `18790` by default; `/health` and `/ready` are status endpoints, not a browser Web UI. The app uses the launcher inline keyboard so Pinyin candidates are available when the system input method is enabled. This version does not own the microphone and does not bundle the PicoClaw binary in the image. |
+| `PicoClaw` | Chat-style control page for the lightweight PicoClaw agent. It can use OpenAI-compatible model profiles, save an API key, send text prompts, and link Weixin through QR login. | Connect the board to the network, open PicoClaw settings, choose a model profile, set the API key, or provision the profile quickly over SSH. Then send text from the chat input. To link Weixin, tap `Weixin login` and scan the on-screen QR code with the WeChat mobile app. |
 | `RTSP` | Starts or stops camera RTSP streaming and shows the stream address. | Enable streaming, then open the displayed URL from a computer on the same network. Stop RTSP before using the `Camera` app. |
 | `Wi-Fi` | Scans Wi-Fi networks, saves passwords, connects, and reconnects saved networks. | Turn Wi-Fi on, tap a network, enter a password of at least 8 characters, and wait for the connection result. |
 | `Bluetooth` | Manages BLE behavior. `Meshtastic` mode reserves the nRF52840 BLE link for the Meshtastic phone bridge. `Custom BLE` mode disables Meshtastic BLE ownership and allows normal BLE scanning, connection, and GATT inspection. The two modes are mutually exclusive. | Turn Bluetooth on, choose the required mode, then tap a device in `Custom BLE` mode to connect and inspect its GATT data. Use `Meshtastic` mode when the Meshtastic phone app should connect to the K230 board. |
@@ -100,6 +100,37 @@ The `LoRaWAN` app stores profile files under `/root/lorawan`.
 12. Tap `Run` to prepare the radio, join through OTAA, and send payloads with the saved profile.
 
 Save the profile before running it. The app refuses to run profiles with unsaved changes or invalid key lengths.
+
+## PicoClaw Profile CLI
+
+You can add or update a profile over SSH:
+
+```sh
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-add \
+  deepseek-chat \
+  deepseek/deepseek-chat \
+  https://api.deepseek.com/v1 \
+  'sk-xxxx' \
+  'DeepSeek Chat'
+```
+
+The arguments are `MODEL_NAME`, `MODEL_ID`, `API_BASE`, `API_KEY`, and an
+optional display name. If a matching `MODEL_NAME + MODEL_ID + API_BASE` profile
+already exists, it is updated; otherwise a new profile is created. The profile
+is made active automatically.
+
+Useful helpers:
+
+```sh
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-list
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh status
+/root/app/k230_phone_ui/k230_picoclaw_ctl.sh profile-use 0
+```
+
+Expected checks:
+
+- `profile-list` marks the active profile with `*`.
+- `model_key=ready` in `status` means the active profile has an API key.
 
 ## Settings Pages
 
