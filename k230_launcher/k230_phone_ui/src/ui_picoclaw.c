@@ -21,6 +21,9 @@
 #define PICOCLAW_API_BASE_KEY "picoclaw.api_base"
 #define PICOCLAW_API_KEY_KEY "picoclaw.api_key"
 #define PICOCLAW_PRESET_KEY "picoclaw.preset"
+#define PICOCLAW_PROFILE_COUNT_KEY "picoclaw.profile.count"
+#define PICOCLAW_PROFILE_ACTIVE_KEY "picoclaw.profile.active"
+#define PICOCLAW_PROFILE_MAX 8
 #define PICOCLAW_OUTPUT_MAX 4096
 #define PICOCLAW_CHAT_MAX 32
 #define PICOCLAW_CHAT_TEXT_MAX 1024
@@ -41,10 +44,12 @@ typedef enum {
     PICOCLAW_ACTION_WEIXIN_CANCEL,
     PICOCLAW_ACTION_WEIXIN_UNBIND,
     PICOCLAW_ACTION_LOG,
+    PICOCLAW_ACTION_TEST_PROFILE,
 } picoclaw_action_t;
 
 typedef enum {
-    PICOCLAW_FIELD_MODEL_NAME = 0,
+    PICOCLAW_FIELD_PROFILE_TITLE = 0,
+    PICOCLAW_FIELD_MODEL_NAME,
     PICOCLAW_FIELD_MODEL_ID,
     PICOCLAW_FIELD_API_BASE,
     PICOCLAW_FIELD_API_KEY,
@@ -53,6 +58,8 @@ typedef enum {
 typedef enum {
     PICOCLAW_VIEW_CHAT = 0,
     PICOCLAW_VIEW_SETTINGS,
+    PICOCLAW_VIEW_PROFILE_LIST,
+    PICOCLAW_VIEW_PROFILE_EDIT,
 } picoclaw_view_t;
 
 typedef struct {
@@ -62,6 +69,14 @@ typedef struct {
     const char *api_base;
     int custom;
 } picoclaw_preset_t;
+
+typedef struct {
+    char title[80];
+    char model_name[128];
+    char model_id[256];
+    char api_base[256];
+    char api_key[512];
+} picoclaw_profile_t;
 
 typedef struct {
     picoclaw_action_t action;
@@ -141,6 +156,7 @@ static uint16_t *picoclaw_weixin_qr_buf;
 static ui_input_inline_t *picoclaw_inline_input;
 
 static picoclaw_view_t picoclaw_view = PICOCLAW_VIEW_CHAT;
+static int picoclaw_edit_profile_index = 0;
 static int picoclaw_keyboard_reserved_h;
 static int picoclaw_status_panel_h;
 static int picoclaw_busy;
@@ -386,7 +402,35 @@ static const picoclaw_preset_t *picoclaw_preset_at(int index)
     return &picoclaw_presets[index];
 }
 
-static int picoclaw_current_preset_index(void)
+static void picoclaw_profile_key(char *out, size_t len, int index,
+                                 const char *field)
+{
+    if(!out || len == 0) {
+        return;
+    }
+    snprintf(out, len, "picoclaw.profile.%d.%s", index, field ? field : "");
+}
+
+static int picoclaw_profile_count_raw(void)
+{
+    char value[16];
+    int count;
+
+    if(ui_prefs_get(PICOCLAW_PROFILE_COUNT_KEY, value, sizeof(value), "") != 0 ||
+       !value[0]) {
+        return 0;
+    }
+    count = atoi(value);
+    if(count < 0) {
+        count = 0;
+    }
+    if(count > PICOCLAW_PROFILE_MAX) {
+        count = PICOCLAW_PROFILE_MAX;
+    }
+    return count;
+}
+
+static int picoclaw_legacy_preset_index(void)
 {
     char value[32];
     char model_id[256];
@@ -420,23 +464,176 @@ static int picoclaw_current_preset_index(void)
     return (int)(sizeof(picoclaw_presets) / sizeof(picoclaw_presets[0])) - 1;
 }
 
-static const picoclaw_preset_t *picoclaw_current_preset(void)
+static void picoclaw_profile_load(int index, picoclaw_profile_t *profile)
 {
-    return picoclaw_preset_at(picoclaw_current_preset_index());
+    const picoclaw_preset_t *preset = picoclaw_preset_at(index);
+    char key[64];
+
+    if(!profile) {
+        return;
+    }
+    memset(profile, 0, sizeof(*profile));
+    picoclaw_profile_key(key, sizeof(key), index, "title");
+    picoclaw_load_pref(profile->title, sizeof(profile->title), key,
+                       preset->display);
+    picoclaw_profile_key(key, sizeof(key), index, "model_name");
+    picoclaw_load_pref(profile->model_name, sizeof(profile->model_name), key,
+                       preset->model_name);
+    picoclaw_profile_key(key, sizeof(key), index, "model_id");
+    picoclaw_load_pref(profile->model_id, sizeof(profile->model_id), key,
+                       preset->model_id);
+    picoclaw_profile_key(key, sizeof(key), index, "api_base");
+    picoclaw_load_pref(profile->api_base, sizeof(profile->api_base), key,
+                       preset->api_base);
+    picoclaw_profile_key(key, sizeof(key), index, "api_key");
+    picoclaw_load_pref(profile->api_key, sizeof(profile->api_key), key, "");
+}
+
+static void picoclaw_profile_save(int index, const picoclaw_profile_t *profile)
+{
+    char key[64];
+
+    if(!profile || index < 0 || index >= PICOCLAW_PROFILE_MAX) {
+        return;
+    }
+    picoclaw_profile_key(key, sizeof(key), index, "title");
+    ui_prefs_set(key, profile->title);
+    picoclaw_profile_key(key, sizeof(key), index, "model_name");
+    ui_prefs_set(key, profile->model_name);
+    picoclaw_profile_key(key, sizeof(key), index, "model_id");
+    ui_prefs_set(key, profile->model_id);
+    picoclaw_profile_key(key, sizeof(key), index, "api_base");
+    ui_prefs_set(key, profile->api_base);
+    picoclaw_profile_key(key, sizeof(key), index, "api_key");
+    ui_prefs_set(key, profile->api_key);
+}
+
+static void picoclaw_profile_seed_if_needed(void)
+{
+    int count = picoclaw_profile_count_raw();
+    int preset_count =
+        (int)(sizeof(picoclaw_presets) / sizeof(picoclaw_presets[0]));
+    int active = picoclaw_legacy_preset_index();
+    char active_text[16];
+    char legacy_model_name[128];
+    char legacy_model_id[256];
+    char legacy_api_base[256];
+    char legacy_api_key[512];
+
+    if(count > 0) {
+        return;
+    }
+
+    picoclaw_load_pref(legacy_model_name, sizeof(legacy_model_name),
+                       PICOCLAW_MODEL_NAME_KEY, "");
+    picoclaw_load_pref(legacy_model_id, sizeof(legacy_model_id),
+                       PICOCLAW_MODEL_ID_KEY, "");
+    picoclaw_load_pref(legacy_api_base, sizeof(legacy_api_base),
+                       PICOCLAW_API_BASE_KEY, "");
+    picoclaw_load_pref(legacy_api_key, sizeof(legacy_api_key),
+                       PICOCLAW_API_KEY_KEY, "");
+
+    if(active < 0 || active >= preset_count) {
+        active = 0;
+    }
+    if(preset_count > PICOCLAW_PROFILE_MAX) {
+        preset_count = PICOCLAW_PROFILE_MAX;
+    }
+    for(int i = 0; i < preset_count; i++) {
+        const picoclaw_preset_t *preset = picoclaw_preset_at(i);
+        picoclaw_profile_t profile;
+
+        memset(&profile, 0, sizeof(profile));
+        snprintf(profile.title, sizeof(profile.title), "%s", preset->display);
+        snprintf(profile.model_name, sizeof(profile.model_name), "%s",
+                 preset->model_name);
+        snprintf(profile.model_id, sizeof(profile.model_id), "%s",
+                 preset->model_id);
+        snprintf(profile.api_base, sizeof(profile.api_base), "%s",
+                 preset->api_base);
+        if(i == active && legacy_api_key[0]) {
+            snprintf(profile.api_key, sizeof(profile.api_key), "%s",
+                     legacy_api_key);
+        }
+        if(i == active && legacy_model_name[0]) {
+            snprintf(profile.model_name, sizeof(profile.model_name), "%s",
+                     legacy_model_name);
+        }
+        if(i == active && legacy_model_id[0]) {
+            snprintf(profile.model_id, sizeof(profile.model_id), "%s",
+                     legacy_model_id);
+        }
+        if(i == active && legacy_api_base[0]) {
+            snprintf(profile.api_base, sizeof(profile.api_base), "%s",
+                     legacy_api_base);
+        }
+        picoclaw_profile_save(i, &profile);
+    }
+
+    snprintf(active_text, sizeof(active_text), "%d", active);
+    ui_prefs_set(PICOCLAW_PROFILE_ACTIVE_KEY, active_text);
+    snprintf(active_text, sizeof(active_text), "%d", preset_count);
+    ui_prefs_set(PICOCLAW_PROFILE_COUNT_KEY, active_text);
+}
+
+static int picoclaw_profile_count(void)
+{
+    int count;
+
+    picoclaw_profile_seed_if_needed();
+    count = picoclaw_profile_count_raw();
+    if(count <= 0) {
+        count = 1;
+    }
+    return count;
+}
+
+static int picoclaw_current_profile_index(void)
+{
+    char value[16];
+    int count = picoclaw_profile_count();
+    int index = 0;
+
+    if(ui_prefs_get(PICOCLAW_PROFILE_ACTIVE_KEY, value, sizeof(value), "") == 0 &&
+       value[0]) {
+        index = atoi(value);
+    }
+    if(index < 0 || index >= count) {
+        index = 0;
+    }
+    return index;
+}
+
+static void picoclaw_set_current_profile_index(int index)
+{
+    char value[16];
+    int count = picoclaw_profile_count();
+
+    if(index < 0) {
+        index = 0;
+    }
+    if(index >= count) {
+        index = count - 1;
+    }
+    snprintf(value, sizeof(value), "%d", index);
+    ui_prefs_set(PICOCLAW_PROFILE_ACTIVE_KEY, value);
+}
+
+static void picoclaw_current_profile(picoclaw_profile_t *profile)
+{
+    picoclaw_profile_load(picoclaw_current_profile_index(), profile);
 }
 
 static void picoclaw_effective_model(char *model_name, size_t model_name_len,
                                      char *model_id, size_t model_id_len,
                                      char *api_base, size_t api_base_len)
 {
-    const picoclaw_preset_t *preset = picoclaw_current_preset();
+    picoclaw_profile_t profile;
 
-    picoclaw_load_pref(model_name, model_name_len, PICOCLAW_MODEL_NAME_KEY,
-                       preset->model_name);
-    picoclaw_load_pref(model_id, model_id_len, PICOCLAW_MODEL_ID_KEY,
-                       preset->model_id);
-    picoclaw_load_pref(api_base, api_base_len, PICOCLAW_API_BASE_KEY,
-                       preset->api_base);
+    picoclaw_current_profile(&profile);
+    snprintf(model_name, model_name_len, "%s", profile.model_name);
+    snprintf(model_id, model_id_len, "%s", profile.model_id);
+    snprintf(api_base, api_base_len, "%s", profile.api_base);
 }
 
 static int picoclaw_build_command(picoclaw_request_t *req, char *cmd,
@@ -451,6 +648,7 @@ static int picoclaw_build_command(picoclaw_request_t *req, char *cmd,
     char model_id[256];
     char api_base[256];
     char api_key[512];
+    picoclaw_profile_t profile;
 
     if(!req || !cmd || cmd_len == 0) {
         return -1;
@@ -491,10 +689,11 @@ static int picoclaw_build_command(picoclaw_request_t *req, char *cmd,
         snprintf(cmd, cmd_len, "%s ask %s", PICOCLAW_SCRIPT, q0);
         return 0;
     case PICOCLAW_ACTION_SAVE_CONFIG:
-        picoclaw_effective_model(model_name, sizeof(model_name),
-                                 model_id, sizeof(model_id),
-                                 api_base, sizeof(api_base));
-        picoclaw_load_pref(api_key, sizeof(api_key), PICOCLAW_API_KEY_KEY, "");
+        picoclaw_current_profile(&profile);
+        snprintf(model_name, sizeof(model_name), "%s", profile.model_name);
+        snprintf(model_id, sizeof(model_id), "%s", profile.model_id);
+        snprintf(api_base, sizeof(api_base), "%s", profile.api_base);
+        snprintf(api_key, sizeof(api_key), "%s", profile.api_key);
         if(picoclaw_shell_quote(q1, sizeof(q1), model_name) != 0 ||
            picoclaw_shell_quote(q2, sizeof(q2), model_id) != 0 ||
            picoclaw_shell_quote(q3, sizeof(q3), api_base) != 0 ||
@@ -503,6 +702,22 @@ static int picoclaw_build_command(picoclaw_request_t *req, char *cmd,
         }
         snprintf(cmd, cmd_len, "%s save-config %s %s %s %s",
                  PICOCLAW_SCRIPT, q1, q2, q3, q4);
+        return 0;
+    case PICOCLAW_ACTION_TEST_PROFILE:
+        picoclaw_current_profile(&profile);
+        snprintf(model_name, sizeof(model_name), "%s", profile.model_name);
+        snprintf(model_id, sizeof(model_id), "%s", profile.model_id);
+        snprintf(api_base, sizeof(api_base), "%s", profile.api_base);
+        snprintf(api_key, sizeof(api_key), "%s", profile.api_key);
+        if(picoclaw_shell_quote(q0, sizeof(q0), "Reply with OK.") != 0 ||
+           picoclaw_shell_quote(q1, sizeof(q1), model_name) != 0 ||
+           picoclaw_shell_quote(q2, sizeof(q2), model_id) != 0 ||
+           picoclaw_shell_quote(q3, sizeof(q3), api_base) != 0 ||
+           picoclaw_shell_quote(q4, sizeof(q4), api_key) != 0) {
+            return -1;
+        }
+        snprintf(cmd, cmd_len, "%s save-config %s %s %s %s && %s ask %s",
+                 PICOCLAW_SCRIPT, q1, q2, q3, q4, PICOCLAW_SCRIPT, q0);
         return 0;
     default:
         return -1;
@@ -547,6 +762,9 @@ static void picoclaw_status_for_action(picoclaw_action_t action, char *out,
         break;
     case PICOCLAW_ACTION_LOG:
         text = "Reading log...";
+        break;
+    case PICOCLAW_ACTION_TEST_PROFILE:
+        text = "Testing profile...";
         break;
     default:
         break;
@@ -1291,6 +1509,7 @@ static void picoclaw_update_status_labels(int busy, int rc)
     char model_name[128];
     char model_id[256];
     char api_base[256];
+    picoclaw_profile_t profile;
     char output[PICOCLAW_OUTPUT_MAX];
     char line[360];
     int weixin_ready;
@@ -1309,9 +1528,10 @@ static void picoclaw_update_status_labels(int busy, int rc)
     weixin_auth_running = picoclaw_weixin_auth_running;
     pthread_mutex_unlock(&picoclaw_lock);
 
-    picoclaw_effective_model(model_name, sizeof(model_name),
-                             model_id, sizeof(model_id),
-                             api_base, sizeof(api_base));
+    picoclaw_current_profile(&profile);
+    snprintf(model_name, sizeof(model_name), "%s", profile.model_name);
+    snprintf(model_id, sizeof(model_id), "%s", profile.model_id);
+    snprintf(api_base, sizeof(api_base), "%s", profile.api_base);
 
     if(picoclaw_status_label) {
         lv_label_set_text(picoclaw_status_label, ui_tr(status));
@@ -1322,11 +1542,12 @@ static void picoclaw_update_status_labels(int busy, int rc)
     }
     if(picoclaw_model_label) {
         snprintf(line, sizeof(line), "%s  %s",
-                 ui_tr("Current model"), model_name);
+                 ui_tr("Current profile"), profile.title);
         lv_label_set_text(picoclaw_model_label, line);
     }
     if(picoclaw_detail_label) {
-        snprintf(line, sizeof(line), "%s %s  %s %s  %s %s",
+        snprintf(line, sizeof(line), "%s  %s %s | %s %s  %s %s",
+                 model_name,
                  ui_tr("Network"), ui_tr(network),
                  ui_tr("Config"), ui_tr(config),
                  ui_tr("Gateway"), ui_tr(gateway));
@@ -1510,62 +1731,91 @@ static void picoclaw_open_settings_event_cb(lv_event_t *event)
     app_refresh_current_page();
 }
 
-static void picoclaw_field_submit_cb(const char *text, void *user_data)
+static void picoclaw_refresh_page_async(void *user_data)
+{
+    (void)user_data;
+    app_refresh_current_page();
+}
+
+static void picoclaw_profile_field_submit_cb(const char *text, void *user_data)
 {
     picoclaw_field_t field = (picoclaw_field_t)(intptr_t)user_data;
+    picoclaw_profile_t profile;
+    char value[512];
+
+    snprintf(value, sizeof(value), "%s", text ? text : "");
+    picoclaw_trim_local(value);
+    picoclaw_profile_load(picoclaw_edit_profile_index, &profile);
 
     switch(field) {
+    case PICOCLAW_FIELD_PROFILE_TITLE:
+        snprintf(profile.title, sizeof(profile.title), "%s",
+                 value[0] ? value : "Default profile");
+        break;
     case PICOCLAW_FIELD_MODEL_NAME:
-        ui_prefs_set(PICOCLAW_PRESET_KEY, "3");
-        ui_prefs_set(PICOCLAW_MODEL_NAME_KEY, text ? text : "");
+        snprintf(profile.model_name, sizeof(profile.model_name), "%s",
+                 value[0] ? value : "k230-agent");
         break;
     case PICOCLAW_FIELD_MODEL_ID:
-        ui_prefs_set(PICOCLAW_PRESET_KEY, "3");
-        ui_prefs_set(PICOCLAW_MODEL_ID_KEY, text ? text : "");
+        snprintf(profile.model_id, sizeof(profile.model_id), "%s",
+                 value[0] ? value : "openai/gpt-4o-mini");
         break;
     case PICOCLAW_FIELD_API_BASE:
-        ui_prefs_set(PICOCLAW_PRESET_KEY, "3");
-        ui_prefs_set(PICOCLAW_API_BASE_KEY, text ? text : "");
+        snprintf(profile.api_base, sizeof(profile.api_base), "%s",
+                 value[0] ? value : "https://api.openai.com/v1");
         break;
     case PICOCLAW_FIELD_API_KEY:
-        ui_prefs_set(PICOCLAW_API_KEY_KEY, text ? text : "");
+        if(!value[0]) {
+            pthread_mutex_lock(&picoclaw_lock);
+            snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
+                     "%s", "API key unchanged");
+            pthread_mutex_unlock(&picoclaw_lock);
+            app_request_fast_refresh();
+            return;
+        }
+        snprintf(profile.api_key, sizeof(profile.api_key), "%s", value);
         break;
     default:
         return;
     }
 
+    picoclaw_profile_save(picoclaw_edit_profile_index, &profile);
     pthread_mutex_lock(&picoclaw_lock);
     snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
-             "%s", "Setting saved");
+             "%s", "Profile saved");
     pthread_mutex_unlock(&picoclaw_lock);
-    picoclaw_start_action(PICOCLAW_ACTION_SAVE_CONFIG, NULL);
     app_request_fast_refresh();
+    lv_async_call(picoclaw_refresh_page_async, NULL);
 }
 
-static void picoclaw_config_event_cb(lv_event_t *event)
+static void picoclaw_profile_field_event_cb(lv_event_t *event)
 {
     picoclaw_field_t field =
         (picoclaw_field_t)(intptr_t)lv_event_get_user_data(event);
     ui_input_dialog_config_t cfg;
     char value[512];
+    picoclaw_profile_t profile;
 
     memset(&cfg, 0, sizeof(cfg));
+    picoclaw_profile_load(picoclaw_edit_profile_index, &profile);
     switch(field) {
+    case PICOCLAW_FIELD_PROFILE_TITLE:
+        snprintf(value, sizeof(value), "%s", profile.title);
+        cfg.title = "Profile name";
+        cfg.placeholder = "DeepSeek default";
+        break;
     case PICOCLAW_FIELD_MODEL_NAME:
-        picoclaw_load_pref(value, sizeof(value), PICOCLAW_MODEL_NAME_KEY,
-                           "custom-agent");
-        cfg.title = "Model name";
-        cfg.placeholder = "custom-agent";
+        snprintf(value, sizeof(value), "%s", profile.model_name);
+        cfg.title = "Model alias";
+        cfg.placeholder = "deepseek-chat";
         break;
     case PICOCLAW_FIELD_MODEL_ID:
-        picoclaw_load_pref(value, sizeof(value), PICOCLAW_MODEL_ID_KEY,
-                           "openai/gpt-4o-mini");
+        snprintf(value, sizeof(value), "%s", profile.model_id);
         cfg.title = "Model ID";
         cfg.placeholder = "openai/gpt-4o-mini";
         break;
     case PICOCLAW_FIELD_API_BASE:
-        picoclaw_load_pref(value, sizeof(value), PICOCLAW_API_BASE_KEY,
-                           "https://api.openai.com/v1");
+        snprintf(value, sizeof(value), "%s", profile.api_base);
         cfg.title = "API base";
         cfg.placeholder = "https://api.openai.com/v1";
         break;
@@ -1581,7 +1831,7 @@ static void picoclaw_config_event_cb(lv_event_t *event)
 
     cfg.initial_text = value;
     cfg.max_length = 480;
-    cfg.submit_cb = picoclaw_field_submit_cb;
+    cfg.submit_cb = picoclaw_profile_field_submit_cb;
     cfg.user_data = (void *)(intptr_t)field;
     cfg.submit_text = "Save";
     cfg.cancel_text = "Cancel";
@@ -1626,59 +1876,138 @@ static void picoclaw_make_info_pair(lv_obj_t *parent, int x, int y, int w,
     }
 }
 
-static void picoclaw_apply_preset_event_cb(lv_event_t *event)
+static void picoclaw_profile_select_event_cb(lv_event_t *event)
 {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
-    const picoclaw_preset_t *preset = picoclaw_preset_at(index);
-    char value[16];
 
-    snprintf(value, sizeof(value), "%d", index);
-    ui_prefs_set(PICOCLAW_PRESET_KEY, value);
-    if(!preset->custom) {
-        ui_prefs_set(PICOCLAW_MODEL_NAME_KEY, preset->model_name);
-        ui_prefs_set(PICOCLAW_MODEL_ID_KEY, preset->model_id);
-        ui_prefs_set(PICOCLAW_API_BASE_KEY, preset->api_base);
-    } else {
-        char current[256];
-
-        picoclaw_load_pref(current, sizeof(current), PICOCLAW_MODEL_NAME_KEY,
-                           "");
-        if(!current[0]) {
-            ui_prefs_set(PICOCLAW_MODEL_NAME_KEY, preset->model_name);
-        }
-        picoclaw_load_pref(current, sizeof(current), PICOCLAW_MODEL_ID_KEY,
-                           "");
-        if(!current[0]) {
-            ui_prefs_set(PICOCLAW_MODEL_ID_KEY, preset->model_id);
-        }
-        picoclaw_load_pref(current, sizeof(current), PICOCLAW_API_BASE_KEY,
-                           "");
-        if(!current[0]) {
-            ui_prefs_set(PICOCLAW_API_BASE_KEY, preset->api_base);
-        }
-    }
-
+    picoclaw_set_current_profile_index(index);
     pthread_mutex_lock(&picoclaw_lock);
     snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
-             "%s", "Model preset saved");
+             "%s", "Profile selected");
+    pthread_mutex_unlock(&picoclaw_lock);
+    picoclaw_start_action(PICOCLAW_ACTION_SAVE_CONFIG, NULL);
+    picoclaw_view = PICOCLAW_VIEW_SETTINGS;
+    app_refresh_current_page();
+}
+
+static void picoclaw_open_profile_list_event_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_view = PICOCLAW_VIEW_PROFILE_LIST;
+    app_refresh_current_page();
+}
+
+static void picoclaw_open_profile_edit_event_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_edit_profile_index = picoclaw_current_profile_index();
+    picoclaw_view = PICOCLAW_VIEW_PROFILE_EDIT;
+    app_refresh_current_page();
+}
+
+static void picoclaw_new_profile_event_cb(lv_event_t *event)
+{
+    int count = picoclaw_profile_count();
+    picoclaw_profile_t profile;
+    char value[16];
+
+    (void)event;
+    if(count >= PICOCLAW_PROFILE_MAX) {
+        pthread_mutex_lock(&picoclaw_lock);
+        snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
+                 "%s", "Profile limit reached");
+        pthread_mutex_unlock(&picoclaw_lock);
+        app_request_fast_refresh();
+        return;
+    }
+
+    memset(&profile, 0, sizeof(profile));
+    snprintf(profile.title, sizeof(profile.title), "Profile %d", count + 1);
+    snprintf(profile.model_name, sizeof(profile.model_name),
+             "k230-profile-%d", count + 1);
+    snprintf(profile.model_id, sizeof(profile.model_id), "%s",
+             picoclaw_presets[0].model_id);
+    snprintf(profile.api_base, sizeof(profile.api_base), "%s",
+             picoclaw_presets[0].api_base);
+    profile.api_key[0] = '\0';
+    picoclaw_profile_save(count, &profile);
+    snprintf(value, sizeof(value), "%d", count + 1);
+    ui_prefs_set(PICOCLAW_PROFILE_COUNT_KEY, value);
+    picoclaw_set_current_profile_index(count);
+    picoclaw_edit_profile_index = count;
+    picoclaw_view = PICOCLAW_VIEW_PROFILE_EDIT;
+    app_refresh_current_page();
+}
+
+static void picoclaw_delete_profile_event_cb(lv_event_t *event)
+{
+    int count = picoclaw_profile_count();
+    int active = picoclaw_current_profile_index();
+    char value[16];
+
+    (void)event;
+    if(count <= 1) {
+        pthread_mutex_lock(&picoclaw_lock);
+        snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
+                 "%s", "Cannot delete last profile");
+        pthread_mutex_unlock(&picoclaw_lock);
+        app_request_fast_refresh();
+        return;
+    }
+    for(int i = active; i + 1 < count; i++) {
+        picoclaw_profile_t next;
+
+        picoclaw_profile_load(i + 1, &next);
+        picoclaw_profile_save(i, &next);
+    }
+    count--;
+    snprintf(value, sizeof(value), "%d", count);
+    ui_prefs_set(PICOCLAW_PROFILE_COUNT_KEY, value);
+    if(active >= count) {
+        active = count - 1;
+    }
+    picoclaw_set_current_profile_index(active);
+    pthread_mutex_lock(&picoclaw_lock);
+    snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
+             "%s", "Profile deleted");
     pthread_mutex_unlock(&picoclaw_lock);
     picoclaw_start_action(PICOCLAW_ACTION_SAVE_CONFIG, NULL);
     app_refresh_current_page();
 }
 
-static lv_obj_t *picoclaw_preset_card(lv_obj_t *parent, int x, int y, int w,
-                                      int index, int selected)
+static void picoclaw_test_profile_event_cb(lv_event_t *event)
 {
-    const picoclaw_preset_t *preset = picoclaw_preset_at(index);
+    (void)event;
+    picoclaw_start_action(PICOCLAW_ACTION_TEST_PROFILE, NULL);
+}
+
+static void picoclaw_use_profile_event_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_set_current_profile_index(picoclaw_edit_profile_index);
+    picoclaw_start_action(PICOCLAW_ACTION_SAVE_CONFIG, NULL);
+    picoclaw_view = PICOCLAW_VIEW_SETTINGS;
+    app_refresh_current_page();
+}
+
+static lv_obj_t *picoclaw_profile_card(lv_obj_t *parent, int x, int y, int w,
+                                       int index, int selected)
+{
+    picoclaw_profile_t profile;
     lv_obj_t *card;
     lv_obj_t *title;
     lv_obj_t *sub;
+    lv_obj_t *key;
     lv_obj_t *mark;
     char desc[360];
+    const char *key_state;
+
+    picoclaw_profile_load(index, &profile);
+    key_state = profile.api_key[0] ? "Key configured" : "Key missing";
 
     card = lv_obj_create(parent);
     lv_obj_set_pos(card, x, y);
-    lv_obj_set_size(card, w, 78);
+    lv_obj_set_size(card, w, 96);
     lv_obj_set_style_bg_color(card,
                               lv_color_hex(selected ? 0x16352A : 0x141B23), 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
@@ -1691,23 +2020,30 @@ static lv_obj_t *picoclaw_preset_card(lv_obj_t *parent, int x, int y, int w,
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(card, 6);
-    lv_obj_add_event_cb(card, picoclaw_apply_preset_event_cb,
+    lv_obj_add_event_cb(card, picoclaw_profile_select_event_cb,
                         LV_EVENT_CLICKED, (void *)(intptr_t)index);
 
-    title = ui_label(card, preset->display, &lv_font_montserrat_20,
+    title = ui_label(card, profile.title, &lv_font_montserrat_20,
                      selected ? 0xD1FAE5 : 0xF2F5F8);
     lv_obj_set_pos(title, 14, 10);
     lv_obj_set_width(title, w - 72);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     ui_make_click_forwarder(title);
 
-    snprintf(desc, sizeof(desc), "%s  %s", preset->model_id,
-             preset->api_base);
+    snprintf(desc, sizeof(desc), "%s  %s", profile.model_id,
+             profile.api_base);
     sub = ui_label(card, desc, &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_pos(sub, 14, 44);
     lv_obj_set_width(sub, w - 28);
     lv_label_set_long_mode(sub, LV_LABEL_LONG_DOT);
     ui_make_click_forwarder(sub);
+
+    key = ui_label(card, key_state, &lv_font_montserrat_14,
+                   profile.api_key[0] ? 0x25C281 : 0xF5A524);
+    lv_obj_set_pos(key, 14, 68);
+    lv_obj_set_width(key, w - 28);
+    lv_label_set_long_mode(key, LV_LABEL_LONG_DOT);
+    ui_make_click_forwarder(key);
 
     if(selected) {
         mark = ui_label(card, LV_SYMBOL_OK, &lv_font_montserrat_20,
@@ -1718,13 +2054,197 @@ static lv_obj_t *picoclaw_preset_card(lv_obj_t *parent, int x, int y, int w,
     return card;
 }
 
+static lv_obj_t *picoclaw_profile_field_row(lv_obj_t *parent, int y, int w,
+                                            const char *name,
+                                            const char *value,
+                                            picoclaw_field_t field,
+                                            uint32_t color)
+{
+    lv_obj_t *row;
+    lv_obj_t *label;
+    lv_obj_t *val;
+
+    row = lv_obj_create(parent);
+    lv_obj_set_pos(row, 0, y);
+    lv_obj_set_size(row, w, 72);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x141B23), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x1B2633), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(0x2A3441), 0);
+    lv_obj_set_style_radius(row, 8, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(row, 6);
+    lv_obj_add_event_cb(row, picoclaw_profile_field_event_cb,
+                        LV_EVENT_CLICKED, (void *)(intptr_t)field);
+
+    label = ui_label(row, name, &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_pos(label, 14, 10);
+    lv_obj_set_width(label, w - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    ui_make_click_forwarder(label);
+
+    val = ui_label(row, value, &lv_font_montserrat_18, color);
+    lv_obj_set_pos(val, 14, 36);
+    lv_obj_set_width(val, w - 28);
+    lv_label_set_long_mode(val, LV_LABEL_LONG_DOT);
+    ui_make_click_forwarder(val);
+    return row;
+}
+
+static void ui_picoclaw_create_profile_list(lv_obj_t *scr)
+{
+    lv_obj_t *body;
+    lv_obj_t *section;
+    lv_obj_t *title;
+    lv_obj_t *button;
+    int top_y = ui_is_landscape() ? 64 : 124;
+    int body_x = ui_page_panel_x();
+    int body_w = ui_page_panel_width();
+    int content_w;
+    int inner_w;
+    int count = picoclaw_profile_count();
+    int active = picoclaw_current_profile_index();
+    int section_h = 54 + count * 106;
+
+    ui_create_header(scr, "Model profiles");
+    body = ui_scroll_panel(scr, body_x, top_y, body_w, ui_body_height(top_y));
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(body, 16, 0);
+    content_w = ui_safe_content_width(body, body_w - 32);
+    inner_w = content_w - 32;
+    if(inner_w < 240) {
+        inner_w = content_w;
+    }
+
+    section = ui_panel(body, 0, 0, content_w, section_h);
+    lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
+    title = ui_label(section, "Tap a profile to use it",
+                     &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_pos(title, 0, 0);
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    for(int i = 0; i < count; i++) {
+        picoclaw_profile_card(section, 0, 44 + i * 106, inner_w, i,
+                              i == active);
+    }
+
+    button = picoclaw_small_button(body, 0, 0,
+                                  ui_is_landscape() ? 240 : content_w,
+                                  "New profile", 0x22C55E,
+                                  picoclaw_new_profile_event_cb, NULL);
+    if(ui_is_landscape()) {
+        lv_obj_align(button, LV_ALIGN_TOP_MID, 0, 0);
+    }
+}
+
+static void ui_picoclaw_create_profile_edit(lv_obj_t *scr)
+{
+    lv_obj_t *body;
+    lv_obj_t *section;
+    lv_obj_t *title;
+    lv_obj_t *button;
+    picoclaw_profile_t profile;
+    int top_y = ui_is_landscape() ? 64 : 124;
+    int body_x = ui_page_panel_x();
+    int body_w = ui_page_panel_width();
+    int content_w;
+    int inner_w;
+    int section_h;
+    int y;
+    int btn_w;
+
+    if(picoclaw_edit_profile_index < 0 ||
+       picoclaw_edit_profile_index >= picoclaw_profile_count()) {
+        picoclaw_edit_profile_index = picoclaw_current_profile_index();
+    }
+    picoclaw_profile_load(picoclaw_edit_profile_index, &profile);
+
+    ui_create_header(scr, "Edit profile");
+    body = ui_scroll_panel(scr, body_x, top_y, body_w, ui_body_height(top_y));
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+    lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(body, 16, 0);
+    content_w = ui_safe_content_width(body, body_w - 32);
+    inner_w = content_w - 32;
+    if(inner_w < 240) {
+        inner_w = content_w;
+    }
+
+    section_h = 54 + 5 * 82;
+    section = ui_panel(body, 0, 0, content_w, section_h);
+    lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
+    title = ui_label(section, "Profile settings", &lv_font_montserrat_22,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, 0, 0);
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    y = 44;
+    picoclaw_profile_field_row(section, y, inner_w, "Profile name",
+                               profile.title, PICOCLAW_FIELD_PROFILE_TITLE,
+                               0xF2F5F8);
+    y += 82;
+    picoclaw_profile_field_row(section, y, inner_w, "Model alias",
+                               profile.model_name, PICOCLAW_FIELD_MODEL_NAME,
+                               0xCBD5E1);
+    y += 82;
+    picoclaw_profile_field_row(section, y, inner_w, "Model ID",
+                               profile.model_id, PICOCLAW_FIELD_MODEL_ID,
+                               0xCBD5E1);
+    y += 82;
+    picoclaw_profile_field_row(section, y, inner_w, "API base",
+                               profile.api_base, PICOCLAW_FIELD_API_BASE,
+                               0xCBD5E1);
+    y += 82;
+    picoclaw_profile_field_row(section, y, inner_w, "API key",
+                               profile.api_key[0] ? "Key configured" :
+                               "Key missing", PICOCLAW_FIELD_API_KEY,
+                               profile.api_key[0] ? 0x25C281 : 0xF5A524);
+
+    section = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 120 : 182);
+    lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
+    title = ui_label(section, "Actions", &lv_font_montserrat_22, 0xF2F5F8);
+    lv_obj_set_pos(title, 0, 0);
+    lv_obj_set_width(title, inner_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    btn_w = ui_is_landscape() ? (inner_w - 12) / 2 : inner_w;
+    if(btn_w < 160) {
+        btn_w = inner_w;
+    }
+    button = picoclaw_small_button(section, 0, 48, btn_w, "Use profile",
+                                  0x25C281, picoclaw_use_profile_event_cb,
+                                  NULL);
+    picoclaw_save_btn = button;
+    if(btn_w * 2 + 12 <= inner_w) {
+        picoclaw_small_button(section, btn_w + 12, 48, btn_w,
+                              "Test profile", 0xA78BFA,
+                              picoclaw_test_profile_event_cb, NULL);
+    } else {
+        picoclaw_small_button(section, 0, 112, btn_w, "Test profile",
+                              0xA78BFA, picoclaw_test_profile_event_cb,
+                              NULL);
+    }
+}
+
 static void ui_picoclaw_create_chat(lv_obj_t *scr)
 {
     lv_obj_t *send_label;
     int top_y = ui_is_landscape() ? 64 : 124;
     int x = ui_page_panel_x();
     int content_w = ui_page_panel_width();
-    const picoclaw_preset_t *preset = picoclaw_current_preset();
+    picoclaw_profile_t profile;
+
+    picoclaw_current_profile(&profile);
 
     ui_create_header(scr, "PicoClaw");
     picoclaw_body = ui_page_body(scr, top_y);
@@ -1741,7 +2261,7 @@ static void ui_picoclaw_create_chat(lv_obj_t *scr)
                                      &lv_font_montserrat_20, 0x25C281);
     lv_label_set_long_mode(picoclaw_status_label, LV_LABEL_LONG_DOT);
 
-    picoclaw_model_label = ui_label(picoclaw_status_panel, preset->display,
+    picoclaw_model_label = ui_label(picoclaw_status_panel, profile.title,
                                     &lv_font_montserrat_16, 0xCBD5E1);
     lv_label_set_long_mode(picoclaw_model_label, LV_LABEL_LONG_DOT);
 
@@ -1824,19 +2344,14 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
     lv_obj_t *title;
     lv_obj_t *subtitle;
     lv_obj_t *actions;
-    lv_obj_t *custom;
     int top_y = ui_is_landscape() ? 64 : 124;
     int body_x = ui_page_panel_x();
     int body_w = ui_page_panel_width();
     int content_w;
     int inner_w;
-    int selected = picoclaw_current_preset_index();
-    int preset_count =
-        (int)(sizeof(picoclaw_presets) / sizeof(picoclaw_presets[0]));
-    int i;
-    int card_gap = 10;
+    int selected = picoclaw_current_profile_index();
     int btn_w;
-    int section_h;
+    int row_y;
 
     ui_create_header(scr, "PicoClaw settings");
     body = ui_scroll_panel(scr, body_x, top_y, body_w, ui_body_height(top_y));
@@ -1860,70 +2375,66 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
     lv_obj_set_width(title, inner_w);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     subtitle = ui_label(section,
-                        "Choose a preset model, save the API key, or run gateway tools.",
+                        "Manage model profiles, gateway tools, and chat app logins.",
                         &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_pos(subtitle, 0, 42);
     lv_obj_set_width(subtitle, inner_w);
     lv_label_set_long_mode(subtitle, LV_LABEL_LONG_WRAP);
 
-    section_h = 54 + preset_count * 78 + (preset_count - 1) * card_gap;
-    section = ui_panel(body, 0, 0, content_w, section_h);
+    section = ui_panel(body, 0, 0, content_w,
+                       ui_is_landscape() ? 228 : 300);
     lv_obj_set_style_bg_color(section, lv_color_hex(0x111820), 0);
-    title = ui_label(section, "Model preset", &lv_font_montserrat_22,
+    title = ui_label(section, "Active profile", &lv_font_montserrat_22,
                      0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
     lv_obj_set_width(title, inner_w);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    for(i = 0; i < preset_count; i++) {
-        picoclaw_preset_card(section, 0, 44 + i * (78 + card_gap),
-                             inner_w, i, i == selected);
-    }
-
-    custom = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 112 : 176);
-    lv_obj_set_style_bg_color(custom, lv_color_hex(0x111820), 0);
-    title = ui_label(custom, "Custom model", &lv_font_montserrat_22,
-                     0xF2F5F8);
-    lv_obj_set_pos(title, 0, 0);
-    lv_obj_set_width(title, inner_w);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    btn_w = ui_is_landscape() ? (inner_w - 36) / 4 :
+    picoclaw_profile_card(section, 0, 44, inner_w, selected, 1);
+    btn_w = ui_is_landscape() ? (inner_w - 48) / 5 :
             (inner_w - 12) / 2;
-    if(btn_w < 118) {
-        btn_w = inner_w;
+    if(btn_w < 104) {
+        btn_w = ui_is_landscape() ? 104 : inner_w;
     }
-    picoclaw_small_button(custom, 0, 48, btn_w, "Model name", 0x3DA5FF,
-                          picoclaw_config_event_cb,
-                          (void *)(intptr_t)PICOCLAW_FIELD_MODEL_NAME);
+    row_y = 154;
+    picoclaw_small_button(section, 0, row_y, btn_w, "Select profile",
+                          0x60A5FA, picoclaw_open_profile_list_event_cb,
+                          NULL);
     if(btn_w * 2 + 12 <= inner_w) {
-        picoclaw_small_button(custom, btn_w + 12, 48, btn_w, "Model ID",
-                              0x3DA5FF, picoclaw_config_event_cb,
-                              (void *)(intptr_t)PICOCLAW_FIELD_MODEL_ID);
-        if(ui_is_landscape() && btn_w * 4 + 36 <= inner_w) {
-            picoclaw_small_button(custom, (btn_w + 12) * 2, 48, btn_w,
-                                  "API base", 0x3DA5FF,
-                                  picoclaw_config_event_cb,
-                                  (void *)(intptr_t)PICOCLAW_FIELD_API_BASE);
-            picoclaw_small_button(custom, (btn_w + 12) * 3, 48, btn_w,
-                                  "API key", 0x3DA5FF,
-                                  picoclaw_config_event_cb,
-                                  (void *)(intptr_t)PICOCLAW_FIELD_API_KEY);
+        picoclaw_small_button(section, btn_w + 12, row_y, btn_w,
+                              "New profile", 0x22C55E,
+                              picoclaw_new_profile_event_cb, NULL);
+        if(ui_is_landscape() && btn_w * 5 + 48 <= inner_w) {
+            picoclaw_small_button(section, (btn_w + 12) * 2, row_y,
+                                  btn_w, "Edit profile", 0x3DA5FF,
+                                  picoclaw_open_profile_edit_event_cb, NULL);
+            picoclaw_small_button(section, (btn_w + 12) * 3, row_y,
+                                  btn_w, "Delete profile", 0xEF4D5A,
+                                  picoclaw_delete_profile_event_cb, NULL);
+            picoclaw_save_btn =
+                picoclaw_small_button(section, (btn_w + 12) * 4, row_y,
+                                      btn_w, "Test profile", 0xA78BFA,
+                                      picoclaw_test_profile_event_cb, NULL);
         } else {
-            picoclaw_small_button(custom, 0, 112, btn_w, "API base",
-                                  0x3DA5FF, picoclaw_config_event_cb,
-                                  (void *)(intptr_t)PICOCLAW_FIELD_API_BASE);
-            picoclaw_small_button(custom, btn_w + 12, 112, btn_w, "API key",
-                                  0x3DA5FF, picoclaw_config_event_cb,
-                                  (void *)(intptr_t)PICOCLAW_FIELD_API_KEY);
+            picoclaw_small_button(section, 0, row_y + 64, btn_w,
+                                  "Edit profile", 0x3DA5FF,
+                                  picoclaw_open_profile_edit_event_cb, NULL);
+            picoclaw_small_button(section, btn_w + 12, row_y + 64,
+                                  btn_w, "Delete profile", 0xEF4D5A,
+                                  picoclaw_delete_profile_event_cb, NULL);
+            picoclaw_save_btn =
+                picoclaw_small_button(section, 0, row_y + 128, btn_w,
+                                      "Test profile", 0xA78BFA,
+                                      picoclaw_test_profile_event_cb, NULL);
         }
     }
 
-    actions = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 182 : 244);
+    actions = ui_panel(body, 0, 0, content_w, ui_is_landscape() ? 120 : 182);
     lv_obj_set_style_bg_color(actions, lv_color_hex(0x111820), 0);
     title = ui_label(actions, "Runtime", &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
     lv_obj_set_width(title, inner_w);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    btn_w = ui_is_landscape() ? (inner_w - 48) / 4 :
+    btn_w = ui_is_landscape() ? (inner_w - 36) / 4 :
             (inner_w - 12) / 2;
     if(btn_w < 116) {
         btn_w = inner_w;
@@ -1933,39 +2444,30 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
                               picoclaw_action_event_cb,
                               (void *)(intptr_t)PICOCLAW_ACTION_INSTALL);
     if(btn_w * 2 + 12 <= inner_w) {
-        picoclaw_save_btn =
+        picoclaw_gateway_start_btn =
             picoclaw_small_button(actions, btn_w + 12, 48, btn_w,
-                                  "Save config", 0x25C281,
+                                  "Start gateway", 0x60A5FA,
                                   picoclaw_action_event_cb,
-                                  (void *)(intptr_t)PICOCLAW_ACTION_SAVE_CONFIG);
+                                  (void *)(intptr_t)PICOCLAW_ACTION_GATEWAY_START);
         if(ui_is_landscape() && btn_w * 4 + 48 <= inner_w) {
-            picoclaw_gateway_start_btn =
-                picoclaw_small_button(actions, (btn_w + 16) * 2, 48, btn_w,
-                                      "Start gateway", 0x60A5FA,
-                                      picoclaw_action_event_cb,
-                                      (void *)(intptr_t)PICOCLAW_ACTION_GATEWAY_START);
             picoclaw_gateway_stop_btn =
-                picoclaw_small_button(actions, (btn_w + 16) * 3, 48, btn_w,
+                picoclaw_small_button(actions, (btn_w + 12) * 2, 48, btn_w,
                                       "Stop gateway", 0xEF4D5A,
                                       picoclaw_action_event_cb,
                                       (void *)(intptr_t)PICOCLAW_ACTION_GATEWAY_STOP);
             picoclaw_log_btn =
-                picoclaw_small_button(actions, 0, 112, btn_w, "Log",
+                picoclaw_small_button(actions, (btn_w + 12) * 3, 48,
+                                      btn_w, "Log",
                                       0x94A3B8, picoclaw_action_event_cb,
                                       (void *)(intptr_t)PICOCLAW_ACTION_LOG);
         } else {
-            picoclaw_gateway_start_btn =
-                picoclaw_small_button(actions, 0, 112, btn_w,
-                                      "Start gateway", 0x60A5FA,
-                                      picoclaw_action_event_cb,
-                                      (void *)(intptr_t)PICOCLAW_ACTION_GATEWAY_START);
             picoclaw_gateway_stop_btn =
-                picoclaw_small_button(actions, btn_w + 12, 112, btn_w,
+                picoclaw_small_button(actions, 0, 112, btn_w,
                                       "Stop gateway", 0xEF4D5A,
                                       picoclaw_action_event_cb,
                                       (void *)(intptr_t)PICOCLAW_ACTION_GATEWAY_STOP);
             picoclaw_log_btn =
-                picoclaw_small_button(actions, 0, 176, btn_w, "Log",
+                picoclaw_small_button(actions, btn_w + 12, 112, btn_w, "Log",
                                       0x94A3B8, picoclaw_action_event_cb,
                                       (void *)(intptr_t)PICOCLAW_ACTION_LOG);
         }
@@ -2034,7 +2536,11 @@ static void ui_picoclaw_create_settings(lv_obj_t *scr)
 
 void ui_picoclaw_create(lv_obj_t *scr)
 {
-    if(picoclaw_view == PICOCLAW_VIEW_SETTINGS) {
+    if(picoclaw_view == PICOCLAW_VIEW_PROFILE_EDIT) {
+        ui_picoclaw_create_profile_edit(scr);
+    } else if(picoclaw_view == PICOCLAW_VIEW_PROFILE_LIST) {
+        ui_picoclaw_create_profile_list(scr);
+    } else if(picoclaw_view == PICOCLAW_VIEW_SETTINGS) {
         ui_picoclaw_create_settings(scr);
     } else {
         ui_picoclaw_create_chat(scr);
@@ -2049,6 +2555,12 @@ int ui_picoclaw_handle_back(void)
     if(picoclaw_weixin_qr_overlay &&
        lv_obj_is_valid(picoclaw_weixin_qr_overlay)) {
         picoclaw_weixin_qr_close();
+        return 1;
+    }
+    if(picoclaw_view == PICOCLAW_VIEW_PROFILE_EDIT ||
+       picoclaw_view == PICOCLAW_VIEW_PROFILE_LIST) {
+        picoclaw_view = PICOCLAW_VIEW_SETTINGS;
+        app_refresh_current_page();
         return 1;
     }
     if(picoclaw_view == PICOCLAW_VIEW_SETTINGS) {
