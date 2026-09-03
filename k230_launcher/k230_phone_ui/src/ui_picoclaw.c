@@ -938,12 +938,7 @@ static void *picoclaw_worker(void *arg)
         } else {
             snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
                      "Profile test failed");
-            if(reply[0] && strcmp(reply, "Prompt failed") != 0) {
-                snprintf(picoclaw_profile_test_detail,
-                         sizeof(picoclaw_profile_test_detail), "%s", reply);
-            } else {
-                picoclaw_profile_test_detail[0] = '\0';
-            }
+            picoclaw_profile_test_detail[0] = '\0';
             picoclaw_profile_test_state = PICOCLAW_PROFILE_TEST_FAILED;
         }
     } else if(rc == 0) {
@@ -1287,7 +1282,7 @@ static void picoclaw_profile_test_overlay_update(void)
         icon = "!";
         if(!detail[0]) {
             snprintf(detail, sizeof(detail), "%s",
-                     ui_tr("Check network, API key, and model settings."));
+                     ui_tr("Test failed. Check logs for details."));
         }
     } else if(state == PICOCLAW_PROFILE_TEST_OK) {
         title = "Profile test OK";

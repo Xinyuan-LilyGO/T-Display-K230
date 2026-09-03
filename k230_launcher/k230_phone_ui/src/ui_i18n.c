@@ -239,6 +239,7 @@ static const ui_translation_t ui_translations[] = {
     { "Sending a test prompt to the active model.", "正在向当前模型发送测试请求。", "現在のモデルへテスト要求を送信中。" },
     { "Model replied successfully.", "模型已正常回复。", "モデルから正常に返信されました。" },
     { "Check network, API key, and model settings.", "请检查网络、API 密钥和模型配置。", "ネットワーク、API キー、モデル設定を確認してください。" },
+    { "Test failed. Check logs for details.", "测试失败，详细信息请查看日志。", "テスト失敗。詳細はログを確認してください。" },
     { "API key unchanged", "API 密钥未更改", "API キー未変更" },
     { "DeepSeek Chat", "DeepSeek Chat", "DeepSeek Chat" },
     { "DeepSeek Reasoner", "DeepSeek Reasoner", "DeepSeek Reasoner" },
