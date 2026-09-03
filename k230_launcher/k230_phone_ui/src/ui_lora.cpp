@@ -4,6 +4,7 @@
 #include "ui_hardware.h"
 #include "ui_input.h"
 #include "ui_nrf9151_manager.h"
+#include "ui_prefs.h"
 
 #include <lvgl/src/misc/cache/instance/lv_image_cache.h>
 
@@ -38,6 +39,7 @@
 #define LORA_LOG_PATH "/tmp/k230_phone_lora.log"
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_PROFILE_STORE_PATH "/root/app/k230_phone_ui/lora_profiles.conf"
+#define LORA_CHIP_PREF_KEY "lora.radio.chip"
 #define LORA_SPI_SPEED_HZ 4000000U
 #define LORA_PIN_SCLK 15U
 #define LORA_PIN_MOSI 16U
@@ -846,6 +848,7 @@ static void lora_add_message(const char *text, int sent, const char *meta);
 static void lora_show_tab(int tab);
 static void lora_rebuild_factory_panel(void);
 static void lora_refresh_builtin_profiles(lora_chip_type_t chip);
+static void lora_log(const char *fmt, ...);
 
 static const char *lora_chip_name(lora_chip_type_t chip)
 {
@@ -863,6 +866,40 @@ static const char *lora_chip_name(lora_chip_type_t chip)
 static const char *lora_active_chip_name(void)
 {
     return lora_chip_name(lora_chip_type);
+}
+
+static lora_chip_type_t lora_chip_from_name(const char *name)
+{
+    if(!name || !name[0]) {
+        return LORA_CHIP_NONE;
+    }
+    if(strcasecmp(name, "SX1262") == 0) {
+        return LORA_CHIP_SX1262;
+    }
+    if(strcasecmp(name, "LR2021") == 0) {
+        return LORA_CHIP_LR2021;
+    }
+    return LORA_CHIP_NONE;
+}
+
+static lora_chip_type_t lora_load_persisted_chip(void)
+{
+    char value[24];
+
+    if(ui_prefs_get(LORA_CHIP_PREF_KEY, value, sizeof(value), "") != 0) {
+        return LORA_CHIP_NONE;
+    }
+    return lora_chip_from_name(value);
+}
+
+static void lora_store_persisted_chip(lora_chip_type_t chip)
+{
+    if(chip != LORA_CHIP_SX1262 && chip != LORA_CHIP_LR2021) {
+        return;
+    }
+    if(ui_prefs_set(LORA_CHIP_PREF_KEY, lora_chip_name(chip)) != 0) {
+        lora_log("Failed to persist LoRa chip: %s", lora_chip_name(chip));
+    }
 }
 
 static void lora_update_chip_label(void)
@@ -1144,12 +1181,17 @@ static void lora_load_profiles(void)
 {
     FILE *fp;
     char line[256];
+    lora_chip_type_t profile_chip;
 
     if(lora_profiles_loaded) {
         return;
     }
     lora_profiles_loaded = 1;
-    lora_refresh_builtin_profiles(lora_chip_type);
+    profile_chip = lora_chip_type;
+    if(profile_chip == LORA_CHIP_NONE) {
+        profile_chip = lora_load_persisted_chip();
+    }
+    lora_refresh_builtin_profiles(profile_chip);
 
     fp = fopen(LORA_PROFILE_STORE_PATH, "r");
     if(!fp) {
@@ -1690,14 +1732,40 @@ static int lora_probe_chip(lora_chip_type_t chip, const lora_profile_t *profile,
     }
 
     lora_log("Detected %s", lora_chip_name(chip));
+    lora_store_persisted_chip(chip);
     return 0;
 }
 
-static int lora_detect_radio(const lora_profile_t *profile)
+static int lora_detect_radio_internal(const lora_profile_t *profile,
+                                      int use_persisted)
 {
     int16_t sx_state = RADIOLIB_ERR_CHIP_NOT_FOUND;
     int16_t lr_state = RADIOLIB_ERR_CHIP_NOT_FOUND;
     int force_lr2021 = lora_profile_requires_lr2021(profile);
+    lora_chip_type_t persisted_chip = LORA_CHIP_NONE;
+
+    if(use_persisted) {
+        persisted_chip = lora_load_persisted_chip();
+        if(persisted_chip != LORA_CHIP_NONE) {
+            if(force_lr2021 && persisted_chip != LORA_CHIP_LR2021) {
+                lora_log("Persisted LoRa chip %s ignored for %.1f MHz LR2021 profile",
+                         lora_chip_name(persisted_chip),
+                         profile ? profile->freq : 0.0f);
+            } else {
+                lora_log("Try persisted LoRa chip: %s",
+                         lora_chip_name(persisted_chip));
+                if(lora_probe_chip(persisted_chip, profile,
+                                   persisted_chip == LORA_CHIP_LR2021 ?
+                                   &lr_state : &sx_state) == 0) {
+                    lora_refresh_builtin_profiles(persisted_chip);
+                    lora_rebuild_factory_panel();
+                    return 0;
+                }
+                lora_log("Persisted LoRa chip %s failed, fall back to full probe",
+                         lora_chip_name(persisted_chip));
+            }
+        }
+    }
 
     if(!force_lr2021 &&
        lora_probe_chip(LORA_CHIP_SX1262, profile, &sx_state) == 0) {
@@ -1727,6 +1795,11 @@ static int lora_detect_radio(const lora_profile_t *profile)
                  lr_state, lora_error_name(lr_state));
     }
     return -1;
+}
+
+static int lora_detect_radio(const lora_profile_t *profile)
+{
+    return lora_detect_radio_internal(profile, 1);
 }
 
 static int lora_start_rx(void)
@@ -1814,7 +1887,7 @@ static int lora_apply_profile(int index)
                 state = lr_state;
             }
         } else {
-            if(lora_detect_radio(profile) == 0) {
+            if(lora_detect_radio_internal(profile, 0) == 0) {
                 state = RADIOLIB_ERR_NONE;
             }
         }
@@ -4627,7 +4700,7 @@ static int lorawan_prepare_radio(void)
         lora_log("LoRaWAN active chip re-init failed: %d %s",
                  state, lora_error_name(state));
     }
-    state = lora_detect_radio(&probe);
+    state = lora_detect_radio_internal(&probe, 0);
     if(state != RADIOLIB_ERR_NONE) {
         return -1;
     }
