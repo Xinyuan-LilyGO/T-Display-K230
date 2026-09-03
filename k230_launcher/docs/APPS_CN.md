@@ -50,7 +50,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Record` / 录音 | 使用板载麦克风录音，列出录音文件，支持播放和删除 | 点击录音按钮开始或停止录音进入录音列表后可以播放或删除 `/root/recordings` 中的录音 |
 | `Mic FFT` / 麦克风频谱 | 实时显示麦克风频谱和输入电平信息 | 用于快速检查麦克风是否工作，也可以调整显示增益方便观察弱信号 |
 | `LoRa` | 控制 SX1262 或 LR2021，支持基于 profile 的射频测试、监听、自动发送、连续载波发射等模式 | 选择或编辑 profile 后选择工作模式连续载波发射只建议工程射频测试使用，不建议普通用户日常使用，并且必须确认已经连接合适天线 |
-| `Meshtastic` | Beta 应用，控制独立 `k230_meshtastic_probe` daemon，提供 Meshtastic 风格 LoRa mesh 文字、仅限 LR2021 的 K230 设备间语音/图片传输、节点缓存、地图、频道配置档和 profile 设置。SX1262 版本仅支持基础文字 mesh 消息 | 进入应用后 daemon 自动启动通过设置图标配置 region、preset、channel、PSK、TX power、node/from/to/hop/ACK在消息输入框直接输入并发送；LR2021 版本可按住语音按钮录制语音，节点页面可查看节点缓存。通过 `Channel` 可以保存/加载 K230 频道配置档、保存官方 Meshtastic 频道 URL，也可以手动输入 URL 导入频道；K230 摄像头扫码当前属于测试功能,不可用状态。收到新消息时会播放 `设置` > `通知` 中选择的音效。离线地图瓦片从 `/root/maps` 读取，详见 [MAPS_CN.md](MAPS_CN.md) |
+| `Meshtastic` | Beta 应用，控制独立 `k230_meshtastic_probe` daemon，提供 Meshtastic 风格 LoRa mesh 文字、仅限 LR2021 的 K230 设备间语音/图片传输、节点缓存、地图、频道配置档和 profile 设置。SX1262 版本仅支持基础文字 mesh 消息 | 进入应用后 daemon 自动启动。通过设置图标配置 region、preset、channel、PSK、TX power、node/from/to/hop/ACK。在消息输入框直接输入并发送；LR2021 版本可按住语音按钮录制语音，节点页面可查看节点缓存。通过 `Channel` 可以保存/加载 K230 频道配置档、保存官方 Meshtastic 频道 URL，也可以手动输入 URL 导入频道。摄像头二维码扫描仍属于实验功能，推荐使用 URL 导入。收到新消息时会播放 `设置` > `通知` 中选择的音效。离线地图瓦片从 `/root/maps` 读取，详见 [MAPS_CN.md](MAPS_CN.md) |
 | `LoRaWAN` | 管理 LoRaWAN profile，并通过 LoRa 模块运行 OTAA 入网和发送测试 | 加载已有 profile，或新建/编辑 profile应用会检查密钥长度配置保存后才能运行，可按需开启模拟温度数据上传 |
 | `NES` | 从 `/root/nes` 加载 `.nes` ROM，并支持触摸按键和硬件键盘控制 | 镜像默认不内置 NES ROM请自行将 ROM 文件放入 `/root/nes`，再从列表选择 ROM键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 为 Start，`Space` 或 `Shift` 为 Select，`U/I/O` 为 A，`H/J/K` 为 B，`Esc` 停止游戏或返回 ROM 列表 |
 | `AI` | 打开随镜像提供的 K230 AI 示例界面 | 当模型资源存在时，可以运行支持的本地 AI 示例，并在屏幕上查看结果 |
@@ -62,13 +62,13 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `nRF DFU` | 通过 K230 的 UART 给板载 nRF52840 更新 AT 固件 | 先打开 `MTP`，将 K230 nRF52840 AT 应用升级包复制为 `/root/nrf52840/firmware/firmware.zip`，回到 `nRF DFU` 后点击 `升级`。应用会在写入前检查当前 AT 版本和升级包版本，非 K230 包和相同版本都会拒绝升级。升级过程中界面会锁定并显示进度，不要断电。失败时查看 `/tmp/k230_nrf52840_dfu_ui.log` |
 | `MTP` | 开启 USB MTP 文件管理 | 点击开启后，通过 USB 连接电脑，管理照片、截图、音乐、视频、ROM 等文件 |
 | `Gallery` / 图库 | 以缩略图浏览照片，并全屏查看 | 点击缩略图查看照片，左右滑动切换上一张或下一张 |
-| `Screenshot` / 截图 | 将当前屏幕保存为 PNG 文件到 `/root/screenshots` | 点击主页 Screenshot 图标，或在硬件键盘上按 `FN + LILYGO`文件可通过 MTP 导出 |
+| `Screenshot` / 截图 | 将当前屏幕保存为 PNG 文件到 `/root/screenshots` | 点击主页 Screenshot 图标、按默认 `F7` 热键，或在硬件键盘上按 `FN + LILYGO`。文件可通过 MTP 导出 |
 | `Terminal` / 终端 | 在设备上提供可交互终端，带常用特殊按键和持久化字体大小调节 | 使用软键盘或硬件键盘输入命令，终端显示区域会随字体大小调整 |
 | `I2S Test` | 输出测试音频，用于测试内部音频或 MAX98357A 外部 I2S 功放 | 先在 `设置` > `音频` 里选择输出，再运行测试音 |
-| `I2C Scan` | 扫描可用 I2C 总线，并高亮显示检测到的 7-bit 地址 | 用于检查 AHT20、BQ25896、BQ27220、XL9555、TCA8418 等设备是否在线 |
+| `I2C Scan` | 异步扫描可用 I2C 总线，并高亮显示检测到的 7-bit 地址 | 用于检查 AHT20、BQ25896、BQ27220、XL9555、TCA8418 等设备是否在线 |
 | `Battery` / 电池 | 显示电池电量计、充电器、电压、电流、容量等信息 | 打开页面查看电池和充电状态支持的充电配置在设置页中提供 |
 | `Keyboard` / 键盘 | 测试 TCA8418 键盘矩阵、中断、键值映射和键盘背光 | 按下硬件按键后，界面上对应按键会点亮可在本页或设置中调节键盘背光 |
-| `Hotkeys` / 热键 | 打开 F1-F11 硬件功能键快捷动作编辑器 | 点击某个功能键，选择需要绑定的动作后返回。可绑定屏幕方向、亮度、音量、音频输出切换、键盘背光和其他 launcher 快捷动作，设置会持久化保存 |
+| `Hotkeys` / 热键 | 打开 F1-F11 硬件功能键快捷动作编辑器 | 点击某个功能键，选择需要绑定的动作后返回。默认值：F1 主页，F2 设置，F3/F4 键盘背光减小/增加，F5/F6 音量减小/增加，F7 截图，F8 终端，F9 Meshtastic，F10/F11 屏幕亮度减小/增加。热键设置会持久化保存 |
 | `LED Test` | 控制 XL9555 扩展 IO 上的 LED | 在页面中切换 LED 状态板载 LED 为低电平点亮时，界面会按对应逻辑控制 |
 | `Cellular` / 蜂窝 | 测试 nRF9151 串口链路、SIM 卡、LTE 状态、GNSS、HTTP/HTTPS、MQTT、NMEA 输出和卫星 C/N0 柱状图 | 点击 `LTE` 进行 SIM/网络检查，点击 `GNSS` 监控 NMEA，也可以使用 HTTP/MQTT 测试按钮做基础数据业务测试。HTTPS 与 MQTT TLS/mTLS 需要 modem 内已经写入可用的 `sec_tag` 凭据 |
 | `USB Modem` | USB modem 检测和连接状态调试页面 | 当前仅用于工程调试和状态观察，还没有完整的用户拨号和数据连接流程 |
@@ -143,5 +143,6 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Date & time` / 日期和时间 | 配置 NTP 和时区 |
 | `Audio` / 音频 | 选择音频输出和默认音量 |
 | `Keyboard settings` / 键盘设置 | 控制键盘自动探测、键盘返回、键盘背光和 F1-F11 热键动作 |
+| `Expand storage` / 扩展存储 | 将 rootfs 扩展到当前 SD 卡可用容量 |
 | `Sensors` / 传感器 | 显示 AHT20 温湿度和相关传感器状态 |
 | `Charger` / 充电器 | 显示和配置 BQ25896 充电相关选项 |

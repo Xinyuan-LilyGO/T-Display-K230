@@ -22,36 +22,22 @@ https://github.com/kendryte/k230_linux_sdk.git
 dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 ```
 
-## Current Release
+## Feature Overview
 
-Current public baseline: `v0.2.2`.
+See [CHANGELOG.MD](CHANGELOG.MD) for release history.
 
-`v0.2.2` is a maintenance release on top of `v0.2.0`. It keeps the same
-validated SDK baseline and focuses on runtime stability, power behavior, and
-user-facing polish:
-
-- Xiaozhi voice assistant is now included with device-code binding, a chat-style
-  conversation view, wake-word entry, push-to-talk, hardware MIC key support,
-  full-screen robot face mode, and automatic session recovery.
-- Battery and power behavior has been refined with first-run charger defaults,
-  a 6000 mAh default battery capacity, optional low-voltage shutdown, and a
-  cleaner shutdown animation path.
-- nRF52840 ownership handling has been improved so Meshtastic BLE and UART DFU
-  do not unnecessarily compete for the same UART path.
-- SD-card image generation is more robust across clean builds and reboot tests.
-
-The `v0.2.0` feature set remains available: a phone-style LVGL launcher,
-responsive portrait/landscape layouts, camera and media apps, settings pages,
-optional keyboard-base hardware support, nRF52840/nRF9151 management,
-LoRa/LoRaWAN tools, and Meshtastic beta support.
+The public image includes a phone-style LVGL launcher, responsive
+portrait/landscape layouts, camera and media apps, settings pages, optional
+keyboard-base hardware support, nRF52840/nRF9151 management, LoRa/LoRaWAN
+tools, and Meshtastic beta support.
 
 Feature status:
 
 - Stable daily-use apps: camera, gallery, music, network radio, recorder,
   video player, terminal, MTP, Wi-Fi, Ethernet, display, audio, notification,
   battery, charger, sensor, keyboard, and system settings.
-- Beta apps: Meshtastic, LoRaWAN, Xiaozhi voice assistant, nRF9151
-  cellular/GNSS data tools, and nRF52840 UART DFU.
+- Beta apps: Meshtastic, LoRaWAN, Xiaozhi voice assistant, PicoClaw,
+  nRF9151 cellular/GNSS data tools, and nRF52840 UART DFU.
 - User-provided content: NES ROM files and offline map tiles are not bundled in
   the default image.
 
@@ -66,6 +52,7 @@ scripts/           Host setup, SDK overlay, image build, and SSH deployment help
 
 ## Documentation
 
+- [Changelog](CHANGELOG.MD)
 - [Launcher app guide](k230_launcher/docs/APPS.md)
 - [Offline map tile guide](k230_launcher/docs/MAPS.md)
 - [BSP GPIO and hardware map](k230_bsp/docs/HARDWARE_PINMAP.md)
@@ -258,5 +245,6 @@ Generated image files under `k230_bsp/images/` are local build artifacts.
   This includes nRF9151, nRF52840, TCA8418, BQ27220, BQ25896, XL9555, and AHT20.
 - Xiaozhi requires network access and a compatible Xiaozhi service. Wake-word
   listening is active only while the Xiaozhi app is open and owns the microphone.
+- PicoClaw requires network access and an OpenAI-compatible model API key.
 - Offline map tiles, NES ROMs, and user media files should be copied to the SD
   card by the user.

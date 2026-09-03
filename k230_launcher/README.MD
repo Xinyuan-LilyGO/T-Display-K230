@@ -11,9 +11,10 @@ LILYGO T-Display K230.
 
 ## Release Scope
 
-This launcher is the user interface layer used by the `v0.2.2` image. It is
-designed for the BSP-provided RM69A10 display, Goodix touch input, GC2093 camera,
-audio routes, optional keyboard base, LoRa module, nRF52840, and nRF9151.
+This launcher is the user interface layer used by the public image. It is
+designed for the BSP-provided RM69A10 display, Goodix touch input, GC2093
+camera, audio routes, optional keyboard base, LoRa module, nRF52840, and
+nRF9151.
 
 Main app groups:
 
@@ -29,18 +30,7 @@ Apps that require optional hardware check for the related module before use. If
 the module is not present, the launcher should show a user-facing notice instead
 of entering a broken page.
 
-## v0.2.2 Updates
-
-- Xiaozhi voice assistant now provides the official device-code binding flow,
-  wake-word entry, push-to-talk, hardware MIC key support, a chat-style
-  transcript, full-screen robot face mode, and automatic session recovery.
-- Power settings include first-run charger defaults, a 6000 mAh default battery
-  capacity, optional low-voltage shutdown, and coordinated screen/keyboard
-  backlight handling during shutdown.
-- nRF52840 UART ownership is coordinated between Meshtastic BLE and nRF DFU so
-  one feature can pause and restore the other cleanly.
-- SD-card image generation is prepared for repeatable clean builds and reboot
-  validation.
+Release history is tracked in the top-level [CHANGELOG.MD](../CHANGELOG.MD).
 
 ## Prerequisites
 
@@ -143,6 +133,7 @@ The launcher can save a PNG screenshot to `/root/screenshots`.
 Supported triggers:
 
 - Tap the `Screenshot` icon on the home screen.
+- Press the default `F7` hotkey.
 - Press `FN + LILYGO` on the hardware keyboard.
 
 Use the MTP app to expose the SD-card root directory to a host computer, then copy files from `/root/screenshots`.

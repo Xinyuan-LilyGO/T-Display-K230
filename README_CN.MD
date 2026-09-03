@@ -20,31 +20,20 @@ https://github.com/kendryte/k230_linux_sdk.git
 dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 ```
 
-## 当前版本
+## 功能概览
 
-当前公开基线：`v0.2.2`
+版本变更记录请看 [CHANGELOG_CN.MD](CHANGELOG_CN.MD)。
 
-`v0.2.2` 是基于 `v0.2.0` 的维护版本，保持相同的已验证 SDK 基线，重点改进
-运行稳定性、电源行为和用户交互体验：
-
-- 新增并完善小智语音助手，支持设备验证码绑定、聊天式对话界面、唤醒词入口、
-  按住说话、硬件 MIC 键、全屏机器人表情模式和会话自动恢复。
-- 优化电池和电源行为，加入首次运行充电默认值、6000 mAh 默认电池容量、
-  可选低电压关机和更统一的关机动画流程。
-- 优化 nRF52840 资源归属管理，减少 Meshtastic BLE 和 UART DFU 对同一 UART
-  通道的竞争。
-- 优化 SD 卡镜像生成流程，提高干净构建和重启测试时的稳定性。
-
-`v0.2.0` 的主要功能仍然保留：手机风格 LVGL Launcher、横竖屏自适应布局、
-相机和多媒体应用、系统设置、可选键盘底板外设支持、nRF52840/nRF9151
-管理、LoRa/LoRaWAN 工具以及 Meshtastic Beta 功能。
+公开镜像包含手机风格 LVGL Launcher、横竖屏自适应布局、相机和多媒体应用、
+系统设置、可选键盘底板外设支持、nRF52840/nRF9151 管理、LoRa/LoRaWAN
+工具以及 Meshtastic Beta 功能。
 
 功能状态：
 
 - 日常可用应用：相机、相册、音乐、网络电台、录音、视频播放器、终端、
   MTP、Wi-Fi、以太网、显示、音频、通知、电池、充电器、传感器、键盘和系统设置
-- Beta 应用：Meshtastic、LoRaWAN、小智语音助手、nRF9151 蜂窝/GNSS 数据工具、
-  nRF52840 UART DFU
+- Beta 应用：Meshtastic、LoRaWAN、小智语音助手、PicoClaw、
+  nRF9151 蜂窝/GNSS 数据工具、nRF52840 UART DFU
 - 用户自备资源：默认镜像不内置 NES ROM 和离线地图瓦片，用户可通过 SD 卡或
   MTP 自行复制
 
@@ -59,6 +48,7 @@ scripts/           主机依赖安装、overlay 应用、镜像构建和 SSH 部
 
 ## 文档入口
 
+- [版本变更记录](CHANGELOG_CN.MD)
 - [Launcher 应用使用说明](k230_launcher/docs/APPS_CN.md)
 - [离线地图瓦片下载说明](k230_launcher/docs/MAPS_CN.md)
 - [BSP GPIO 和硬件连接表](k230_bsp/docs/HARDWARE_PINMAP_CN.md)
@@ -248,4 +238,5 @@ Launcher：
   TCA8418、BQ27220、BQ25896、XL9555 和 AHT20
 - 小智需要网络连接和兼容小智协议的服务。唤醒词监听只会在打开小智应用并占用
   麦克风时启用。
+- PicoClaw 需要网络连接和 OpenAI 兼容模型 API key。
 - 离线地图瓦片、NES ROM 和用户媒体文件需要用户自行复制到 SD 卡中
