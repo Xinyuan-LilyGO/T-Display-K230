@@ -909,6 +909,21 @@ static void lora_update_chip_label(void)
     }
 }
 
+static void lora_apply_persisted_chip_hint(void)
+{
+    lora_chip_type_t chip;
+
+    if(lora_radio) {
+        return;
+    }
+    chip = lora_load_persisted_chip();
+    if(chip == LORA_CHIP_NONE) {
+        return;
+    }
+    lora_chip_type = chip;
+    lora_update_chip_label();
+}
+
 static void lora_radio_event_isr(void)
 {
     (void)__sync_fetch_and_add(&lora_radio_event_count, 1U);
@@ -3358,6 +3373,7 @@ void ui_lora_create(lv_obj_t *scr)
         lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
     }
 
+    lora_apply_persisted_chip_hint();
     lora_load_profiles();
     lora_create_status(body);
 
