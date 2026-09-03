@@ -2275,7 +2275,11 @@ static void lora_reflow_chat_layout(void)
     lv_obj_update_layout(lora_chat_panel);
     panel_h = lv_obj_get_height(lora_chat_panel);
     inner_w = lora_panel_content_width(lora_chat_panel);
-    msg_y = landscape ? 164 : 234;
+    if(landscape) {
+        msg_y = lora_session_mode == LORA_SESSION_AUTO_TX ? 196 : 140;
+    } else {
+        msg_y = lora_session_mode == LORA_SESSION_AUTO_TX ? 234 : 174;
+    }
 
     lv_obj_set_pos(lora_message_page, 0, msg_y);
     lv_obj_set_width(lora_message_page, inner_w);
