@@ -3054,10 +3054,13 @@ static void keyboard_base_get_state(keyboard_base_state_t *state)
 }
 
 int ui_hardware_i2c4_scan(uint8_t found[128], char *status,
-                          unsigned int status_len)
+                          unsigned int status_len, int timeout_ms)
 {
     sensor_gpio_i2c_t bus;
+    uint64_t start_us = ui_monotonic_us();
+    uint64_t timeout_us = timeout_ms > 0 ? (uint64_t)timeout_ms * 1000ULL : 0;
     int found_count = 0;
+    int timed_out = 0;
     int rc = -1;
 
     if(!found) {
@@ -3075,6 +3078,10 @@ int ui_hardware_i2c4_scan(uint8_t found[128], char *status,
     }
 
     for(int addr = 0x03; addr <= 0x77; addr++) {
+        if(timeout_us > 0 && ui_monotonic_us() - start_us >= timeout_us) {
+            timed_out = 1;
+            break;
+        }
         if(keyboard_i2c_probe_addr_unlocked(&bus, (uint8_t)addr)) {
             found[addr] = 1;
             found_count++;
@@ -3082,11 +3089,20 @@ int ui_hardware_i2c4_scan(uint8_t found[128], char *status,
     }
     keyboard_i2c_end(&bus);
 
-    if(status && status_len > 0) {
+    if(timed_out) {
+        if(status && status_len > 0) {
+            snprintf(status, status_len,
+                     "I2C4 SDA47/SCL46 scan timeout, %d partial device%s",
+                     found_count, found_count == 1 ? "" : "s");
+        }
+        rc = -2;
+    } else if(status && status_len > 0) {
         snprintf(status, status_len, "I2C4 SDA47/SCL46 %d device%s",
                  found_count, found_count == 1 ? "" : "s");
+        rc = found_count;
+    } else {
+        rc = found_count;
     }
-    rc = found_count;
 
 out_unlock:
     pthread_mutex_unlock(&sensor_aht20_lock);

@@ -37,7 +37,7 @@ int ui_hardware_xl9555_detected(void);
 int ui_hardware_bq25896_detected(void);
 int ui_hardware_bq27220_detected(void);
 int ui_hardware_i2c4_scan(uint8_t found[128], char *status,
-                          unsigned int status_len);
+                          unsigned int status_len, int timeout_ms);
 const char *ui_extension_keyboard_status(void);
 void ui_extension_keyboard_focus_obj(lv_obj_t *obj);
 void ui_extension_keyboard_set_key_cb(ui_extension_keyboard_key_cb_t cb,

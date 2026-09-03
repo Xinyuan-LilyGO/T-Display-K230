@@ -19,18 +19,33 @@
 #define I2C_SCAN_ADDR_MAX 0x80
 #define I2C_SCAN_STATUS_MAX 160
 #define I2C_SCAN_SUMMARY_MAX 192
+#define I2C_SCAN_DEFER_MS 80
+#define I2C_SCAN_TIMEOUT_MS 7000
+#define I2C_SCAN_I2C4_TIMEOUT_MS 1200
+
+typedef struct {
+    uint32_t generation;
+} i2c_scan_job_t;
 
 static pthread_mutex_t i2c_scan_lock = PTHREAD_MUTEX_INITIALIZER;
 static int i2c_scan_busy;
 static int i2c_scan_result_ready;
+static int i2c_scan_timed_out;
+static uint32_t i2c_scan_generation;
 static char i2c_scan_status[I2C_SCAN_STATUS_MAX] = "Ready";
 static char i2c_scan_summary[I2C_SCAN_BUS_MAX][I2C_SCAN_SUMMARY_MAX];
 static uint8_t i2c_scan_bus_present[I2C_SCAN_BUS_MAX];
 static uint8_t i2c_scan_found[I2C_SCAN_BUS_MAX][I2C_SCAN_ADDR_MAX];
 static lv_timer_t *i2c_scan_timer;
+static lv_timer_t *i2c_scan_defer_timer;
+static lv_timer_t *i2c_scan_timeout_timer;
 static lv_obj_t *i2c_scan_status_label;
 static lv_obj_t *i2c_scan_bus_summary_label[I2C_SCAN_BUS_MAX];
 static lv_obj_t *i2c_scan_addr_obj[I2C_SCAN_BUS_MAX][I2C_SCAN_ADDR_MAX];
+static lv_obj_t *i2c_scan_overlay;
+static lv_obj_t *i2c_scan_overlay_label;
+
+static void i2c_scan_update_page(void);
 
 static const char *i2c_scan_bus_title(int bus)
 {
@@ -176,15 +191,136 @@ static void i2c_scan_format_summary(int bus, int found_bus,
              found_bus == 1 ? "" : "s", known);
 }
 
+static int i2c_scan_job_cancelled(uint32_t generation)
+{
+    int cancelled;
+
+    pthread_mutex_lock(&i2c_scan_lock);
+    cancelled = generation != i2c_scan_generation || i2c_scan_timed_out;
+    pthread_mutex_unlock(&i2c_scan_lock);
+    return cancelled;
+}
+
+static void i2c_scan_destroy_overlay(void)
+{
+    if(i2c_scan_overlay && lv_obj_is_valid(i2c_scan_overlay)) {
+        lv_obj_delete(i2c_scan_overlay);
+    }
+    i2c_scan_overlay = NULL;
+    i2c_scan_overlay_label = NULL;
+}
+
+static void i2c_scan_show_overlay(const char *text)
+{
+    lv_obj_t *card;
+    lv_obj_t *spinner;
+    lv_obj_t *title;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 420 : 420;
+    int card_h = 220;
+
+    if(card_w > screen_w - 48) {
+        card_w = screen_w - 48;
+    }
+    if(card_w < 300) {
+        card_w = 300;
+    }
+    if(card_h > screen_h - 48) {
+        card_h = screen_h - 48;
+    }
+
+    if(i2c_scan_overlay && lv_obj_is_valid(i2c_scan_overlay)) {
+        if(i2c_scan_overlay_label) {
+            lv_label_set_text(i2c_scan_overlay_label, text ? text :
+                              "Scanning...");
+        }
+        lv_obj_move_foreground(i2c_scan_overlay);
+        return;
+    }
+
+    i2c_scan_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(i2c_scan_overlay);
+    lv_obj_add_flag(i2c_scan_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(i2c_scan_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(i2c_scan_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(i2c_scan_overlay, 0, 0);
+    lv_obj_set_style_pad_all(i2c_scan_overlay, 0, 0);
+    lv_obj_clear_flag(i2c_scan_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    card = ui_panel(i2c_scan_overlay, 0, 0, card_w, card_h);
+    lv_obj_align(card, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x121820), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x263544), 0);
+    lv_obj_set_style_radius(card, 10, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    spinner = lv_spinner_create(card);
+    lv_obj_set_size(spinner, 62, 62);
+    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x263342),
+                               LV_PART_MAIN);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x22D3EE),
+                               LV_PART_INDICATOR);
+
+    title = ui_label(card, "Scanning I2C", &lv_font_montserrat_22,
+                     0xF2F5F8);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 104);
+
+    i2c_scan_overlay_label = ui_label(card, text ? text : "Please wait...",
+                                      &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(i2c_scan_overlay_label, card_w - 48);
+    lv_label_set_long_mode(i2c_scan_overlay_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(i2c_scan_overlay_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(i2c_scan_overlay_label, LV_ALIGN_TOP_MID, 0, 146);
+    lv_obj_move_foreground(i2c_scan_overlay);
+}
+
+static void i2c_scan_stop_timeout_timer(void)
+{
+    if(i2c_scan_timeout_timer) {
+        lv_timer_delete(i2c_scan_timeout_timer);
+        i2c_scan_timeout_timer = NULL;
+    }
+}
+
+static void i2c_scan_timeout_cb(lv_timer_t *timer)
+{
+    int timed_out = 0;
+
+    (void)timer;
+    i2c_scan_timeout_timer = NULL;
+    pthread_mutex_lock(&i2c_scan_lock);
+    if(i2c_scan_busy) {
+        i2c_scan_timed_out = 1;
+        i2c_scan_busy = 0;
+        i2c_scan_result_ready = 1;
+        snprintf(i2c_scan_status, sizeof(i2c_scan_status),
+                 "Scan timeout, check I2C bus wiring");
+        timed_out = 1;
+    }
+    pthread_mutex_unlock(&i2c_scan_lock);
+
+    if(timed_out) {
+        i2c_scan_update_page();
+        app_request_fast_refresh();
+    }
+}
+
 static void *i2c_scan_thread(void *arg)
 {
+    i2c_scan_job_t *job = (i2c_scan_job_t *)arg;
+    uint32_t generation = job ? job->generation : 0;
     char local_summary[I2C_SCAN_BUS_MAX][I2C_SCAN_SUMMARY_MAX];
     uint8_t local_present[I2C_SCAN_BUS_MAX];
     uint8_t local_found[I2C_SCAN_BUS_MAX][I2C_SCAN_ADDR_MAX];
     int found_total = 0;
     int bus_total = 0;
 
-    (void)arg;
+    free(job);
     memset(local_summary, 0, sizeof(local_summary));
     memset(local_present, 0, sizeof(local_present));
     memset(local_found, 0, sizeof(local_found));
@@ -195,6 +331,10 @@ static void *i2c_scan_thread(void *arg)
         int fd;
         int found_bus = 0;
 
+        if(i2c_scan_job_cancelled(generation)) {
+            break;
+        }
+
         if(bus == I2C_SCAN_EXT_BUS) {
             char hw_status[96];
             int rc;
@@ -202,7 +342,8 @@ static void *i2c_scan_thread(void *arg)
             local_present[bus] = 1;
             bus_total++;
             rc = ui_hardware_i2c4_scan(local_found[bus], hw_status,
-                                       sizeof(hw_status));
+                                       sizeof(hw_status),
+                                       I2C_SCAN_I2C4_TIMEOUT_MS);
             if(rc < 0) {
                 snprintf(local_summary[bus], sizeof(local_summary[bus]),
                          "%s", hw_status);
@@ -233,6 +374,9 @@ static void *i2c_scan_thread(void *arg)
         }
 
         for(int addr = 0x03; addr <= 0x77; addr++) {
+            if(i2c_scan_job_cancelled(generation)) {
+                break;
+            }
             if(i2c_probe_addr(fd, addr)) {
                 local_found[bus][addr] = 1;
                 found_bus++;
@@ -253,15 +397,18 @@ static void *i2c_scan_thread(void *arg)
     }
 
     pthread_mutex_lock(&i2c_scan_lock);
-    memcpy(i2c_scan_summary, local_summary, sizeof(i2c_scan_summary));
-    memcpy(i2c_scan_bus_present, local_present, sizeof(i2c_scan_bus_present));
-    memcpy(i2c_scan_found, local_found, sizeof(i2c_scan_found));
-    snprintf(i2c_scan_status, sizeof(i2c_scan_status),
-             "%d device%s found on %d I2C bus%s", found_total,
-             found_total == 1 ? "" : "s", bus_total,
-             bus_total == 1 ? "" : "es");
-    i2c_scan_busy = 0;
-    i2c_scan_result_ready = 1;
+    if(generation == i2c_scan_generation && !i2c_scan_timed_out) {
+        memcpy(i2c_scan_summary, local_summary, sizeof(i2c_scan_summary));
+        memcpy(i2c_scan_bus_present, local_present,
+               sizeof(i2c_scan_bus_present));
+        memcpy(i2c_scan_found, local_found, sizeof(i2c_scan_found));
+        snprintf(i2c_scan_status, sizeof(i2c_scan_status),
+                 "%d device%s found on %d I2C bus%s", found_total,
+                 found_total == 1 ? "" : "s", bus_total,
+                 bus_total == 1 ? "" : "es");
+        i2c_scan_busy = 0;
+        i2c_scan_result_ready = 1;
+    }
     pthread_mutex_unlock(&i2c_scan_lock);
     return NULL;
 }
@@ -305,6 +452,13 @@ static void i2c_scan_update_page(void)
     i2c_scan_result_ready = 0;
     pthread_mutex_unlock(&i2c_scan_lock);
 
+    if(busy) {
+        i2c_scan_show_overlay("Scanning buses, please wait...");
+    } else {
+        i2c_scan_stop_timeout_timer();
+        i2c_scan_destroy_overlay();
+    }
+
     if(i2c_scan_status_label) {
         lv_label_set_text(i2c_scan_status_label, busy ? "Scanning..." :
                           status);
@@ -335,11 +489,19 @@ static void i2c_scan_timer_cb(lv_timer_t *timer)
 static void i2c_scan_start(void)
 {
     pthread_t thread;
+    i2c_scan_job_t *job = NULL;
+    uint32_t generation = 0;
     int start_thread = 0;
 
     pthread_mutex_lock(&i2c_scan_lock);
     if(!i2c_scan_busy) {
+        i2c_scan_generation++;
+        if(i2c_scan_generation == 0) {
+            i2c_scan_generation = 1;
+        }
+        generation = i2c_scan_generation;
         i2c_scan_busy = 1;
+        i2c_scan_timed_out = 0;
         i2c_scan_result_ready = 0;
         snprintf(i2c_scan_status, sizeof(i2c_scan_status), "Scanning...");
         start_thread = 1;
@@ -347,9 +509,28 @@ static void i2c_scan_start(void)
     pthread_mutex_unlock(&i2c_scan_lock);
 
     if(start_thread) {
-        if(pthread_create(&thread, NULL, i2c_scan_thread, NULL) == 0) {
+        job = calloc(1, sizeof(*job));
+        if(job) {
+            job->generation = generation;
+        }
+        if(!job) {
+            pthread_mutex_lock(&i2c_scan_lock);
+            i2c_scan_busy = 0;
+            snprintf(i2c_scan_status, sizeof(i2c_scan_status),
+                     "Scan memory allocation failed");
+            i2c_scan_result_ready = 1;
+            pthread_mutex_unlock(&i2c_scan_lock);
+        } else if(pthread_create(&thread, NULL, i2c_scan_thread, job) == 0) {
             pthread_detach(thread);
+            i2c_scan_stop_timeout_timer();
+            i2c_scan_timeout_timer =
+                lv_timer_create(i2c_scan_timeout_cb, I2C_SCAN_TIMEOUT_MS,
+                                NULL);
+            if(i2c_scan_timeout_timer) {
+                lv_timer_set_repeat_count(i2c_scan_timeout_timer, 1);
+            }
         } else {
+            free(job);
             pthread_mutex_lock(&i2c_scan_lock);
             i2c_scan_busy = 0;
             snprintf(i2c_scan_status, sizeof(i2c_scan_status),
@@ -361,6 +542,29 @@ static void i2c_scan_start(void)
 
     i2c_scan_update_page();
     app_request_fast_refresh();
+}
+
+static void i2c_scan_deferred_start_cb(lv_timer_t *timer)
+{
+    if(i2c_scan_defer_timer == timer) {
+        i2c_scan_defer_timer = NULL;
+    }
+    i2c_scan_start();
+}
+
+static void i2c_scan_schedule_start(void)
+{
+    if(i2c_scan_defer_timer) {
+        lv_timer_delete(i2c_scan_defer_timer);
+        i2c_scan_defer_timer = NULL;
+    }
+    i2c_scan_defer_timer =
+        lv_timer_create(i2c_scan_deferred_start_cb, I2C_SCAN_DEFER_MS, NULL);
+    if(i2c_scan_defer_timer) {
+        lv_timer_set_repeat_count(i2c_scan_defer_timer, 1);
+    } else {
+        i2c_scan_start();
+    }
 }
 
 static void i2c_scan_event_cb(lv_event_t *event)
@@ -486,15 +690,28 @@ void ui_i2c_scan_create(lv_obj_t *scr)
     if(!i2c_scan_timer) {
         i2c_scan_timer = lv_timer_create(i2c_scan_timer_cb, 250, NULL);
     }
-    i2c_scan_start();
+    i2c_scan_schedule_start();
 }
 
 void ui_i2c_scan_cleanup(void)
 {
+    int busy;
+
+    if(i2c_scan_defer_timer) {
+        lv_timer_delete(i2c_scan_defer_timer);
+        i2c_scan_defer_timer = NULL;
+    }
     if(i2c_scan_timer) {
         lv_timer_delete(i2c_scan_timer);
         i2c_scan_timer = NULL;
     }
+    pthread_mutex_lock(&i2c_scan_lock);
+    busy = i2c_scan_busy;
+    pthread_mutex_unlock(&i2c_scan_lock);
+    if(!busy) {
+        i2c_scan_stop_timeout_timer();
+    }
+    i2c_scan_destroy_overlay();
     i2c_scan_status_label = NULL;
     memset(i2c_scan_bus_summary_label, 0, sizeof(i2c_scan_bus_summary_label));
     memset(i2c_scan_addr_obj, 0, sizeof(i2c_scan_addr_obj));
