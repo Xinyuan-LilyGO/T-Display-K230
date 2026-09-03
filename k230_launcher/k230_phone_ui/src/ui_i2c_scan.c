@@ -1,5 +1,7 @@
 #include "ui_i2c_scan.h"
 
+#include "ui_hardware.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/i2c-dev.h>
@@ -7,14 +9,16 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
 #define I2C_SCAN_BUS_MAX 8
+#define I2C_SCAN_EXT_BUS 4
 #define I2C_SCAN_ADDR_MAX 0x80
 #define I2C_SCAN_STATUS_MAX 160
-#define I2C_SCAN_SUMMARY_MAX 96
+#define I2C_SCAN_SUMMARY_MAX 192
 
 static pthread_mutex_t i2c_scan_lock = PTHREAD_MUTEX_INITIALIZER;
 static int i2c_scan_busy;
@@ -28,9 +32,42 @@ static lv_obj_t *i2c_scan_status_label;
 static lv_obj_t *i2c_scan_bus_summary_label[I2C_SCAN_BUS_MAX];
 static lv_obj_t *i2c_scan_addr_obj[I2C_SCAN_BUS_MAX][I2C_SCAN_ADDR_MAX];
 
+static const char *i2c_scan_bus_title(int bus)
+{
+    switch(bus) {
+    case 0:
+        return "I2C0 / physical I2C4";
+    case 1:
+        return "I2C1 / physical I2C3";
+    case I2C_SCAN_EXT_BUS:
+        return "I2C4 GPIO SDA47/SCL46";
+    default:
+        break;
+    }
+    return NULL;
+}
+
+static void i2c_scan_format_bus_name(int bus, char *buf, size_t len)
+{
+    const char *title = i2c_scan_bus_title(bus);
+
+    if(!buf || len == 0) {
+        return;
+    }
+    if(title) {
+        snprintf(buf, len, "%s", title);
+    } else {
+        snprintf(buf, len, "I2C%d", bus);
+    }
+}
+
 static int i2c_bus_exists(int bus)
 {
     char dev[32];
+
+    if(bus == I2C_SCAN_EXT_BUS) {
+        return 1;
+    }
 
     snprintf(dev, sizeof(dev), "/dev/i2c-%d", bus);
     return access(dev, F_OK) == 0;
@@ -60,6 +97,85 @@ static int i2c_probe_addr(int fd, int addr)
     return ioctl(fd, I2C_SMBUS, &args) == 0;
 }
 
+static void i2c_scan_append_known(char *buf, size_t len, const char *name)
+{
+    size_t used;
+
+    if(!buf || !name || len == 0) {
+        return;
+    }
+    used = strlen(buf);
+    if(used + 4 >= len) {
+        return;
+    }
+    snprintf(buf + used, len - used, "%s%s", used ? " " : "  ", name);
+}
+
+static void i2c_scan_known_devices(const uint8_t found[I2C_SCAN_ADDR_MAX],
+                                   char *buf, size_t len)
+{
+    int xl_addr = -1;
+
+    if(!buf || len == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if(!found) {
+        return;
+    }
+
+    if(found[0x34]) {
+        i2c_scan_append_known(buf, len, "TCA8418");
+    }
+    if(found[0x37]) {
+        i2c_scan_append_known(buf, len, "GC2093");
+    }
+    if(found[0x38]) {
+        i2c_scan_append_known(buf, len, "AHT20");
+    }
+    if(found[0x3B]) {
+        i2c_scan_append_known(buf, len, "LT9611");
+    }
+    if(found[0x55]) {
+        i2c_scan_append_known(buf, len, "BQ27220");
+    }
+    if(found[0x5D]) {
+        i2c_scan_append_known(buf, len, "GT9895");
+    }
+    if(found[0x6B]) {
+        i2c_scan_append_known(buf, len, "BQ25896");
+    }
+    for(int addr = 0x20; addr <= 0x27; addr++) {
+        if(found[addr]) {
+            xl_addr = addr;
+            break;
+        }
+    }
+    if(xl_addr >= 0) {
+        char name[20];
+
+        snprintf(name, sizeof(name), "XL9555@0x%02X", xl_addr);
+        i2c_scan_append_known(buf, len, name);
+    }
+}
+
+static void i2c_scan_format_summary(int bus, int found_bus,
+                                    const uint8_t found[I2C_SCAN_ADDR_MAX],
+                                    char *summary, size_t len)
+{
+    char name[48];
+    char known[112];
+
+    if(!summary || len == 0) {
+        return;
+    }
+
+    i2c_scan_format_bus_name(bus, name, sizeof(name));
+    i2c_scan_known_devices(found, known, sizeof(known));
+    snprintf(summary, len, "%s  %d device%s%s", name, found_bus,
+             found_bus == 1 ? "" : "s", known);
+}
+
 static void *i2c_scan_thread(void *arg)
 {
     char local_summary[I2C_SCAN_BUS_MAX][I2C_SCAN_SUMMARY_MAX];
@@ -75,8 +191,30 @@ static void *i2c_scan_thread(void *arg)
 
     for(int bus = 0; bus < I2C_SCAN_BUS_MAX; bus++) {
         char dev[32];
+        char bus_name[48];
         int fd;
         int found_bus = 0;
+
+        if(bus == I2C_SCAN_EXT_BUS) {
+            char hw_status[96];
+            int rc;
+
+            local_present[bus] = 1;
+            bus_total++;
+            rc = ui_hardware_i2c4_scan(local_found[bus], hw_status,
+                                       sizeof(hw_status));
+            if(rc < 0) {
+                snprintf(local_summary[bus], sizeof(local_summary[bus]),
+                         "%s", hw_status);
+                continue;
+            }
+            found_bus = rc;
+            found_total += found_bus;
+            i2c_scan_format_summary(bus, found_bus, local_found[bus],
+                                    local_summary[bus],
+                                    sizeof(local_summary[bus]));
+            continue;
+        }
 
         snprintf(dev, sizeof(dev), "/dev/i2c-%d", bus);
         if(access(dev, F_OK) != 0) {
@@ -103,11 +241,15 @@ static void *i2c_scan_thread(void *arg)
         }
         close(fd);
 
+        i2c_scan_format_bus_name(bus, bus_name, sizeof(bus_name));
         snprintf(local_summary[bus], sizeof(local_summary[bus]),
-                 "%s  %d device%s%s%s", dev, found_bus,
-                 found_bus == 1 ? "" : "s",
-                 local_found[bus][0x38] ? "  AHT20" : "",
-                 local_found[bus][0x6B] ? "  BQ25896" : "");
+                 "%s %s  %d device%s", bus_name, dev, found_bus,
+                 found_bus == 1 ? "" : "s");
+        i2c_scan_known_devices(local_found[bus],
+                               local_summary[bus] +
+                                   strlen(local_summary[bus]),
+                               sizeof(local_summary[bus]) -
+                                   strlen(local_summary[bus]));
     }
 
     pthread_mutex_lock(&i2c_scan_lock);
@@ -260,7 +402,7 @@ static int i2c_create_bus_matrix(lv_obj_t *body, int bus, int y)
     int panel_h = 72 + rows * (cell_h + gap);
     lv_obj_t *panel;
     lv_obj_t *title;
-    char text[32];
+    char text[48];
 
     if(body_w < 320) {
         body_w = 320;
@@ -274,7 +416,7 @@ static int i2c_create_bus_matrix(lv_obj_t *body, int bus, int y)
     lv_obj_set_style_border_color(panel, lv_color_hex(0x263544), 0);
     lv_obj_set_style_pad_all(panel, 12, 0);
 
-    snprintf(text, sizeof(text), "I2C%d", bus);
+    i2c_scan_format_bus_name(bus, text, sizeof(text));
     title = ui_label(panel, text, &lv_font_montserrat_22, 0xF2F5F8);
     lv_obj_set_pos(title, 0, 0);
 

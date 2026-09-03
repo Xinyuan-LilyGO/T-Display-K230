@@ -3053,6 +3053,46 @@ static void keyboard_base_get_state(keyboard_base_state_t *state)
     pthread_mutex_unlock(&keyboard_base_lock);
 }
 
+int ui_hardware_i2c4_scan(uint8_t found[128], char *status,
+                          unsigned int status_len)
+{
+    sensor_gpio_i2c_t bus;
+    int found_count = 0;
+    int rc = -1;
+
+    if(!found) {
+        return -1;
+    }
+
+    memset(found, 0, 128);
+    if(status && status_len > 0) {
+        snprintf(status, status_len, "I2C4 SDA47/SCL46 scan failed");
+    }
+
+    pthread_mutex_lock(&sensor_aht20_lock);
+    if(keyboard_i2c_begin(&bus) != 0) {
+        goto out_unlock;
+    }
+
+    for(int addr = 0x03; addr <= 0x77; addr++) {
+        if(keyboard_i2c_probe_addr_unlocked(&bus, (uint8_t)addr)) {
+            found[addr] = 1;
+            found_count++;
+        }
+    }
+    keyboard_i2c_end(&bus);
+
+    if(status && status_len > 0) {
+        snprintf(status, status_len, "I2C4 SDA47/SCL46 %d device%s",
+                 found_count, found_count == 1 ? "" : "s");
+    }
+    rc = found_count;
+
+out_unlock:
+    pthread_mutex_unlock(&sensor_aht20_lock);
+    return rc;
+}
+
 void ui_hardware_reboot_diag_dump(const char *tag)
 {
     keyboard_base_state_t base;
