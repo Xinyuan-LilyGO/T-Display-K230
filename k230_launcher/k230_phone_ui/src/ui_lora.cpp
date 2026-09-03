@@ -3243,11 +3243,11 @@ static void lora_create_chat(lv_obj_t *body)
     if(landscape) {
         label_w = 84;
         controls_x = label_w + 12;
-        mode_y = 66;
-        session_y = 54;
-        payload_y = 120;
-        payload_btn_y = 108;
-        msg_y = 164;
+        session_y = 78;
+        mode_y = session_y + 12;
+        payload_btn_y = 140;
+        payload_y = payload_btn_y + 12;
+        msg_y = 196;
         session_w = (inner_w - controls_x -
                      session_gap * (LORA_SESSION_BUTTON_COUNT - 1)) /
                     LORA_SESSION_BUTTON_COUNT;
