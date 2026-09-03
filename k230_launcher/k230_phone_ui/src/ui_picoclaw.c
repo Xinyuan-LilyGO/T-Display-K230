@@ -62,6 +62,13 @@ typedef enum {
     PICOCLAW_VIEW_PROFILE_EDIT,
 } picoclaw_view_t;
 
+typedef enum {
+    PICOCLAW_PROFILE_TEST_CLOSED = 0,
+    PICOCLAW_PROFILE_TEST_RUNNING,
+    PICOCLAW_PROFILE_TEST_OK,
+    PICOCLAW_PROFILE_TEST_FAILED,
+} picoclaw_profile_test_state_t;
+
 typedef struct {
     const char *display;
     const char *model_name;
@@ -152,6 +159,14 @@ static lv_obj_t *picoclaw_log_btn;
 static lv_obj_t *picoclaw_weixin_qr_overlay;
 static lv_obj_t *picoclaw_weixin_qr_canvas;
 static lv_obj_t *picoclaw_weixin_qr_status_label;
+static lv_obj_t *picoclaw_profile_test_overlay;
+static lv_obj_t *picoclaw_profile_test_card;
+static lv_obj_t *picoclaw_profile_test_spinner;
+static lv_obj_t *picoclaw_profile_test_icon_box;
+static lv_obj_t *picoclaw_profile_test_icon_label;
+static lv_obj_t *picoclaw_profile_test_title_label;
+static lv_obj_t *picoclaw_profile_test_detail_label;
+static lv_obj_t *picoclaw_profile_test_ok_btn;
 static uint16_t *picoclaw_weixin_qr_buf;
 static ui_input_inline_t *picoclaw_inline_input;
 
@@ -171,6 +186,7 @@ static int picoclaw_weixin_auth_running;
 static int picoclaw_weixin_qr_dirty;
 static int picoclaw_chat_dirty;
 static int picoclaw_chat_count;
+static int picoclaw_profile_test_state = PICOCLAW_PROFILE_TEST_CLOSED;
 static uint32_t picoclaw_weixin_last_poll;
 static char picoclaw_status_text[160] = "Ready";
 static char picoclaw_output_text[PICOCLAW_OUTPUT_MAX] = "";
@@ -183,7 +199,13 @@ static char picoclaw_weixin_text[80] = "missing";
 static char picoclaw_weixin_auth_text[80] = "stopped";
 static char picoclaw_weixin_qr_text[PICOCLAW_QR_TEXT_MAX] = "";
 static char picoclaw_url_text[160] = "http://<board-ip>:18790";
+static char picoclaw_profile_test_detail[256] = "";
 static picoclaw_chat_message_t picoclaw_chat[PICOCLAW_CHAT_MAX];
+
+static void picoclaw_profile_test_overlay_open(void);
+static void picoclaw_profile_test_overlay_update(void);
+static void picoclaw_profile_test_overlay_close(void);
+static int picoclaw_profile_test_overlay_handle_back(void);
 
 static void picoclaw_load_pref(char *out, size_t len, const char *key,
                                const char *fallback)
@@ -903,6 +925,27 @@ static void *picoclaw_worker(void *arg)
             snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
                      "%s rc=%d", "Weixin action failed", rc);
         }
+    } else if(req->action == PICOCLAW_ACTION_TEST_PROFILE) {
+        picoclaw_clean_reply(output, rc, reply, sizeof(reply));
+        if(rc == 0) {
+            snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
+                     "Profile test OK");
+            picoclaw_profile_test_detail[0] = '\0';
+            picoclaw_profile_test_state = PICOCLAW_PROFILE_TEST_OK;
+            picoclaw_config_ready = 1;
+            snprintf(picoclaw_config_text, sizeof(picoclaw_config_text), "%s",
+                     "ready");
+        } else {
+            snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
+                     "Profile test failed");
+            if(reply[0] && strcmp(reply, "Prompt failed") != 0) {
+                snprintf(picoclaw_profile_test_detail,
+                         sizeof(picoclaw_profile_test_detail), "%s", reply);
+            } else {
+                picoclaw_profile_test_detail[0] = '\0';
+            }
+            picoclaw_profile_test_state = PICOCLAW_PROFILE_TEST_FAILED;
+        }
     } else if(rc == 0) {
         snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s",
                  "Done");
@@ -929,6 +972,7 @@ static void picoclaw_start_action(picoclaw_action_t action, const char *text)
     pthread_t thread;
     picoclaw_request_t *req;
     char status[160];
+    int show_profile_test_overlay = 0;
 
     req = calloc(1, sizeof(*req));
     if(!req) {
@@ -967,7 +1011,16 @@ static void picoclaw_start_action(picoclaw_action_t action, const char *text)
     picoclaw_busy = 1;
     picoclaw_status_for_action(action, status, sizeof(status));
     snprintf(picoclaw_status_text, sizeof(picoclaw_status_text), "%s", status);
+    if(action == PICOCLAW_ACTION_TEST_PROFILE) {
+        picoclaw_profile_test_state = PICOCLAW_PROFILE_TEST_RUNNING;
+        picoclaw_profile_test_detail[0] = '\0';
+        show_profile_test_overlay = 1;
+    }
     pthread_mutex_unlock(&picoclaw_lock);
+
+    if(show_profile_test_overlay) {
+        picoclaw_profile_test_overlay_open();
+    }
 
     if(pthread_create(&thread, NULL, picoclaw_worker, req) == 0) {
         pthread_detach(thread);
@@ -977,6 +1030,12 @@ static void picoclaw_start_action(picoclaw_action_t action, const char *text)
         picoclaw_busy = 0;
         snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
                  "%s", "Thread start failed");
+        if(action == PICOCLAW_ACTION_TEST_PROFILE) {
+            snprintf(picoclaw_profile_test_detail,
+                     sizeof(picoclaw_profile_test_detail), "%s",
+                     "Thread start failed");
+            picoclaw_profile_test_state = PICOCLAW_PROFILE_TEST_FAILED;
+        }
         pthread_mutex_unlock(&picoclaw_lock);
     }
     app_request_fast_refresh();
@@ -1034,6 +1093,288 @@ static void picoclaw_update_buttons(int busy)
             lv_obj_center(label);
         }
     }
+}
+
+static void picoclaw_profile_test_overlay_delete_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_profile_test_overlay = NULL;
+    picoclaw_profile_test_card = NULL;
+    picoclaw_profile_test_spinner = NULL;
+    picoclaw_profile_test_icon_box = NULL;
+    picoclaw_profile_test_icon_label = NULL;
+    picoclaw_profile_test_title_label = NULL;
+    picoclaw_profile_test_detail_label = NULL;
+    picoclaw_profile_test_ok_btn = NULL;
+}
+
+static void picoclaw_profile_test_overlay_close(void)
+{
+    if(picoclaw_profile_test_overlay &&
+       lv_obj_is_valid(picoclaw_profile_test_overlay)) {
+        lv_obj_delete(picoclaw_profile_test_overlay);
+    }
+    picoclaw_profile_test_overlay = NULL;
+    picoclaw_profile_test_card = NULL;
+    picoclaw_profile_test_spinner = NULL;
+    picoclaw_profile_test_icon_box = NULL;
+    picoclaw_profile_test_icon_label = NULL;
+    picoclaw_profile_test_title_label = NULL;
+    picoclaw_profile_test_detail_label = NULL;
+    picoclaw_profile_test_ok_btn = NULL;
+    pthread_mutex_lock(&picoclaw_lock);
+    picoclaw_profile_test_state = PICOCLAW_PROFILE_TEST_CLOSED;
+    picoclaw_profile_test_detail[0] = '\0';
+    pthread_mutex_unlock(&picoclaw_lock);
+}
+
+static void picoclaw_profile_test_overlay_close_event_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_profile_test_overlay_close();
+}
+
+static void picoclaw_profile_test_overlay_open(void)
+{
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int card_w = ui_is_landscape() ? 500 : 420;
+    int card_h = ui_is_landscape() ? 260 : 300;
+    int pad = 24;
+    lv_obj_t *label;
+
+    if(picoclaw_profile_test_overlay &&
+       lv_obj_is_valid(picoclaw_profile_test_overlay)) {
+        lv_obj_delete(picoclaw_profile_test_overlay);
+    }
+
+    if(card_w > screen_w - 48) {
+        card_w = screen_w - 48;
+    }
+    if(card_w < 300) {
+        card_w = screen_w - 24;
+    }
+    if(card_h > screen_h - 48) {
+        card_h = screen_h - 48;
+    }
+    if(card_h < 220) {
+        card_h = 220;
+    }
+
+    picoclaw_profile_test_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(picoclaw_profile_test_overlay);
+    lv_obj_add_flag(picoclaw_profile_test_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(picoclaw_profile_test_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(picoclaw_profile_test_overlay, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(picoclaw_profile_test_overlay, 0, 0);
+    lv_obj_set_style_pad_all(picoclaw_profile_test_overlay, 0, 0);
+    lv_obj_clear_flag(picoclaw_profile_test_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(picoclaw_profile_test_overlay,
+                        picoclaw_profile_test_overlay_delete_cb,
+                        LV_EVENT_DELETE, NULL);
+
+    picoclaw_profile_test_card =
+        ui_panel(picoclaw_profile_test_overlay, 0, 0, card_w, card_h);
+    lv_obj_center(picoclaw_profile_test_card);
+    lv_obj_set_style_bg_color(picoclaw_profile_test_card,
+                              lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(picoclaw_profile_test_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(picoclaw_profile_test_card, 1, 0);
+    lv_obj_set_style_border_color(picoclaw_profile_test_card,
+                                  lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_radius(picoclaw_profile_test_card, 14, 0);
+    lv_obj_set_style_pad_all(picoclaw_profile_test_card, 0, 0);
+    lv_obj_clear_flag(picoclaw_profile_test_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    picoclaw_profile_test_spinner =
+        lv_spinner_create(picoclaw_profile_test_card);
+    lv_obj_set_size(picoclaw_profile_test_spinner, 76, 76);
+    lv_obj_align(picoclaw_profile_test_spinner, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_set_style_arc_width(picoclaw_profile_test_spinner, 7,
+                               LV_PART_MAIN);
+    lv_obj_set_style_arc_width(picoclaw_profile_test_spinner, 7,
+                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(picoclaw_profile_test_spinner,
+                               lv_color_hex(0x233044), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(picoclaw_profile_test_spinner,
+                               lv_color_hex(0x25C281), LV_PART_INDICATOR);
+
+    picoclaw_profile_test_icon_box =
+        lv_obj_create(picoclaw_profile_test_card);
+    lv_obj_set_pos(picoclaw_profile_test_icon_box, (card_w - 74) / 2, 24);
+    lv_obj_set_size(picoclaw_profile_test_icon_box, 74, 74);
+    lv_obj_set_style_radius(picoclaw_profile_test_icon_box, 37, 0);
+    lv_obj_set_style_bg_color(picoclaw_profile_test_icon_box,
+                              lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_opa(picoclaw_profile_test_icon_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(picoclaw_profile_test_icon_box, 0, 0);
+    lv_obj_clear_flag(picoclaw_profile_test_icon_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(picoclaw_profile_test_icon_box, LV_OBJ_FLAG_CLICKABLE);
+
+    picoclaw_profile_test_icon_label =
+        ui_label(picoclaw_profile_test_icon_box, LV_SYMBOL_OK,
+                 &lv_font_montserrat_36, 0xFFFFFF);
+    lv_obj_center(picoclaw_profile_test_icon_label);
+
+    picoclaw_profile_test_title_label =
+        ui_label(picoclaw_profile_test_card, ui_tr("Testing profile..."),
+                 &lv_font_montserrat_24, 0xF2F5F8);
+    lv_obj_set_pos(picoclaw_profile_test_title_label, pad, 116);
+    lv_obj_set_width(picoclaw_profile_test_title_label, card_w - pad * 2);
+    lv_obj_set_style_text_align(picoclaw_profile_test_title_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(picoclaw_profile_test_title_label,
+                           LV_LABEL_LONG_DOT);
+
+    picoclaw_profile_test_detail_label =
+        ui_label(picoclaw_profile_test_card,
+                 ui_tr("Sending a test prompt to the active model."),
+                 &lv_font_montserrat_16, 0xCBD5E1);
+    lv_obj_set_pos(picoclaw_profile_test_detail_label, pad, 156);
+    lv_obj_set_width(picoclaw_profile_test_detail_label, card_w - pad * 2);
+    lv_obj_set_style_text_align(picoclaw_profile_test_detail_label,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(picoclaw_profile_test_detail_label,
+                           LV_LABEL_LONG_WRAP);
+
+    picoclaw_profile_test_ok_btn =
+        ui_command_button(picoclaw_profile_test_card, (card_w - 176) / 2,
+                          card_h - 64, 176, ui_tr("OK"), 0x25C281);
+    lv_obj_set_height(picoclaw_profile_test_ok_btn, 44);
+    lv_obj_add_event_cb(picoclaw_profile_test_ok_btn,
+                        picoclaw_profile_test_overlay_close_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    label = lv_obj_get_child(picoclaw_profile_test_ok_btn, 0);
+    if(label) {
+        lv_obj_set_style_text_font(label,
+                                   ui_font_for_text(ui_tr("OK"),
+                                                    &lv_font_montserrat_18),
+                                   0);
+    }
+    lv_obj_add_flag(picoclaw_profile_test_icon_box, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(picoclaw_profile_test_ok_btn, LV_OBJ_FLAG_HIDDEN);
+    picoclaw_profile_test_overlay_update();
+    lv_obj_move_foreground(picoclaw_profile_test_overlay);
+}
+
+static void picoclaw_profile_test_overlay_update(void)
+{
+    int state;
+    char detail[sizeof(picoclaw_profile_test_detail)];
+    uint32_t accent = 0x25C281;
+    const char *title = "Testing profile...";
+    const char *icon = LV_SYMBOL_OK;
+
+    pthread_mutex_lock(&picoclaw_lock);
+    state = picoclaw_profile_test_state;
+    snprintf(detail, sizeof(detail), "%s", picoclaw_profile_test_detail);
+    pthread_mutex_unlock(&picoclaw_lock);
+
+    if(state == PICOCLAW_PROFILE_TEST_CLOSED) {
+        return;
+    }
+    if(!picoclaw_profile_test_overlay ||
+       !lv_obj_is_valid(picoclaw_profile_test_overlay)) {
+        picoclaw_profile_test_overlay_open();
+        return;
+    }
+
+    if(state == PICOCLAW_PROFILE_TEST_FAILED) {
+        accent = 0xEF4D5A;
+        title = "Profile test failed";
+        icon = "!";
+        if(!detail[0]) {
+            snprintf(detail, sizeof(detail), "%s",
+                     ui_tr("Check network, API key, and model settings."));
+        }
+    } else if(state == PICOCLAW_PROFILE_TEST_OK) {
+        title = "Profile test OK";
+        if(!detail[0]) {
+            snprintf(detail, sizeof(detail), "%s",
+                     ui_tr("Model replied successfully."));
+        }
+    } else {
+        if(!detail[0]) {
+            snprintf(detail, sizeof(detail), "%s",
+                     ui_tr("Sending a test prompt to the active model."));
+        }
+    }
+
+    if(picoclaw_profile_test_card &&
+       lv_obj_is_valid(picoclaw_profile_test_card)) {
+        lv_obj_set_style_border_color(picoclaw_profile_test_card,
+                                      lv_color_hex(accent), 0);
+    }
+    if(picoclaw_profile_test_spinner &&
+       lv_obj_is_valid(picoclaw_profile_test_spinner)) {
+        if(state == PICOCLAW_PROFILE_TEST_RUNNING) {
+            lv_obj_clear_flag(picoclaw_profile_test_spinner,
+                              LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(picoclaw_profile_test_spinner,
+                            LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_set_style_arc_color(picoclaw_profile_test_spinner,
+                                   lv_color_hex(accent), LV_PART_INDICATOR);
+    }
+    if(picoclaw_profile_test_icon_box &&
+       lv_obj_is_valid(picoclaw_profile_test_icon_box)) {
+        if(state == PICOCLAW_PROFILE_TEST_RUNNING) {
+            lv_obj_add_flag(picoclaw_profile_test_icon_box,
+                            LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(picoclaw_profile_test_icon_box,
+                              LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_set_style_bg_color(picoclaw_profile_test_icon_box,
+                                  lv_color_hex(accent), 0);
+    }
+    if(picoclaw_profile_test_icon_label &&
+       lv_obj_is_valid(picoclaw_profile_test_icon_label)) {
+        lv_label_set_text(picoclaw_profile_test_icon_label, icon);
+        lv_obj_center(picoclaw_profile_test_icon_label);
+    }
+    if(picoclaw_profile_test_title_label &&
+       lv_obj_is_valid(picoclaw_profile_test_title_label)) {
+        lv_label_set_text(picoclaw_profile_test_title_label, ui_tr(title));
+    }
+    if(picoclaw_profile_test_detail_label &&
+       lv_obj_is_valid(picoclaw_profile_test_detail_label)) {
+        lv_label_set_text(picoclaw_profile_test_detail_label, detail);
+    }
+    if(picoclaw_profile_test_ok_btn &&
+       lv_obj_is_valid(picoclaw_profile_test_ok_btn)) {
+        lv_obj_set_style_border_color(picoclaw_profile_test_ok_btn,
+                                      lv_color_hex(accent), 0);
+        if(state == PICOCLAW_PROFILE_TEST_RUNNING) {
+            lv_obj_add_flag(picoclaw_profile_test_ok_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(picoclaw_profile_test_ok_btn,
+                              LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static int picoclaw_profile_test_overlay_handle_back(void)
+{
+    int state;
+
+    if(!picoclaw_profile_test_overlay ||
+       !lv_obj_is_valid(picoclaw_profile_test_overlay)) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&picoclaw_lock);
+    state = picoclaw_profile_test_state;
+    pthread_mutex_unlock(&picoclaw_lock);
+
+    if(state == PICOCLAW_PROFILE_TEST_RUNNING) {
+        return 1;
+    }
+    picoclaw_profile_test_overlay_close();
+    return 1;
 }
 
 static uint16_t picoclaw_rgb565(uint32_t rgb)
@@ -1634,6 +1975,7 @@ static void picoclaw_update_ui(void)
     if(qr_dirty && qr_text[0]) {
         picoclaw_weixin_qr_show(qr_text);
     }
+    picoclaw_profile_test_overlay_update();
     picoclaw_chat_rebuild(0);
 }
 
@@ -2509,6 +2851,9 @@ void ui_picoclaw_create(lv_obj_t *scr)
 
 int ui_picoclaw_handle_back(void)
 {
+    if(picoclaw_profile_test_overlay_handle_back()) {
+        return 1;
+    }
     if(picoclaw_weixin_qr_overlay &&
        lv_obj_is_valid(picoclaw_weixin_qr_overlay)) {
         picoclaw_weixin_qr_close();
@@ -2538,6 +2883,7 @@ void ui_picoclaw_cleanup(void)
         ui_input_inline_destroy(picoclaw_inline_input);
         picoclaw_inline_input = NULL;
     }
+    picoclaw_profile_test_overlay_close();
     picoclaw_weixin_qr_close();
     picoclaw_body = NULL;
     picoclaw_status_panel = NULL;
