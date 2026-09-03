@@ -167,6 +167,7 @@ static lv_obj_t *picoclaw_profile_test_icon_label;
 static lv_obj_t *picoclaw_profile_test_title_label;
 static lv_obj_t *picoclaw_profile_test_detail_label;
 static lv_obj_t *picoclaw_profile_test_ok_btn;
+static lv_obj_t *picoclaw_delete_confirm_overlay;
 static uint16_t *picoclaw_weixin_qr_buf;
 static ui_input_inline_t *picoclaw_inline_input;
 
@@ -187,6 +188,7 @@ static int picoclaw_weixin_qr_dirty;
 static int picoclaw_chat_dirty;
 static int picoclaw_chat_count;
 static int picoclaw_profile_test_state = PICOCLAW_PROFILE_TEST_CLOSED;
+static int picoclaw_delete_pending_index = -1;
 static uint32_t picoclaw_weixin_last_poll;
 static char picoclaw_status_text[160] = "Ready";
 static char picoclaw_output_text[PICOCLAW_OUTPUT_MAX] = "";
@@ -200,12 +202,15 @@ static char picoclaw_weixin_auth_text[80] = "stopped";
 static char picoclaw_weixin_qr_text[PICOCLAW_QR_TEXT_MAX] = "";
 static char picoclaw_url_text[160] = "http://<board-ip>:18790";
 static char picoclaw_profile_test_detail[256] = "";
+static char picoclaw_delete_pending_title[80] = "";
 static picoclaw_chat_message_t picoclaw_chat[PICOCLAW_CHAT_MAX];
 
 static void picoclaw_profile_test_overlay_open(void);
 static void picoclaw_profile_test_overlay_update(void);
 static void picoclaw_profile_test_overlay_close(void);
 static int picoclaw_profile_test_overlay_handle_back(void);
+static void picoclaw_delete_confirm_close(void);
+static int picoclaw_delete_confirm_handle_back(void);
 
 static void picoclaw_load_pref(char *out, size_t len, const char *key,
                                const char *fallback)
@@ -2271,13 +2276,12 @@ static void picoclaw_new_profile_event_cb(lv_event_t *event)
     app_refresh_current_page();
 }
 
-static void picoclaw_delete_profile_event_cb(lv_event_t *event)
+static void picoclaw_delete_profile_index(int index)
 {
     int count = picoclaw_profile_count();
-    int active = picoclaw_current_profile_index();
+    int active;
     char value[16];
 
-    (void)event;
     if(count <= 1) {
         pthread_mutex_lock(&picoclaw_lock);
         snprintf(picoclaw_status_text, sizeof(picoclaw_status_text),
@@ -2286,7 +2290,12 @@ static void picoclaw_delete_profile_event_cb(lv_event_t *event)
         app_request_fast_refresh();
         return;
     }
-    for(int i = active; i + 1 < count; i++) {
+    if(index < 0 || index >= count) {
+        return;
+    }
+
+    active = picoclaw_current_profile_index();
+    for(int i = index; i + 1 < count; i++) {
         picoclaw_profile_t next;
 
         picoclaw_profile_load(i + 1, &next);
@@ -2295,6 +2304,14 @@ static void picoclaw_delete_profile_event_cb(lv_event_t *event)
     count--;
     snprintf(value, sizeof(value), "%d", count);
     ui_prefs_set(PICOCLAW_PROFILE_COUNT_KEY, value);
+    if(active == index) {
+        active = index < count ? index : count - 1;
+    } else if(active > index) {
+        active--;
+    }
+    if(active < 0) {
+        active = 0;
+    }
     if(active >= count) {
         active = count - 1;
     }
@@ -2305,6 +2322,153 @@ static void picoclaw_delete_profile_event_cb(lv_event_t *event)
     pthread_mutex_unlock(&picoclaw_lock);
     picoclaw_start_action(PICOCLAW_ACTION_SAVE_CONFIG, NULL);
     app_refresh_current_page();
+}
+
+static void picoclaw_delete_confirm_close(void)
+{
+    if(picoclaw_delete_confirm_overlay &&
+       lv_obj_is_valid(picoclaw_delete_confirm_overlay)) {
+        lv_obj_delete(picoclaw_delete_confirm_overlay);
+    }
+    picoclaw_delete_confirm_overlay = NULL;
+    picoclaw_delete_pending_index = -1;
+    picoclaw_delete_pending_title[0] = '\0';
+}
+
+static void picoclaw_delete_confirm_cancel_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_delete_confirm_close();
+}
+
+static void picoclaw_delete_confirm_accept_cb(lv_event_t *event)
+{
+    int index = picoclaw_delete_pending_index;
+
+    (void)event;
+    picoclaw_delete_confirm_close();
+    picoclaw_delete_profile_index(index);
+}
+
+static void picoclaw_open_delete_confirm(int index)
+{
+    picoclaw_profile_t profile;
+    lv_obj_t *dialog;
+    lv_obj_t *title;
+    lv_obj_t *name;
+    lv_obj_t *note;
+    lv_obj_t *btn;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int dialog_w = ui_is_landscape() ? 560 : 500;
+    int dialog_h = ui_is_landscape() ? 246 : 268;
+    int pad = 24;
+    int gap = 18;
+    int button_w;
+    int button_y;
+
+    if(index < 0 || index >= picoclaw_profile_count()) {
+        return;
+    }
+    if(picoclaw_profile_count() <= 1) {
+        picoclaw_delete_profile_index(index);
+        return;
+    }
+
+    picoclaw_profile_load(index, &profile);
+    picoclaw_delete_confirm_close();
+    picoclaw_delete_pending_index = index;
+    snprintf(picoclaw_delete_pending_title,
+             sizeof(picoclaw_delete_pending_title), "%s", profile.title);
+
+    if(dialog_w > screen_w - 48) {
+        dialog_w = screen_w - 48;
+    }
+    if(dialog_w < 320) {
+        dialog_w = 320;
+    }
+    if(dialog_h > screen_h - 48) {
+        dialog_h = screen_h - 48;
+    }
+    if(dialog_h < 216) {
+        dialog_h = 216;
+    }
+    button_w = (dialog_w - pad * 2 - gap) / 2;
+    button_y = dialog_h - pad - 58;
+
+    picoclaw_delete_confirm_overlay = lv_obj_create(lv_layer_top());
+    ui_set_fullscreen(picoclaw_delete_confirm_overlay);
+    lv_obj_add_flag(picoclaw_delete_confirm_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(picoclaw_delete_confirm_overlay,
+                              lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(picoclaw_delete_confirm_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(picoclaw_delete_confirm_overlay, 0, 0);
+    lv_obj_set_style_pad_all(picoclaw_delete_confirm_overlay, 0, 0);
+    lv_obj_clear_flag(picoclaw_delete_confirm_overlay,
+                      LV_OBJ_FLAG_SCROLLABLE);
+
+    dialog = ui_panel(picoclaw_delete_confirm_overlay, 0, 0, dialog_w,
+                      dialog_h);
+    lv_obj_align(dialog, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_radius(dialog, 16, 0);
+    lv_obj_set_style_border_color(dialog, lv_color_hex(0x3A2630), 0);
+    lv_obj_set_style_pad_all(dialog, 0, 0);
+    lv_obj_clear_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
+
+    title = ui_label(dialog, "Delete profile?", &lv_font_montserrat_22,
+                     0xF2F5F8);
+    lv_obj_set_pos(title, pad, pad);
+    lv_obj_set_width(title, dialog_w - pad * 2);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+
+    name = ui_label(dialog, picoclaw_delete_pending_title,
+                    &lv_font_montserrat_18, 0xF5A524);
+    lv_obj_set_pos(name, pad, pad + 52);
+    lv_obj_set_width(name, dialog_w - pad * 2);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+
+    note = ui_label(dialog, "This cannot be undone.",
+                    &lv_font_montserrat_16, 0x94A3B8);
+    lv_obj_set_pos(note, pad, pad + 88);
+    lv_obj_set_width(note, dialog_w - pad * 2);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_DOT);
+
+    btn = ui_command_button(dialog, pad, button_y, button_w,
+                            "Cancel", 0x9AA4AF);
+    lv_obj_set_height(btn, 58);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A222C), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x2A3644), 0);
+    lv_obj_add_event_cb(btn, picoclaw_delete_confirm_cancel_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    btn = ui_command_button(dialog, pad + button_w + gap, button_y,
+                            button_w, "Delete", 0xEF4D5A);
+    lv_obj_set_height(btn, 58);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A1D24), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x4A2632),
+                              LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0xEF4D5A), 0);
+    lv_obj_add_event_cb(btn, picoclaw_delete_confirm_accept_cb,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(picoclaw_delete_confirm_overlay);
+    app_request_fast_refresh();
+}
+
+static int picoclaw_delete_confirm_handle_back(void)
+{
+    if(!picoclaw_delete_confirm_overlay ||
+       !lv_obj_is_valid(picoclaw_delete_confirm_overlay)) {
+        return 0;
+    }
+    picoclaw_delete_confirm_close();
+    return 1;
+}
+
+static void picoclaw_delete_profile_event_cb(lv_event_t *event)
+{
+    (void)event;
+    picoclaw_open_delete_confirm(picoclaw_current_profile_index());
 }
 
 static void picoclaw_test_profile_event_cb(lv_event_t *event)
@@ -2849,6 +3013,9 @@ int ui_picoclaw_handle_back(void)
     if(picoclaw_profile_test_overlay_handle_back()) {
         return 1;
     }
+    if(picoclaw_delete_confirm_handle_back()) {
+        return 1;
+    }
     if(picoclaw_weixin_qr_overlay &&
        lv_obj_is_valid(picoclaw_weixin_qr_overlay)) {
         picoclaw_weixin_qr_close();
@@ -2879,6 +3046,7 @@ void ui_picoclaw_cleanup(void)
         picoclaw_inline_input = NULL;
     }
     picoclaw_profile_test_overlay_close();
+    picoclaw_delete_confirm_close();
     picoclaw_weixin_qr_close();
     picoclaw_body = NULL;
     picoclaw_status_panel = NULL;
