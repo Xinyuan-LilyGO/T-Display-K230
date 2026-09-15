@@ -109,6 +109,7 @@
 #define CAMERA_PREVIEW_W 640
 #define CAMERA_PREVIEW_H 360
 #define CAMERA_FOCUS_SYSFS "/sys/bus/i2c/devices/0-000c/focus_position"
+#define CAMERA_FOCUS_POWER_CONTROL "/sys/bus/i2c/devices/0-000c/power/control"
 #define CAMERA_FOCUS_MIN_POS 0
 #define CAMERA_FOCUS_MAX_POS 1023
 #define CAMERA_FOCUS_COARSE_STEP 128
@@ -116,13 +117,16 @@
 #define CAMERA_FOCUS_TAP_COARSE_STEP 64
 #define CAMERA_FOCUS_FINE_STEP 16
 #define CAMERA_FOCUS_FINE_RADIUS 64
-#define CAMERA_FOCUS_SETTLE_US 70000ULL
+#define CAMERA_FOCUS_SETTLE_US 120000ULL
 #define CAMERA_FOCUS_FRAME_WAIT_US 260000ULL
-#define CAMERA_FOCUS_DISCARD_FRAMES 1
-#define CAMERA_FOCUS_SAMPLE_FRAMES 2
+#define CAMERA_FOCUS_DISCARD_FRAMES 2
+#define CAMERA_FOCUS_SAMPLE_FRAMES 5
 #define CAMERA_FOCUS_MARKER_SIZE 86
 #define CAMERA_FOCUS_APPROACH_DELTA 96
 #define CAMERA_FOCUS_APPROACH_SETTLE_US 60000ULL
+#define CAMERA_FOCUS_MAX_CANDIDATES 48
+#define CAMERA_FOCUS_VERIFY_TRIES 4
+#define CAMERA_FOCUS_VERIFY_RATIO_PCT 62ULL
 #define CAMERA_FOCUS_AFM_ENABLE (V4L2_CID_USER_BASE + 0x3A00)
 #define CAMERA_FOCUS_AFM_WIN_A_SHARPNESS (V4L2_CID_USER_BASE + 0x3A06)
 #define CAMERA_FOCUS_AFM_WIN_B_SHARPNESS (V4L2_CID_USER_BASE + 0x3A07)
@@ -10416,6 +10420,43 @@ static int camera_focus_read_position(int *pos)
     return 0;
 }
 
+static int camera_focus_set_power_control(const char *mode)
+{
+    int fd;
+    int rc = 0;
+    ssize_t written;
+    size_t len;
+
+    if(!mode) {
+        return -EINVAL;
+    }
+
+    fd = open(CAMERA_FOCUS_POWER_CONTROL, O_WRONLY | O_CLOEXEC);
+    if(fd < 0) {
+        return -errno;
+    }
+
+    len = strlen(mode);
+    written = write(fd, mode, len);
+    if(written != (ssize_t)len) {
+        rc = written < 0 ? -errno : -EIO;
+    } else {
+        written = write(fd, "\n", 1);
+        if(written != 1) {
+            rc = written < 0 ? -errno : -EIO;
+        }
+    }
+    close(fd);
+
+    if(rc == 0) {
+        touch_trace_log("CAMERA_FOCUS_POWER mode=%s", mode);
+    } else {
+        touch_trace_log("CAMERA_FOCUS_POWER_FAILED mode=%s rc=%d",
+                        mode, rc);
+    }
+    return rc;
+}
+
 static int camera_focus_afm_read_u32(int fd, uint32_t id, uint32_t *value)
 {
     struct v4l2_ext_control ctrl;
@@ -10567,6 +10608,24 @@ static int camera_focus_read_afm_metric(uint64_t *metric,
     }
 
     return *metric > 0 ? 0 : -EAGAIN;
+}
+
+static void camera_focus_sort_u64(uint64_t *values, unsigned count)
+{
+    if(!values || count < 2U) {
+        return;
+    }
+
+    for(unsigned i = 1; i < count; i++) {
+        uint64_t value = values[i];
+        unsigned j = i;
+
+        while(j > 0U && values[j - 1U] > value) {
+            values[j] = values[j - 1U];
+            j--;
+        }
+        values[j] = value;
+    }
 }
 
 static int camera_focus_copy_latest_frame(uint8_t *dst, unsigned *width,
@@ -10768,8 +10827,8 @@ static int camera_focus_measure_position(int pos, uint8_t *sample_buf,
 {
     unsigned width = 0;
     unsigned height = 0;
-    uint64_t metric_sum = 0;
-    uint64_t afm_metric_sum = 0;
+    uint64_t metric_samples[CAMERA_FOCUS_SAMPLE_FRAMES];
+    uint64_t afm_metric_samples[CAMERA_FOCUS_SAMPLE_FRAMES];
     unsigned metric_count = 0;
     unsigned afm_metric_count = 0;
     int rc;
@@ -10828,8 +10887,9 @@ static int camera_focus_measure_position(int pos, uint8_t *sample_buf,
         rc = camera_focus_read_afm_metric(&afm_metric, &afm_luminance,
                                           &afm_pixels);
         if(rc == 0) {
-            afm_metric_sum += afm_metric;
-            afm_metric_count++;
+            if(afm_metric_count < CAMERA_FOCUS_SAMPLE_FRAMES) {
+                afm_metric_samples[afm_metric_count++] = afm_metric;
+            }
             if(width > 0U && height > 0U) {
                 camera_focus_normalize_roi(req_x, req_y, width, height,
                                            roi_x, roi_y, roi_w, roi_h);
@@ -10852,16 +10912,204 @@ static int camera_focus_measure_position(int pos, uint8_t *sample_buf,
         frame_metric = camera_focus_sharpness_score(sample_buf, width, height,
                                                     *roi_x, *roi_y, *roi_w,
                                                     *roi_h);
-        metric_sum += frame_metric;
-        metric_count++;
+        if(metric_count < CAMERA_FOCUS_SAMPLE_FRAMES) {
+            metric_samples[metric_count++] = frame_metric;
+        }
     }
 
     if(afm_metric_count > 0U) {
-        *metric = afm_metric_sum / afm_metric_count;
-        return 0;
+        uint64_t min_metric;
+        uint64_t med_metric;
+        uint64_t max_metric;
+        unsigned spread_pct = 0;
+
+        camera_focus_sort_u64(afm_metric_samples, afm_metric_count);
+        min_metric = afm_metric_samples[0];
+        med_metric = afm_metric_count == 2U ?
+            afm_metric_samples[0] :
+            afm_metric_samples[afm_metric_count / 2U];
+        max_metric = afm_metric_samples[afm_metric_count - 1U];
+        if(max_metric > 0ULL) {
+            spread_pct = (unsigned)(((max_metric - min_metric) * 100ULL) /
+                                    max_metric);
+        }
+
+        *metric = med_metric;
+        touch_trace_log("CAMERA_FOCUS_AFM_AGG pos=%d count=%u min=%llu "
+                        "med=%llu max=%llu spread=%u score=%llu",
+                        pos, afm_metric_count,
+                        (unsigned long long)min_metric,
+                        (unsigned long long)med_metric,
+                        (unsigned long long)max_metric,
+                        spread_pct,
+                        (unsigned long long)*metric);
+        return *metric > 0ULL ? 0 : -EAGAIN;
     }
 
-    *metric = metric_count ? metric_sum / metric_count : 0;
+    if(metric_count > 0U) {
+        uint64_t min_metric;
+        uint64_t med_metric;
+        uint64_t max_metric;
+        unsigned spread_pct = 0;
+
+        camera_focus_sort_u64(metric_samples, metric_count);
+        min_metric = metric_samples[0];
+        med_metric = metric_count == 2U ?
+            metric_samples[0] :
+            metric_samples[metric_count / 2U];
+        max_metric = metric_samples[metric_count - 1U];
+        if(max_metric > 0ULL) {
+            spread_pct = (unsigned)(((max_metric - min_metric) * 100ULL) /
+                                    max_metric);
+        }
+        *metric = med_metric;
+        touch_trace_log("CAMERA_FOCUS_FRAME_AGG pos=%d count=%u min=%llu "
+                        "med=%llu max=%llu spread=%u score=%llu",
+                        pos, metric_count,
+                        (unsigned long long)min_metric,
+                        (unsigned long long)med_metric,
+                        (unsigned long long)max_metric,
+                        spread_pct,
+                        (unsigned long long)*metric);
+        return *metric > 0ULL ? 0 : -EAGAIN;
+    }
+
+    *metric = 0;
+    return -EAGAIN;
+}
+
+struct camera_focus_candidate {
+    int pos;
+    uint64_t metric;
+    unsigned roi_x;
+    unsigned roi_y;
+    unsigned roi_w;
+    unsigned roi_h;
+};
+
+static void camera_focus_candidate_add(struct camera_focus_candidate *candidates,
+                                       unsigned *candidate_count,
+                                       int pos, uint64_t metric,
+                                       unsigned roi_x, unsigned roi_y,
+                                       unsigned roi_w, unsigned roi_h)
+{
+    if(!candidates || !candidate_count || metric == 0ULL) {
+        return;
+    }
+
+    for(unsigned i = 0; i < *candidate_count; i++) {
+        if(candidates[i].pos == pos) {
+            if(metric > candidates[i].metric) {
+                candidates[i].metric = metric;
+                candidates[i].roi_x = roi_x;
+                candidates[i].roi_y = roi_y;
+                candidates[i].roi_w = roi_w;
+                candidates[i].roi_h = roi_h;
+            }
+            return;
+        }
+    }
+
+    if(*candidate_count >= CAMERA_FOCUS_MAX_CANDIDATES) {
+        unsigned weakest = 0;
+
+        for(unsigned i = 1; i < *candidate_count; i++) {
+            if(candidates[i].metric < candidates[weakest].metric) {
+                weakest = i;
+            }
+        }
+        if(metric <= candidates[weakest].metric) {
+            return;
+        }
+        candidates[weakest].pos = pos;
+        candidates[weakest].metric = metric;
+        candidates[weakest].roi_x = roi_x;
+        candidates[weakest].roi_y = roi_y;
+        candidates[weakest].roi_w = roi_w;
+        candidates[weakest].roi_h = roi_h;
+        return;
+    }
+
+    candidates[*candidate_count].pos = pos;
+    candidates[*candidate_count].metric = metric;
+    candidates[*candidate_count].roi_x = roi_x;
+    candidates[*candidate_count].roi_y = roi_y;
+    candidates[*candidate_count].roi_w = roi_w;
+    candidates[*candidate_count].roi_h = roi_h;
+    (*candidate_count)++;
+}
+
+static void camera_focus_candidate_sort(struct camera_focus_candidate *candidates,
+                                        unsigned candidate_count)
+{
+    if(!candidates || candidate_count < 2U) {
+        return;
+    }
+
+    for(unsigned i = 1; i < candidate_count; i++) {
+        struct camera_focus_candidate value = candidates[i];
+        unsigned j = i;
+
+        while(j > 0U && candidates[j - 1U].metric < value.metric) {
+            candidates[j] = candidates[j - 1U];
+            j--;
+        }
+        candidates[j] = value;
+    }
+}
+
+static int camera_focus_verify_candidate(struct camera_focus_candidate *candidate,
+                                         uint8_t *sample_buf,
+                                         unsigned req_x, unsigned req_y,
+                                         uint32_t *frame_count,
+                                         unsigned int req_seq,
+                                         uint64_t *verified_metric)
+{
+    uint64_t metric = 0;
+    unsigned roi_x = 0;
+    unsigned roi_y = 0;
+    unsigned roi_w = 0;
+    unsigned roi_h = 0;
+    uint64_t threshold;
+    int rc;
+
+    if(!candidate || !sample_buf || !frame_count || !verified_metric) {
+        return -EINVAL;
+    }
+
+    rc = camera_focus_commit_position(candidate->pos);
+    if(rc != 0) {
+        return rc;
+    }
+    usleep(CAMERA_FOCUS_SETTLE_US);
+
+    rc = camera_focus_measure_position(candidate->pos, sample_buf, req_x, req_y,
+                                       &metric, &roi_x, &roi_y, &roi_w, &roi_h,
+                                       frame_count, req_seq);
+    if(rc != 0) {
+        touch_trace_log("CAMERA_FOCUS_VERIFY_FAILED pos=%d rc=%d",
+                        candidate->pos, rc);
+        return rc;
+    }
+
+    threshold = (candidate->metric * CAMERA_FOCUS_VERIFY_RATIO_PCT) / 100ULL;
+    *verified_metric = metric;
+    touch_trace_log("CAMERA_FOCUS_VERIFY pos=%d expected=%llu verify=%llu "
+                    "threshold=%llu",
+                    candidate->pos,
+                    (unsigned long long)candidate->metric,
+                    (unsigned long long)metric,
+                    (unsigned long long)threshold);
+
+    if(metric < threshold) {
+        return -ERANGE;
+    }
+
+    candidate->metric = metric;
+    candidate->roi_x = roi_x;
+    candidate->roi_y = roi_y;
+    candidate->roi_w = roi_w;
+    candidate->roi_h = roi_h;
     return 0;
 }
 
@@ -10880,6 +11128,8 @@ static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
     unsigned roi_y = 0;
     unsigned roi_w = 0;
     unsigned roi_h = 0;
+    struct camera_focus_candidate candidates[CAMERA_FOCUS_MAX_CANDIDATES];
+    unsigned candidate_count = 0;
     int current = -1;
     int rc = -EIO;
 
@@ -10960,6 +11210,8 @@ static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
                 continue;
             }
             last_sampled = pos;
+            camera_focus_candidate_add(candidates, &candidate_count,
+                                       pos, metric, mx, my, mw, mh);
             touch_trace_log("CAMERA_FOCUS_SAMPLE pass=%d full=%d pos=%d "
                             "metric=%llu roi=%u,%u,%u,%u",
                             pass, full_scan, pos,
@@ -10988,6 +11240,9 @@ static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
                                                &metric, &mx, &my, &mw, &mh,
                                                &frame_count, req_seq);
             if(rc == 0) {
+                camera_focus_candidate_add(candidates, &candidate_count,
+                                           CAMERA_FOCUS_MAX_POS, metric,
+                                           mx, my, mw, mh);
                 touch_trace_log("CAMERA_FOCUS_SAMPLE pass=%d full=%d pos=%d "
                                 "metric=%llu roi=%u,%u,%u,%u",
                                 pass, full_scan, CAMERA_FOCUS_MAX_POS,
@@ -11024,17 +11279,64 @@ static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
     }
 
     if(best >= 0 && !camera_focus_scan_should_stop(req_seq)) {
-        rc = camera_focus_commit_position(best);
-        if(rc == 0) {
-            usleep(CAMERA_FOCUS_SETTLE_US);
+        int selected = -1;
+        int fallback = -1;
+        uint64_t fallback_metric = 0;
+        unsigned tries = 0;
+
+        camera_focus_candidate_sort(candidates, candidate_count);
+        for(unsigned i = 0; i < candidate_count &&
+            tries < CAMERA_FOCUS_VERIFY_TRIES &&
+            !camera_focus_scan_should_stop(req_seq); i++) {
+            uint64_t verified_metric = 0;
+
+            rc = camera_focus_verify_candidate(&candidates[i], sample_buf,
+                                               req_x, req_y, &frame_count,
+                                               req_seq, &verified_metric);
+            tries++;
+            if(rc == 0) {
+                selected = (int)i;
+                break;
+            }
+            if(rc == -ECANCELED) {
+                break;
+            }
+            if(verified_metric > fallback_metric) {
+                fallback = (int)i;
+                fallback_metric = verified_metric;
+            }
         }
-        if(rc == 0) {
+
+        if(selected < 0 && fallback >= 0 &&
+           !camera_focus_scan_should_stop(req_seq)) {
+            rc = camera_focus_commit_position(candidates[fallback].pos);
+            if(rc == 0) {
+                usleep(CAMERA_FOCUS_SETTLE_US);
+                selected = fallback;
+                candidates[selected].metric = fallback_metric;
+                touch_trace_log("CAMERA_FOCUS_VERIFY_FALLBACK pos=%d "
+                                "metric=%llu",
+                                candidates[selected].pos,
+                                (unsigned long long)fallback_metric);
+            }
+        }
+
+        if(selected >= 0 && rc == 0) {
+            best = candidates[selected].pos;
+            best_score = candidates[selected].metric;
+            roi_x = candidates[selected].roi_x;
+            roi_y = candidates[selected].roi_y;
+            roi_w = candidates[selected].roi_w;
+            roi_h = candidates[selected].roi_h;
+
             *best_pos = best;
             *best_metric = best_score;
             *best_roi_x = roi_x;
             *best_roi_y = roi_y;
             *best_roi_w = roi_w;
             *best_roi_h = roi_h;
+        } else if(rc == 0) {
+            rc = -EIO;
         }
     }
 
@@ -11125,6 +11427,7 @@ static int camera_focus_worker_start(void)
                         CAMERA_FOCUS_SYSFS);
         return -1;
     }
+    (void)camera_focus_set_power_control("on");
 
     pthread_mutex_lock(&camera_focus_lock);
     if(camera_focus_thread_valid) {
@@ -11140,6 +11443,7 @@ static int camera_focus_worker_start(void)
                         camera_focus_thread_cb, NULL);
     if(rc != 0) {
         touch_trace_log("CAMERA_FOCUS_WORKER_START_FAILED rc=%d", rc);
+        (void)camera_focus_set_power_control("auto");
         return -1;
     }
 
@@ -11170,6 +11474,7 @@ static void camera_focus_worker_stop(void)
         touch_trace_log("CAMERA_FOCUS_WORKER_STOP");
     }
     camera_focus_afm_close();
+    (void)camera_focus_set_power_control("auto");
 
     pthread_mutex_lock(&camera_focus_lock);
     camera_focus_stop = 0;
