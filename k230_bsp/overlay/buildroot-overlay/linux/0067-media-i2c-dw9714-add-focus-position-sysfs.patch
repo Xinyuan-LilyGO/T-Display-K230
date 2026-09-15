@@ -1,0 +1,95 @@
+--- a/drivers/media/i2c/dw9714.c
++++ b/drivers/media/i2c/dw9714.c
+@@ -6,6 +6,7 @@
+ #include <linux/module.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/sysfs.h>
+ #include <media/v4l2-ctrls.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-event.h>
+@@ -111,6 +112,56 @@
+ 
+ static const struct v4l2_subdev_ops dw9714_ops = {
+ 	.core = &dw9714_core_ops,
++};
++
++static ssize_t focus_position_show(struct device *dev,
++				   struct device_attribute *attr, char *buf)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct dw9714_device *dw9714_dev = sd_to_dw9714_vcm(sd);
++
++	return sysfs_emit(buf, "%u\n", dw9714_dev->current_val);
++}
++
++static ssize_t focus_position_store(struct device *dev,
++				    struct device_attribute *attr,
++				    const char *buf, size_t count)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct dw9714_device *dw9714_dev = sd_to_dw9714_vcm(sd);
++	unsigned long position;
++	int ret;
++
++	ret = kstrtoul(buf, 0, &position);
++	if (ret)
++		return ret;
++
++	if (position > DW9714_MAX_FOCUS_POS)
++		return -ERANGE;
++
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++
++	ret = dw9714_t_focus_vcm(dw9714_dev, position);
++	pm_runtime_put(dev);
++
++	if (ret)
++		return ret;
++
++	return count;
++}
++static DEVICE_ATTR_RW(focus_position);
++
++static struct attribute *dw9714_attrs[] = {
++	&dev_attr_focus_position.attr,
++	NULL,
++};
++
++static const struct attribute_group dw9714_attr_group = {
++	.attrs = dw9714_attrs,
+ };
+ 
+ static void dw9714_subdev_cleanup(struct dw9714_device *dw9714_dev)
+@@ -186,12 +237,18 @@
+ 	if (rval < 0)
+ 		goto err_cleanup;
+ 
++	rval = sysfs_create_group(&client->dev.kobj, &dw9714_attr_group);
++	if (rval < 0)
++		goto err_unregister;
++
+ 	pm_runtime_set_active(&client->dev);
+ 	pm_runtime_enable(&client->dev);
+ 	pm_runtime_idle(&client->dev);
+ 
+ 	return 0;
+ 
++err_unregister:
++	v4l2_async_unregister_subdev(&dw9714_dev->sd);
+ err_cleanup:
+ 	if (dw9714_dev->vcc)
+ 		regulator_disable(dw9714_dev->vcc);
+@@ -206,6 +263,8 @@
+ 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+ 	struct dw9714_device *dw9714_dev = sd_to_dw9714_vcm(sd);
+ 	int ret;
++
++	sysfs_remove_group(&client->dev.kobj, &dw9714_attr_group);
+ 
+ 	pm_runtime_disable(&client->dev);
+ 	if (!pm_runtime_status_suspended(&client->dev) && dw9714_dev->vcc) {

@@ -1,0 +1,16 @@
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -247,11 +247,12 @@
+-	dw9714@0c {
++	dw9714: dw9714@0c {
+ 		compatible = "dongwoon,dw9714";
+ 		reg = <0x0c>;
+ 	};
+ 
+ 	gc2093@37 {
+ 		compatible = "galaxycore,gc2093";
+ 		reg = <0x37>;
++		lens-focus = <&dw9714>;
+ 	};
+ 
+ 	aht20@38 {
