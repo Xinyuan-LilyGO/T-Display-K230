@@ -464,6 +464,7 @@ if [ "${DEPLOY_APP}" = "1" ]; then
               "${REMOTE_APP_DIR}/k230_pcm_volume" \
               "${REMOTE_APP_DIR}/drm_motion_probe" \
               "${REMOTE_APP_DIR}/drm_motion_probe_rgb565" 2>/dev/null || true
+    mkdir -p /root/qrcode
 fi
 
 if [ "${DEPLOY_FIRMWARE}" = "1" ]; then
@@ -477,7 +478,7 @@ if [ "${DEPLOY_FIRMWARE}" = "1" ]; then
 fi
 
 if [ "${DEPLOY_MEDIA}" = "1" ]; then
-    mkdir -p "${REMOTE_MUSIC_DIR}" "${REMOTE_VIDEO_DIR}" "${REMOTE_NOTIFICATION_DIR}" /root/nes /root/photos /root/screenshots /root/recordings /root/lorawan
+    mkdir -p "${REMOTE_MUSIC_DIR}" "${REMOTE_VIDEO_DIR}" "${REMOTE_NOTIFICATION_DIR}" /root/nes /root/photos /root/screenshots /root/qrcode /root/recordings /root/lorawan
     if [ "$(find "${REMOTE_TMP}/music" -mindepth 1 -print -quit 2>/dev/null)" ]; then
         rm -rf "${REMOTE_MUSIC_DIR}"
         mkdir -p "${REMOTE_MUSIC_DIR}"

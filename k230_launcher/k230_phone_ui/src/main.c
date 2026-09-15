@@ -243,6 +243,7 @@
 #include "ui_nes.h"
 #include "ui_nrf52840_dfu.h"
 #include "ui_picoclaw.h"
+#include "ui_qr_scanner.h"
 #include "ui_prefs.h"
 #include "ui_rtsp.h"
 #include "ui_settings.h"
@@ -651,6 +652,7 @@ static int styles_ready;
 
 static const app_item_t app_items[] = {
     {"Camera", LV_SYMBOL_VIDEO, 0x3DA5FF, PAGE_CAMERA},
+    {"QR Scan", "QR", 0x22C55E, PAGE_QR_SCANNER},
     {"Music", LV_SYMBOL_AUDIO, 0x2563EB, PAGE_MUSIC},
     {"Video", LV_SYMBOL_VIDEO, 0xF43F5E, PAGE_VIDEO},
     {"Radio", LV_SYMBOL_VOLUME_MAX, 0x25C281, PAGE_NET_RADIO},
@@ -764,6 +766,8 @@ static const char *page_name(page_id_t page)
         return "Home";
     case PAGE_CAMERA:
         return "Camera";
+    case PAGE_QR_SCANNER:
+        return "QR Scanner";
     case PAGE_NETWORK:
         return "Network";
     case PAGE_WIFI:
@@ -12910,6 +12914,7 @@ static void cleanup_page_state(void)
     ui_lora_flrc_cleanup();
     ui_lora_cleanup();
     ui_meshtastic_cleanup();
+    ui_qr_scanner_cleanup();
     ui_nes_cleanup();
     ui_mic_spectrum_cleanup();
     ui_hardware_cleanup();
@@ -14152,6 +14157,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_CAMERA:
         create_camera_page(scr);
+        break;
+    case PAGE_QR_SCANNER:
+        ui_qr_scanner_create(scr);
         break;
     case PAGE_NETWORK:
         ui_wifi_create(scr);

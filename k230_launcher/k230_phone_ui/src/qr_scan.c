@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <linux/videodev2.h>
 #include <drm_fourcc.h>
@@ -8,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -24,6 +26,14 @@
 #define QR_SCAN_DEFAULT_PREVIEW_HEIGHT 216
 #define QR_SCAN_DEFAULT_PREVIEW_INTERVAL_MS 120
 #define QR_SCAN_STAGE_NAME_MAX 32
+#define QR_SCAN_FOCUS_SYSFS "/sys/bus/i2c/devices/0-000c/focus_position"
+#define QR_SCAN_FOCUS_POWER_CONTROL "/sys/bus/i2c/devices/0-000c/power/control"
+#define QR_SCAN_FOCUS_INTERVAL_MS 1400
+#define QR_SCAN_ISP_SERVER_CMD \
+    "if ! pidof isp_media_server >/dev/null 2>&1; then " \
+    "ISP_MEDIA_SENSOR_DRIVER=/usr/lib/libvvcam.so " \
+    "/usr/bin/isp_media_server >/tmp/isp.out.log 2>/tmp/isp.err.log & " \
+    "fi"
 
 typedef enum {
     QR_SCAN_FORMAT_NV12 = 0,
@@ -39,6 +49,8 @@ typedef struct {
     qr_scan_format_t format;
     bool preview;
     bool verbose;
+    bool require_meshtastic;
+    bool focus_sweep;
     char preview_file[QR_SCAN_PREVIEW_PATH_MAX];
     unsigned preview_width;
     unsigned preview_height;
@@ -46,6 +58,7 @@ typedef struct {
 } qr_scan_options_t;
 
 typedef struct {
+    bool require_meshtastic;
     unsigned frames;
     unsigned attempts;
     unsigned candidates;
@@ -102,8 +115,19 @@ static void usage(const char *argv0)
     fprintf(stderr,
             "Usage: %s [-d video] [-w width] [-h height] [-f NV12|NV16] "
             "[--timeout-sec N] [--skip N] [--preview] [--verbose] "
+            "[--require-meshtastic] [--focus-sweep] "
             "[--preview-file path --preview-width W --preview-height H]\n",
             argv0);
+}
+
+static void ensure_camera_pipeline(void)
+{
+    int rc = system(QR_SCAN_ISP_SERVER_CMD);
+
+    if(rc == -1 || (WIFEXITED(rc) && WEXITSTATUS(rc) != 0)) {
+        fprintf(stderr, "isp_media_server start check failed\n");
+    }
+    usleep(300000);
 }
 
 static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
@@ -119,6 +143,8 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
         {"preview-height", required_argument, NULL, 1005},
         {"preview-interval-ms", required_argument, NULL, 1006},
         {"verbose", no_argument, NULL, 1007},
+        {"require-meshtastic", no_argument, NULL, 1008},
+        {"focus-sweep", no_argument, NULL, 1009},
         {0, 0, 0, 0},
     };
 
@@ -133,6 +159,8 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
     opts->format = QR_SCAN_FORMAT_NV16;
     opts->preview = false;
     opts->verbose = false;
+    opts->require_meshtastic = false;
+    opts->focus_sweep = false;
     opts->preview_file[0] = '\0';
     opts->preview_width = QR_SCAN_DEFAULT_PREVIEW_WIDTH;
     opts->preview_height = QR_SCAN_DEFAULT_PREVIEW_HEIGHT;
@@ -196,6 +224,12 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
         case 1007:
             opts->verbose = true;
             break;
+        case 1008:
+            opts->require_meshtastic = true;
+            break;
+        case 1009:
+            opts->focus_sweep = true;
+            break;
         default:
             return -1;
         }
@@ -209,6 +243,68 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
         return -1;
     }
     return 0;
+}
+
+static int focus_write_text(const char *path, const char *text)
+{
+    int fd;
+    size_t len;
+    ssize_t written;
+
+    if(!path || !text) {
+        return -1;
+    }
+    fd = open(path, O_WRONLY | O_CLOEXEC);
+    if(fd < 0) {
+        return -1;
+    }
+    len = strlen(text);
+    written = write(fd, text, len);
+    if(written == (ssize_t)len) {
+        ssize_t newline_written = write(fd, "\n", 1);
+        (void)newline_written;
+    }
+    close(fd);
+    return written == (ssize_t)len ? 0 : -1;
+}
+
+static void focus_power_set(const char *mode)
+{
+    if(focus_write_text(QR_SCAN_FOCUS_POWER_CONTROL, mode) == 0) {
+        fprintf(stderr, "qr_focus power=%s\n", mode);
+    }
+}
+
+static int focus_set_position(unsigned pos)
+{
+    char text[24];
+
+    snprintf(text, sizeof(text), "%u", pos > 1023U ? 1023U : pos);
+    if(focus_write_text(QR_SCAN_FOCUS_SYSFS, text) == 0) {
+        fprintf(stderr, "qr_focus pos=%s\n", text);
+        return 0;
+    }
+    return -1;
+}
+
+static void focus_sweep_tick(const qr_scan_options_t *opts,
+                             uint64_t now_ms, uint64_t *next_focus_ms,
+                             unsigned *focus_index)
+{
+    static const unsigned positions[] = {
+        800, 704, 896, 608, 992, 512, 384, 256,
+    };
+
+    if(!opts || !opts->focus_sweep || !next_focus_ms || !focus_index ||
+       now_ms < *next_focus_ms) {
+        return;
+    }
+
+    if(focus_set_position(positions[*focus_index]) == 0) {
+        *focus_index = (*focus_index + 1U) %
+            (unsigned)(sizeof(positions) / sizeof(positions[0]));
+    }
+    *next_focus_ms = now_ms + QR_SCAN_FOCUS_INTERVAL_MS;
 }
 
 static uint16_t gray_to_rgb565(uint8_t gray)
@@ -343,7 +439,7 @@ static int decode_gray_image(struct quirc *qr, const uint8_t *gray,
         }
         memcpy(out, data.payload, n);
         out[n] = '\0';
-        if(is_meshtastic_url(out)) {
+        if(!stats || !stats->require_meshtastic || is_meshtastic_url(out)) {
             return 0;
         }
         if(stats) {
@@ -515,7 +611,9 @@ typedef struct {
     const qr_scan_options_t *opts;
     struct quirc *qr;
     uint64_t deadline_ms;
+    uint64_t next_focus_ms;
     unsigned skipped;
+    unsigned focus_index;
     unsigned last_frame_count;
     uint8_t *work_a;
     uint8_t *work_b;
@@ -536,7 +634,9 @@ static int scan_preview_handler(struct v4l2_drm_context *ctx, bool displayed)
     if(!rt || !ctx || !rt->opts || !rt->qr) {
         return 'q';
     }
-    if(monotonic_ms() >= rt->deadline_ms) {
+    uint64_t now_ms = monotonic_ms();
+    focus_sweep_tick(rt->opts, now_ms, &rt->next_focus_ms, &rt->focus_index);
+    if(now_ms >= rt->deadline_ms) {
         rt->rc = 1;
         return 'q';
     }
@@ -580,6 +680,7 @@ static int scan_camera_preview(const qr_scan_options_t *opts)
     if(!opts) {
         return 2;
     }
+    ensure_camera_pipeline();
     qr = quirc_new();
     if(!qr) {
         fprintf(stderr, "quirc allocation failed\n");
@@ -625,10 +726,18 @@ static int scan_camera_preview(const qr_scan_options_t *opts)
     runtime.work_b = work_b;
     runtime.work_len = work_len;
     runtime.deadline_ms = monotonic_ms() + (uint64_t)opts->timeout_s * 1000ULL;
+    runtime.next_focus_ms = 0;
     runtime.rc = 1;
+    runtime.stats.require_meshtastic = opts->require_meshtastic;
+    if(opts->focus_sweep) {
+        focus_power_set("on");
+    }
     g_scan_runtime = &runtime;
     (void)v4l2_drm_run(&ctx, 1, scan_preview_handler);
     g_scan_runtime = NULL;
+    if(opts->focus_sweep) {
+        focus_power_set("auto");
+    }
     if(display) {
         display_exit(display);
     }
@@ -647,7 +756,8 @@ static int scan_camera_preview(const qr_scan_options_t *opts)
     free(work_b);
     quirc_destroy(qr);
     if(runtime.rc != 0) {
-        fprintf(stderr, "no Meshtastic QR code found\n");
+        fprintf(stderr, opts->require_meshtastic ?
+                "no Meshtastic QR code found\n" : "no QR code found\n");
     }
     return runtime.rc;
 }
@@ -664,6 +774,8 @@ static int scan_camera_once(const qr_scan_options_t *opts)
     uint16_t *preview_buf = NULL;
     uint64_t last_preview_ms = 0;
     uint64_t last_log_ms = 0;
+    uint64_t next_focus_ms = 0;
+    unsigned focus_index = 0;
     uint8_t *work_a = NULL;
     uint8_t *work_b = NULL;
     size_t work_len;
@@ -676,6 +788,7 @@ static int scan_camera_once(const qr_scan_options_t *opts)
     if(opts->preview) {
         return scan_camera_preview(opts);
     }
+    ensure_camera_pipeline();
     if(opts->preview_file[0]) {
         preview_buf = malloc((size_t)opts->preview_width *
                              opts->preview_height * sizeof(uint16_t));
@@ -702,6 +815,7 @@ static int scan_camera_once(const qr_scan_options_t *opts)
         return 2;
     }
     memset(&stats, 0, sizeof(stats));
+    stats.require_meshtastic = opts->require_meshtastic;
 
     memset(&ctx, 0, sizeof(ctx));
     v4l2_drm_default_context(&ctx);
@@ -732,9 +846,15 @@ static int scan_camera_once(const qr_scan_options_t *opts)
         return 2;
     }
 
+    if(opts->focus_sweep) {
+        focus_power_set("on");
+    }
     deadline_ms = monotonic_ms() + (uint64_t)opts->timeout_s * 1000ULL;
     while(monotonic_ms() < deadline_ms) {
         const uint8_t *frame;
+        uint64_t now_ms = monotonic_ms();
+
+        focus_sweep_tick(opts, now_ms, &next_focus_ms, &focus_index);
 
         memset(&ctx.vbuffer, 0, sizeof(ctx.vbuffer));
         ctx.vbuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -790,6 +910,9 @@ static int scan_camera_once(const qr_scan_options_t *opts)
 
     ioctl(ctx.video_fd, VIDIOC_STREAMOFF, &type);
     v4l2_drm_stop(&ctx);
+    if(opts->focus_sweep) {
+        focus_power_set("auto");
+    }
     if(opts->verbose) {
         fprintf(stderr,
                 "qr_scan summary width=%u height=%u frames=%u attempts=%u candidates=%u non_mesh=%u errors=%u last_stage=%s last_count=%d last_error=%s\n",
@@ -804,7 +927,8 @@ static int scan_camera_once(const qr_scan_options_t *opts)
     quirc_destroy(qr);
     free(preview_buf);
     if(rc != 0) {
-        fprintf(stderr, "no Meshtastic QR code found\n");
+        fprintf(stderr, opts->require_meshtastic ?
+                "no Meshtastic QR code found\n" : "no QR code found\n");
     }
     return rc;
 }

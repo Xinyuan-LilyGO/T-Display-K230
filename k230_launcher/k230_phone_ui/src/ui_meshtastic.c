@@ -7197,6 +7197,7 @@ static void *mesh_channel_scan_worker(void *arg)
     snprintf(command, sizeof(command),
              MESHTASTIC_QR_SCAN_PATH
              " -w %d -h %d --skip 2"
+             " --require-meshtastic --focus-sweep"
              " --timeout-sec 18 --preview-file " MESHTASTIC_QR_PREVIEW_FILE
              " --preview-width %d --preview-height %d "
              "--preview-interval-ms 100 --verbose 2>/tmp/k230_qr_scan.log",

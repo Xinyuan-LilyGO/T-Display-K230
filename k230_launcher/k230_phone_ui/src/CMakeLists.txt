@@ -190,6 +190,7 @@ set(K230_PHONE_UI_SOURCES
     ui_meshtastic.c
     ui_xiaozhi.c
     ui_picoclaw.c
+    ui_qr_scanner.c
     ui_lora.cpp
     ui_nes.cpp
     ${LIBTMT_DIR}/tmt.c

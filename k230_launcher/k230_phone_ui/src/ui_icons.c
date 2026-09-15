@@ -10,6 +10,8 @@ static const char *ui_icon_name_for_page(page_id_t page)
     switch(page) {
     case PAGE_CAMERA:
         return "camera";
+    case PAGE_QR_SCANNER:
+        return "screenshot";
     case PAGE_NETWORK:
         return "network";
     case PAGE_WIFI:
@@ -130,6 +132,8 @@ const char *ui_icon_path_for_page(page_id_t page)
     switch(page) {
     case PAGE_CAMERA:
         return UI_ICON_FILE("camera");
+    case PAGE_QR_SCANNER:
+        return UI_ICON_FILE("screenshot");
     case PAGE_NETWORK:
         return UI_ICON_FILE("network");
     case PAGE_WIFI:

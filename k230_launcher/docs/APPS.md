@@ -28,6 +28,7 @@ The launcher creates these folders in the target root filesystem:
 | `/root/nes` | NES ROM browser |
 | `/root/photos` | Camera captures and gallery |
 | `/root/screenshots` | Screenshot app and keyboard screenshot shortcut |
+| `/root/qrcode` | QR scanner result file |
 | `/root/recordings` | Recorder app |
 | `/root/lorawan` | LoRaWAN profile files |
 | `/root/meshtastic` | Meshtastic channel/profile/cache files |
@@ -44,6 +45,7 @@ See [MAPS.md](MAPS.md) for offline map tile download and install instructions.
 | App | What it does | Basic use |
 | --- | --- | --- |
 | `Camera` | Shows a live camera preview, captures photos, opens the photo viewer, and can overlay face-detection boxes when the model files are installed. | Stop `RTSP` first if it is active. Tap the shutter button to save a photo to `/root/photos`. Use the flip buttons to adjust preview orientation. Tap the thumbnail to browse photos. |
+| `QR Scan` | Scans normal QR codes with the camera and shows the decoded text. | The scanner starts when the app opens. Tap Save after a successful scan to write `/root/qrcode/last.txt`, then export it through MTP. Stop RTSP first if it is active. |
 | `Music` | Plays local audio files from `/root/music` with album art, playlist browsing, seek bar, volume control, repeat, and shuffle modes. | Select a song from the playlist, then use previous, play/pause, next, repeat, and shuffle controls. Playback can continue after leaving the app. |
 | `Video` | Browses videos from `/root/videos` as thumbnails and plays them full screen without stretching the picture. | Tap a video thumbnail to play. Swipe left or right during playback to move to the next or previous video. Audio follows the selected audio output route. |
 | `Radio` | Plays network radio streams and custom stream URLs. | Select a preset or enter a custom URL, then use play/pause and volume controls. Network access must be available. |
