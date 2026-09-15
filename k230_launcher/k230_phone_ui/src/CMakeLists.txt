@@ -6,6 +6,63 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(K230_PHONE_UI_VERSION "unknown")
+set(K230_PHONE_UI_GIT_DESCRIBE "unknown")
+set(K230_PHONE_UI_GIT_COMMIT "unknown")
+set(K230_PHONE_UI_SOURCE_STATE "unknown")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ui_build_info_override.cmake")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/ui_build_info_override.cmake")
+else()
+    execute_process(
+        COMMAND git describe --tags --abbrev=0
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE K230_PHONE_UI_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND git describe --tags --always --dirty
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE K230_PHONE_UI_GIT_DESCRIBE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND git rev-parse --short=12 HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE K230_PHONE_UI_GIT_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND git diff --quiet
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE K230_PHONE_UI_GIT_DIRTY
+        ERROR_QUIET
+    )
+    if(K230_PHONE_UI_GIT_DIRTY EQUAL 0)
+        set(K230_PHONE_UI_SOURCE_STATE "clean")
+    else()
+        set(K230_PHONE_UI_SOURCE_STATE "dirty")
+    endif()
+endif()
+foreach(build_info_var
+        K230_PHONE_UI_VERSION
+        K230_PHONE_UI_GIT_DESCRIBE
+        K230_PHONE_UI_GIT_COMMIT
+        K230_PHONE_UI_SOURCE_STATE)
+    if(NOT DEFINED ${build_info_var} OR "${${build_info_var}}" STREQUAL "")
+        set(${build_info_var} "unknown")
+    endif()
+endforeach()
+string(TIMESTAMP K230_PHONE_UI_BUILD_TIME "%Y-%m-%d %H:%M:%S UTC" UTC)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/ui_build_info.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/ui_build_info.h"
+    @ONLY
+)
+message(STATUS "k230_phone_ui version: ${K230_PHONE_UI_VERSION} (${K230_PHONE_UI_GIT_DESCRIBE})")
+
 option(K230_ENABLE_DEV_APPS "Install unreleased engineering apps such as WiFi iperf, LoRa FLRC, and Halow" OFF)
 option(K230_INSTALL_DEBUG_PROBES "Install low-level display/debug probe utilities" OFF)
 
@@ -107,6 +164,7 @@ set(K230_PHONE_UI_SOURCES
     ui_nrf9151_manager.c
     ui_multitouch.c
     ui_hardware.c
+    ui_haptic.c
     ui_display_test.c
     ui_hdmi_test.c
     ui_i2c_scan.c
@@ -192,6 +250,7 @@ add_executable(lvgl_scroll_probe lvgl_scroll_probe.c)
 
 foreach(ui_target k230_phone_ui k230_phone_ui_fullswitch_test)
 target_include_directories(${ui_target} PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
     ${CMAKE_SYSROOT}/usr/include
     ${CMAKE_SYSROOT}/usr/include/libdrm
     ${CMAKE_SYSROOT}/usr/include/libevdev-1.0

@@ -31,7 +31,7 @@ dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
 功能状态：
 
 - 日常可用应用：相机、相册、音乐、网络电台、录音、视频播放器、终端、
-  MTP、Wi-Fi、以太网、显示、音频、通知、电池、充电器、传感器、键盘和系统设置
+  MTP、Wi-Fi、以太网、显示、音频、通知、触觉反馈、电池、充电器、传感器、键盘和系统设置
 - Beta 应用：Meshtastic、LoRaWAN、小智语音助手、PicoClaw、
   nRF9151 蜂窝/GNSS 数据工具、nRF52840 UART DFU
 - 用户自备资源：默认镜像不内置 NES ROM 和离线地图瓦片，用户可通过 SD 卡或
@@ -221,7 +221,7 @@ Launcher：
 - nRF9151 UART 和使能引脚预设
 - SX1262/LR2021 LoRa SPI 预设
 - MAX98357A 外部 I2S 功放和音频输出切换
-- AHT20、BQ25896、BQ27220、XL9555、TCA8418 键盘底板 I2C 设备
+- AHT20、BQ25896、BQ27220、XL9555、TCA8418 和可选 DRV2605 I2C 设备
 - 键盘中断 GPIO42 和键盘背光 GPIO52/PWM4
 - PMU 电源键 input 和 K230 温度传感器支持
 
@@ -235,7 +235,7 @@ Launcher：
   文字 mesh 消息。
 - HDMI 目前保留为诊断功能，AMOLED 仍然是默认显示路径
 - 依赖扩展硬件的功能只会在检测到对应模块后启用，包括 nRF9151、nRF52840、
-  TCA8418、BQ27220、BQ25896、XL9555 和 AHT20
+  TCA8418、BQ27220、BQ25896、XL9555、DRV2605 和 AHT20
 - 小智需要网络连接和兼容小智协议的服务。唤醒词监听只会在打开小智应用并占用
   麦克风时启用。
 - PicoClaw 需要网络连接和 OpenAI 兼容模型 API key。

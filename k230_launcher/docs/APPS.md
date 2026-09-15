@@ -143,6 +143,7 @@ Some functions are reached through `Settings` instead of direct home icons:
 | `Language` | Selects the launcher language. |
 | `Date & time` | Sets NTP and timezone options. |
 | `Audio` | Selects output route and default volume. |
+| `Haptics` | Configures optional DRV2605 vibration effects for hardware keyboard presses and useful touch controls. |
 | `Keyboard settings` | Controls keyboard detection, keyboard back navigation, keyboard backlight behavior, and F1-F11 hotkey actions. |
 | `Expand storage` | Expands the root filesystem to use the available SD-card capacity. |
 | `Sensors` | Shows AHT20 temperature/humidity and related sensor status. |

@@ -21,8 +21,8 @@ Main app groups:
 - Camera, gallery, screenshot, video, music, network radio, recorder, mic FFT,
   I2S test, terminal, NES, MTP, and display test.
 - Network and system settings for Wi-Fi, Ethernet, Bluetooth, display, audio,
-  notification sounds, language, time, sensors, charger, battery, keyboard,
-  F-key hotkeys, and system information.
+  notification sounds, haptics, language, time, sensors, charger, battery,
+  keyboard, F-key hotkeys, and system information.
 - LoRa profile testing, LoRaWAN profile management, nRF52840 DFU, nRF9151
   cellular/GNSS/HTTP/MQTT tools, Meshtastic beta, and Xiaozhi voice assistant.
 

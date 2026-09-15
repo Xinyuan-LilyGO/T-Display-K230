@@ -142,6 +142,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Language` / 语言 | 切换 launcher 显示语言 |
 | `Date & time` / 日期和时间 | 配置 NTP 和时区 |
 | `Audio` / 音频 | 选择音频输出和默认音量 |
+| `Haptics` / 触觉反馈 | 配置可选 DRV2605 震动效果，可分别控制实体键盘按下反馈和有效触摸控件反馈 |
 | `Keyboard settings` / 键盘设置 | 控制键盘自动探测、键盘返回、键盘背光和 F1-F11 热键动作 |
 | `Expand storage` / 扩展存储 | 将 rootfs 扩展到当前 SD 卡可用容量 |
 | `Sensors` / 传感器 | 显示 AHT20 温湿度和相关传感器状态 |

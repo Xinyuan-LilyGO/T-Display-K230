@@ -41,7 +41,7 @@ applied, which keeps clean rebuilds and reboot validation predictable.
 - nRF9151 UART3 and GPIO2 enable pin preset.
 - SX1262/LR2021 LoRa SPI pin preset.
 - MAX98357A external I2S amplifier pins and output switch support.
-- AHT20, BQ25896, BQ27220, XL9555, and TCA8418 keyboard-base I2C support.
+- AHT20, BQ25896, BQ27220, XL9555, TCA8418, and optional DRV2605 I2C support.
 - Keyboard interrupt GPIO42 and keyboard backlight GPIO52/PWM4.
 - PMU power-key input and K230 thermal sensor support.
 

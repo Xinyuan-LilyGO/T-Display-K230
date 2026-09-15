@@ -1,6 +1,7 @@
 #include "ui_settings.h"
 
 #include "ui_hardware.h"
+#include "ui_haptic.h"
 #include "ui_i18n.h"
 #include "ui_meshtastic.h"
 #include "ui_nrf9151_manager.h"
@@ -207,6 +208,7 @@ static void settings_switch_row(lv_obj_t *parent, int y, const char *symbol,
         lv_obj_add_state(sw, LV_STATE_CHECKED);
     }
     lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    ui_haptic_bind_touch(sw);
 }
 
 void ui_settings_create(lv_obj_t *scr)
@@ -268,6 +270,10 @@ void ui_settings_create(lv_obj_t *scr)
     ui_settings_nav_row(body, y, LV_SYMBOL_AUDIO, "Notifications",
                         "Incoming message sound", 0xA78BFA,
                         PAGE_NOTIFICATION_SETTINGS);
+    y = settings_next_row_y(y);
+    ui_settings_nav_row(body, y, "VIB", "Haptics",
+                        "DRV2605 vibration effects", 0xF472B6,
+                        PAGE_HAPTIC);
     y = settings_next_row_y(y);
 #if K230_FAN_ENABLED
     ui_settings_nav_row(body, y, "FAN", "Fan",

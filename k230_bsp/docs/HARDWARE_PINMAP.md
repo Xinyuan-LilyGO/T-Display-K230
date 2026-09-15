@@ -120,6 +120,8 @@ keyboard backlight, battery gauge, charger, and GPIO expander devices.
 | TCA8418 keyboard | IRQ | `GPIO42` | Input | Keyboard interrupt line. |
 | XL9555 GPIO expander | SCL | `GPIO46` / I2C4 SCL | I2C | 7-bit I2C address can be `0x20`-`0x27`; software probes and caches the detected address. |
 | XL9555 GPIO expander | SDA | `GPIO47` / I2C4 SDA | I2C | LED and keyboard-base support. |
+| DRV2605 haptic driver | SCL | `GPIO46` / I2C4 SCL | I2C | Optional haptic-feedback driver, 7-bit I2C address `0x5A`. |
+| DRV2605 haptic driver | SDA | `GPIO47` / I2C4 SDA | I2C | Shares the keyboard-base I2C bus with TCA8418 and XL9555. |
 | Keyboard backlight | PWM | `GPIO52` / PWM4 | Output | Userspace drives keyboard-backlight brightness. |
 
 ## I2C Address Quick Reference
@@ -133,3 +135,4 @@ keyboard backlight, battery gauge, charger, and GPIO expander devices.
 | `0x20`-`0x27` | XL9555 GPIO expander | nRF9151 keyboard base; address depends on hardware strap/version |
 | `0x34` | TCA8418 keyboard controller | nRF9151 keyboard base |
 | `0x55` | BQ27220 battery gauge | nRF9151 keyboard base |
+| `0x5A` | DRV2605 haptic-feedback driver | Optional nRF9151 keyboard base variant |

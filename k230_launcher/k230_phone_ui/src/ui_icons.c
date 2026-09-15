@@ -59,6 +59,8 @@ static const char *ui_icon_name_for_page(page_id_t page)
         return "audio";
     case PAGE_NOTIFICATION_SETTINGS:
         return "notifications";
+    case PAGE_HAPTIC:
+        return "touch";
     case PAGE_APP_STARTUP:
         return "startup";
     case PAGE_I2S_TEST:
@@ -177,6 +179,8 @@ const char *ui_icon_path_for_page(page_id_t page)
         return UI_ICON_FILE("audio");
     case PAGE_NOTIFICATION_SETTINGS:
         return UI_ICON_FILE("notifications");
+    case PAGE_HAPTIC:
+        return UI_ICON_FILE("touch");
     case PAGE_APP_STARTUP:
         return UI_ICON_FILE("startup");
     case PAGE_I2S_TEST:

@@ -35,7 +35,7 @@ Feature status:
 
 - Stable daily-use apps: camera, gallery, music, network radio, recorder,
   video player, terminal, MTP, Wi-Fi, Ethernet, display, audio, notification,
-  battery, charger, sensor, keyboard, and system settings.
+  haptic, battery, charger, sensor, keyboard, and system settings.
 - Beta apps: Meshtastic, LoRaWAN, Xiaozhi voice assistant, PicoClaw,
   nRF9151 cellular/GNSS data tools, and nRF52840 UART DFU.
 - User-provided content: NES ROM files and offline map tiles are not bundled in
@@ -227,7 +227,7 @@ Deploy the launcher and boot files:
 - nRF9151 UART and enable-pin preset.
 - SX1262/LR2021 LoRa SPI preset.
 - MAX98357A external I2S amplifier and audio route switching.
-- AHT20, BQ25896, BQ27220, XL9555, and TCA8418 keyboard-base I2C devices.
+- AHT20, BQ25896, BQ27220, XL9555, TCA8418, and optional DRV2605 I2C devices.
 - Keyboard interrupt GPIO42 and keyboard backlight GPIO52/PWM4.
 - PMU power key input and K230 thermal sensor support.
 
@@ -242,7 +242,8 @@ Generated image files under `k230_bsp/images/` are local build artifacts.
 - HDMI support is kept as a diagnostic feature. AMOLED remains the default
   display path.
 - Optional hardware features are shown only when the related module is detected.
-  This includes nRF9151, nRF52840, TCA8418, BQ27220, BQ25896, XL9555, and AHT20.
+  This includes nRF9151, nRF52840, TCA8418, BQ27220, BQ25896, XL9555,
+  DRV2605, and AHT20.
 - Xiaozhi requires network access and a compatible Xiaozhi service. Wake-word
   listening is active only while the Xiaozhi app is open and owns the microphone.
 - PicoClaw requires network access and an OpenAI-compatible model API key.

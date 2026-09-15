@@ -38,6 +38,11 @@ int ui_hardware_bq25896_detected(void);
 int ui_hardware_bq27220_detected(void);
 int ui_hardware_i2c4_scan(uint8_t found[128], char *status,
                           unsigned int status_len, int timeout_ms);
+int ui_hardware_i2c4_probe_addr(uint8_t addr);
+int ui_hardware_i2c4_read_reg(uint8_t addr, uint8_t reg, uint8_t *value);
+int ui_hardware_i2c4_write_reg(uint8_t addr, uint8_t reg, uint8_t value);
+int ui_hardware_i2c4_update_bits(uint8_t addr, uint8_t reg, uint8_t mask,
+                                 uint8_t value);
 const char *ui_extension_keyboard_status(void);
 void ui_extension_keyboard_focus_obj(lv_obj_t *obj);
 void ui_extension_keyboard_set_key_cb(ui_extension_keyboard_key_cb_t cb,

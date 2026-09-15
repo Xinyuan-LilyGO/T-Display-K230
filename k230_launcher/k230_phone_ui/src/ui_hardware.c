@@ -2,6 +2,7 @@
 
 #include "ui_audio.h"
 #include "ui_i18n.h"
+#include "ui_haptic.h"
 #include "ui_input.h"
 #include "ui_meshtastic.h"
 #include "ui_prefs.h"
@@ -2839,6 +2840,39 @@ static int keyboard_i2c_update_bits(uint8_t addr, uint8_t reg, uint8_t mask,
     return keyboard_i2c_write_reg(addr, reg, new_value);
 }
 
+int ui_hardware_i2c4_probe_addr(uint8_t addr)
+{
+    sensor_gpio_i2c_t bus;
+    int found = 0;
+
+    pthread_mutex_lock(&sensor_aht20_lock);
+    if(keyboard_i2c_begin(&bus) != 0) {
+        goto out_unlock;
+    }
+    found = keyboard_i2c_probe_addr_unlocked(&bus, addr);
+    keyboard_i2c_end(&bus);
+
+out_unlock:
+    pthread_mutex_unlock(&sensor_aht20_lock);
+    return found ? 0 : -1;
+}
+
+int ui_hardware_i2c4_read_reg(uint8_t addr, uint8_t reg, uint8_t *value)
+{
+    return keyboard_i2c_read_reg(addr, reg, value);
+}
+
+int ui_hardware_i2c4_write_reg(uint8_t addr, uint8_t reg, uint8_t value)
+{
+    return keyboard_i2c_write_reg(addr, reg, value);
+}
+
+int ui_hardware_i2c4_update_bits(uint8_t addr, uint8_t reg, uint8_t mask,
+                                 uint8_t value)
+{
+    return keyboard_i2c_update_bits(addr, reg, mask, value);
+}
+
 static int xl9555_addr_valid(int addr)
 {
     return addr >= XL9555_ADDR_MIN && addr <= XL9555_ADDR_MAX;
@@ -5109,6 +5143,8 @@ static void extension_keyboard_enqueue_tca_event(int code, int pressed)
         }
         return;
     }
+
+    ui_haptic_play_keyboard();
 
     if(keyboard_hotkey_handle_fkey(code)) {
         extension_keyboard_repeat_clear();

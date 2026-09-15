@@ -40,6 +40,8 @@
 #include "ui_nrf9151_manager.h"
 #include "ui_nrf52840_manager.h"
 #include "ui_power_manager.h"
+#include "ui_haptic.h"
+#include "ui_build_info.h"
 
 #ifndef LV_SYMBOL_WIFI
 #define LV_SYMBOL_WIFI "WiFi"
@@ -765,6 +767,8 @@ static const char *page_name(page_id_t page)
         return "Audio output";
     case PAGE_NOTIFICATION_SETTINGS:
         return "Notifications";
+    case PAGE_HAPTIC:
+        return "Haptics";
     case PAGE_APP_STARTUP:
         return "Startup apps";
     case PAGE_I2S_TEST:
@@ -4494,6 +4498,7 @@ static page_id_t nav_fallback_parent(page_id_t page)
     case PAGE_AUDIO_SETTINGS:
     case PAGE_AUDIO_OUTPUT:
     case PAGE_NOTIFICATION_SETTINGS:
+    case PAGE_HAPTIC:
     case PAGE_FAN:
     case PAGE_SENSORS:
     case PAGE_BQ25896:
@@ -5364,6 +5369,8 @@ static int page_entry_allowed(page_id_t page)
 static void app_event_cb(lv_event_t *event)
 {
     page_id_t page = (page_id_t)(intptr_t)lv_event_get_user_data(event);
+
+    ui_haptic_play_touch();
 
     if(page == PAGE_SCREENSHOT) {
         trace_ui_action("LVGL_CLICKED_SCREENSHOT", current_page);
@@ -6592,6 +6599,7 @@ static lv_obj_t *command_button(lv_obj_t *parent, int x, int y, int w, const cha
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(btn, 6);
+    ui_haptic_bind_touch(btn);
 
     lv_obj_t *lbl = label(btn, text, &lv_font_montserrat_18, color);
     lv_obj_center(lbl);
@@ -11933,18 +11941,24 @@ static void create_about_page(lv_obj_t *scr)
                            0xF2F5F8, side_gap);
     info_row_with_side_gap(body, 62, "Board", "kendryte k230 canmv v3",
                            0xF2F5F8, side_gap);
-    info_row_with_side_gap(body, 116, "OS", os, 0x3DA5FF, side_gap);
-    info_row_with_side_gap(body, 170, "Kernel", kernel, 0xF2F5F8, side_gap);
-    info_row_with_side_gap(body, 224, "Panel", "RM69A10 568x1232",
+    info_row_with_side_gap(body, 116, "Software version",
+                           K230_PHONE_UI_VERSION, 0x22D3EE, side_gap);
+    info_row_with_side_gap(body, 170, "Build date/time",
+                           K230_PHONE_UI_BUILD_TIME, 0xF5A524, side_gap);
+    info_row_with_side_gap(body, 224, "Source revision",
+                           K230_PHONE_UI_GIT_DESCRIBE, 0x94A3B8, side_gap);
+    info_row_with_side_gap(body, 278, "OS", os, 0x3DA5FF, side_gap);
+    info_row_with_side_gap(body, 332, "Kernel", kernel, 0xF2F5F8, side_gap);
+    info_row_with_side_gap(body, 386, "Panel", "RM69A10 568x1232",
                            0x25C281, side_gap);
-    info_row_with_side_gap(body, 278, "Touch", "GT9895", 0x25C281,
+    info_row_with_side_gap(body, 440, "Touch", "GT9895", 0x25C281,
                            side_gap);
-    info_row_with_side_gap(body, 332, "Camera", "GC2093",
+    info_row_with_side_gap(body, 494, "Camera", "GC2093",
                            has_video_node() ? 0x25C281 : 0xF5A524,
                            side_gap);
-    info_row_with_side_gap(body, 386, "Ethernet", eth, 0x25C281,
+    info_row_with_side_gap(body, 548, "Ethernet", eth, 0x25C281,
                            side_gap);
-    info_row_with_side_gap(body, 440, "WiFi", wifi,
+    info_row_with_side_gap(body, 602, "WiFi", wifi,
                            path_exists("/sys/class/net/" NET_WIFI_IFACE) ?
                            0x25C281 : 0x9AA4AF, side_gap);
 
@@ -12628,6 +12642,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     case PAGE_NOTIFICATION_SETTINGS:
         ui_notification_settings_create(scr);
         break;
+    case PAGE_HAPTIC:
+        ui_haptic_settings_create(scr);
+        break;
     case PAGE_APP_STARTUP:
         ui_startup_settings_create(scr);
         break;
@@ -12783,6 +12800,7 @@ int main(void)
     ui_time_settings_apply_startup();
     ui_nrf52840_manager_startup();
     ui_hardware_startup();
+    ui_haptic_init();
     ui_audio_apply_startup_defaults();
     storage_expand_finish_pending_startup();
     ui_hardware_reboot_diag_dump("app-start-after-hardware-startup");
@@ -12896,6 +12914,7 @@ int main(void)
     touch_trace_running = 0;
     ui_multitouch_stop();
     ui_hardware_reboot_diag_dump("app-stop-before-hardware-shutdown");
+    ui_haptic_shutdown();
     ui_hardware_shutdown();
     ui_nrf52840_manager_shutdown();
     ui_hardware_reboot_diag_dump("app-stop-after-hardware-shutdown");

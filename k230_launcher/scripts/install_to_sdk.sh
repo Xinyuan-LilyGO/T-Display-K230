@@ -40,6 +40,41 @@ fi
 mkdir -p "$PACKAGE_DIR"
 rsync -a --delete "$LAUNCHER_DIR/k230_phone_ui/" "$PACKAGE_DIR/"
 
+write_build_info_override() {
+    local dst="$1"
+    local repo="$2"
+    local version="unknown"
+    local describe="unknown"
+    local commit="unknown"
+    local state="unknown"
+
+    if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        version="$(git -C "$repo" describe --tags --abbrev=0 2>/dev/null || true)"
+        describe="$(git -C "$repo" describe --tags --always --dirty 2>/dev/null || true)"
+        commit="$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null || true)"
+        if git -C "$repo" diff --quiet --ignore-submodules -- 2>/dev/null &&
+           git -C "$repo" diff --cached --quiet --ignore-submodules -- 2>/dev/null; then
+            state="clean"
+        else
+            state="dirty"
+        fi
+    fi
+    [ -n "$version" ] || version="unknown"
+    [ -n "$describe" ] || describe="$version"
+    [ -n "$commit" ] || commit="unknown"
+
+    mkdir -p "$(dirname "$dst")"
+    {
+        printf 'set(K230_PHONE_UI_VERSION "%s")\n' "$version"
+        printf 'set(K230_PHONE_UI_GIT_DESCRIBE "%s")\n' "$describe"
+        printf 'set(K230_PHONE_UI_GIT_COMMIT "%s")\n' "$commit"
+        printf 'set(K230_PHONE_UI_SOURCE_STATE "%s")\n' "$state"
+    } > "$dst"
+}
+
+write_build_info_override "$PACKAGE_DIR/src/ui_build_info_override.cmake" \
+    "$(git -C "$LAUNCHER_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$LAUNCHER_DIR")"
+
 # The SDK overlay sync and Buildroot package rsync can leave stale generated
 # package files behind. Remove generated copies before syncing this launcher.
 rm -rf "$OUTPUT_BUILDROOT_PACKAGE_DIR" "$OUTPUT_PACKAGE_BUILD_DIR" "$OUTPUT_TARGET_APP_DIR"

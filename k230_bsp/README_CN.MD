@@ -40,7 +40,7 @@ BSP 应用流程会在 overlay 应用时刷新已生成的 rootfs 镜像产物�
 - nRF9151 UART3 和 GPIO2 使能脚预设。
 - SX1262/LR2021 LoRa SPI 引脚预设。
 - MAX98357A 外部 I2S 功放引脚和音频输出切换支持。
-- AHT20、BQ25896、BQ27220、XL9555、TCA8418 键盘底板 I2C 支持。
+- AHT20、BQ25896、BQ27220、XL9555、TCA8418 和可选 DRV2605 I2C 支持。
 - 键盘中断 GPIO42 和键盘背光 GPIO52/PWM4。
 - PMU 电源键 input 驱动和 K230 温度传感器支持。
 

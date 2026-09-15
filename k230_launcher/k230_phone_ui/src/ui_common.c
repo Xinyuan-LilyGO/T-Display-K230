@@ -1,5 +1,6 @@
 #include "ui_common.h"
 
+#include "ui_haptic.h"
 #include "ui_icons.h"
 #include "ui_i18n.h"
 #include "ui_prefs.h"
@@ -631,6 +632,7 @@ lv_obj_t *ui_command_button(lv_obj_t *parent, int x, int y, int w,
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(btn, 6);
+    ui_haptic_bind_touch(btn);
 
     lv_obj_t *lbl = ui_label(btn, text, &lv_font_montserrat_18, color);
     lv_obj_center(lbl);
@@ -651,6 +653,7 @@ lv_obj_t *ui_settings_nav_row(lv_obj_t *parent, int y, const char *symbol,
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(row, 6);
+    ui_haptic_bind_touch(row);
     lv_obj_add_event_cb(row, ui_settings_nav_event_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)page);
 
