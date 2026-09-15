@@ -10923,6 +10923,148 @@ static void camera_capture_toast_update(int busy, int result, int feedback_seq)
     }
 }
 
+static int camera_isp_media_server_running(void)
+{
+    return shell_exit_code(system("pidof isp_media_server >/dev/null 2>&1")) == 0;
+}
+
+static void camera_ensure_isp_media_server(int force_restart)
+{
+    int rc;
+
+    if(!force_restart && camera_isp_media_server_running()) {
+        return;
+    }
+
+    touch_trace_log("CAMERA_ISP_SERVER_%s",
+                    force_restart ? "RESTART" : "START");
+    rc = system(force_restart ?
+                "killall -q isp_media_server >/dev/null 2>&1; "
+                "ISP_MEDIA_SENSOR_DRIVER=/usr/lib/libvvcam.so "
+                "/usr/bin/isp_media_server >/tmp/isp.out.log 2>/tmp/isp.err.log &" :
+                "ISP_MEDIA_SENSOR_DRIVER=/usr/lib/libvvcam.so "
+                "/usr/bin/isp_media_server >/tmp/isp.out.log 2>/tmp/isp.err.log &");
+    if(shell_exit_code(rc) != 0) {
+        touch_trace_log("CAMERA_ISP_SERVER_CMD_FAILED rc=%d", shell_exit_code(rc));
+    }
+}
+
+static int camera_probe_capture_formats(unsigned device, uint32_t expected_format)
+{
+    char path[32];
+    int fd;
+    int supported = 0;
+    struct v4l2_fmtdesc desc;
+
+    snprintf(path, sizeof(path), "/dev/video%u", device);
+    fd = open(path, O_RDWR | O_NONBLOCK);
+    if(fd < 0) {
+        return -errno;
+    }
+
+    memset(&desc, 0, sizeof(desc));
+    desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    while(ioctl(fd, VIDIOC_ENUM_FMT, &desc) == 0) {
+        if(desc.pixelformat == expected_format) {
+            supported = 1;
+            break;
+        }
+        desc.index++;
+    }
+
+    close(fd);
+    return supported ? 0 : -ENODEV;
+}
+
+static int camera_prepare_capture_format(unsigned device, unsigned width,
+                                         unsigned height, uint32_t pixfmt)
+{
+    char path[32];
+    int fd;
+    int saved_errno;
+    struct v4l2_capability cap;
+    struct v4l2_format fmt;
+
+    snprintf(path, sizeof(path), "/dev/video%u", device);
+    fd = open(path, O_RDWR | O_NONBLOCK);
+    if(fd < 0) {
+        saved_errno = errno;
+        touch_trace_log("CAMERA_PREP_OPEN_FAILED dev=%s errno=%d",
+                        path, saved_errno);
+        return -saved_errno;
+    }
+
+    memset(&cap, 0, sizeof(cap));
+    if(ioctl(fd, VIDIOC_QUERYCAP, &cap) != 0) {
+        saved_errno = errno;
+        close(fd);
+        touch_trace_log("CAMERA_PREP_QUERYCAP_FAILED dev=%s errno=%d",
+                        path, saved_errno);
+        return -saved_errno;
+    }
+
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt.fmt.pix.pixelformat = pixfmt;
+    fmt.fmt.pix.width = width;
+    fmt.fmt.pix.height = height;
+    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+
+    if(ioctl(fd, VIDIOC_S_FMT, &fmt) != 0) {
+        saved_errno = errno;
+        close(fd);
+        touch_trace_log("CAMERA_PREP_S_FMT_FAILED dev=%s errno=%d",
+                        path, saved_errno);
+        return -saved_errno;
+    }
+
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if(ioctl(fd, VIDIOC_G_FMT, &fmt) == 0) {
+        touch_trace_log("CAMERA_PREP_READY dev=%s fmt=%c%c%c%c %ux%u",
+                        path,
+                        (int)(fmt.fmt.pix.pixelformat & 0xff),
+                        (int)((fmt.fmt.pix.pixelformat >> 8) & 0xff),
+                        (int)((fmt.fmt.pix.pixelformat >> 16) & 0xff),
+                        (int)((fmt.fmt.pix.pixelformat >> 24) & 0xff),
+                        fmt.fmt.pix.width, fmt.fmt.pix.height);
+    } else {
+        saved_errno = errno;
+        touch_trace_log("CAMERA_PREP_G_FMT_AFTER_S_FMT_FAILED dev=%s errno=%d",
+                        path, saved_errno);
+    }
+
+    close(fd);
+    return 0;
+}
+
+static int camera_prepare_capture_pipeline(unsigned device, unsigned width,
+                                           unsigned height, uint32_t pixfmt)
+{
+    int rc = -ENODEV;
+
+    for(int attempt = 0; attempt < 8; attempt++) {
+        if(attempt == 0) {
+            camera_ensure_isp_media_server(0);
+        } else if(attempt == 3) {
+            camera_ensure_isp_media_server(1);
+        }
+
+        rc = camera_probe_capture_formats(device, pixfmt);
+        if(rc == 0) {
+            rc = camera_prepare_capture_format(device, width, height, pixfmt);
+            if(rc == 0) {
+                return 0;
+            }
+        }
+
+        touch_trace_log("CAMERA_PREP_WAIT attempt=%d rc=%d", attempt + 1, rc);
+        usleep(250000);
+    }
+
+    return rc;
+}
+
 static void *camera_preview_thread_cb(void *arg)
 {
     struct v4l2_drm_context ctx;
@@ -10947,6 +11089,14 @@ static void *camera_preview_thread_cb(void *arg)
     ctx.video_format = V4L2_PIX_FMT_NV16;
     ctx.display = false;
     ctx.buffer_num = 4;
+
+    if(camera_prepare_capture_pipeline(CAMERA_CAPTURE_DEVICE, CAMERA_PREVIEW_W,
+                                       CAMERA_PREVIEW_H,
+                                       V4L2_PIX_FMT_NV16) != 0) {
+        camera_set_preview_status("Camera pipeline unavailable", 1, 0);
+        free(local_buf);
+        return NULL;
+    }
 
     if(v4l2_drm_setup(&ctx, 1, NULL) != 0) {
         camera_set_preview_status("Preview setup failed", 1, 0);

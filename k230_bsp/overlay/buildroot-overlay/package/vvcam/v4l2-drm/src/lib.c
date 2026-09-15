@@ -143,11 +143,19 @@ int v4l2_drm_setup(struct v4l2_drm_context context[], unsigned num, struct displ
         struct v4l2_format format;
         memset(&format, 0, sizeof(format));
         format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        CKE(ioctl(context[i].video_fd, VIDIOC_G_FMT, &format), close);
+        if (ioctl(context[i].video_fd, VIDIOC_G_FMT, &format) != 0) {
+            pr(
+                "/dev/video%u VIDIOC_G_FMT before VIDIOC_S_FMT failed: %s; trying requested format",
+                context[i].device,
+                strerror(errno)
+            );
+            memset(&format, 0, sizeof(format));
+        }
         format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         format.fmt.pix.pixelformat = context[i].video_format;
         format.fmt.pix.width = context[i].width;
         format.fmt.pix.height = context[i].height;
+        format.fmt.pix.field = V4L2_FIELD_NONE;
         CKE(ioctl(context[i].video_fd, VIDIOC_S_FMT, &format), close);
 
         if (context[i].hflip >= 0) {
