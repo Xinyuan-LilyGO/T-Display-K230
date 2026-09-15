@@ -22,9 +22,10 @@
 #define QR_SCANNER_RESULT_FILE QR_SCANNER_RESULT_DIR "/last.txt"
 #define QR_SCANNER_CAPTURE_W 1280
 #define QR_SCANNER_CAPTURE_H 720
-#define QR_SCANNER_PREVIEW_W 512
-#define QR_SCANNER_PREVIEW_H 288
-#define QR_SCANNER_PREVIEW_BYTES (QR_SCANNER_PREVIEW_W * QR_SCANNER_PREVIEW_H * 2)
+#define QR_SCANNER_PREVIEW_LANDSCAPE_W 512
+#define QR_SCANNER_PREVIEW_LANDSCAPE_H 288
+#define QR_SCANNER_PREVIEW_PORTRAIT_W 288
+#define QR_SCANNER_PREVIEW_PORTRAIT_H 512
 
 static pthread_mutex_t qr_scanner_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t qr_scanner_thread;
@@ -47,9 +48,13 @@ static lv_obj_t *qr_scanner_guide_box;
 static lv_obj_t *qr_scanner_toast;
 static lv_obj_t *qr_scanner_toast_label;
 static uint16_t *qr_scanner_preview_pixels;
+static size_t qr_scanner_preview_pixels_size;
 static lv_image_dsc_t qr_scanner_preview_dsc;
 static int qr_scanner_preview_panel_w;
 static int qr_scanner_preview_panel_h;
+static int qr_scanner_preview_w = QR_SCANNER_PREVIEW_LANDSCAPE_W;
+static int qr_scanner_preview_h = QR_SCANNER_PREVIEW_LANDSCAPE_H;
+static int qr_scanner_preview_rotate;
 static uint32_t qr_scanner_toast_until;
 
 static void qr_scanner_set_status_locked(const char *status, int ok)
@@ -87,6 +92,7 @@ static void qr_scanner_preview_update(void)
 {
     FILE *fp;
     size_t n;
+    size_t bytes;
     int scale_w;
     int scale_h;
     int scale;
@@ -95,39 +101,49 @@ static void qr_scanner_preview_update(void)
        !lv_obj_is_valid(qr_scanner_preview_image)) {
         return;
     }
-    if(!qr_scanner_preview_pixels) {
-        qr_scanner_preview_pixels = malloc(QR_SCANNER_PREVIEW_BYTES);
-        if(!qr_scanner_preview_pixels) {
+    if(qr_scanner_preview_w <= 0 || qr_scanner_preview_h <= 0) {
+        return;
+    }
+    bytes = (size_t)qr_scanner_preview_w *
+            (size_t)qr_scanner_preview_h * 2U;
+    if(!qr_scanner_preview_pixels ||
+       qr_scanner_preview_pixels_size < bytes) {
+        uint16_t *pixels = realloc(qr_scanner_preview_pixels, bytes);
+
+        if(!pixels) {
             return;
         }
+        qr_scanner_preview_pixels = pixels;
+        qr_scanner_preview_pixels_size = bytes;
     }
 
     fp = fopen(QR_SCANNER_PREVIEW_FILE, "rb");
     if(!fp) {
         return;
     }
-    n = fread(qr_scanner_preview_pixels, 1, QR_SCANNER_PREVIEW_BYTES, fp);
+    n = fread(qr_scanner_preview_pixels, 1, bytes, fp);
     fclose(fp);
-    if(n != QR_SCANNER_PREVIEW_BYTES) {
+    if(n != bytes) {
         return;
     }
 
     memset(&qr_scanner_preview_dsc, 0, sizeof(qr_scanner_preview_dsc));
     qr_scanner_preview_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     qr_scanner_preview_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    qr_scanner_preview_dsc.header.w = QR_SCANNER_PREVIEW_W;
-    qr_scanner_preview_dsc.header.h = QR_SCANNER_PREVIEW_H;
-    qr_scanner_preview_dsc.header.stride = QR_SCANNER_PREVIEW_W * 2;
-    qr_scanner_preview_dsc.data_size = QR_SCANNER_PREVIEW_BYTES;
+    qr_scanner_preview_dsc.header.w = (uint32_t)qr_scanner_preview_w;
+    qr_scanner_preview_dsc.header.h = (uint32_t)qr_scanner_preview_h;
+    qr_scanner_preview_dsc.header.stride =
+        (uint32_t)qr_scanner_preview_w * 2U;
+    qr_scanner_preview_dsc.data_size = bytes;
     qr_scanner_preview_dsc.data = (const uint8_t *)qr_scanner_preview_pixels;
 
     lv_image_cache_drop(&qr_scanner_preview_dsc);
     lv_image_set_src(qr_scanner_preview_image, &qr_scanner_preview_dsc);
 
     scale_w = qr_scanner_preview_panel_w > 0 ?
-        qr_scanner_preview_panel_w * 256 / QR_SCANNER_PREVIEW_W : 256;
+        qr_scanner_preview_panel_w * 256 / qr_scanner_preview_w : 256;
     scale_h = qr_scanner_preview_panel_h > 0 ?
-        qr_scanner_preview_panel_h * 256 / QR_SCANNER_PREVIEW_H : 256;
+        qr_scanner_preview_panel_h * 256 / qr_scanner_preview_h : 256;
     scale = scale_w < scale_h ? scale_w : scale_h;
     if(scale < 128) {
         scale = 128;
@@ -222,6 +238,9 @@ static void *qr_scanner_worker(void *arg)
     char line[1024];
     FILE *fp;
     int rc = 1;
+    int preview_w = qr_scanner_preview_w;
+    int preview_h = qr_scanner_preview_h;
+    int preview_rotate = qr_scanner_preview_rotate;
 
     (void)arg;
 
@@ -230,9 +249,10 @@ static void *qr_scanner_worker(void *arg)
              " -w %d -h %d --skip 2 --focus-sweep"
              " --timeout-sec 45 --preview-file " QR_SCANNER_PREVIEW_FILE
              " --preview-width %d --preview-height %d"
+             " --preview-rotate %d"
              " --preview-interval-ms 100 --verbose 2>" QR_SCANNER_LOG,
              QR_SCANNER_CAPTURE_W, QR_SCANNER_CAPTURE_H,
-             QR_SCANNER_PREVIEW_W, QR_SCANNER_PREVIEW_H);
+             preview_w, preview_h, preview_rotate);
 
     fp = popen(command, "r");
     line[0] = '\0';
@@ -440,6 +460,28 @@ static void qr_scanner_create_preview(lv_obj_t *parent, int x, int y,
     lv_obj_clear_flag(qr_scanner_guide_box, LV_OBJ_FLAG_SCROLLABLE);
 }
 
+static void qr_scanner_configure_preview(int landscape)
+{
+    if(qr_scanner_preview_panel_w > 0 && qr_scanner_preview_panel_h > 0) {
+        qr_scanner_preview_w = qr_scanner_preview_panel_w;
+        qr_scanner_preview_h = qr_scanner_preview_panel_h;
+    } else if(landscape) {
+        qr_scanner_preview_w = QR_SCANNER_PREVIEW_LANDSCAPE_W;
+        qr_scanner_preview_h = QR_SCANNER_PREVIEW_LANDSCAPE_H;
+    } else {
+        qr_scanner_preview_w = QR_SCANNER_PREVIEW_PORTRAIT_W;
+        qr_scanner_preview_h = QR_SCANNER_PREVIEW_PORTRAIT_H;
+    }
+
+    if(qr_scanner_preview_w < 160) {
+        qr_scanner_preview_w = 160;
+    }
+    if(qr_scanner_preview_h < 160) {
+        qr_scanner_preview_h = 160;
+    }
+    qr_scanner_preview_rotate = landscape ? 0 : 90;
+}
+
 static void qr_scanner_create_info(lv_obj_t *parent, int x, int y,
                                    int w, int h, int landscape)
 {
@@ -525,6 +567,7 @@ void ui_qr_scanner_create(lv_obj_t *scr)
         int info_w = content_w - preview_w - 18;
 
         qr_scanner_create_preview(body, margin, 18, preview_w, body_h - 36);
+        qr_scanner_configure_preview(landscape);
         qr_scanner_create_info(body, margin + preview_w + 18, 18, info_w,
                                body_h - 36, landscape);
     } else {
@@ -535,6 +578,7 @@ void ui_qr_scanner_create(lv_obj_t *scr)
             preview_h = 360;
         }
         qr_scanner_create_preview(body, margin, 18, content_w, preview_h);
+        qr_scanner_configure_preview(landscape);
         qr_scanner_create_info(body, margin, preview_h + 34, content_w,
                                info_h, landscape);
     }
@@ -556,6 +600,7 @@ void ui_qr_scanner_cleanup(void)
         free(qr_scanner_preview_pixels);
         qr_scanner_preview_pixels = NULL;
     }
+    qr_scanner_preview_pixels_size = 0;
     qr_scanner_preview_image = NULL;
     qr_scanner_preview_placeholder = NULL;
     qr_scanner_status_label = NULL;

@@ -115,9 +115,10 @@
 #define MESHTASTIC_QR_PREVIEW_TMP MESHTASTIC_QR_PREVIEW_FILE ".tmp"
 #define MESHTASTIC_QR_CAPTURE_W 1280
 #define MESHTASTIC_QR_CAPTURE_H 720
-#define MESHTASTIC_QR_PREVIEW_W 512
-#define MESHTASTIC_QR_PREVIEW_H 288
-#define MESHTASTIC_QR_PREVIEW_BYTES (MESHTASTIC_QR_PREVIEW_W * MESHTASTIC_QR_PREVIEW_H * 2)
+#define MESHTASTIC_QR_PREVIEW_LANDSCAPE_W 512
+#define MESHTASTIC_QR_PREVIEW_LANDSCAPE_H 288
+#define MESHTASTIC_QR_PREVIEW_PORTRAIT_W 288
+#define MESHTASTIC_QR_PREVIEW_PORTRAIT_H 512
 #define MESHTASTIC_MAP_ROOT "/root/maps"
 #define MESHTASTIC_MAP_STYLE "openstreetmap"
 #define MESHTASTIC_MAP_DOWNLOADER_PATH \
@@ -436,6 +437,10 @@ static lv_obj_t *mesh_channel_scan_guide_box;
 static int mesh_channel_scan_preview_panel_w;
 static int mesh_channel_scan_preview_panel_h;
 static uint8_t *mesh_channel_scan_preview_pixels;
+static size_t mesh_channel_scan_preview_pixels_size;
+static int mesh_channel_scan_preview_w = MESHTASTIC_QR_PREVIEW_LANDSCAPE_W;
+static int mesh_channel_scan_preview_h = MESHTASTIC_QR_PREVIEW_LANDSCAPE_H;
+static int mesh_channel_scan_preview_rotate;
 static lv_image_dsc_t mesh_channel_scan_preview_dsc;
 static lv_obj_t *mesh_notification_toast;
 static lv_timer_t *mesh_notification_timer;
@@ -6494,10 +6499,36 @@ static void mesh_channel_scan_overlay_close_event_cb(lv_event_t *event)
     mesh_channel_scan_overlay_close();
 }
 
+static void mesh_channel_scan_configure_preview(void)
+{
+    int landscape = ui_is_landscape();
+
+    if(mesh_channel_scan_preview_panel_w > 0 &&
+       mesh_channel_scan_preview_panel_h > 0) {
+        mesh_channel_scan_preview_w = mesh_channel_scan_preview_panel_w;
+        mesh_channel_scan_preview_h = mesh_channel_scan_preview_panel_h;
+    } else if(landscape) {
+        mesh_channel_scan_preview_w = MESHTASTIC_QR_PREVIEW_LANDSCAPE_W;
+        mesh_channel_scan_preview_h = MESHTASTIC_QR_PREVIEW_LANDSCAPE_H;
+    } else {
+        mesh_channel_scan_preview_w = MESHTASTIC_QR_PREVIEW_PORTRAIT_W;
+        mesh_channel_scan_preview_h = MESHTASTIC_QR_PREVIEW_PORTRAIT_H;
+    }
+
+    if(mesh_channel_scan_preview_w < 160) {
+        mesh_channel_scan_preview_w = 160;
+    }
+    if(mesh_channel_scan_preview_h < 160) {
+        mesh_channel_scan_preview_h = 160;
+    }
+    mesh_channel_scan_preview_rotate = landscape ? 0 : 90;
+}
+
 static void mesh_channel_scan_preview_update(void)
 {
     FILE *fp;
     size_t n;
+    size_t bytes;
     int scale_w;
     int scale_h;
     int scale;
@@ -6506,21 +6537,29 @@ static void mesh_channel_scan_preview_update(void)
        !lv_obj_is_valid(mesh_channel_scan_preview_image)) {
         return;
     }
-    if(!mesh_channel_scan_preview_pixels) {
-        mesh_channel_scan_preview_pixels = malloc(MESHTASTIC_QR_PREVIEW_BYTES);
-        if(!mesh_channel_scan_preview_pixels) {
+    if(mesh_channel_scan_preview_w <= 0 || mesh_channel_scan_preview_h <= 0) {
+        return;
+    }
+    bytes = (size_t)mesh_channel_scan_preview_w *
+            (size_t)mesh_channel_scan_preview_h * 2U;
+    if(!mesh_channel_scan_preview_pixels ||
+       mesh_channel_scan_preview_pixels_size < bytes) {
+        uint8_t *pixels = realloc(mesh_channel_scan_preview_pixels, bytes);
+
+        if(!pixels) {
             return;
         }
+        mesh_channel_scan_preview_pixels = pixels;
+        mesh_channel_scan_preview_pixels_size = bytes;
     }
 
     fp = fopen(MESHTASTIC_QR_PREVIEW_FILE, "rb");
     if(!fp) {
         return;
     }
-    n = fread(mesh_channel_scan_preview_pixels, 1,
-              MESHTASTIC_QR_PREVIEW_BYTES, fp);
+    n = fread(mesh_channel_scan_preview_pixels, 1, bytes, fp);
     fclose(fp);
-    if(n != MESHTASTIC_QR_PREVIEW_BYTES) {
+    if(n != bytes) {
         return;
     }
 
@@ -6528,10 +6567,13 @@ static void mesh_channel_scan_preview_update(void)
            sizeof(mesh_channel_scan_preview_dsc));
     mesh_channel_scan_preview_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     mesh_channel_scan_preview_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    mesh_channel_scan_preview_dsc.header.w = MESHTASTIC_QR_PREVIEW_W;
-    mesh_channel_scan_preview_dsc.header.h = MESHTASTIC_QR_PREVIEW_H;
-    mesh_channel_scan_preview_dsc.header.stride = MESHTASTIC_QR_PREVIEW_W * 2;
-    mesh_channel_scan_preview_dsc.data_size = MESHTASTIC_QR_PREVIEW_BYTES;
+    mesh_channel_scan_preview_dsc.header.w =
+        (uint32_t)mesh_channel_scan_preview_w;
+    mesh_channel_scan_preview_dsc.header.h =
+        (uint32_t)mesh_channel_scan_preview_h;
+    mesh_channel_scan_preview_dsc.header.stride =
+        (uint32_t)mesh_channel_scan_preview_w * 2U;
+    mesh_channel_scan_preview_dsc.data_size = bytes;
     mesh_channel_scan_preview_dsc.data = mesh_channel_scan_preview_pixels;
 
     lv_image_cache_drop(&mesh_channel_scan_preview_dsc);
@@ -6539,10 +6581,10 @@ static void mesh_channel_scan_preview_update(void)
                      &mesh_channel_scan_preview_dsc);
     scale_w = mesh_channel_scan_preview_panel_w > 0 ?
               mesh_channel_scan_preview_panel_w * 256 /
-              MESHTASTIC_QR_PREVIEW_W : 256;
+              mesh_channel_scan_preview_w : 256;
     scale_h = mesh_channel_scan_preview_panel_h > 0 ?
               mesh_channel_scan_preview_panel_h * 256 /
-              MESHTASTIC_QR_PREVIEW_H : 256;
+              mesh_channel_scan_preview_h : 256;
     scale = scale_w < scale_h ? scale_w : scale_h;
     if(scale < 128) {
         scale = 128;
@@ -6617,6 +6659,7 @@ static void mesh_channel_scan_overlay_show(void)
 
     mesh_channel_scan_preview_panel_w = content_w - 24;
     mesh_channel_scan_preview_panel_h = preview_h - 24;
+    mesh_channel_scan_configure_preview();
     mesh_channel_scan_preview_image = lv_image_create(preview);
     lv_obj_add_flag(mesh_channel_scan_preview_image, LV_OBJ_FLAG_HIDDEN);
 
@@ -7189,6 +7232,9 @@ static void *mesh_channel_scan_worker(void *arg)
     char response[1280];
     FILE *fp;
     int ok = 0;
+    int preview_w = mesh_channel_scan_preview_w;
+    int preview_h = mesh_channel_scan_preview_h;
+    int preview_rotate = mesh_channel_scan_preview_rotate;
 
     (void)arg;
     url[0] = '\0';
@@ -7200,9 +7246,10 @@ static void *mesh_channel_scan_worker(void *arg)
              " --require-meshtastic --focus-sweep"
              " --timeout-sec 18 --preview-file " MESHTASTIC_QR_PREVIEW_FILE
              " --preview-width %d --preview-height %d "
+             "--preview-rotate %d "
              "--preview-interval-ms 100 --verbose 2>/tmp/k230_qr_scan.log",
              MESHTASTIC_QR_CAPTURE_W, MESHTASTIC_QR_CAPTURE_H,
-             MESHTASTIC_QR_PREVIEW_W, MESHTASTIC_QR_PREVIEW_H);
+             preview_w, preview_h, preview_rotate);
     fp = popen(command, "r");
     if(fp) {
         if(fgets(url, sizeof(url), fp)) {

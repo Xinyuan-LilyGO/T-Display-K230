@@ -54,6 +54,7 @@ typedef struct {
     char preview_file[QR_SCAN_PREVIEW_PATH_MAX];
     unsigned preview_width;
     unsigned preview_height;
+    unsigned preview_rotate_degrees;
     unsigned preview_interval_ms;
 } qr_scan_options_t;
 
@@ -116,7 +117,8 @@ static void usage(const char *argv0)
             "Usage: %s [-d video] [-w width] [-h height] [-f NV12|NV16] "
             "[--timeout-sec N] [--skip N] [--preview] [--verbose] "
             "[--require-meshtastic] [--focus-sweep] "
-            "[--preview-file path --preview-width W --preview-height H]\n",
+            "[--preview-file path --preview-width W --preview-height H "
+            "--preview-rotate 0|90|180|270]\n",
             argv0);
 }
 
@@ -145,6 +147,7 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
         {"verbose", no_argument, NULL, 1007},
         {"require-meshtastic", no_argument, NULL, 1008},
         {"focus-sweep", no_argument, NULL, 1009},
+        {"preview-rotate", required_argument, NULL, 1010},
         {0, 0, 0, 0},
     };
 
@@ -164,6 +167,7 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
     opts->preview_file[0] = '\0';
     opts->preview_width = QR_SCAN_DEFAULT_PREVIEW_WIDTH;
     opts->preview_height = QR_SCAN_DEFAULT_PREVIEW_HEIGHT;
+    opts->preview_rotate_degrees = 0;
     opts->preview_interval_ms = QR_SCAN_DEFAULT_PREVIEW_INTERVAL_MS;
 
     while((ch = getopt_long(argc, argv, "d:w:h:f:", long_options,
@@ -229,6 +233,15 @@ static int parse_args(int argc, char **argv, qr_scan_options_t *opts)
             break;
         case 1009:
             opts->focus_sweep = true;
+            break;
+        case 1010:
+            if(parse_uint(optarg, &opts->preview_rotate_degrees, 270) != 0 ||
+               (opts->preview_rotate_degrees != 0 &&
+                opts->preview_rotate_degrees != 90 &&
+                opts->preview_rotate_degrees != 180 &&
+                opts->preview_rotate_degrees != 270)) {
+                return -1;
+            }
             break;
         default:
             return -1;
@@ -314,6 +327,125 @@ static uint16_t gray_to_rgb565(uint8_t gray)
                       ((uint16_t)gray >> 3U));
 }
 
+static void preview_cover_crop(unsigned src_w, unsigned src_h,
+                               unsigned dst_w, unsigned dst_h,
+                               unsigned *crop_x, unsigned *crop_y,
+                               unsigned *crop_w, unsigned *crop_h)
+{
+    unsigned x = 0;
+    unsigned y = 0;
+    unsigned w = src_w;
+    unsigned h = src_h;
+
+    if(src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0) {
+        if(crop_x) {
+            *crop_x = 0;
+        }
+        if(crop_y) {
+            *crop_y = 0;
+        }
+        if(crop_w) {
+            *crop_w = src_w;
+        }
+        if(crop_h) {
+            *crop_h = src_h;
+        }
+        return;
+    }
+
+    if((uint64_t)src_w * dst_h > (uint64_t)dst_w * src_h) {
+        w = (unsigned)(((uint64_t)src_h * dst_w) / dst_h);
+        if(w == 0) {
+            w = 1;
+        }
+        if(w > src_w) {
+            w = src_w;
+        }
+        x = (src_w - w) / 2U;
+    } else {
+        h = (unsigned)(((uint64_t)src_w * dst_h) / dst_w);
+        if(h == 0) {
+            h = 1;
+        }
+        if(h > src_h) {
+            h = src_h;
+        }
+        y = (src_h - h) / 2U;
+    }
+
+    if(crop_x) {
+        *crop_x = x;
+    }
+    if(crop_y) {
+        *crop_y = y;
+    }
+    if(crop_w) {
+        *crop_w = w;
+    }
+    if(crop_h) {
+        *crop_h = h;
+    }
+}
+
+static uint8_t preview_sample_gray(const uint8_t *y_plane,
+                                   const qr_scan_options_t *opts,
+                                   unsigned dst_w, unsigned dst_h,
+                                   unsigned x, unsigned y)
+{
+    unsigned rotate = opts->preview_rotate_degrees;
+    unsigned base_w = (rotate == 90 || rotate == 270) ?
+        opts->height : opts->width;
+    unsigned base_h = (rotate == 90 || rotate == 270) ?
+        opts->width : opts->height;
+    unsigned crop_x = 0;
+    unsigned crop_y = 0;
+    unsigned crop_w = base_w;
+    unsigned crop_h = base_h;
+    unsigned base_x;
+    unsigned base_y;
+    unsigned src_x = 0;
+    unsigned src_y = 0;
+
+    preview_cover_crop(base_w, base_h, dst_w, dst_h, &crop_x, &crop_y,
+                       &crop_w, &crop_h);
+    base_x = crop_x + (unsigned)(((uint64_t)x * crop_w) / dst_w);
+    base_y = crop_y + (unsigned)(((uint64_t)y * crop_h) / dst_h);
+    if(base_x >= base_w) {
+        base_x = base_w - 1U;
+    }
+    if(base_y >= base_h) {
+        base_y = base_h - 1U;
+    }
+
+    switch(rotate) {
+    case 90:
+        src_x = base_y;
+        src_y = opts->height - 1U - base_x;
+        break;
+    case 180:
+        src_x = opts->width - 1U - base_x;
+        src_y = opts->height - 1U - base_y;
+        break;
+    case 270:
+        src_x = opts->width - 1U - base_y;
+        src_y = base_x;
+        break;
+    case 0:
+    default:
+        src_x = base_x;
+        src_y = base_y;
+        break;
+    }
+
+    if(src_x >= opts->width) {
+        src_x = opts->width - 1U;
+    }
+    if(src_y >= opts->height) {
+        src_y = opts->height - 1U;
+    }
+    return y_plane[(size_t)src_y * opts->width + src_x];
+}
+
 static int write_preview_frame(const qr_scan_options_t *opts,
                                const uint8_t *y_plane,
                                uint16_t *preview_buf)
@@ -327,15 +459,12 @@ static int write_preview_frame(const qr_scan_options_t *opts,
     }
 
     for(unsigned y = 0; y < opts->preview_height; y++) {
-        unsigned src_y = (unsigned)(((uint64_t)y * opts->height) /
-                                    opts->preview_height);
-        const uint8_t *src_row = y_plane + (size_t)src_y * opts->width;
-
         for(unsigned x = 0; x < opts->preview_width; x++) {
-            unsigned src_x = (unsigned)(((uint64_t)x * opts->width) /
-                                        opts->preview_width);
             preview_buf[(size_t)y * opts->preview_width + x] =
-                gray_to_rgb565(src_row[src_x]);
+                gray_to_rgb565(preview_sample_gray(y_plane, opts,
+                                                   opts->preview_width,
+                                                   opts->preview_height,
+                                                   x, y));
         }
     }
 
