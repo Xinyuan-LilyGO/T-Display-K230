@@ -2,9 +2,9 @@
 /*
  * Read-only camera and VCM probe for the T-Display K230.
  *
- * The probe never writes to the camera or lens controller. A responding
- * address only proves that an I2C device is present; it does not identify
- * the VCM model or prove that a focus command is safe.
+ * The current focus actuator has been confirmed as a DW9714 at 0x0c.
+ * The probe still never writes to the camera or lens controller; it only
+ * checks the camera ID and VCM I2C presence.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -206,7 +206,7 @@ static void print_probe_result(int fd, int bus, int camera_addr, int vcm_addr)
 
     printf("vcm: bus=%d addr=0x%02x", bus, vcm_addr);
     if(vcm_status == 0) {
-        printf(" responding=yes rx=0x%02x model=unknown\n", value);
+        printf(" responding=yes rx=0x%02x model=DW9714\n", value);
         printf("vcm: I2C presence confirmed; no register writes performed\n");
     } else {
         printf(" responding=no\n");

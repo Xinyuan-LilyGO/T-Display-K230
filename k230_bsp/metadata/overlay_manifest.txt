@@ -50,6 +50,7 @@ overlay/buildroot-overlay/linux/0061-riscv-dts-rm69a10-enable-uart3-nrf9151.patc
 overlay/buildroot-overlay/linux/0062-riscv-dts-rm69a10-hdmi-use-sdk-v3-baseline.patch
 overlay/buildroot-overlay/linux/0063-thermal-canaan-convert-k230-tsensor-raw.patch
 overlay/buildroot-overlay/linux/0064-input-k230-pmu-pwrkey.patch
+overlay/buildroot-overlay/linux/0065-riscv-dts-rm69a10-add-dw9714-vcm.patch
 overlay/buildroot-overlay/linux/Config.ext.in
 overlay/buildroot-overlay/linux/linux.fragment
 overlay/buildroot-overlay/linux/rejected/0044-drm-canaan-use-wc-allocation-for-dumb-buffers.rejected

@@ -1,0 +1,127 @@
+From 4f0d5f158f5bc310a81d1a1f51398933764056bd Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 15 Sep 2026 00:00:00 +0000
+Subject: [PATCH] riscv: dts: rm69a10: add DW9714-compatible camera focus actuator
+
+Add the optional DW9714-compatible VCM on the GC2093 camera I2C bus. The
+current T-Display K230 camera module exposes the actuator at 0x0c while keeping
+the sensor at 0x37.
+
+The board does not expose a software-controlled VCM supply in the current
+device tree. Keep the upstream DW9714 regulator path when a vcc-supply is
+declared, but allow the driver to bind on modules where the rail is always
+powered by hardware.
+---
+ arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts |  5 +++++
+ drivers/media/i2c/dw9714.c                        | 31 +++++++++++++++++-----
+ 2 files changed, 30 insertions(+), 6 deletions(-)
+
+diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+index 8a10d4b..f4a2d69 100644
+--- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
++++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
+@@ -244,6 +244,11 @@ &i2c4 {
+ 	pinctrl-names = "default";
+ 	pinctrl-0 = <&cam_i2c4_pins &aht20_i2c4_pins>;
+ 
++	dw9714@0c {
++		compatible = "dongwoon,dw9714";
++		reg = <0x0c>;
++	};
++
+ 	gc2093@37 {
+ 		compatible = "galaxycore,gc2093";
+ 		reg = <0x37>;
+diff --git a/drivers/media/i2c/dw9714.c b/drivers/media/i2c/dw9714.c
+index 7ae593a..0d9a6d7 100644
+--- a/drivers/media/i2c/dw9714.c
++++ b/drivers/media/i2c/dw9714.c
+@@ -147,14 +147,24 @@ static int dw9714_probe(struct i2c_client *client)
+ 	if (dw9714_dev == NULL)
+ 		return -ENOMEM;
+ 
+-	dw9714_dev->vcc = devm_regulator_get(&client->dev, "vcc");
+-	if (IS_ERR(dw9714_dev->vcc))
+-		return PTR_ERR(dw9714_dev->vcc);
+-
+-	rval = regulator_enable(dw9714_dev->vcc);
+-	if (rval < 0) {
+-		dev_err(&client->dev, "failed to enable vcc: %d\n", rval);
+-		return rval;
++	dw9714_dev->vcc = devm_regulator_get_optional(&client->dev, "vcc");
++	if (IS_ERR(dw9714_dev->vcc)) {
++		rval = PTR_ERR(dw9714_dev->vcc);
++		if (rval == -ENODEV || rval == -ENOENT) {
++			dw9714_dev->vcc = NULL;
++			dev_dbg(&client->dev,
++				"no vcc regulator, using always-on rail\n");
++		} else {
++			return rval;
++		}
++	}
++
++	if (dw9714_dev->vcc) {
++		rval = regulator_enable(dw9714_dev->vcc);
++		if (rval < 0) {
++			dev_err(&client->dev, "failed to enable vcc: %d\n", rval);
++			return rval;
++		}
+ 	}
+ 
+ 	v4l2_i2c_subdev_init(&dw9714_dev->sd, client, &dw9714_ops);
+@@ -183,7 +193,8 @@ static int dw9714_probe(struct i2c_client *client)
+ 	return 0;
+ 
+ err_cleanup:
+-	regulator_disable(dw9714_dev->vcc);
++	if (dw9714_dev->vcc)
++		regulator_disable(dw9714_dev->vcc);
+ 	v4l2_ctrl_handler_free(&dw9714_dev->ctrls_vcm);
+ 	media_entity_cleanup(&dw9714_dev->sd.entity);
+ 
+@@ -197,7 +208,7 @@ static void dw9714_remove(struct i2c_client *client)
+ 	int ret;
+ 
+ 	pm_runtime_disable(&client->dev);
+-	if (!pm_runtime_status_suspended(&client->dev)) {
++	if (!pm_runtime_status_suspended(&client->dev) && dw9714_dev->vcc) {
+ 		ret = regulator_disable(dw9714_dev->vcc);
+ 		if (ret) {
+ 			dev_err(&client->dev,
+@@ -232,9 +243,11 @@ static int __maybe_unused dw9714_vcm_suspend(struct device *dev)
+ 		usleep_range(DW9714_CTRL_DELAY_US, DW9714_CTRL_DELAY_US + 10);
+ 	}
+ 
+-	ret = regulator_disable(dw9714_dev->vcc);
+-	if (ret)
+-		dev_err(dev, "Failed to disable vcc: %d\n", ret);
++	if (dw9714_dev->vcc) {
++		ret = regulator_disable(dw9714_dev->vcc);
++		if (ret)
++			dev_err(dev, "Failed to disable vcc: %d\n", ret);
++	}
+ 
+ 	return ret;
+ }
+@@ -255,12 +268,14 @@ static int  __maybe_unused dw9714_vcm_resume(struct device *dev)
+ 	if (pm_runtime_suspended(&client->dev))
+ 		return 0;
+ 
+-	ret = regulator_enable(dw9714_dev->vcc);
+-	if (ret) {
+-		dev_err(dev, "Failed to enable vcc: %d\n", ret);
+-		return ret;
++	if (dw9714_dev->vcc) {
++		ret = regulator_enable(dw9714_dev->vcc);
++		if (ret) {
++			dev_err(dev, "Failed to enable vcc: %d\n", ret);
++			return ret;
++		}
++		usleep_range(1000, 2000);
+ 	}
+-	usleep_range(1000, 2000);
+ 
+ 	for (val = dw9714_dev->current_val % DW9714_CTRL_STEPS;
+ 	     val < dw9714_dev->current_val + DW9714_CTRL_STEPS - 1;
+-- 
+2.25.1
