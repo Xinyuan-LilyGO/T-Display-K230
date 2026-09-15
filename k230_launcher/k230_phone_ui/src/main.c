@@ -120,6 +120,8 @@
 #define CAMERA_FOCUS_DISCARD_FRAMES 1
 #define CAMERA_FOCUS_SAMPLE_FRAMES 2
 #define CAMERA_FOCUS_MARKER_SIZE 86
+#define CAMERA_FOCUS_APPROACH_DELTA 96
+#define CAMERA_FOCUS_APPROACH_SETTLE_US 60000ULL
 #define CAMERA_STORED_THUMB_W 360
 #define CAMERA_STORED_THUMB_H 640
 #define CAMERA_STORED_THUMB_BYTES (CAMERA_STORED_THUMB_W * CAMERA_STORED_THUMB_H * 2)
@@ -10338,6 +10340,31 @@ static int camera_focus_write_position(int pos)
     return 0;
 }
 
+static int camera_focus_commit_position(int pos)
+{
+    int approach = pos - CAMERA_FOCUS_APPROACH_DELTA;
+    int rc;
+
+    if(approach < CAMERA_FOCUS_MIN_POS) {
+        approach = CAMERA_FOCUS_MIN_POS;
+    }
+
+    if(approach < pos) {
+        rc = camera_focus_write_position(approach);
+        if(rc != 0) {
+            return rc;
+        }
+        usleep(CAMERA_FOCUS_APPROACH_SETTLE_US);
+    }
+
+    rc = camera_focus_write_position(pos);
+    if(rc == 0) {
+        touch_trace_log("CAMERA_FOCUS_COMMIT pos=%d approach=%d",
+                        pos, approach);
+    }
+    return rc;
+}
+
 static int camera_focus_read_position(int *pos)
 {
     char buf[32];
@@ -10806,7 +10833,7 @@ static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
     }
 
     if(best >= 0 && !camera_focus_scan_should_stop(req_seq)) {
-        rc = camera_focus_write_position(best);
+        rc = camera_focus_commit_position(best);
         if(rc == 0) {
             usleep(CAMERA_FOCUS_SETTLE_US);
         }
