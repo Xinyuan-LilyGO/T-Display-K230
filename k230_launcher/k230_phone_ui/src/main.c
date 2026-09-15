@@ -107,6 +107,15 @@
 #define CAMERA_CAPTURE_H 1080
 #define CAMERA_PREVIEW_W 640
 #define CAMERA_PREVIEW_H 360
+#define CAMERA_FOCUS_SYSFS "/sys/bus/i2c/devices/0-000c/focus_position"
+#define CAMERA_FOCUS_MIN_POS 0
+#define CAMERA_FOCUS_MAX_POS 1023
+#define CAMERA_FOCUS_COARSE_STEP 96
+#define CAMERA_FOCUS_FINE_STEP 16
+#define CAMERA_FOCUS_FINE_RADIUS 96
+#define CAMERA_FOCUS_SETTLE_US 45000ULL
+#define CAMERA_FOCUS_FRAME_WAIT_US 220000ULL
+#define CAMERA_FOCUS_MARKER_SIZE 86
 #define CAMERA_STORED_THUMB_W 360
 #define CAMERA_STORED_THUMB_H 640
 #define CAMERA_STORED_THUMB_BYTES (CAMERA_STORED_THUMB_W * CAMERA_STORED_THUMB_H * 2)
@@ -365,6 +374,7 @@ static lv_obj_t *camera_gallery_canvas;
 static lv_obj_t *camera_gallery_hint_label;
 static lv_obj_t *camera_flip_h_btn;
 static lv_obj_t *camera_flip_v_btn;
+static lv_obj_t *camera_focus_marker;
 static lv_obj_t *camera_rtsp_notice_overlay;
 static lv_obj_t *network_wifi_state_label;
 static lv_obj_t *network_wifi_ip_label;
@@ -455,15 +465,26 @@ static int32_t camera_gallery_press_y;
 static pthread_mutex_t camera_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t camera_preview_thread_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t camera_face_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t camera_focus_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t camera_face_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t camera_focus_cond = PTHREAD_COND_INITIALIZER;
 static lv_timer_t *camera_timer;
 static pthread_t camera_preview_thread;
 static pthread_t camera_face_thread;
+static pthread_t camera_focus_thread;
 static int camera_preview_thread_valid;
 static int camera_face_thread_valid;
+static int camera_focus_thread_valid;
 static int camera_face_pending;
 static int camera_face_busy;
 static int camera_face_stop;
+static int camera_focus_pending;
+static int camera_focus_busy;
+static int camera_focus_stop;
+static int camera_focus_startup_requested;
+static unsigned camera_focus_req_x;
+static unsigned camera_focus_req_y;
+static unsigned int camera_focus_req_seq;
 static uint8_t *camera_face_request_buf;
 static unsigned camera_face_request_w;
 static unsigned camera_face_request_h;
@@ -491,6 +512,13 @@ static int camera_preview_flip_v;
 static int camera_last_result = -1;
 static char camera_status_text[128] = "Ready";
 static char camera_preview_status_text[128] = "Preview idle";
+static char camera_focus_status_text[128];
+static uint64_t camera_focus_status_until_us;
+static uint64_t camera_focus_marker_until_us;
+static int camera_focus_display_busy;
+static int camera_focus_last_result = -1;
+static int camera_focus_last_pos = -1;
+static uint64_t camera_focus_last_metric;
 static char camera_last_photo_path[192];
 static char camera_last_thumb_path[192];
 static wifi_ap_info_t network_aps[NET_MAX_APS];
@@ -10220,6 +10248,598 @@ static void camera_set_preview_status(const char *text, int result, int active)
     pthread_mutex_unlock(&camera_lock);
 }
 
+static int camera_focus_motor_available(void)
+{
+    return access(CAMERA_FOCUS_SYSFS, W_OK) == 0;
+}
+
+static void camera_focus_set_display_status(const char *text, int result,
+                                            int busy, int pos,
+                                            uint64_t metric,
+                                            uint32_t hold_ms)
+{
+    pthread_mutex_lock(&camera_lock);
+    snprintf(camera_focus_status_text, sizeof(camera_focus_status_text), "%s",
+             text ? text : "");
+    camera_focus_last_result = result;
+    camera_focus_display_busy = busy;
+    if(pos >= CAMERA_FOCUS_MIN_POS) {
+        camera_focus_last_pos = pos;
+    }
+    if(metric) {
+        camera_focus_last_metric = metric;
+    }
+    camera_focus_status_until_us = hold_ms ?
+        monotonic_us() + (uint64_t)hold_ms * 1000ULL : 0;
+    if(!busy && camera_focus_marker) {
+        camera_focus_marker_until_us =
+            monotonic_us() + (uint64_t)(hold_ms ? hold_ms : 900U) * 1000ULL;
+    }
+    camera_result_ready = 1;
+    pthread_mutex_unlock(&camera_lock);
+}
+
+static int camera_focus_should_stop(void)
+{
+    int stop;
+
+    pthread_mutex_lock(&camera_focus_lock);
+    stop = camera_focus_stop;
+    pthread_mutex_unlock(&camera_focus_lock);
+    return stop || camera_preview_stop;
+}
+
+static int camera_focus_write_position(int pos)
+{
+    char buf[24];
+    int fd;
+    int len;
+    ssize_t written;
+
+    if(pos < CAMERA_FOCUS_MIN_POS) {
+        pos = CAMERA_FOCUS_MIN_POS;
+    }
+    if(pos > CAMERA_FOCUS_MAX_POS) {
+        pos = CAMERA_FOCUS_MAX_POS;
+    }
+
+    fd = open(CAMERA_FOCUS_SYSFS, O_WRONLY | O_CLOEXEC);
+    if(fd < 0) {
+        return -errno;
+    }
+    len = snprintf(buf, sizeof(buf), "%d\n", pos);
+    written = write(fd, buf, (size_t)len);
+    close(fd);
+
+    if(written != len) {
+        return written < 0 ? -errno : -EIO;
+    }
+    return 0;
+}
+
+static int camera_focus_copy_latest_frame(uint8_t *dst, unsigned *width,
+                                          unsigned *height,
+                                          uint32_t *frame_count)
+{
+    unsigned w;
+    unsigned h;
+    size_t bytes;
+
+    if(!dst || !width || !height || !frame_count) {
+        return -EINVAL;
+    }
+
+    pthread_mutex_lock(&camera_lock);
+    w = camera_capture_frame_w;
+    h = camera_capture_frame_h;
+    if(!camera_capture_frame_valid || w == 0U || h == 0U ||
+       (size_t)w * h * 2U > CAMERA_PREVIEW_VIEW_BYTES) {
+        pthread_mutex_unlock(&camera_lock);
+        return -EAGAIN;
+    }
+    bytes = (size_t)w * h * 2U;
+    memcpy(dst, camera_capture_frame_buf, bytes);
+    *width = w;
+    *height = h;
+    *frame_count = camera_preview_frame_count;
+    pthread_mutex_unlock(&camera_lock);
+    return 0;
+}
+
+static int camera_focus_wait_new_frame(uint32_t *frame_count,
+                                       uint64_t timeout_us)
+{
+    uint64_t deadline = monotonic_us() + timeout_us;
+
+    if(!frame_count) {
+        return -EINVAL;
+    }
+
+    while(!camera_focus_should_stop()) {
+        int ready = 0;
+
+        pthread_mutex_lock(&camera_lock);
+        if(camera_capture_frame_valid &&
+           camera_preview_frame_count != *frame_count) {
+            *frame_count = camera_preview_frame_count;
+            ready = 1;
+        }
+        pthread_mutex_unlock(&camera_lock);
+
+        if(ready) {
+            return 0;
+        }
+        if(monotonic_us() >= deadline) {
+            return -ETIMEDOUT;
+        }
+        usleep(10000);
+    }
+
+    return -ECANCELED;
+}
+
+static uint8_t camera_focus_luma565(uint16_t px)
+{
+    uint8_t r = (uint8_t)(((px >> 11) & 0x1F) << 3);
+    uint8_t g = (uint8_t)(((px >> 5) & 0x3F) << 2);
+    uint8_t b = (uint8_t)((px & 0x1F) << 3);
+
+    return (uint8_t)(((uint16_t)r * 77U + (uint16_t)g * 150U +
+                      (uint16_t)b * 29U) >> 8);
+}
+
+static void camera_focus_normalize_roi(unsigned req_x, unsigned req_y,
+                                       unsigned width, unsigned height,
+                                       unsigned *roi_x, unsigned *roi_y,
+                                       unsigned *roi_w, unsigned *roi_h)
+{
+    unsigned min_side;
+    unsigned rw;
+    unsigned rh;
+    int x0;
+    int y0;
+
+    if(width == 0U || height == 0U) {
+        *roi_x = 0;
+        *roi_y = 0;
+        *roi_w = 0;
+        *roi_h = 0;
+        return;
+    }
+
+    if(req_x >= width) {
+        req_x = width / 2U;
+    }
+    if(req_y >= height) {
+        req_y = height / 2U;
+    }
+
+    min_side = width < height ? width : height;
+    rw = min_side / 2U;
+    rh = min_side / 2U;
+    if(rw < 150U) {
+        rw = width < 150U ? width : 150U;
+    }
+    if(rh < 150U) {
+        rh = height < 150U ? height : 150U;
+    }
+    if(rw > width) {
+        rw = width;
+    }
+    if(rh > height) {
+        rh = height;
+    }
+
+    x0 = (int)req_x - (int)rw / 2;
+    y0 = (int)req_y - (int)rh / 2;
+    if(x0 < 0) {
+        x0 = 0;
+    }
+    if(y0 < 0) {
+        y0 = 0;
+    }
+    if((unsigned)x0 + rw > width) {
+        x0 = (int)width - (int)rw;
+    }
+    if((unsigned)y0 + rh > height) {
+        y0 = (int)height - (int)rh;
+    }
+    if(x0 < 0) {
+        x0 = 0;
+    }
+    if(y0 < 0) {
+        y0 = 0;
+    }
+
+    *roi_x = (unsigned)x0;
+    *roi_y = (unsigned)y0;
+    *roi_w = rw;
+    *roi_h = rh;
+}
+
+static uint64_t camera_focus_sharpness_score(const uint8_t *buf,
+                                             unsigned width, unsigned height,
+                                             unsigned roi_x, unsigned roi_y,
+                                             unsigned roi_w, unsigned roi_h)
+{
+    const uint16_t *pixels = (const uint16_t *)buf;
+    uint64_t score = 0;
+    uint64_t samples = 0;
+    unsigned x_start;
+    unsigned y_start;
+    unsigned x_end;
+    unsigned y_end;
+
+    if(!buf || width < 3U || height < 3U || roi_w < 3U || roi_h < 3U) {
+        return 0;
+    }
+
+    x_start = roi_x > 1U ? roi_x : 1U;
+    y_start = roi_y > 1U ? roi_y : 1U;
+    x_end = roi_x + roi_w;
+    y_end = roi_y + roi_h;
+    if(x_end > width - 1U) {
+        x_end = width - 1U;
+    }
+    if(y_end > height - 1U) {
+        y_end = height - 1U;
+    }
+    if(x_end <= x_start || y_end <= y_start) {
+        return 0;
+    }
+
+    for(unsigned y = y_start; y < y_end; y += 2U) {
+        for(unsigned x = x_start; x < x_end; x += 2U) {
+            uint8_t left = camera_focus_luma565(pixels[y * width + x - 1U]);
+            uint8_t right = camera_focus_luma565(pixels[y * width + x + 1U]);
+            uint8_t up = camera_focus_luma565(pixels[(y - 1U) * width + x]);
+            uint8_t down = camera_focus_luma565(pixels[(y + 1U) * width + x]);
+            int gx = (int)right - (int)left;
+            int gy = (int)down - (int)up;
+
+            score += (uint64_t)(gx * gx + gy * gy);
+            samples++;
+        }
+    }
+
+    return samples ? score / samples : 0;
+}
+
+static int camera_focus_measure_position(int pos, uint8_t *sample_buf,
+                                         unsigned req_x, unsigned req_y,
+                                         uint64_t *metric,
+                                         unsigned *roi_x, unsigned *roi_y,
+                                         unsigned *roi_w, unsigned *roi_h,
+                                         uint32_t *frame_count)
+{
+    unsigned width = 0;
+    unsigned height = 0;
+    int rc;
+
+    if(!sample_buf || !metric || !roi_x || !roi_y || !roi_w || !roi_h ||
+       !frame_count) {
+        return -EINVAL;
+    }
+
+    if(camera_focus_copy_latest_frame(sample_buf, &width, &height,
+                                      frame_count) != 0) {
+        rc = camera_focus_wait_new_frame(frame_count,
+                                         CAMERA_FOCUS_FRAME_WAIT_US);
+        if(rc != 0) {
+            return rc;
+        }
+    }
+
+    rc = camera_focus_write_position(pos);
+    if(rc != 0) {
+        return rc;
+    }
+    usleep(CAMERA_FOCUS_SETTLE_US);
+    rc = camera_focus_wait_new_frame(frame_count, CAMERA_FOCUS_FRAME_WAIT_US);
+    if(rc != 0) {
+        return rc;
+    }
+
+    rc = camera_focus_copy_latest_frame(sample_buf, &width, &height,
+                                        frame_count);
+    if(rc != 0) {
+        return rc;
+    }
+
+    camera_focus_normalize_roi(req_x, req_y, width, height,
+                               roi_x, roi_y, roi_w, roi_h);
+    *metric = camera_focus_sharpness_score(sample_buf, width, height,
+                                           *roi_x, *roi_y, *roi_w, *roi_h);
+    return 0;
+}
+
+static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
+                                 int *best_pos, uint64_t *best_metric,
+                                 unsigned *best_roi_x, unsigned *best_roi_y,
+                                 unsigned *best_roi_w, unsigned *best_roi_h)
+{
+    uint8_t *sample_buf;
+    uint32_t frame_count = 0;
+    int best = -1;
+    uint64_t best_score = 0;
+    unsigned roi_x = 0;
+    unsigned roi_y = 0;
+    unsigned roi_w = 0;
+    unsigned roi_h = 0;
+    int last_sampled = -1;
+    int rc = -EIO;
+
+    sample_buf = malloc(CAMERA_PREVIEW_VIEW_BYTES);
+    if(!sample_buf) {
+        return -ENOMEM;
+    }
+
+    for(int pass = 0; pass < 2 && !camera_focus_should_stop(); pass++) {
+        int start;
+        int end;
+        int step;
+
+        if(pass == 0) {
+            start = CAMERA_FOCUS_MIN_POS;
+            end = CAMERA_FOCUS_MAX_POS;
+            step = CAMERA_FOCUS_COARSE_STEP;
+        } else {
+            if(best < 0) {
+                break;
+            }
+            start = best - CAMERA_FOCUS_FINE_RADIUS;
+            end = best + CAMERA_FOCUS_FINE_RADIUS;
+            step = CAMERA_FOCUS_FINE_STEP;
+            if(start < CAMERA_FOCUS_MIN_POS) {
+                start = CAMERA_FOCUS_MIN_POS;
+            }
+            if(end > CAMERA_FOCUS_MAX_POS) {
+                end = CAMERA_FOCUS_MAX_POS;
+            }
+        }
+
+        for(int pos = start; pos <= end && !camera_focus_should_stop();
+            pos += step) {
+            uint64_t metric = 0;
+            unsigned mx = 0;
+            unsigned my = 0;
+            unsigned mw = 0;
+            unsigned mh = 0;
+
+            rc = camera_focus_measure_position(pos, sample_buf, req_x, req_y,
+                                               &metric, &mx, &my, &mw, &mh,
+                                               &frame_count);
+            if(rc != 0) {
+                touch_trace_log("CAMERA_FOCUS_SAMPLE_FAILED pass=%d pos=%d rc=%d",
+                                pass, pos, rc);
+                continue;
+            }
+            last_sampled = pos;
+            touch_trace_log("CAMERA_FOCUS_SAMPLE pass=%d pos=%d metric=%llu "
+                            "roi=%u,%u,%u,%u",
+                            pass, pos, (unsigned long long)metric,
+                            mx, my, mw, mh);
+            if(best < 0 || metric > best_score) {
+                best = pos;
+                best_score = metric;
+                roi_x = mx;
+                roi_y = my;
+                roi_w = mw;
+                roi_h = mh;
+            }
+        }
+
+        if(pass == 0 && last_sampled != CAMERA_FOCUS_MAX_POS &&
+           !camera_focus_should_stop()) {
+            uint64_t metric = 0;
+            unsigned mx = 0;
+            unsigned my = 0;
+            unsigned mw = 0;
+            unsigned mh = 0;
+
+            rc = camera_focus_measure_position(CAMERA_FOCUS_MAX_POS,
+                                               sample_buf, req_x, req_y,
+                                               &metric, &mx, &my, &mw, &mh,
+                                               &frame_count);
+            if(rc == 0) {
+                touch_trace_log("CAMERA_FOCUS_SAMPLE pass=%d pos=%d "
+                                "metric=%llu roi=%u,%u,%u,%u",
+                                pass, CAMERA_FOCUS_MAX_POS,
+                                (unsigned long long)metric,
+                                mx, my, mw, mh);
+                if(best < 0 || metric > best_score) {
+                    best = CAMERA_FOCUS_MAX_POS;
+                    best_score = metric;
+                    roi_x = mx;
+                    roi_y = my;
+                    roi_w = mw;
+                    roi_h = mh;
+                }
+            } else {
+                touch_trace_log("CAMERA_FOCUS_SAMPLE_FAILED pass=%d pos=%d rc=%d",
+                                pass, CAMERA_FOCUS_MAX_POS, rc);
+            }
+        }
+    }
+
+    if(best >= 0 && !camera_focus_should_stop()) {
+        rc = camera_focus_write_position(best);
+        if(rc == 0) {
+            *best_pos = best;
+            *best_metric = best_score;
+            *best_roi_x = roi_x;
+            *best_roi_y = roi_y;
+            *best_roi_w = roi_w;
+            *best_roi_h = roi_h;
+        }
+    }
+
+    free(sample_buf);
+    return (best >= 0 && !camera_focus_should_stop()) ? rc : -ECANCELED;
+}
+
+static void *camera_focus_thread_cb(void *arg)
+{
+    (void)arg;
+
+    while(1) {
+        unsigned req_x;
+        unsigned req_y;
+        unsigned int req_seq;
+        int best = -1;
+        uint64_t metric = 0;
+        unsigned roi_x = 0;
+        unsigned roi_y = 0;
+        unsigned roi_w = 0;
+        unsigned roi_h = 0;
+        int rc;
+
+        pthread_mutex_lock(&camera_focus_lock);
+        while(!camera_focus_stop && !camera_focus_pending) {
+            pthread_cond_wait(&camera_focus_cond, &camera_focus_lock);
+        }
+        if(camera_focus_stop) {
+            pthread_mutex_unlock(&camera_focus_lock);
+            break;
+        }
+        req_x = camera_focus_req_x;
+        req_y = camera_focus_req_y;
+        req_seq = camera_focus_req_seq;
+        camera_focus_pending = 0;
+        camera_focus_busy = 1;
+        pthread_mutex_unlock(&camera_focus_lock);
+
+        camera_focus_set_display_status("Focusing...", -1, 1, -1, 0, 0);
+        rc = camera_focus_run_scan(req_x, req_y, &best, &metric,
+                                   &roi_x, &roi_y, &roi_w, &roi_h);
+
+        pthread_mutex_lock(&camera_focus_lock);
+        camera_focus_busy = 0;
+        pthread_mutex_unlock(&camera_focus_lock);
+
+        if(rc == 0) {
+            char text[128];
+
+            snprintf(text, sizeof(text), "Focused  pos %d", best);
+            camera_focus_set_display_status(text, 0, 0, best, metric, 1100);
+            touch_trace_log("CAMERA_FOCUS_DONE seq=%u pos=%d metric=%llu "
+                            "roi=%u,%u,%u,%u",
+                            req_seq, best, (unsigned long long)metric,
+                            roi_x, roi_y, roi_w, roi_h);
+        } else if(rc != -ECANCELED) {
+            char text[128];
+
+            snprintf(text, sizeof(text), "Focus failed  %d", rc);
+            camera_focus_set_display_status(text, 1, 0, -1, 0, 1500);
+            touch_trace_log("CAMERA_FOCUS_FAILED seq=%u rc=%d", req_seq, rc);
+        }
+    }
+
+    return NULL;
+}
+
+static int camera_focus_worker_start(void)
+{
+    int rc;
+
+    if(!camera_focus_motor_available()) {
+        touch_trace_log("CAMERA_FOCUS_MOTOR_MISSING path=%s",
+                        CAMERA_FOCUS_SYSFS);
+        return -1;
+    }
+
+    pthread_mutex_lock(&camera_focus_lock);
+    if(camera_focus_thread_valid) {
+        pthread_mutex_unlock(&camera_focus_lock);
+        return 0;
+    }
+    camera_focus_stop = 0;
+    camera_focus_pending = 0;
+    camera_focus_busy = 0;
+    pthread_mutex_unlock(&camera_focus_lock);
+
+    rc = pthread_create(&camera_focus_thread, NULL,
+                        camera_focus_thread_cb, NULL);
+    if(rc != 0) {
+        touch_trace_log("CAMERA_FOCUS_WORKER_START_FAILED rc=%d", rc);
+        return -1;
+    }
+
+    pthread_mutex_lock(&camera_focus_lock);
+    camera_focus_thread_valid = 1;
+    pthread_mutex_unlock(&camera_focus_lock);
+    touch_trace_log("CAMERA_FOCUS_WORKER_START");
+    return 0;
+}
+
+static void camera_focus_worker_stop(void)
+{
+    pthread_t thread;
+    int join_thread = 0;
+
+    pthread_mutex_lock(&camera_focus_lock);
+    if(camera_focus_thread_valid) {
+        thread = camera_focus_thread;
+        camera_focus_thread_valid = 0;
+        camera_focus_stop = 1;
+        pthread_cond_signal(&camera_focus_cond);
+        join_thread = 1;
+    }
+    pthread_mutex_unlock(&camera_focus_lock);
+
+    if(join_thread) {
+        pthread_join(thread, NULL);
+        touch_trace_log("CAMERA_FOCUS_WORKER_STOP");
+    }
+
+    pthread_mutex_lock(&camera_focus_lock);
+    camera_focus_stop = 0;
+    camera_focus_pending = 0;
+    camera_focus_busy = 0;
+    pthread_mutex_unlock(&camera_focus_lock);
+
+    camera_focus_set_display_status("", -1, 0, -1, 0, 0);
+}
+
+static int camera_focus_request_at(unsigned x, unsigned y,
+                                   int visible_feedback,
+                                   const char *reason)
+{
+    int ready;
+
+    if(!camera_focus_motor_available()) {
+        if(visible_feedback) {
+            camera_focus_set_display_status("Focus motor missing", 1, 0,
+                                            -1, 0, 1500);
+        }
+        return -1;
+    }
+
+    pthread_mutex_lock(&camera_focus_lock);
+    ready = camera_focus_thread_valid && !camera_focus_stop;
+    if(ready) {
+        camera_focus_req_x = x;
+        camera_focus_req_y = y;
+        camera_focus_req_seq++;
+        camera_focus_pending = 1;
+        pthread_cond_signal(&camera_focus_cond);
+    }
+    pthread_mutex_unlock(&camera_focus_lock);
+
+    if(!ready) {
+        if(visible_feedback) {
+            camera_focus_set_display_status("Focus not ready", 1, 0,
+                                            -1, 0, 1500);
+        }
+        return -1;
+    }
+
+    camera_focus_set_display_status("Focusing...", -1, 1, -1, 0, 0);
+    touch_trace_log("CAMERA_FOCUS_REQUEST reason=%s x=%u y=%u",
+                    reason ? reason : "manual", x, y);
+    return 0;
+}
+
 static void camera_capture_flash_done_cb(lv_anim_t *anim)
 {
     lv_obj_t *obj = anim ? (lv_obj_t *)anim->var : NULL;
@@ -10343,6 +10963,7 @@ static void *camera_preview_thread_cb(void *arg)
 
     started = 1;
     camera_face_worker_start();
+    camera_focus_worker_start();
     camera_set_preview_status("Live preview starting", 0, 1);
 
     while(!camera_preview_stop) {
@@ -10374,6 +10995,7 @@ static void *camera_preview_thread_cb(void *arg)
             int flip_h = camera_preview_flip_h ? 1 : 0;
             int flip_v = camera_preview_flip_v ? 1 : 0;
             int detected_faces;
+            int request_startup_focus = 0;
             uint32_t layout_key = ((uint32_t)view_w << 16) ^
                                   ((uint32_t)view_h << 1) ^
                                   (uint32_t)(rotate_preview ? 1 : 0) ^
@@ -10416,10 +11038,20 @@ static void *camera_preview_thread_cb(void *arg)
             camera_preview_active = 1;
             camera_preview_last_result = 0;
             camera_preview_frame_count++;
+            if(!camera_focus_startup_requested &&
+               camera_preview_frame_count >= 6U) {
+                camera_focus_startup_requested = 1;
+                request_startup_focus = 1;
+            }
             snprintf(camera_preview_status_text, sizeof(camera_preview_status_text),
                      "Live preview  %ux%u  Faces %d", view_w, view_h,
                      detected_faces);
             pthread_mutex_unlock(&camera_lock);
+
+            if(request_startup_focus) {
+                camera_focus_request_at(view_w / 2U, view_h / 2U, 0,
+                                        "startup");
+            }
         }
 
         v4l2_drm_dump_release(&ctx);
@@ -10432,6 +11064,7 @@ static void *camera_preview_thread_cb(void *arg)
     }
 
     if(started) {
+        camera_focus_worker_stop();
         ioctl(ctx.video_fd, VIDIOC_STREAMOFF, &type);
     }
     v4l2_drm_stop(&ctx);
@@ -10487,6 +11120,11 @@ static void camera_start_preview(void)
     camera_capture_frame_valid = 0;
     camera_capture_frame_w = 0;
     camera_capture_frame_h = 0;
+    camera_focus_startup_requested = 0;
+    camera_focus_display_busy = 0;
+    camera_focus_status_text[0] = '\0';
+    camera_focus_status_until_us = 0;
+    camera_focus_marker_until_us = 0;
     snprintf(camera_preview_status_text, sizeof(camera_preview_status_text),
              "Starting live preview");
     camera_result_ready = 1;
@@ -10506,16 +11144,22 @@ static void camera_update_visible_state(void)
 {
     char status[128];
     char preview_status[128];
+    char focus_status[128];
     char photo[192];
     char thumb[192];
     int result;
     int busy;
+    int focus_busy;
     int preview_active;
     int preview_have_frame;
     int preview_frame_ready;
     int preview_result;
     int feedback_seq;
     const char *base;
+    uint64_t now_us = monotonic_us();
+    uint64_t focus_until_us;
+    uint64_t marker_until_us;
+    int focus_status_active;
     unsigned preview_w = camera_preview_view_width();
     unsigned preview_h = camera_preview_view_height();
     size_t preview_bytes = (size_t)preview_w * preview_h * 2U;
@@ -10523,15 +11167,19 @@ static void camera_update_visible_state(void)
     pthread_mutex_lock(&camera_lock);
     snprintf(status, sizeof(status), "%s", camera_status_text);
     snprintf(preview_status, sizeof(preview_status), "%s", camera_preview_status_text);
+    snprintf(focus_status, sizeof(focus_status), "%s", camera_focus_status_text);
     snprintf(photo, sizeof(photo), "%s", camera_last_photo_path);
     snprintf(thumb, sizeof(thumb), "%s", camera_last_thumb_path);
     result = camera_last_result;
     busy = camera_busy;
+    focus_busy = camera_focus_display_busy;
     preview_active = camera_preview_active;
     preview_have_frame = camera_preview_have_frame;
     preview_frame_ready = camera_preview_frame_ready;
     preview_result = camera_preview_last_result;
     feedback_seq = camera_capture_feedback_seq;
+    focus_until_us = camera_focus_status_until_us;
+    marker_until_us = camera_focus_marker_until_us;
     if(preview_frame_ready) {
         memcpy(camera_preview_buf, camera_preview_frame_buf, preview_bytes);
         camera_preview_frame_ready = 0;
@@ -10539,17 +11187,34 @@ static void camera_update_visible_state(void)
     camera_result_ready = 0;
     pthread_mutex_unlock(&camera_lock);
 
+    focus_status_active = focus_status[0] &&
+        (focus_busy || focus_until_us == 0 ||
+         (now_us < focus_until_us));
+
     if(camera_status_label) {
         lv_label_set_text(camera_status_label,
                           busy ? "Capturing..." :
-                          (preview_active || preview_have_frame ? preview_status : status));
+                          (focus_status_active ? focus_status :
+                           (preview_active || preview_have_frame ?
+                            preview_status : status)));
         lv_obj_set_style_text_color(camera_status_label,
                                     lv_color_hex(busy ? 0xF5A524 :
+                                                 (focus_status_active ?
+                                                  (focus_busy ? 0xF5A524 :
+                                                   camera_focus_last_result == 0 ?
+                                                   0x25C281 : 0xEF4D5A) :
                                                  (preview_active || preview_have_frame ?
                                                   (preview_result == 0 ? 0x25C281 : 0xEF4D5A) :
                                                   (result == 0 ? 0x25C281 :
-                                                   result < 0 ? 0x9AA4AF : 0xEF4D5A))),
+                                                   result < 0 ? 0x9AA4AF : 0xEF4D5A)))),
                                     0);
+    }
+    if(camera_focus_marker && lv_obj_is_valid(camera_focus_marker) &&
+       marker_until_us && now_us >= marker_until_us) {
+        lv_obj_add_flag(camera_focus_marker, LV_OBJ_FLAG_HIDDEN);
+        pthread_mutex_lock(&camera_lock);
+        camera_focus_marker_until_us = 0;
+        pthread_mutex_unlock(&camera_lock);
     }
     camera_capture_toast_update(busy, result, feedback_seq);
 
@@ -10996,6 +11661,83 @@ static void camera_flip_v_event_cb(lv_event_t *event)
     request_fast_refresh();
 }
 
+static void camera_focus_show_marker_ui(unsigned x, unsigned y)
+{
+    int size = CAMERA_FOCUS_MARKER_SIZE;
+    int px = (int)x - size / 2;
+    int py = (int)y - size / 2;
+    unsigned preview_w = camera_preview_view_width();
+    unsigned preview_h = camera_preview_view_height();
+
+    if(!camera_focus_marker || !lv_obj_is_valid(camera_focus_marker)) {
+        return;
+    }
+
+    if(px < 0) {
+        px = 0;
+    }
+    if(py < 0) {
+        py = 0;
+    }
+    if(px + size > (int)preview_w) {
+        px = (int)preview_w - size;
+    }
+    if(py + size > (int)preview_h) {
+        py = (int)preview_h - size;
+    }
+    if(px < 0) {
+        px = 0;
+    }
+    if(py < 0) {
+        py = 0;
+    }
+
+    lv_obj_set_pos(camera_focus_marker, px, py);
+    lv_obj_clear_flag(camera_focus_marker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(camera_focus_marker);
+}
+
+static void camera_focus_event_cb(lv_event_t *event)
+{
+    lv_area_t area;
+    lv_point_t point;
+    int x;
+    int y;
+    unsigned preview_w = camera_preview_view_width();
+    unsigned preview_h = camera_preview_view_height();
+
+    if(lv_event_get_code(event) != LV_EVENT_CLICKED ||
+       !camera_preview_canvas ||
+       !lv_obj_is_valid(camera_preview_canvas) ||
+       !evdev_indev) {
+        return;
+    }
+
+    lv_indev_get_point(evdev_indev, &point);
+    lv_obj_get_coords(camera_preview_canvas, &area);
+    x = point.x - area.x1;
+    y = point.y - area.y1;
+    if(x < 0) {
+        x = 0;
+    }
+    if(y < 0) {
+        y = 0;
+    }
+    if(x >= (int)preview_w) {
+        x = (int)preview_w - 1;
+    }
+    if(y >= (int)preview_h) {
+        y = (int)preview_h - 1;
+    }
+
+    camera_focus_show_marker_ui((unsigned)x, (unsigned)y);
+    pthread_mutex_lock(&camera_lock);
+    camera_focus_marker_until_us = 0;
+    pthread_mutex_unlock(&camera_lock);
+    camera_focus_request_at((unsigned)x, (unsigned)y, 1, "tap");
+    camera_update_visible_state();
+}
+
 static void camera_rtsp_notice_close_cb(lv_event_t *event)
 {
     (void)event;
@@ -11096,6 +11838,22 @@ static void create_camera_page(lv_obj_t *scr)
     lv_obj_set_size(camera_preview_canvas, (int)preview_w, (int)preview_h);
     lv_obj_set_style_radius(camera_preview_canvas, 8, 0);
     lv_obj_set_style_clip_corner(camera_preview_canvas, true, 0);
+    lv_obj_add_flag(camera_preview_canvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(camera_preview_canvas, camera_focus_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+
+    camera_focus_marker = lv_obj_create(viewfinder);
+    lv_obj_set_size(camera_focus_marker, CAMERA_FOCUS_MARKER_SIZE,
+                    CAMERA_FOCUS_MARKER_SIZE);
+    lv_obj_set_style_bg_opa(camera_focus_marker, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(camera_focus_marker,
+                                  lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_border_width(camera_focus_marker, 3, 0);
+    lv_obj_set_style_radius(camera_focus_marker, 14, 0);
+    lv_obj_set_style_pad_all(camera_focus_marker, 0, 0);
+    lv_obj_add_flag(camera_focus_marker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(camera_focus_marker, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(camera_focus_marker, LV_OBJ_FLAG_CLICKABLE);
 
     camera_preview_hint_label = label(viewfinder, "Starting live preview",
                                       &lv_font_montserrat_22, 0xF2F5F8);
@@ -11408,6 +12166,7 @@ static void cleanup_page_state(void)
     camera_gallery_hint_label = NULL;
     camera_flip_h_btn = NULL;
     camera_flip_v_btn = NULL;
+    camera_focus_marker = NULL;
     network_wifi_state_label = NULL;
     network_wifi_ip_label = NULL;
     network_eth_state_label = NULL;
