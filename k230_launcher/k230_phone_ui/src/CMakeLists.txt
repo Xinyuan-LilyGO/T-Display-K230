@@ -234,6 +234,7 @@ add_executable(k230_pcm_volume pcm_volume.c)
 add_executable(k230_nrf52840_dfu k230_nrf52840_dfu.cpp)
 add_executable(k230_xiaozhi_probe k230_xiaozhi_probe.c)
 add_executable(k230_map_tile_downloader k230_map_tile_downloader.c)
+add_executable(k230_camera_focus_probe camera_focus_probe.c)
 if(AI_DEMO_KWS_SRC_DIR AND AI_DEMO_COMMON_SRC_DIR)
     set(K230_XIAOZHI_KWS_ENABLED 1)
     add_executable(k230_xiaozhi_kws
@@ -576,6 +577,7 @@ set(K230_PHONE_UI_INSTALL_TARGETS
     k230_nrf52840_dfu
     k230_xiaozhi_probe
     k230_map_tile_downloader
+    k230_camera_focus_probe
 )
 
 if(K230_XIAOZHI_KWS_ENABLED)
