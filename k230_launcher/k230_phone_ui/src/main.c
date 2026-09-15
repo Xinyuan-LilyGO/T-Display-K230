@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <linux/input.h>
+#include <linux/videodev2.h>
 #include <pthread.h>
 #include <signal.h>
 #include <setjmp.h>
@@ -122,6 +123,12 @@
 #define CAMERA_FOCUS_MARKER_SIZE 86
 #define CAMERA_FOCUS_APPROACH_DELTA 96
 #define CAMERA_FOCUS_APPROACH_SETTLE_US 60000ULL
+#define CAMERA_FOCUS_AFM_ENABLE (V4L2_CID_USER_BASE + 0x3A00)
+#define CAMERA_FOCUS_AFM_WIN_A_SHARPNESS (V4L2_CID_USER_BASE + 0x3A06)
+#define CAMERA_FOCUS_AFM_WIN_B_SHARPNESS (V4L2_CID_USER_BASE + 0x3A07)
+#define CAMERA_FOCUS_AFM_WIN_C_SHARPNESS (V4L2_CID_USER_BASE + 0x3A08)
+#define CAMERA_FOCUS_AFM_WIN_A_LUMINANCE (V4L2_CID_USER_BASE + 0x3A09)
+#define CAMERA_FOCUS_AFM_WIN_A_PIXEL_CNT (V4L2_CID_USER_BASE + 0x3A0C)
 #define CAMERA_STORED_THUMB_W 360
 #define CAMERA_STORED_THUMB_H 640
 #define CAMERA_STORED_THUMB_BYTES (CAMERA_STORED_THUMB_W * CAMERA_STORED_THUMB_H * 2)
@@ -526,6 +533,9 @@ static int camera_focus_display_busy;
 static int camera_focus_last_result = -1;
 static int camera_focus_last_pos = -1;
 static uint64_t camera_focus_last_metric;
+static int camera_focus_afm_fd = -1;
+static char camera_focus_afm_node[32];
+static int camera_focus_afm_warned;
 static char camera_last_photo_path[192];
 static char camera_last_thumb_path[192];
 static wifi_ap_info_t network_aps[NET_MAX_APS];
@@ -10406,6 +10416,159 @@ static int camera_focus_read_position(int *pos)
     return 0;
 }
 
+static int camera_focus_afm_read_u32(int fd, uint32_t id, uint32_t *value)
+{
+    struct v4l2_ext_control ctrl;
+    struct v4l2_ext_controls ctrls;
+    uint32_t tmp = 0;
+
+    if(fd < 0 || !value) {
+        return -EINVAL;
+    }
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    memset(&ctrls, 0, sizeof(ctrls));
+    ctrl.id = id;
+    ctrl.size = sizeof(tmp);
+    ctrl.p_u32 = &tmp;
+    ctrls.which = V4L2_CTRL_WHICH_CUR_VAL;
+    ctrls.count = 1;
+    ctrls.controls = &ctrl;
+
+    if(ioctl(fd, VIDIOC_G_EXT_CTRLS, &ctrls) != 0) {
+        return -errno;
+    }
+
+    *value = tmp;
+    return 0;
+}
+
+static int camera_focus_afm_set_enable(int fd)
+{
+    struct v4l2_ext_control ctrl;
+    struct v4l2_ext_controls ctrls;
+    uint32_t enable = 1;
+
+    if(fd < 0) {
+        return -EINVAL;
+    }
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    memset(&ctrls, 0, sizeof(ctrls));
+    ctrl.id = CAMERA_FOCUS_AFM_ENABLE;
+    ctrl.size = sizeof(enable);
+    ctrl.p_u32 = &enable;
+    ctrls.which = V4L2_CTRL_WHICH_CUR_VAL;
+    ctrls.count = 1;
+    ctrls.controls = &ctrl;
+
+    if(ioctl(fd, VIDIOC_S_EXT_CTRLS, &ctrls) != 0) {
+        return -errno;
+    }
+
+    return 0;
+}
+
+static void camera_focus_afm_close(void)
+{
+    if(camera_focus_afm_fd >= 0) {
+        close(camera_focus_afm_fd);
+        camera_focus_afm_fd = -1;
+        camera_focus_afm_node[0] = '\0';
+    }
+}
+
+static int camera_focus_afm_open(void)
+{
+    static const char *nodes[] = {
+        "/dev/video1",
+        "/dev/video2",
+        "/dev/video3",
+    };
+    uint32_t sharp = 0;
+
+    if(camera_focus_afm_fd >= 0) {
+        return camera_focus_afm_fd;
+    }
+
+    for(size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
+        int fd = open(nodes[i], O_RDWR | O_CLOEXEC);
+        if(fd < 0) {
+            continue;
+        }
+
+        (void)camera_focus_afm_set_enable(fd);
+        if(camera_focus_afm_read_u32(fd,
+                                     CAMERA_FOCUS_AFM_WIN_A_SHARPNESS,
+                                     &sharp) == 0) {
+            camera_focus_afm_fd = fd;
+            snprintf(camera_focus_afm_node, sizeof(camera_focus_afm_node),
+                     "%s", nodes[i]);
+            touch_trace_log("CAMERA_FOCUS_AFM_OPEN node=%s sharp=%u",
+                            camera_focus_afm_node, sharp);
+            camera_focus_afm_warned = 0;
+            return camera_focus_afm_fd;
+        }
+
+        close(fd);
+    }
+
+    if(!camera_focus_afm_warned) {
+        touch_trace_log("CAMERA_FOCUS_AFM_UNAVAILABLE");
+        camera_focus_afm_warned = 1;
+    }
+    return -ENODEV;
+}
+
+static int camera_focus_read_afm_metric(uint64_t *metric,
+                                        uint32_t *luminance,
+                                        uint32_t *pixel_count)
+{
+    uint32_t sharp_a = 0;
+    uint32_t sharp_b = 0;
+    uint32_t sharp_c = 0;
+    uint32_t lum_a = 0;
+    uint32_t pix_a = 0;
+    int fd;
+    int rc;
+
+    if(!metric) {
+        return -EINVAL;
+    }
+
+    fd = camera_focus_afm_open();
+    if(fd < 0) {
+        return fd;
+    }
+
+    rc = camera_focus_afm_read_u32(fd, CAMERA_FOCUS_AFM_WIN_A_SHARPNESS,
+                                   &sharp_a);
+    if(rc != 0) {
+        touch_trace_log("CAMERA_FOCUS_AFM_READ_FAILED node=%s rc=%d",
+                        camera_focus_afm_node, rc);
+        camera_focus_afm_close();
+        return rc;
+    }
+    (void)camera_focus_afm_read_u32(fd, CAMERA_FOCUS_AFM_WIN_B_SHARPNESS,
+                                    &sharp_b);
+    (void)camera_focus_afm_read_u32(fd, CAMERA_FOCUS_AFM_WIN_C_SHARPNESS,
+                                    &sharp_c);
+    (void)camera_focus_afm_read_u32(fd, CAMERA_FOCUS_AFM_WIN_A_LUMINANCE,
+                                    &lum_a);
+    (void)camera_focus_afm_read_u32(fd, CAMERA_FOCUS_AFM_WIN_A_PIXEL_CNT,
+                                    &pix_a);
+
+    *metric = (uint64_t)sharp_a + (uint64_t)sharp_b + (uint64_t)sharp_c;
+    if(luminance) {
+        *luminance = lum_a;
+    }
+    if(pixel_count) {
+        *pixel_count = pix_a;
+    }
+
+    return *metric > 0 ? 0 : -EAGAIN;
+}
+
 static int camera_focus_copy_latest_frame(uint8_t *dst, unsigned *width,
                                           unsigned *height,
                                           uint32_t *frame_count)
@@ -10606,7 +10769,9 @@ static int camera_focus_measure_position(int pos, uint8_t *sample_buf,
     unsigned width = 0;
     unsigned height = 0;
     uint64_t metric_sum = 0;
+    uint64_t afm_metric_sum = 0;
     unsigned metric_count = 0;
+    unsigned afm_metric_count = 0;
     int rc;
 
     if(!sample_buf || !metric || !roi_x || !roi_y || !roi_w || !roi_h ||
@@ -10625,6 +10790,8 @@ static int camera_focus_measure_position(int pos, uint8_t *sample_buf,
         if(rc != 0) {
             return rc;
         }
+        (void)camera_focus_copy_latest_frame(sample_buf, &width, &height,
+                                             frame_count);
     }
 
     if(camera_focus_scan_should_stop(req_seq)) {
@@ -10646,13 +10813,32 @@ static int camera_focus_measure_position(int pos, uint8_t *sample_buf,
     }
 
     for(int i = 0; i < CAMERA_FOCUS_SAMPLE_FRAMES; i++) {
+        uint64_t afm_metric = 0;
         uint64_t frame_metric;
+        uint32_t afm_luminance = 0;
+        uint32_t afm_pixels = 0;
 
         rc = camera_focus_wait_new_frame(frame_count,
                                          CAMERA_FOCUS_FRAME_WAIT_US,
                                          req_seq);
         if(rc != 0) {
             return rc;
+        }
+
+        rc = camera_focus_read_afm_metric(&afm_metric, &afm_luminance,
+                                          &afm_pixels);
+        if(rc == 0) {
+            afm_metric_sum += afm_metric;
+            afm_metric_count++;
+            if(width > 0U && height > 0U) {
+                camera_focus_normalize_roi(req_x, req_y, width, height,
+                                           roi_x, roi_y, roi_w, roi_h);
+            }
+            touch_trace_log("CAMERA_FOCUS_AFM_SAMPLE pos=%d metric=%llu "
+                            "lum=%u pixels=%u",
+                            pos, (unsigned long long)afm_metric,
+                            afm_luminance, afm_pixels);
+            continue;
         }
 
         rc = camera_focus_copy_latest_frame(sample_buf, &width, &height,
@@ -10668,6 +10854,11 @@ static int camera_focus_measure_position(int pos, uint8_t *sample_buf,
                                                     *roi_h);
         metric_sum += frame_metric;
         metric_count++;
+    }
+
+    if(afm_metric_count > 0U) {
+        *metric = afm_metric_sum / afm_metric_count;
+        return 0;
     }
 
     *metric = metric_count ? metric_sum / metric_count : 0;
@@ -10978,6 +11169,7 @@ static void camera_focus_worker_stop(void)
         pthread_join(thread, NULL);
         touch_trace_log("CAMERA_FOCUS_WORKER_STOP");
     }
+    camera_focus_afm_close();
 
     pthread_mutex_lock(&camera_focus_lock);
     camera_focus_stop = 0;
