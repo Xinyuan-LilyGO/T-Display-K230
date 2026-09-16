@@ -115,17 +115,17 @@
 #define CAMERA_FOCUS_COARSE_STEP 128
 #define CAMERA_FOCUS_TAP_RADIUS 192
 #define CAMERA_FOCUS_TAP_COARSE_STEP 64
-#define CAMERA_FOCUS_FINE_STEP 16
-#define CAMERA_FOCUS_FINE_RADIUS 64
-#define CAMERA_FOCUS_SETTLE_US 120000ULL
-#define CAMERA_FOCUS_FRAME_WAIT_US 260000ULL
-#define CAMERA_FOCUS_DISCARD_FRAMES 2
-#define CAMERA_FOCUS_SAMPLE_FRAMES 5
+#define CAMERA_FOCUS_FINE_STEP 24
+#define CAMERA_FOCUS_FINE_RADIUS 48
+#define CAMERA_FOCUS_SETTLE_US 90000ULL
+#define CAMERA_FOCUS_FRAME_WAIT_US 180000ULL
+#define CAMERA_FOCUS_DISCARD_FRAMES 1
+#define CAMERA_FOCUS_SAMPLE_FRAMES 3
 #define CAMERA_FOCUS_MARKER_SIZE 86
 #define CAMERA_FOCUS_APPROACH_DELTA 96
 #define CAMERA_FOCUS_APPROACH_SETTLE_US 60000ULL
 #define CAMERA_FOCUS_MAX_CANDIDATES 48
-#define CAMERA_FOCUS_VERIFY_TRIES 4
+#define CAMERA_FOCUS_VERIFY_TRIES 3
 #define CAMERA_FOCUS_VERIFY_RATIO_PCT 62ULL
 #define CAMERA_FOCUS_AFM_ENABLE (V4L2_CID_USER_BASE + 0x3A00)
 #define CAMERA_FOCUS_AFM_WIN_A_SHARPNESS (V4L2_CID_USER_BASE + 0x3A06)
@@ -11085,7 +11085,6 @@ static int camera_focus_verify_candidate(struct camera_focus_candidate *candidat
     if(rc != 0) {
         return rc;
     }
-    usleep(CAMERA_FOCUS_SETTLE_US);
 
     rc = camera_focus_measure_position(candidate->pos, sample_buf, req_x, req_y,
                                        &metric, &roi_x, &roi_y, &roi_w, &roi_h,
@@ -11134,8 +11133,10 @@ static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
     unsigned roi_h = 0;
     struct camera_focus_candidate candidates[CAMERA_FOCUS_MAX_CANDIDATES];
     unsigned candidate_count = 0;
+    unsigned verify_tries = 0;
     int current = -1;
     int rc = -EIO;
+    uint64_t scan_started_us = monotonic_us();
 
     sample_buf = malloc(CAMERA_PREVIEW_VIEW_BYTES);
     if(!sample_buf) {
@@ -11298,6 +11299,7 @@ static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
                                                req_x, req_y, &frame_count,
                                                req_seq, &verified_metric);
             tries++;
+            verify_tries = tries;
             if(rc == 0) {
                 selected = (int)i;
                 break;
@@ -11344,6 +11346,12 @@ static int camera_focus_run_scan(unsigned req_x, unsigned req_y,
         }
     }
 
+    touch_trace_log("CAMERA_FOCUS_SCAN_TIMING seq=%u full=%d elapsed_ms=%llu "
+                    "candidates=%u verifies=%u rc=%d",
+                    req_seq, full_scan,
+                    (unsigned long long)((monotonic_us() - scan_started_us) /
+                                         1000ULL),
+                    candidate_count, verify_tries, rc);
     free(sample_buf);
     return (best >= 0 && !camera_focus_scan_should_stop(req_seq)) ?
         rc : -ECANCELED;
@@ -11836,6 +11844,8 @@ static void *camera_preview_thread_cb(void *arg)
             int flip_v = camera_preview_flip_v ? 1 : 0;
             int detected_faces;
             int request_startup_focus = 0;
+            int startup_full_scan = 1;
+            int startup_reference_pos = -1;
             uint32_t layout_key = ((uint32_t)view_w << 16) ^
                                   ((uint32_t)view_h << 1) ^
                                   (uint32_t)(rotate_preview ? 1 : 0) ^
@@ -11889,8 +11899,15 @@ static void *camera_preview_thread_cb(void *arg)
             pthread_mutex_unlock(&camera_lock);
 
             if(request_startup_focus) {
-                camera_focus_request_at(view_w / 2U, view_h / 2U, 0, 1,
-                                        "startup");
+                pthread_mutex_lock(&camera_lock);
+                startup_reference_pos = camera_focus_last_pos;
+                startup_full_scan = startup_reference_pos < CAMERA_FOCUS_MIN_POS;
+                pthread_mutex_unlock(&camera_lock);
+                touch_trace_log("CAMERA_FOCUS_STARTUP full=%d reference_pos=%d",
+                                startup_full_scan,
+                                startup_reference_pos);
+                camera_focus_request_at(view_w / 2U, view_h / 2U, 0,
+                                        startup_full_scan, "startup");
             }
         }
 
