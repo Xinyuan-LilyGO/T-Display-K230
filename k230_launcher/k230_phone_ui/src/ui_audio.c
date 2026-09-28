@@ -2001,15 +2001,6 @@ static void music_info_open_cb(lv_event_t *event)
     }
 }
 
-static void music_info_close_cb(lv_event_t *event)
-{
-    (void)event;
-
-    if(music_info_overlay) {
-        lv_obj_add_flag(music_info_overlay, LV_OBJ_FLAG_HIDDEN);
-    }
-}
-
 static void music_refresh_ui(void)
 {
     char device[128];
@@ -2360,7 +2351,7 @@ static lv_obj_t *audio_create_row_ex(lv_obj_t *parent, int y,
 
     name = ui_label(row, title, &lv_font_montserrat_18, 0xF2F5F8);
     lv_obj_set_width(name, text_w);
-    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_align(name, LV_ALIGN_TOP_LEFT, text_x, 13);
     ui_make_click_forwarder(name);
 
@@ -3139,12 +3130,18 @@ static lv_obj_t *music_info_value_row(lv_obj_t *parent, int y,
 {
     lv_obj_t *left;
     lv_obj_t *right;
+    int content_w = lv_obj_get_width(parent) - 32;
+
+    if(content_w < 160) {
+        content_w = 160;
+    }
 
     left = ui_label(parent, name, &lv_font_montserrat_16, 0x9AA4AF);
+    lv_obj_set_width(left, content_w);
     lv_obj_set_pos(left, 0, y);
 
     right = ui_label(parent, value, &lv_font_montserrat_18, color);
-    lv_obj_set_width(right, ui_inner_width());
+    lv_obj_set_width(right, content_w);
     lv_label_set_long_mode(right, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(right, 0, y + 30);
     return right;
@@ -3152,10 +3149,21 @@ static lv_obj_t *music_info_value_row(lv_obj_t *parent, int y,
 
 static void music_create_info_overlay(lv_obj_t *scr)
 {
-    lv_obj_t *back;
-    lv_obj_t *back_icon;
     lv_obj_t *title;
     lv_obj_t *body;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = 24;
+    int body_y = 76;
+    int body_w = screen_w - margin * 2;
+    int body_h = screen_h - body_y - margin;
+
+    if(body_w < 280) {
+        body_w = 280;
+    }
+    if(body_h < 220) {
+        body_h = 220;
+    }
 
     music_info_overlay = lv_obj_create(scr);
     lv_obj_set_pos(music_info_overlay, 0, 0);
@@ -3167,23 +3175,16 @@ static void music_create_info_overlay(lv_obj_t *scr)
     lv_obj_set_style_pad_all(music_info_overlay, 0, 0);
     lv_obj_clear_flag(music_info_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
-    back = lv_obj_create(music_info_overlay);
-    lv_obj_set_pos(back, 24, 74);
-    audio_style_round_button(back, 58, 0x222832);
-    lv_obj_set_style_radius(back, 8, 0);
-    lv_obj_add_event_cb(back, music_info_close_cb, LV_EVENT_CLICKED, NULL);
-    back_icon = ui_label(back, LV_SYMBOL_LEFT, &lv_font_montserrat_24,
-                         0xF2F5F8);
-    lv_obj_center(back_icon);
-    ui_make_click_forwarder(back_icon);
-
     title = ui_label(music_info_overlay, "Song info", &lv_font_montserrat_28,
                      0xF2F5F8);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 108, 82);
+    lv_obj_set_width(title, body_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(title, margin, 24);
 
-    body = ui_panel(music_info_overlay, 24, 154, 520, 690);
+    body = ui_panel(music_info_overlay, margin, body_y, body_w, body_h);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x151B22), 0);
     lv_obj_set_style_pad_all(body, 16, 0);
+    ui_make_scrollable(body, 48);
 
     music_info_title_label = music_info_value_row(body, 0, "Title", "--",
                                                   0xF2F5F8);
@@ -3349,7 +3350,7 @@ void ui_music_create(lv_obj_t *scr)
     music_title_label = ui_label(body, player_title, &lv_font_montserrat_26,
                                  0xF2F5F8);
     lv_obj_set_width(music_title_label, control_w);
-    lv_label_set_long_mode(music_title_label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(music_title_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_align(music_title_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(music_title_label, control_x, title_y);
 

@@ -1241,6 +1241,7 @@ static void nes_create_library(lv_obj_t *parent)
     lv_obj_set_style_bg_color(nes_list_panel, lv_color_hex(0x121820), 0);
     lv_obj_set_style_border_color(nes_list_panel, lv_color_hex(0x243244), 0);
     lv_obj_set_style_pad_all(nes_list_panel, 0, 0);
+    lv_obj_add_flag(nes_list_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(nes_list_panel, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(nes_list_panel, LV_SCROLLBAR_MODE_OFF);
 }
