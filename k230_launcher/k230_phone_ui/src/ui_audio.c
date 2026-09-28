@@ -3201,6 +3201,21 @@ static void music_create_info_overlay(lv_obj_t *scr)
     lv_obj_add_flag(music_info_overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
+int ui_music_handle_back(void)
+{
+    if(music_list_overlay &&
+       !lv_obj_has_flag(music_list_overlay, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_add_flag(music_list_overlay, LV_OBJ_FLAG_HIDDEN);
+        return 1;
+    }
+    if(music_info_overlay &&
+       !lv_obj_has_flag(music_info_overlay, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_add_flag(music_info_overlay, LV_OBJ_FLAG_HIDDEN);
+        return 1;
+    }
+    return 0;
+}
+
 void ui_music_create(lv_obj_t *scr)
 {
     lv_obj_t *body;

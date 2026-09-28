@@ -4642,6 +4642,9 @@ static void nav_back(void)
     if(ui_xiaozhi_handle_back()) {
         return;
     }
+    if(current_page == PAGE_MUSIC && ui_music_handle_back()) {
+        return;
+    }
     if(current_page == PAGE_PICOCLAW && ui_picoclaw_handle_back()) {
         return;
     }

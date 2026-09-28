@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 void ui_music_create(lv_obj_t *scr);
+int ui_music_handle_back(void);
 void ui_net_radio_create(lv_obj_t *scr);
 void ui_recorder_create(lv_obj_t *scr);
 void ui_notification_settings_create(lv_obj_t *scr);
