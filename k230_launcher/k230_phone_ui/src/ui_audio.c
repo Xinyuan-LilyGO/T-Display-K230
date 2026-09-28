@@ -3130,7 +3130,13 @@ static lv_obj_t *music_info_value_row(lv_obj_t *parent, int y,
 {
     lv_obj_t *left;
     lv_obj_t *right;
-    int content_w = lv_obj_get_width(parent) - 32;
+    int screen_w = ui_screen_width();
+    int content_w = screen_w - 80;
+    int parent_w = lv_obj_get_width(parent) - 32;
+
+    if(parent_w > 0 && parent_w < content_w) {
+        content_w = parent_w;
+    }
 
     if(content_w < 160) {
         content_w = 160;
@@ -3142,7 +3148,7 @@ static lv_obj_t *music_info_value_row(lv_obj_t *parent, int y,
 
     right = ui_label(parent, value, &lv_font_montserrat_18, color);
     lv_obj_set_width(right, content_w);
-    lv_label_set_long_mode(right, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(right, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_pos(right, 0, y + 30);
     return right;
 }
@@ -3182,6 +3188,7 @@ static void music_create_info_overlay(lv_obj_t *scr)
     lv_obj_set_pos(title, margin, 24);
 
     body = ui_panel(music_info_overlay, margin, body_y, body_w, body_h);
+    lv_obj_set_width(body, body_w);
     lv_obj_set_style_bg_color(body, lv_color_hex(0x151B22), 0);
     lv_obj_set_style_pad_all(body, 16, 0);
     ui_make_scrollable(body, 48);
