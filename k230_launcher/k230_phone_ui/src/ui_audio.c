@@ -2260,15 +2260,6 @@ static void music_list_open_cb(lv_event_t *event)
     }
 }
 
-static void music_list_close_cb(lv_event_t *event)
-{
-    (void)event;
-
-    if(music_list_overlay) {
-        lv_obj_add_flag(music_list_overlay, LV_OBJ_FLAG_HIDDEN);
-    }
-}
-
 static void radio_row_cb(lv_event_t *event)
 {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
@@ -3091,11 +3082,11 @@ static void recorder_refresh_ui(void)
 
 static void music_create_list_overlay(lv_obj_t *scr)
 {
-    lv_obj_t *back;
-    lv_obj_t *back_icon;
-    lv_obj_t *title;
     lv_obj_t *list;
     lv_obj_t *count;
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int margin = 24;
 
     music_list_overlay = lv_obj_create(scr);
     lv_obj_set_pos(music_list_overlay, 0, 0);
@@ -3107,30 +3098,8 @@ static void music_create_list_overlay(lv_obj_t *scr)
     lv_obj_set_style_pad_all(music_list_overlay, 0, 0);
     lv_obj_clear_flag(music_list_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
-    back = lv_obj_create(music_list_overlay);
-    lv_obj_set_pos(back, 24, 74);
-    lv_obj_set_size(back, 64, 54);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x222832), 0);
-    lv_obj_set_style_bg_opa(back, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x2D3744), LV_STATE_PRESSED);
-    lv_obj_set_style_translate_y(back, 2, LV_STATE_PRESSED);
-    lv_obj_set_style_radius(back, 8, 0);
-    lv_obj_set_style_border_width(back, 1, 0);
-    lv_obj_set_style_border_color(back, lv_color_hex(0x2A3037), 0);
-    lv_obj_clear_flag(back, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(back, 8);
-    lv_obj_add_event_cb(back, music_list_close_cb, LV_EVENT_CLICKED, NULL);
-    back_icon = ui_label(back, LV_SYMBOL_LEFT, &lv_font_montserrat_24,
-                         0xF2F5F8);
-    lv_obj_center(back_icon);
-    ui_make_click_forwarder(back_icon);
-
-    title = ui_label(music_list_overlay, "Music list", &lv_font_montserrat_28,
-                     0xF2F5F8);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 108, 82);
-
-    list = ui_panel(music_list_overlay, 24, 154, 520, 1038);
+    list = ui_panel(music_list_overlay, margin, margin,
+                    screen_w - margin * 2, screen_h - margin * 2);
     lv_obj_set_style_bg_color(list, lv_color_hex(0x101418), 0);
     lv_obj_set_style_pad_all(list, 16, 0);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
