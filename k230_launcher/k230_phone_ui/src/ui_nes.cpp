@@ -14,6 +14,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -95,6 +96,7 @@ static lv_obj_t *nes_frame_image;
 static lv_obj_t *nes_frame_placeholder;
 static lv_obj_t *nes_game_status_label;
 static lv_obj_t *nes_control_btn[8];
+static int nes_list_cached_w;
 
 static pthread_t nes_emulator_thread;
 static int nes_emulator_thread_valid;
@@ -304,12 +306,25 @@ static int nes_parse_header(nes_rom_item_t *item)
     FILE *fp;
     uint8_t h[16];
     size_t got;
+    uint64_t expected_size;
 
     if(!item) {
         return 0;
     }
+    if(item->size == 0) {
+        item->valid_header = 0;
+        snprintf(item->meta, sizeof(item->meta), "Empty ROM file");
+        return 0;
+    }
+    if(item->size < sizeof(h)) {
+        item->valid_header = 0;
+        snprintf(item->meta, sizeof(item->meta), "ROM file is too small");
+        return 0;
+    }
     fp = fopen(item->path, "rb");
     if(!fp) {
+        item->valid_header = 0;
+        snprintf(item->meta, sizeof(item->meta), "Cannot open ROM file");
         return 0;
     }
     got = fread(h, 1, sizeof(h), fp);
@@ -328,6 +343,20 @@ static int nes_parse_header(nes_rom_item_t *item)
     item->battery = (h[6] & 0x02) ? 1 : 0;
     item->trainer = (h[6] & 0x04) ? 1 : 0;
     item->four_screen = (h[6] & 0x08) ? 1 : 0;
+    if(item->prg_banks == 0) {
+        item->valid_header = 0;
+        snprintf(item->meta, sizeof(item->meta), "Invalid ROM: no PRG data");
+        return 0;
+    }
+    expected_size = 16ULL + (item->trainer ? 512ULL : 0ULL) +
+        (uint64_t)item->prg_banks * 16ULL * 1024ULL +
+        (uint64_t)item->chr_banks * 8ULL * 1024ULL;
+    if(item->size < expected_size) {
+        item->valid_header = 0;
+        snprintf(item->meta, sizeof(item->meta),
+                 "Invalid ROM: truncated file");
+        return 0;
+    }
     snprintf(item->mirror, sizeof(item->mirror), "%s",
              item->four_screen ? "4-screen" : ((h[6] & 0x01) ? "Vertical" : "Horizontal"));
     snprintf(item->system, sizeof(item->system), "%s",
@@ -338,6 +367,66 @@ static int nes_parse_header(nes_rom_item_t *item)
              (unsigned)item->chr_banks * 8U, item->mirror, item->system,
              item->battery ? "  Battery" : "",
              item->trainer ? "  Trainer" : "");
+    return 1;
+}
+
+static int nes_validate_rom_for_start(const char *path, char *reason,
+                                      size_t reason_len)
+{
+    FILE *fp;
+    struct stat st;
+    uint8_t h[16];
+    size_t got;
+    uint64_t expected_size;
+    uint8_t prg_banks;
+    uint8_t chr_banks;
+    int trainer;
+
+    if(reason && reason_len) {
+        reason[0] = '\0';
+    }
+    if(!path || !path[0]) {
+        snprintf(reason, reason_len, "No ROM selected");
+        return 0;
+    }
+    if(stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        snprintf(reason, reason_len, "ROM file not found");
+        return 0;
+    }
+    if(st.st_size <= 0) {
+        snprintf(reason, reason_len, "ROM file is empty");
+        return 0;
+    }
+    if(st.st_size < (off_t)sizeof(h)) {
+        snprintf(reason, reason_len, "ROM file is too small");
+        return 0;
+    }
+    fp = fopen(path, "rb");
+    if(!fp) {
+        snprintf(reason, reason_len, "Cannot open ROM file");
+        return 0;
+    }
+    got = fread(h, 1, sizeof(h), fp);
+    fclose(fp);
+    if(got != sizeof(h) || h[0] != 'N' || h[1] != 'E' || h[2] != 'S' ||
+       h[3] != 0x1A) {
+        snprintf(reason, reason_len, "Invalid NES ROM header");
+        return 0;
+    }
+    prg_banks = h[4];
+    chr_banks = h[5];
+    trainer = (h[6] & 0x04) ? 1 : 0;
+    if(prg_banks == 0) {
+        snprintf(reason, reason_len, "Invalid ROM: no PRG data");
+        return 0;
+    }
+    expected_size = 16ULL + (trainer ? 512ULL : 0ULL) +
+        (uint64_t)prg_banks * 16ULL * 1024ULL +
+        (uint64_t)chr_banks * 8ULL * 1024ULL;
+    if((uint64_t)st.st_size < expected_size) {
+        snprintf(reason, reason_len, "ROM file is truncated");
+        return 0;
+    }
     return 1;
 }
 
@@ -881,7 +970,17 @@ static void *nes_emulator_thread_main(void *arg)
 
 static int nes_start_emulator(const char *path)
 {
+    char reason[128];
+
     if(!path || !path[0] || nes_emulator_running) {
+        return 0;
+    }
+    if(!nes_validate_rom_for_start(path, reason, sizeof(reason))) {
+        nes_set_status(reason, 0xEF4D5A);
+        if(nes_game_status_label && lv_obj_is_valid(nes_game_status_label)) {
+            lv_label_set_text(nes_game_status_label, reason);
+        }
+        nes_log("Rejected ROM %s: %s", path ? path : "(null)", reason);
         return 0;
     }
     ui_audio_stop_for_exclusive_app("Stopped for NES");
@@ -952,9 +1051,11 @@ static void nes_create_empty_row(const char *text)
     if(!nes_list_panel) {
         return;
     }
-    panel_w = lv_obj_get_width(nes_list_panel) - 32;
-    if(panel_w < 260) {
-        panel_w = 260;
+    panel_w = nes_list_cached_w > 0 ? nes_list_cached_w :
+        lv_obj_get_width(nes_list_panel);
+    panel_w -= 32;
+    if(panel_w < 160) {
+        panel_w = 160;
     }
     label = ui_label(nes_list_panel, text, &lv_font_montserrat_18, 0x9AA4AF);
     lv_obj_set_width(label, panel_w);
@@ -971,16 +1072,20 @@ static void nes_create_rom_row(int index)
     lv_obj_t *meta;
     lv_obj_t *size_label;
     char size_buf[32];
-    int panel_w = nes_list_panel ? lv_obj_get_width(nes_list_panel) : 520;
+    int panel_w = nes_list_cached_w > 0 ? nes_list_cached_w :
+        (nes_list_panel ? lv_obj_get_width(nes_list_panel) : 520);
     int row_w = panel_w - 16;
     int title_w;
 
-    if(row_w < 320) {
-        row_w = 320;
+    if(row_w < 160) {
+        row_w = 160;
     }
-    title_w = row_w - 190;
+    title_w = row_w - 178;
     if(title_w < 160) {
-        title_w = row_w - 72;
+        title_w = row_w - 68;
+    }
+    if(title_w < 96) {
+        title_w = 96;
     }
 
     row = ui_panel(nes_list_panel, 8, 8 + index * 88, row_w, 78);
@@ -999,7 +1104,7 @@ static void nes_create_rom_row(int index)
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(title, 52, 10);
 
-    meta = ui_label(row, item->valid_header ? item->meta : "Invalid ROM header",
+    meta = ui_label(row, item->valid_header ? item->meta : item->meta,
                     &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_width(meta, row_w - 72);
     lv_label_set_long_mode(meta, LV_LABEL_LONG_DOT);
@@ -1238,6 +1343,7 @@ static void nes_create_library(lv_obj_t *parent)
                    landscape ? body_h - 30 : list_y - 34);
 
     nes_list_panel = ui_panel(nes_library_panel, list_x, list_y, list_w, list_h);
+    nes_list_cached_w = list_w;
     lv_obj_set_style_bg_color(nes_list_panel, lv_color_hex(0x121820), 0);
     lv_obj_set_style_border_color(nes_list_panel, lv_color_hex(0x243244), 0);
     lv_obj_set_style_pad_all(nes_list_panel, 0, 0);
