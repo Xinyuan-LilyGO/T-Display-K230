@@ -62,6 +62,8 @@ The K230 main board exposes the following 40-pin header.
 | GC2093 camera | `GPIO49` | I2C SDA | Camera SDA | Camera sensor I2C address is `0x37`. |
 | GC2093 camera | `GPIO48` | I2C SCL | Camera SCL | Used with the MIPI CSI camera path. |
 | GC2093 camera | MIPI CSI | Input | Camera data | Used by camera preview, capture, RTSP, and AI camera features. |
+| DW9714 focus actuator | `GPIO49` | I2C SDA | Focus SDA | Optional VCM on the camera I2C bus; 7-bit address is `0x0C`. |
+| DW9714 focus actuator | `GPIO48` | I2C SCL | Focus SCL | Optional VCM on the camera I2C bus. |
 | SD card | `GPIO54` | SDIO CMD | SD CMD | Boot/storage SDMMC path. |
 | SD card | `GPIO55` | SDIO CLK | SD CLK | Boot/storage SDMMC path. |
 | SD card | `GPIO56` | SDIO D0 | SD D0 | Boot/storage SDMMC path. |
@@ -128,6 +130,7 @@ keyboard backlight, battery gauge, charger, and GPIO expander devices.
 
 | 7-bit address | Device | Board group |
 | --- | --- | --- |
+| `0x0C` | DW9714 focus actuator | Optional camera module |
 | `0x37` | GC2093 camera sensor | K230 main board |
 | `0x5D` | GT9895 / Goodix touch controller | K230 main board |
 | `0x6B` | BQ25896 charger | nRF9151 keyboard base |

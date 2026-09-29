@@ -62,6 +62,8 @@ K230 主板引出的 40Pin 排针如下
 | GC2093 摄像头 | `GPIO49` | I2C SDA | Camera SDA | 摄像头 I2C 地址是 `0x37` |
 | GC2093 摄像头 | `GPIO48` | I2C SCL | Camera SCL | 配合 MIPI CSI 摄像头路径使用 |
 | GC2093 摄像头 | MIPI CSI | 输入 | 摄像头数据 | 用于相机预览、拍照、RTSP 和 AI 摄像头功能 |
+| DW9714 对焦模组 | `GPIO49` | I2C SDA | Focus SDA | 可选 VCM，对焦模组 I2C 地址是 `0x0C` |
+| DW9714 对焦模组 | `GPIO48` | I2C SCL | Focus SCL | 和摄像头共用 I2C 总线 |
 | SD 卡 | `GPIO54` | SDIO CMD | SD CMD | 启动/存储 SDMMC 路径 |
 | SD 卡 | `GPIO55` | SDIO CLK | SD CLK | 启动/存储 SDMMC 路径 |
 | SD 卡 | `GPIO56` | SDIO D0 | SD D0 | 启动/存储 SDMMC 路径 |
@@ -128,6 +130,7 @@ MAX98357A 外部 I2S 功放
 
 | 7-bit 地址 | 设备 | 板卡分组 |
 | --- | --- | --- |
+| `0x0C` | DW9714 对焦模组 | 可选摄像头模组 |
 | `0x37` | GC2093 摄像头 | K230 主板 |
 | `0x5D` | GT9895 / Goodix 触摸控制器 | K230 主板 |
 | `0x6B` | BQ25896 充电器 | nRF9151 键盘底板 |

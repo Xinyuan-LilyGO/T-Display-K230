@@ -2,6 +2,20 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## v0.2.5 - 2026-09-29
+
+- Added optional DRV2605 haptics support and related settings entries.
+- Added camera focus support for DW9714-based modules, including tap focus and
+  autofocus stability improvements.
+- Added QR code scanning through the camera app flow.
+- Improved camera startup reliability and focus settling behavior.
+- Improved music and NES list navigation, long-title handling, and portrait
+  layout bounds.
+- Added invalid NES ROM protection to avoid crashes when a ROM file is empty or
+  incomplete.
+- Improved MTP storage-space reporting and write-error handling so failed file
+  copies are easier to diagnose.
+
 ## v0.2.4 - 2026-09-03
 
 - Added PicoClaw chat app with model profiles, API-key storage, SSH profile

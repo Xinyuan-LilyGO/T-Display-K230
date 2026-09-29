@@ -214,7 +214,7 @@ Launcher：
 
 - RM69A10 AMOLED MIPI DSI 屏幕和 U-Boot 启动 logo
 - GT9895 / Goodix Berlin 触摸
-- GC2093 摄像头
+- GC2093 摄像头和可选 DW9714 对焦模组
 - RTL8189FS SDIO Wi-Fi
 - USB 蓝牙适配器支持和 BlueZ 运行环境
 - nRF52840 UART 预设

@@ -220,7 +220,7 @@ Deploy the launcher and boot files:
 
 - RM69A10 AMOLED MIPI DSI panel and U-Boot boot logo.
 - GT9895 / Goodix Berlin touchscreen.
-- GC2093 camera.
+- GC2093 camera with optional DW9714 focus actuator.
 - RTL8189FS SDIO Wi-Fi.
 - USB Bluetooth adapter support and BlueZ runtime.
 - nRF52840 UART preset.

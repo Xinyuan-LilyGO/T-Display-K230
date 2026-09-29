@@ -34,7 +34,7 @@ applied, which keeps clean rebuilds and reboot validation predictable.
 
 - RM69A10 AMOLED MIPI DSI panel and U-Boot boot logo.
 - GT9895 / Goodix Berlin touchscreen.
-- GC2093 camera support.
+- GC2093 camera support with optional DW9714 focus actuator.
 - RTL8189FS and RTL8723DS SDIO Wi-Fi support.
 - USB Bluetooth adapter kernel support and BlueZ tools.
 - nRF52840 UART1 pin preset.

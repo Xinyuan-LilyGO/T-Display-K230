@@ -33,7 +33,7 @@ BSP 应用流程会在 overlay 应用时刷新已生成的 rootfs 镜像产物�
 
 - RM69A10 AMOLED MIPI DSI 屏幕和 U-Boot 启动 logo。
 - GT9895 / Goodix Berlin 触摸驱动。
-- GC2093 摄像头支持。
+- GC2093 摄像头和可选 DW9714 对焦模组支持。
 - RTL8189FS 和 RTL8723DS SDIO Wi-Fi 支持。
 - USB 蓝牙适配器内核支持和 BlueZ 工具。
 - nRF52840 UART1 引脚预设。
