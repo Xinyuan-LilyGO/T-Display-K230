@@ -3,6 +3,23 @@
 #adb.exe device
 #adb.exe shell
 g1="/sys/kernel/config/usb_gadget/g1"
+: "${K230_MTP_MIN_FREE_KB:=32768}"
+
+check_mtp_storage_space()
+{
+    free_kb="$(df -Pk /root 2>/dev/null | awk 'NR==2 {print $4}')"
+    case "$free_kb" in
+      ''|*[!0-9]*)
+        echo "MTP storage space check skipped: cannot read /root free space"
+        return 0
+        ;;
+    esac
+    if [ "$free_kb" -lt "$K230_MTP_MIN_FREE_KB" ]; then
+      echo "MTP storage free space too low: ${free_kb}KB < ${K230_MTP_MIN_FREE_KB}KB"
+      return 1
+    fi
+    return 0
+}
 
 start_manual()
 {
@@ -10,6 +27,7 @@ start_manual()
       echo "USB mass-storage active; skip ADB/MTP gadget"
       exit 0
     fi
+    check_mtp_storage_space || exit 1
 
     modprobe libcomposite
     modprobe usb_f_fs

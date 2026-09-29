@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #define USB_MTP_SCRIPT "/etc/init.d/S41adb_mtp"
@@ -17,7 +18,7 @@
 #define USB_MTP_EP0 "/dev/usb-ffs/mtp/ep0"
 #define USB_MTP_STORE "/root/"
 #define USB_MTP_STORE_LABEL "/root/ on SD card"
-#define USB_MTP_SCREENSHOT_DIR "/root/screenshots"
+#define USB_MTP_MIN_FREE_KB (32ULL * 1024ULL)
 
 typedef enum {
     USB_ACTION_START = 0,
@@ -30,13 +31,69 @@ static lv_obj_t *usb_storage_status_label;
 static lv_obj_t *usb_storage_state_label;
 static lv_obj_t *usb_storage_image_label;
 static lv_obj_t *usb_storage_mount_label;
-static lv_obj_t *usb_storage_screenshot_label;
+static lv_obj_t *usb_storage_space_label;
 static lv_obj_t *usb_storage_start_btn;
 static lv_obj_t *usb_storage_stop_btn;
 static int usb_storage_busy;
 static int usb_storage_result_ready;
 static int usb_storage_last_rc;
 static char usb_storage_status_text[192] = "Ready";
+
+static int usb_storage_space(uint64_t *total_kb, uint64_t *free_kb)
+{
+    struct statvfs vfs;
+
+    if(statvfs(USB_MTP_STORE, &vfs) != 0 || vfs.f_frsize == 0) {
+        return -1;
+    }
+    if(total_kb) {
+        *total_kb = (uint64_t)vfs.f_blocks * (uint64_t)vfs.f_frsize / 1024ULL;
+    }
+    if(free_kb) {
+        *free_kb = (uint64_t)vfs.f_bavail * (uint64_t)vfs.f_frsize / 1024ULL;
+    }
+    return 0;
+}
+
+static void usb_storage_format_kb(uint64_t kb, char *out, size_t out_len)
+{
+    if(!out || out_len == 0) {
+        return;
+    }
+    if(kb >= 1024ULL * 1024ULL) {
+        snprintf(out, out_len, "%.1f GB", (double)kb / (1024.0 * 1024.0));
+    } else if(kb >= 1024ULL) {
+        snprintf(out, out_len, "%.0f MB", (double)kb / 1024.0);
+    } else {
+        snprintf(out, out_len, "%llu KB", (unsigned long long)kb);
+    }
+}
+
+static void usb_storage_format_space(char *out, size_t out_len,
+                                     int *space_low)
+{
+    uint64_t total_kb;
+    uint64_t free_kb;
+    char total[32];
+    char free_space[32];
+
+    if(space_low) {
+        *space_low = 0;
+    }
+    if(!out || out_len == 0) {
+        return;
+    }
+    if(usb_storage_space(&total_kb, &free_kb) != 0) {
+        snprintf(out, out_len, "%s", ui_tr("Unknown"));
+        return;
+    }
+    usb_storage_format_kb(free_kb, free_space, sizeof(free_space));
+    usb_storage_format_kb(total_kb, total, sizeof(total));
+    snprintf(out, out_len, "%s / %s", free_space, total);
+    if(space_low && free_kb < USB_MTP_MIN_FREE_KB) {
+        *space_low = 1;
+    }
+}
 
 static int usb_storage_is_active(void)
 {
@@ -95,10 +152,19 @@ static void *usb_storage_action_thread(void *arg)
 static void usb_storage_start_action(usb_storage_action_t action)
 {
     pthread_t thread;
+    uint64_t free_kb = 0;
 
     pthread_mutex_lock(&usb_storage_lock);
     if(usb_storage_busy) {
         pthread_mutex_unlock(&usb_storage_lock);
+        return;
+    }
+    if(action == USB_ACTION_START &&
+       usb_storage_space(NULL, &free_kb) == 0 &&
+       free_kb < USB_MTP_MIN_FREE_KB) {
+        usb_storage_set_status_locked("Not enough free space for MTP", -1);
+        pthread_mutex_unlock(&usb_storage_lock);
+        app_request_fast_refresh();
         return;
     }
     usb_storage_busy = 1;
@@ -135,7 +201,9 @@ static void usb_storage_update(void)
     int active = usb_storage_is_active();
     int busy;
     int rc;
+    int space_low = 0;
     char status[192];
+    char space_text[96];
 
     pthread_mutex_lock(&usb_storage_lock);
     busy = usb_storage_busy;
@@ -143,12 +211,16 @@ static void usb_storage_update(void)
     snprintf(status, sizeof(status), "%s", usb_storage_status_text);
     usb_storage_result_ready = 0;
     pthread_mutex_unlock(&usb_storage_lock);
+    usb_storage_format_space(space_text, sizeof(space_text), &space_low);
 
     if(usb_storage_status_label) {
-        uint32_t color = active ? 0x25C281 : (rc == 0 ? 0x9AA4AF : 0xF5A524);
+        uint32_t color = active ? 0x25C281 :
+            (space_low ? 0xEF4D5A : (rc == 0 ? 0x9AA4AF : 0xF5A524));
         lv_label_set_text(usb_storage_status_label,
-                          ui_tr(busy ? status :
-                                (active ? "Shared with host computer" : status)));
+                          ui_tr(space_low && !active && !busy ?
+                                "Not enough free space for MTP" :
+                                (busy ? status :
+                                 (active ? "Shared with host computer" : status))));
         lv_obj_set_style_text_color(usb_storage_status_label, lv_color_hex(color), 0);
     }
 
@@ -167,12 +239,15 @@ static void usb_storage_update(void)
         lv_label_set_text(usb_storage_mount_label, ui_tr(USB_MTP_STORE_LABEL));
     }
 
-    if(usb_storage_screenshot_label) {
-        lv_label_set_text(usb_storage_screenshot_label, USB_MTP_SCREENSHOT_DIR);
+    if(usb_storage_space_label) {
+        lv_label_set_text(usb_storage_space_label, space_text);
+        lv_obj_set_style_text_color(usb_storage_space_label,
+                                    lv_color_hex(space_low ? 0xEF4D5A :
+                                                 0xF2F5F8), 0);
     }
 
     if(usb_storage_start_btn) {
-        if(active || busy) {
+        if(active || busy || space_low) {
             lv_obj_add_state(usb_storage_start_btn, LV_STATE_DISABLED);
         } else {
             lv_obj_clear_state(usb_storage_start_btn, LV_STATE_DISABLED);
@@ -220,7 +295,7 @@ void ui_usb_storage_create(lv_obj_t *scr)
     int row_state_y = landscape ? 94 : 244;
     int row_protocol_y = landscape ? 148 : 306;
     int row_storage_y = landscape ? 202 : 368;
-    int row_screenshot_y = landscape ? 256 : 430;
+    int row_space_y = landscape ? 256 : 430;
     int button_y = landscape ? 352 : 528;
 
     ui_create_header(scr, "MTP");
@@ -261,8 +336,8 @@ void ui_usb_storage_create(lv_obj_t *scr)
     }
     if(landscape && button_y + 60 > body_h - 16) {
         button_y = body_h - 76;
-        if(button_y < row_screenshot_y + 58) {
-            button_y = row_screenshot_y + 58;
+        if(button_y < row_space_y + 58) {
+            button_y = row_space_y + 58;
         }
     }
 
@@ -351,21 +426,20 @@ void ui_usb_storage_create(lv_obj_t *scr)
         lv_obj_align(usb_storage_mount_label, LV_ALIGN_TOP_RIGHT, 0, 366);
     }
 
-    label_obj = ui_label(body, "Screenshots", &lv_font_montserrat_16, 0x9AA4AF);
+    label_obj = ui_label(body, "Free space", &lv_font_montserrat_16, 0x9AA4AF);
     lv_obj_set_width(label_obj, landscape ? label_w : 160);
     lv_label_set_long_mode(label_obj, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(label_obj, landscape ? right_x : 0, row_screenshot_y);
-    usb_storage_screenshot_label = ui_label(body, USB_MTP_SCREENSHOT_DIR,
-                                            &lv_font_montserrat_18, 0x22C55E);
-    lv_obj_set_width(usb_storage_screenshot_label, value_w);
-    lv_label_set_long_mode(usb_storage_screenshot_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(usb_storage_screenshot_label,
+    lv_obj_set_pos(label_obj, landscape ? right_x : 0, row_space_y);
+    usb_storage_space_label = ui_label(body, "--",
+                                       &lv_font_montserrat_18, 0xF2F5F8);
+    lv_obj_set_width(usb_storage_space_label, value_w);
+    lv_label_set_long_mode(usb_storage_space_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(usb_storage_space_label,
                                 LV_TEXT_ALIGN_RIGHT, 0);
     if(landscape) {
-        lv_obj_set_pos(usb_storage_screenshot_label, value_x,
-                       row_screenshot_y - 2);
+        lv_obj_set_pos(usb_storage_space_label, value_x, row_space_y - 2);
     } else {
-        lv_obj_align(usb_storage_screenshot_label, LV_ALIGN_TOP_RIGHT, 0, 428);
+        lv_obj_align(usb_storage_space_label, LV_ALIGN_TOP_RIGHT, 0, 428);
     }
 
     usb_storage_start_btn = ui_command_button(body,
@@ -398,7 +472,7 @@ void ui_usb_storage_cleanup(void)
     usb_storage_state_label = NULL;
     usb_storage_image_label = NULL;
     usb_storage_mount_label = NULL;
-    usb_storage_screenshot_label = NULL;
+    usb_storage_space_label = NULL;
     usb_storage_start_btn = NULL;
     usb_storage_stop_btn = NULL;
 }
