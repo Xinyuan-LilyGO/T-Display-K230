@@ -9,7 +9,7 @@
  #include <media/v4l2-device.h>
  #include <media/v4l2-event.h>
 @@ -111,6 +112,56 @@
- 
+
  static const struct v4l2_subdev_ops dw9714_ops = {
  	.core = &dw9714_core_ops,
 +};
@@ -63,12 +63,12 @@
 +static const struct attribute_group dw9714_attr_group = {
 +	.attrs = dw9714_attrs,
  };
- 
+
  static void dw9714_subdev_cleanup(struct dw9714_device *dw9714_dev)
 @@ -186,12 +237,18 @@
  	if (rval < 0)
  		goto err_cleanup;
- 
+
 +	rval = sysfs_create_group(&client->dev.kobj, &dw9714_attr_group);
 +	if (rval < 0)
 +		goto err_unregister;
@@ -76,9 +76,9 @@
  	pm_runtime_set_active(&client->dev);
  	pm_runtime_enable(&client->dev);
  	pm_runtime_idle(&client->dev);
- 
+
  	return 0;
- 
+
 +err_unregister:
 +	v4l2_async_unregister_subdev(&dw9714_dev->sd);
  err_cleanup:
@@ -90,6 +90,6 @@
  	int ret;
 +
 +	sysfs_remove_group(&client->dev.kobj, &dw9714_attr_group);
- 
+
  	pm_runtime_disable(&client->dev);
  	if (!pm_runtime_status_suspended(&client->dev) && dw9714_dev->vcc) {
