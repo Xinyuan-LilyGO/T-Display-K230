@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: T-Display K230 Maintainers <maintainers@example.com>
+Date: Tue, 29 Sep 2026 06:45:00 +0000
+Subject: [PATCH] mtp: report sendobject write failures
+
+Return a proper MTP error when writing an uploaded object fails, drain
+remaining USB data to keep the transaction aligned, and remove incomplete
+regular uploads.
+
+--- a/src/mtp_operations/mtp_op_sendobject.c	2024-07-08 20:19:44.000000000 +0000
++++ b/src/mtp_operations/mtp_op_sendobject.c	2026-09-29 06:39:23.154962901 +0000
+@@ -25,6 +25,7 @@
+ 
+ #include "buildconf.h"
+ 
++#include <errno.h>
+ #include <inttypes.h>
+ #include <pthread.h>
+ #include <unistd.h>
+@@ -50,6 +51,10 @@
+ 	char * full_path;
+ 	int file;
+ 	int sz;
++	ssize_t written;
++	int transfer_failed;
++	int write_errno;
++	int remove_partial;
+ 
+ 	if(!ctx->fs_db)
+ 		return MTP_RESPONSE_SESSION_NOT_OPEN;
+@@ -101,6 +106,10 @@
+ 						if( file != -1 )
+ 						{
+ 							ctx->transferring_file_data = 1;
++							transfer_failed = 0;
++							write_errno = 0;
++							remove_partial = (mtp_packet_hdr->code !=
++								MTP_OPERATION_SEND_PARTIAL_OBJECT);
+ 
+ 							lseek64(file, ctx->SendObjInfoOffset, SEEK_SET);
+ 
+@@ -110,9 +119,14 @@
+ 
+ 							if(sz > 0)
+ 							{
+-								if( write(file, tmp_ptr, sz) != sz)
++								written = write(file, tmp_ptr, sz);
++								if( written != sz )
+ 								{
+-									// TODO : Handle this error case properly
++									write_errno = errno ? errno : EIO;
++									transfer_failed = 1;
++									response_code = posix_to_mtp_errcode(write_errno);
++									PRINT_WARN("SEND_OBJECT : write failed for %s, errno=%d",
++										full_path, write_errno);
+ 								}
+ 
+ 								ctx->SendObjInfoSize -= sz;
+@@ -135,9 +149,17 @@
+ 
+ 								if( sz >= 0 )
+ 								{
+-									if( write(file, tmp_ptr, sz) != sz)
++									if( !transfer_failed )
+ 									{
+-										// TODO : Handle this error case properly
++										written = write(file, tmp_ptr, sz);
++										if( written != sz )
++										{
++											write_errno = errno ? errno : EIO;
++											transfer_failed = 1;
++											response_code = posix_to_mtp_errcode(write_errno);
++											PRINT_WARN("SEND_OBJECT : write failed for %s, errno=%d",
++												full_path, write_errno);
++										}
+ 									}
+ 
+ 									ctx->SendObjInfoSize -= sz;
+@@ -150,8 +172,15 @@
+ 
+ 							close(file);
+ 
+-							if(ctx->usb_cfg.val_umask >= 0)
++							if( transfer_failed )
++							{
++								if( remove_partial )
++									unlink(full_path);
++							}
++							else if(ctx->usb_cfg.val_umask >= 0)
++							{
+ 								chmod(full_path, 0777 & (~ctx->usb_cfg.val_umask));
++							}
+ 
+ 							if(ctx->cancel_req)
+ 							{
+@@ -164,7 +193,8 @@
+ 								return MTP_RESPONSE_NO_RESPONSE;
+ 							}
+ 
+-							response_code = MTP_RESPONSE_OK;
++							if( !transfer_failed )
++								response_code = MTP_RESPONSE_OK;
+ 						}
+ 
+ 						free( full_path );
