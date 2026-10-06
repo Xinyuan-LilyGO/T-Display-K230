@@ -24,6 +24,7 @@ extern "C" {
 #include "gui.h"
 #include "log.h"
 #include "nes/nes.h"
+#include "nes/nes_mmc.h"
 #include "nes/nes_pal.h"
 #include "nes/nesinput.h"
 #include "nofconfig.h"
@@ -59,7 +60,7 @@ typedef struct {
     uint8_t valid_header;
     uint8_t prg_banks;
     uint8_t chr_banks;
-    uint8_t mapper;
+    uint16_t mapper;
     uint8_t battery;
     uint8_t trainer;
     uint8_t four_screen;
@@ -301,6 +302,25 @@ static void nes_find_cover(nes_rom_item_t *item)
     }
 }
 
+static int nes_is_nes2_header(const uint8_t h[16])
+{
+    return (h[7] & 0x0C) == 0x08;
+}
+
+static uint16_t nes_mapper_from_header(const uint8_t h[16])
+{
+    uint16_t mapper = (uint16_t)((h[6] >> 4) | (h[7] & 0xF0));
+    if(nes_is_nes2_header(h)) {
+        mapper |= (uint16_t)(h[8] & 0x0F) << 8;
+    }
+    return mapper;
+}
+
+static int nes_mapper_supported(uint16_t mapper)
+{
+    return mmc_peek((int)mapper) ? 1 : 0;
+}
+
 static int nes_parse_header(nes_rom_item_t *item)
 {
     FILE *fp;
@@ -339,10 +359,24 @@ static int nes_parse_header(nes_rom_item_t *item)
     item->valid_header = 1;
     item->prg_banks = h[4];
     item->chr_banks = h[5];
-    item->mapper = (uint8_t)((h[6] >> 4) | (h[7] & 0xF0));
+    item->mapper = nes_mapper_from_header(h);
     item->battery = (h[6] & 0x02) ? 1 : 0;
     item->trainer = (h[6] & 0x04) ? 1 : 0;
     item->four_screen = (h[6] & 0x08) ? 1 : 0;
+    if(nes_is_nes2_header(h)) {
+        item->valid_header = 0;
+        snprintf(item->meta, sizeof(item->meta),
+                 "Unsupported NES 2.0 ROM: mapper %u",
+                 (unsigned)item->mapper);
+        return 0;
+    }
+    if(!nes_mapper_supported(item->mapper)) {
+        item->valid_header = 0;
+        snprintf(item->meta, sizeof(item->meta),
+                 "Unsupported mapper %u",
+                 (unsigned)item->mapper);
+        return 0;
+    }
     if(item->prg_banks == 0) {
         item->valid_header = 0;
         snprintf(item->meta, sizeof(item->meta), "Invalid ROM: no PRG data");
@@ -363,7 +397,7 @@ static int nes_parse_header(nes_rom_item_t *item)
              (h[9] & 0x01) ? "PAL" : "NTSC");
     snprintf(item->meta, sizeof(item->meta),
              "Mapper %u  PRG %uKB  CHR %uKB  %s  %s%s%s",
-             item->mapper, (unsigned)item->prg_banks * 16U,
+             (unsigned)item->mapper, (unsigned)item->prg_banks * 16U,
              (unsigned)item->chr_banks * 8U, item->mirror, item->system,
              item->battery ? "  Battery" : "",
              item->trainer ? "  Trainer" : "");
@@ -380,6 +414,7 @@ static int nes_validate_rom_for_start(const char *path, char *reason,
     uint64_t expected_size;
     uint8_t prg_banks;
     uint8_t chr_banks;
+    uint16_t mapper;
     int trainer;
 
     if(reason && reason_len) {
@@ -416,6 +451,17 @@ static int nes_validate_rom_for_start(const char *path, char *reason,
     prg_banks = h[4];
     chr_banks = h[5];
     trainer = (h[6] & 0x04) ? 1 : 0;
+    mapper = nes_mapper_from_header(h);
+    if(nes_is_nes2_header(h)) {
+        snprintf(reason, reason_len, "Unsupported NES 2.0 ROM: mapper %u",
+                 (unsigned)mapper);
+        return 0;
+    }
+    if(!nes_mapper_supported(mapper)) {
+        snprintf(reason, reason_len, "Unsupported mapper %u",
+                 (unsigned)mapper);
+        return 0;
+    }
     if(prg_banks == 0) {
         snprintf(reason, reason_len, "Invalid ROM: no PRG data");
         return 0;
