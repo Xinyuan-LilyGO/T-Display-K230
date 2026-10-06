@@ -363,13 +363,6 @@ static int nes_parse_header(nes_rom_item_t *item)
     item->battery = (h[6] & 0x02) ? 1 : 0;
     item->trainer = (h[6] & 0x04) ? 1 : 0;
     item->four_screen = (h[6] & 0x08) ? 1 : 0;
-    if(nes_is_nes2_header(h)) {
-        item->valid_header = 0;
-        snprintf(item->meta, sizeof(item->meta),
-                 "Unsupported NES 2.0 ROM: mapper %u",
-                 (unsigned)item->mapper);
-        return 0;
-    }
     if(!nes_mapper_supported(item->mapper)) {
         item->valid_header = 0;
         snprintf(item->meta, sizeof(item->meta),
@@ -396,7 +389,8 @@ static int nes_parse_header(nes_rom_item_t *item)
     snprintf(item->system, sizeof(item->system), "%s",
              (h[9] & 0x01) ? "PAL" : "NTSC");
     snprintf(item->meta, sizeof(item->meta),
-             "Mapper %u  PRG %uKB  CHR %uKB  %s  %s%s%s",
+             "%sMapper %u  PRG %uKB  CHR %uKB  %s  %s%s%s",
+             nes_is_nes2_header(h) ? "NES 2.0  " : "",
              (unsigned)item->mapper, (unsigned)item->prg_banks * 16U,
              (unsigned)item->chr_banks * 8U, item->mirror, item->system,
              item->battery ? "  Battery" : "",
@@ -452,11 +446,6 @@ static int nes_validate_rom_for_start(const char *path, char *reason,
     chr_banks = h[5];
     trainer = (h[6] & 0x04) ? 1 : 0;
     mapper = nes_mapper_from_header(h);
-    if(nes_is_nes2_header(h)) {
-        snprintf(reason, reason_len, "Unsupported NES 2.0 ROM: mapper %u",
-                 (unsigned)mapper);
-        return 0;
-    }
     if(!nes_mapper_supported(mapper)) {
         snprintf(reason, reason_len, "Unsupported mapper %u",
                  (unsigned)mapper);
