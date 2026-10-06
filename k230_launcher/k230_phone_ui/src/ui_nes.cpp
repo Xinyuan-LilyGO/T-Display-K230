@@ -24,6 +24,7 @@ extern "C" {
 #include "gui.h"
 #include "log.h"
 #include "nes/nes.h"
+#include "nes/nes_mmc.h"
 #include "nes/nes_pal.h"
 #include "nes/nesinput.h"
 #include "nofconfig.h"
@@ -59,10 +60,11 @@ typedef struct {
     uint8_t valid_header;
     uint8_t prg_banks;
     uint8_t chr_banks;
-    uint8_t mapper;
+    uint16_t mapper;
     uint8_t battery;
     uint8_t trainer;
     uint8_t four_screen;
+    uint8_t nes2;
     char mirror[16];
     char system[16];
     char meta[NES_META_MAX];
@@ -301,6 +303,39 @@ static void nes_find_cover(nes_rom_item_t *item)
     }
 }
 
+static int nes_is_nes2_header(const uint8_t h[16])
+{
+    return (h[7] & 0x0C) == 0x08;
+}
+
+static uint16_t nes_mapper_from_header(const uint8_t h[16])
+{
+    uint16_t mapper = (uint16_t)((h[6] >> 4) | (h[7] & 0xF0));
+    if(nes_is_nes2_header(h)) {
+        mapper |= (uint16_t)(h[8] & 0x0F) << 8;
+    }
+    return mapper;
+}
+
+static void nes_format_rom_meta(const nes_rom_item_t *item, int compact,
+                                char *buf, size_t len)
+{
+    if(!item || !buf || len == 0) {
+        return;
+    }
+    snprintf(buf, len, "%sMapper %u  PRG %uKB  CHR %uKB  %s  %s%s%s",
+             item->nes2 ? "NES 2.0  " : "",
+             (unsigned)item->mapper, (unsigned)item->prg_banks * 16U,
+             (unsigned)item->chr_banks * 8U, item->mirror, item->system,
+             (!compact && item->battery) ? "  Battery" : "",
+             (!compact && item->trainer) ? "  Trainer" : "");
+}
+
+static int nes_mapper_supported(uint16_t mapper)
+{
+    return mmc_peek((int)mapper) ? 1 : 0;
+}
+
 static int nes_parse_header(nes_rom_item_t *item)
 {
     FILE *fp;
@@ -339,10 +374,18 @@ static int nes_parse_header(nes_rom_item_t *item)
     item->valid_header = 1;
     item->prg_banks = h[4];
     item->chr_banks = h[5];
-    item->mapper = (uint8_t)((h[6] >> 4) | (h[7] & 0xF0));
+    item->mapper = nes_mapper_from_header(h);
     item->battery = (h[6] & 0x02) ? 1 : 0;
     item->trainer = (h[6] & 0x04) ? 1 : 0;
     item->four_screen = (h[6] & 0x08) ? 1 : 0;
+    item->nes2 = nes_is_nes2_header(h) ? 1 : 0;
+    if(!nes_mapper_supported(item->mapper)) {
+        item->valid_header = 0;
+        snprintf(item->meta, sizeof(item->meta),
+                 "Unsupported mapper %u",
+                 (unsigned)item->mapper);
+        return 0;
+    }
     if(item->prg_banks == 0) {
         item->valid_header = 0;
         snprintf(item->meta, sizeof(item->meta), "Invalid ROM: no PRG data");
@@ -361,12 +404,7 @@ static int nes_parse_header(nes_rom_item_t *item)
              item->four_screen ? "4-screen" : ((h[6] & 0x01) ? "Vertical" : "Horizontal"));
     snprintf(item->system, sizeof(item->system), "%s",
              (h[9] & 0x01) ? "PAL" : "NTSC");
-    snprintf(item->meta, sizeof(item->meta),
-             "Mapper %u  PRG %uKB  CHR %uKB  %s  %s%s%s",
-             item->mapper, (unsigned)item->prg_banks * 16U,
-             (unsigned)item->chr_banks * 8U, item->mirror, item->system,
-             item->battery ? "  Battery" : "",
-             item->trainer ? "  Trainer" : "");
+    nes_format_rom_meta(item, 0, item->meta, sizeof(item->meta));
     return 1;
 }
 
@@ -380,6 +418,7 @@ static int nes_validate_rom_for_start(const char *path, char *reason,
     uint64_t expected_size;
     uint8_t prg_banks;
     uint8_t chr_banks;
+    uint16_t mapper;
     int trainer;
 
     if(reason && reason_len) {
@@ -416,6 +455,12 @@ static int nes_validate_rom_for_start(const char *path, char *reason,
     prg_banks = h[4];
     chr_banks = h[5];
     trainer = (h[6] & 0x04) ? 1 : 0;
+    mapper = nes_mapper_from_header(h);
+    if(!nes_mapper_supported(mapper)) {
+        snprintf(reason, reason_len, "Unsupported mapper %u",
+                 (unsigned)mapper);
+        return 0;
+    }
     if(prg_banks == 0) {
         snprintf(reason, reason_len, "Invalid ROM: no PRG data");
         return 0;
@@ -542,14 +587,26 @@ static void nes_update_selected_info(int index)
         lv_label_set_text(nes_title_label, item ? item->title : "No ROM selected");
     }
     if(nes_meta_label && lv_obj_is_valid(nes_meta_label)) {
-        lv_label_set_text(nes_meta_label, item ? item->meta : "Copy .nes files to /root/nes");
+        if(item && item->valid_header) {
+            nes_format_rom_meta(item, ui_is_landscape(), text, sizeof(text));
+            lv_label_set_text(nes_meta_label, text);
+        } else {
+            lv_label_set_text(nes_meta_label,
+                              item ? item->meta : "Copy .nes files to /root/nes");
+        }
     }
     if(nes_path_label && lv_obj_is_valid(nes_path_label)) {
         if(item) {
             nes_format_size(size_buf, sizeof(size_buf), item->size);
-            snprintf(text, sizeof(text), "%s\n%s  CRC32 %08X%s",
-                     item->path, size_buf, item->crc32,
-                     item->cover_path[0] ? "\nSidecar cover found" : "\nNo embedded cover in NES ROM");
+            if(ui_is_landscape()) {
+                snprintf(text, sizeof(text), "%s  CRC32 %08X  %s",
+                         size_buf, item->crc32,
+                         item->cover_path[0] ? "Cover found" : "No cover");
+            } else {
+                snprintf(text, sizeof(text), "%s\n%s  CRC32 %08X%s",
+                         item->path, size_buf, item->crc32,
+                         item->cover_path[0] ? "\nSidecar cover found" : "\nNo embedded cover in NES ROM");
+            }
         } else {
             snprintf(text, sizeof(text), "%s", NES_ROM_DIR_PRIMARY);
         }
@@ -1072,6 +1129,7 @@ static void nes_create_rom_row(int index)
     lv_obj_t *meta;
     lv_obj_t *size_label;
     char size_buf[32];
+    char meta_text[NES_META_MAX];
     int panel_w = nes_list_cached_w > 0 ? nes_list_cached_w :
         (nes_list_panel ? lv_obj_get_width(nes_list_panel) : 520);
     int row_w = panel_w - 16;
@@ -1101,10 +1159,17 @@ static void nes_create_rom_row(int index)
 
     title = ui_label(row, item->title, &lv_font_montserrat_18, 0xF2F5F8);
     lv_obj_set_width(title, title_w);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(title, 26);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_pos(title, 52, 10);
 
-    meta = ui_label(row, item->valid_header ? item->meta : item->meta,
+    if(item->valid_header) {
+        nes_format_rom_meta(item, ui_is_landscape(), meta_text,
+                            sizeof(meta_text));
+    } else {
+        snprintf(meta_text, sizeof(meta_text), "%s", item->meta);
+    }
+    meta = ui_label(row, meta_text,
                     &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_width(meta, row_w - 72);
     lv_label_set_long_mode(meta, LV_LABEL_LONG_DOT);
@@ -1224,19 +1289,28 @@ static void nes_create_library(lv_obj_t *parent)
     int gap = landscape ? 24 : 16;
     int left_w = landscape ? nes_clamp_int(screen_w * 34 / 100, 320, 460) : panel_w;
     int min_list_w = landscape ? 360 : 420;
+    int cover_x = margin;
+    int cover_y = landscape ? 20 : 18;
+    int cover_w = landscape ? left_w : panel_w;
+    int cover_h = landscape ? nes_clamp_int(body_h * 42 / 100, 170, 260) :
+        panel_w;
+    int info_x = landscape ? margin : margin;
+    int info_y = landscape ? 20 + cover_h + 16 : cover_y + cover_h + 12;
+    int info_w = landscape ? left_w : panel_w;
+    int info_h = landscape ? body_h - info_y - 20 :
+        nes_clamp_int(body_h * 25 / 100, 204, 232);
     int list_x = landscape ? margin + left_w + gap : margin;
-    int list_y = landscape ? 20 : 360;
+    int list_y = landscape ? 20 : info_y + info_h + 16;
     int list_w = landscape ? screen_w - list_x - margin : panel_w;
     int list_h = landscape ? body_h - 40 : body_h - list_y - 24;
-    int cover_w = landscape ? left_w : (panel_w - gap) / 2;
-    int cover_h = landscape ? nes_clamp_int(body_h * 42 / 100, 170, 260) : 260;
     int cover_img_w = landscape ? cover_w - 32 : cover_w - 28;
-    int cover_img_h = landscape ? cover_h - 32 : cover_h - 30;
-    int info_x = landscape ? margin : margin + cover_w + gap;
-    int info_y = landscape ? 20 + cover_h + 16 : 22;
-    int info_w = landscape ? left_w : cover_w;
-    int info_h = landscape ? body_h - info_y - 54 : cover_h;
+    int cover_img_h = landscape ? cover_h - 32 : cover_img_w;
     int info_text_w = info_w - 32;
+    int scan_btn_w = landscape ? 82 : 132;
+    int scan_btn_h = landscape ? 46 : 46;
+    int scan_btn_x;
+    int scan_btn_y;
+    int title_w;
 
     if(landscape && list_w < min_list_w) {
         left_w -= min_list_w - list_w;
@@ -1253,8 +1327,8 @@ static void nes_create_library(lv_obj_t *parent)
     if(landscape && list_w < min_list_w) {
         list_w = min_list_w;
     }
-    if(list_h < 260) {
-        list_h = 260;
+    if(list_h < (landscape ? 260 : 220)) {
+        list_h = landscape ? 260 : 220;
     }
     if(landscape && info_h < 136) {
         cover_h -= 136 - info_h;
@@ -1263,10 +1337,17 @@ static void nes_create_library(lv_obj_t *parent)
         }
         cover_img_h = cover_h - 32;
         info_y = 20 + cover_h + 16;
-        info_h = body_h - info_y - 54;
+        info_h = body_h - info_y - 20;
     }
     if(info_h < 112) {
         info_h = 112;
+    }
+    scan_btn_x = landscape ? 8 : info_w - scan_btn_w - 24;
+    scan_btn_y = landscape ? info_h - scan_btn_h - 28 :
+        info_h - scan_btn_h - 38;
+    title_w = info_text_w;
+    if(title_w < 96) {
+        title_w = 96;
     }
 
     nes_library_panel = ui_scroll_panel(parent, panel_x, 0, panel_w, body_h);
@@ -1280,8 +1361,7 @@ static void nes_create_library(lv_obj_t *parent)
         lv_obj_clear_flag(nes_library_panel, LV_OBJ_FLAG_SCROLLABLE);
     }
 
-    cover = ui_panel(nes_library_panel, margin, landscape ? 20 : 22,
-                     cover_w, cover_h);
+    cover = ui_panel(nes_library_panel, cover_x, cover_y, cover_w, cover_h);
     lv_obj_set_style_bg_color(cover, lv_color_hex(0x182331), 0);
     lv_obj_set_style_border_color(cover, lv_color_hex(0x2A3B4F), 0);
     lv_obj_set_style_pad_all(cover, 0, 0);
@@ -1311,36 +1391,48 @@ static void nes_create_library(lv_obj_t *parent)
     lv_obj_set_style_border_color(info, lv_color_hex(0x2A3B4F), 0);
     lv_obj_set_style_pad_all(info, 16, 0);
     nes_title_label = ui_label(info, "NES", &lv_font_montserrat_26, 0xF2F5F8);
-    lv_obj_set_width(nes_title_label, info_text_w);
-    lv_label_set_long_mode(nes_title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(nes_title_label, title_w);
+    lv_obj_set_height(nes_title_label, 34);
+    lv_label_set_long_mode(nes_title_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_pos(nes_title_label, 0, 0);
     nes_meta_label = ui_label(info, "Scanning ROM library", &lv_font_montserrat_16,
                               0xD3DAE3);
     lv_obj_set_width(nes_meta_label, info_text_w);
-    lv_label_set_long_mode(nes_meta_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(nes_meta_label, 0, landscape ? 40 : 48);
+    lv_label_set_long_mode(nes_meta_label,
+                           landscape ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(nes_meta_label, 0, landscape ? 40 : 42);
     nes_path_label = ui_label(info, NES_ROM_DIR_PRIMARY, &lv_font_montserrat_14,
                               0x9AA4AF);
     lv_obj_set_width(nes_path_label, info_text_w);
     lv_label_set_long_mode(nes_path_label,
                            LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(nes_path_label, 0, landscape ? 78 : 108);
+    lv_obj_set_pos(nes_path_label, 0, landscape ? 62 : 78);
 
-    scan_btn = nes_button(info, landscape ? info_w - 164 : 0,
-                          landscape ? 0 : 162, 132, 46,
+    scan_btn = nes_button(info, scan_btn_x,
+                          scan_btn_y, scan_btn_w, scan_btn_h,
                           LV_SYMBOL_REFRESH, 0x3DA5FF);
     lv_obj_add_event_cb(scan_btn, nes_scan_event, LV_EVENT_CLICKED, NULL);
     folder_label = ui_label(info, "ROMs", &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_align(folder_label, LV_ALIGN_BOTTOM_RIGHT, -52, -15);
+    if(landscape) {
+        lv_obj_align(folder_label, LV_ALIGN_BOTTOM_RIGHT, -52, -15);
+    } else {
+        lv_obj_set_pos(folder_label, 0, scan_btn_y + (scan_btn_h - 22) / 2);
+    }
     nes_count_label = ui_label(info, "0", &lv_font_montserrat_20, 0x25C281);
-    lv_obj_align(nes_count_label, LV_ALIGN_BOTTOM_RIGHT, 0, -12);
+    if(landscape) {
+        lv_obj_align(nes_count_label, LV_ALIGN_BOTTOM_RIGHT, 0, -12);
+    } else {
+        lv_obj_align_to(nes_count_label, folder_label, LV_ALIGN_OUT_RIGHT_MID,
+                        8, 1);
+    }
 
-    nes_status_label = ui_label(nes_library_panel, "Ready",
+    nes_status_label = ui_label(nes_library_panel, "",
                                 &lv_font_montserrat_16, 0x9AA4AF);
-    lv_obj_set_width(nes_status_label, landscape ? left_w : panel_w);
+    lv_obj_set_width(nes_status_label, landscape ? left_w - 32 : panel_w);
     lv_label_set_long_mode(nes_status_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(nes_status_label, landscape ? 24 : 0,
-                   landscape ? body_h - 30 : list_y - 34);
+    lv_obj_set_pos(nes_status_label, landscape ? margin + 16 : 0,
+                   landscape ? body_h - 48 : list_y - 34);
+    lv_obj_add_flag(nes_status_label, LV_OBJ_FLAG_HIDDEN);
 
     nes_list_panel = ui_panel(nes_library_panel, list_x, list_y, list_w, list_h);
     nes_list_cached_w = list_w;
