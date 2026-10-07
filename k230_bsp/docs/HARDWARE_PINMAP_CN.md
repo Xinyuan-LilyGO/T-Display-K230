@@ -78,8 +78,13 @@ K230 主板引出的 40Pin 排针如下
 | SX1262/LR2021 LoRa | `GPIO14` | 输出 | CS | SPI 片选 |
 | SX1262/LR2021 LoRa | `GPIO5` | 输出 | Reset | 由 RadioLib HAL 控制 |
 | SX1262/LR2021 LoRa | `GPIO19` | 输入 | BUSY | LoRa 模组 busy 状态 |
-| SX1262/LR2021 LoRa | `GPIO20` | 输入 | IRQ / DIO1 到 K230 | SX1262版本DIO1连接到 K230 侧中断线是 `GPIO20` ， LR2021版本IRQ DIO 编号为 `DIO11` 连接到 K230 `GPIO20` |
+| SX1262/LR2021 LoRa | `GPIO20` | 输入 | IRQ / DIO1 到 K230 | SX1262 版本 DIO1 连接到 K230 侧中断线 `GPIO20`。LR2021 版本 IRQ DIO 编号为 `DIO11`，连接到 K230 `GPIO20` |
 | SX1262/LR2021 LoRa | `GPIO44` | 输出 | 电源使能 | 控制 LoRa 模组电源路径 |
+
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4GHz HF profile 限制为 4dBm。868/915MHz 模组版本使用
+> DPX205850DT-4055A1 双工器，没有 MXD8721 RF switch。DIO8/DIO10 RF
+> switch 控制仅用于 433MHz LR2021 版本。
 
 ## nRF52840 BLE / 音频 / 传感器底板
 

@@ -45,6 +45,12 @@ applied, which keeps clean rebuilds and reboot validation predictable.
 - Keyboard interrupt GPIO42 and keyboard backlight GPIO52/PWM4.
 - PMU power-key input and K230 thermal sensor support.
 
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4 GHz HF modes are limited to 4 dBm. The LR2021 868/915 MHz
+> hardware version uses the DPX205850DT-4055A1 duplexer and does not have an
+> MXD8721 RF switch. DIO8/DIO10 RF-switch control is only used by the 433 MHz
+> LR2021 variant.
+
 See [docs/HARDWARE_PINMAP.md](docs/HARDWARE_PINMAP.md) for the GPIO, bus, and
 peripheral connection map.
 

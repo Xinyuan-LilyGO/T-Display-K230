@@ -78,8 +78,14 @@ The K230 main board exposes the following 40-pin header.
 | SX1262/LR2021 LoRa | `GPIO14` | Output | CS | SPI chip select. |
 | SX1262/LR2021 LoRa | `GPIO5` | Output | Reset | Controlled by the RadioLib HAL. |
 | SX1262/LR2021 LoRa | `GPIO19` | Input | BUSY | Radio busy status. |
-| SX1262/LR2021 LoRa | `GPIO20` | Input | IRQ / DIO1 line to K230 | SX1262 version, DIO1 is connected to the K230 side interrupt line `GPIO20`. LR2021 version, the IRQ DIO number is `DIO11`, which is connected to the K230 `GPIO20`.. |
+| SX1262/LR2021 LoRa | `GPIO20` | Input | IRQ / DIO1 line to K230 | SX1262 version, DIO1 is connected to the K230 side interrupt line `GPIO20`. LR2021 version, the IRQ DIO number is `DIO11`, which is connected to K230 `GPIO20`. |
 | SX1262/LR2021 LoRa | `GPIO44` | Output | Power enable | Enables the LoRa module power path. |
+
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4 GHz HF profiles are limited to 4 dBm. The 868/915 MHz
+> module version uses the DPX205850DT-4055A1 duplexer and does not include an
+> MXD8721 RF switch. DIO8/DIO10 RF-switch control is only used by the 433 MHz
+> LR2021 version.
 
 ## nRF52840 BLE / Audio / Sensor Base Board
 

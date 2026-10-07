@@ -44,6 +44,11 @@ BSP 应用流程会在 overlay 应用时刷新已生成的 rootfs 镜像产物�
 - 键盘中断 GPIO42 和键盘背光 GPIO52/PWM4。
 - PMU 电源键 input 驱动和 K230 温度传感器支持。
 
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4GHz HF 模式限制为 4dBm。LR2021 868/915MHz 硬件版本
+> 使用 DPX205850DT-4055A1 双工器，没有 MXD8721 RF switch。DIO8/DIO10
+> RF switch 控制仅用于 433MHz LR2021 版本。
+
 GPIO、总线和外设连接关系请看
 [docs/HARDWARE_PINMAP_CN.md](docs/HARDWARE_PINMAP_CN.md)。
 
