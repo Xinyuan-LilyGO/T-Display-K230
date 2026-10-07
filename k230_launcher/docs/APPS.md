@@ -84,6 +84,12 @@ See [MAPS.md](MAPS.md) for offline map tile download and install instructions.
 | `About` | Shows board, software, and build information. | Open it to identify the installed launcher/BSP image. |
 | `Reboot` | Reboots the board after confirmation. | Use it when a clean software reboot is needed. |
 
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4 GHz HF profiles are capped at 4 dBm. The 868/915 MHz
+> LR2021 hardware uses the DPX205850DT-4055A1 duplexer instead of an MXD8721 RF
+> switch; DIO8/DIO10 RF-switch control only applies to the 433 MHz LR2021
+> variant.
+
 ## LoRaWAN Profile Setup
 
 The `LoRaWAN` app stores profile files under `/root/lorawan`.

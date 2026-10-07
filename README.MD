@@ -233,6 +233,12 @@ Deploy the launcher and boot files:
 
 Generated image files under `k230_bsp/images/` are local build artifacts.
 
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4 GHz HF profiles are capped at 4 dBm by default for module
+> safety. The LR2021 868/915 MHz module version does not use an MXD8721 RF
+> switch; it uses the DPX205850DT-4055A1 duplexer. LR2021 DIO8/DIO10 RF-switch
+> control is only relevant to the 433 MHz module variant.
+
 ## Known Limitations
 
 - Meshtastic is included as a beta feature. Core chat, node display, map view,

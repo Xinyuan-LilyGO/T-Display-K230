@@ -84,6 +84,11 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `About` / 关于 | 显示板卡、软件和构建信息 | 用于确认当前安装的 launcher/BSP 镜像版本 |
 | `Reboot` / 重启 | 确认后重启设备 | 需要软件重启时使用 |
 
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4GHz HF profile 默认限制为 4dBm。LR2021 868/915MHz
+> 硬件使用 DPX205850DT-4055A1 双工器，不使用 MXD8721 RF switch；
+> DIO8/DIO10 RF switch 控制仅适用于 433MHz LR2021 版本。
+
 ## LoRaWAN Profile 配置方法
 
 `LoRaWAN` 应用将 profile 文件保存在 `/root/lorawan` 目录

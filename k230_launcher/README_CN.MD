@@ -58,6 +58,11 @@ Meshtastic 当前作为 Beta 应用提供。语音/图片传输需要两端 K230
 模块；SX1262 版本仅支持基础文字 mesh 消息。小智当前同样作为 Beta 功能提供，
 需要网络连接和兼容小智协议的服务。
 
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4GHz HF 模式默认限制为 4dBm。LR2021 868/915MHz
+> 硬件使用 DPX205850DT-4055A1 双工器，不使用 MXD8721 RF switch。
+> DIO8/DIO10 RF switch 控制仅用于 433MHz LR2021 版本。
+
 PicoClaw 的模型 profile 可以在设备上通过 SSH 快速写入，避免在屏幕键盘中输入
 较长的 API key：
 

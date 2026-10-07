@@ -64,6 +64,12 @@ modules on both K230 boards; SX1262 boards support basic text mesh messages
 only. Xiaozhi is also beta and requires network access plus a compatible
 Xiaozhi service.
 
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4 GHz HF modes are limited to 4 dBm by default. On LR2021
+> 868/915 MHz hardware, antenna routing uses the DPX205850DT-4055A1 duplexer
+> instead of an MXD8721 RF switch. DIO8/DIO10 RF-switch control is only used by
+> the 433 MHz LR2021 variant.
+
 PicoClaw model profiles can be provisioned quickly over SSH, which avoids
 typing long API keys with the on-screen keyboard:
 

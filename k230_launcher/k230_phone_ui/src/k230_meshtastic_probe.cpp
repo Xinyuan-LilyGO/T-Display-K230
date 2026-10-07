@@ -129,7 +129,7 @@
 #define MESHTASTIC_FLRC_VOICE_FREQ_MHZ 2400.0f
 #define MESHTASTIC_FLRC_VOICE_FREQ_TENTHS 24000U
 #define MESHTASTIC_FLRC_VOICE_BR_KBPS 2600U
-#define MESHTASTIC_FLRC_VOICE_POWER_DBM 8
+#define MESHTASTIC_FLRC_VOICE_POWER_DBM 4
 #define MESHTASTIC_FLRC_VOICE_PREAMBLE 16U
 #define MESHTASTIC_FLRC_VOICE_SYNC_LEN 4U
 #define MESHTASTIC_FLRC_VOICE_RX_GUARD_MS 2600U
@@ -267,17 +267,19 @@ static bool meshtastic_port_is_text(uint32_t portnum)
            portnum == MESHTASTIC_TEXT_MESSAGE_COMPRESSED_APP;
 }
 
-static const uint32_t lr2021_16e8_rf_switch_dio_pins[] = {
+static const uint32_t lr2021_lilygo_rf_switch_dio_pins[Module::RFSWITCH_MAX_PINS] = {
     RADIOLIB_LR2021_DIO6, RADIOLIB_LR2021_DIO7,
-    RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC,
+    RADIOLIB_LR2021_DIO8, RADIOLIB_LR2021_DIO10,
+    RADIOLIB_NC,
 };
 
-static const Module::RfSwitchMode_t lr2021_16e8_rf_switch_table[] = {
-    {LR2021::MODE_STBY, {0, 0}},
-    {LR2021::MODE_TX, {0, 0}},
-    {LR2021::MODE_RX, {0, 0}},
-    {LR2021::MODE_TX_HF, {0, 1}},
-    {LR2021::MODE_RX_HF, {1, 0}},
+static const Module::RfSwitchMode_t lr2021_lilygo_rf_switch_table[] = {
+    // mode                  DIO6  DIO7  DIO8  DIO10
+    {LR2021::MODE_STBY,  {0,    0,    0,    0,     0}},
+    {LR2021::MODE_RX,    {0,    0,    1,    0,     0}},
+    {LR2021::MODE_TX,    {0,    0,    1,    0,     0}},
+    {LR2021::MODE_RX_HF, {1,    0,    0,    1,     0}},
+    {LR2021::MODE_TX_HF, {0,    1,    0,    1,     0}},
     END_OF_MODE_TABLE,
 };
 
@@ -14722,8 +14724,8 @@ static int16_t mesh_flrc_voice_set_hf_power(LR2021 *lr2021, int power)
     if(safe_power < -19) {
         safe_power = -19;
     }
-    if(safe_power > 9) {
-        safe_power = 9;
+    if(safe_power > 4) {
+        safe_power = 4;
     }
     state = lr2021->setOutputPower((int8_t)safe_power);
     if(state == RADIOLIB_ERR_SPI_CMD_INVALID) {
@@ -14763,8 +14765,8 @@ static int16_t mesh_flrc_voice_begin(LR2021 *lr2021)
        state != RADIOLIB_ERR_SPI_CMD_INVALID) {
         return state;
     }
-    lr2021->setRfSwitchTable(lr2021_16e8_rf_switch_dio_pins,
-                             lr2021_16e8_rf_switch_table);
+    lr2021->setRfSwitchTable(lr2021_lilygo_rf_switch_dio_pins,
+                             lr2021_lilygo_rf_switch_table);
     state = mesh_flrc_voice_set_hf_power(lr2021,
                                          MESHTASTIC_FLRC_VOICE_POWER_DBM);
     if(state != RADIOLIB_ERR_NONE) {
@@ -19540,9 +19542,9 @@ static int16_t begin_chip(chip_type_t chip, PhysicalLayer *radio,
                               profile->sf, profile->cr, profile->sync_word,
                               profile->power, profile->preamble, 3.0f);
         if(state == RADIOLIB_ERR_NONE) {
-            lr2021->setRfSwitchTable(lr2021_16e8_rf_switch_dio_pins,
-                                     lr2021_16e8_rf_switch_table);
-            printf("LR2021 16E8 RF switch: sub1G TX/RX DIO6=0 DIO7=0, 2.4G TX=01 RX=10\n");
+            lr2021->setRfSwitchTable(lr2021_lilygo_rf_switch_dio_pins,
+                                     lr2021_lilygo_rf_switch_table);
+            printf("LR2021 LILYGO RF switch: sub1G RX/TX DIO8=1, 2.4G RX DIO6=1 DIO10=1, TX DIO7=1 DIO10=1\n");
             state = lr2021->setOutputPower(profile->power);
         }
         if(state == RADIOLIB_ERR_NONE) {

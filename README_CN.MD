@@ -227,6 +227,11 @@ Launcher：
 
 `k230_bsp/images/` 下的镜像文件是本机构建产物
 
+> [!IMPORTANT]
+> LR2021 LILYGO 2.4GHz HF profile 默认和上限均限制为 4dBm，避免超过模组
+> 安全范围。LR2021 的 868/915MHz 版本没有 MXD8721 RF switch，使用的是
+> DPX205850DT-4055A1 双工器；DIO8/DIO10 RF switch 控制仅用于 433MHz
+> 版本。
 
 ## 当前限制
 
