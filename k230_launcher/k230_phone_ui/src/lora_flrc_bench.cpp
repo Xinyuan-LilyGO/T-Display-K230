@@ -30,7 +30,7 @@
 #define BENCH_PIN_POWER 44U
 #define BENCH_LR2021_IRQ_DIO_NUM 11U
 #define BENCH_PAYLOAD_LEN_DEFAULT 252U
-#define BENCH_POWER_DEFAULT 8
+#define BENCH_POWER_DEFAULT 4
 #define BENCH_FREQ_DEFAULT 2400.0f
 #define BENCH_BR_DEFAULT 2600U
 #define BENCH_DURATION_DEFAULT 15U
@@ -566,17 +566,19 @@ typedef struct {
 } flrc_tile_header_t;
 #endif
 
-static const uint32_t lr2021_16e8_rf_switch_dio_pins[] = {
+static const uint32_t lr2021_lilygo_rf_switch_dio_pins[Module::RFSWITCH_MAX_PINS] = {
     RADIOLIB_LR2021_DIO6, RADIOLIB_LR2021_DIO7,
-    RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC,
+    RADIOLIB_LR2021_DIO8, RADIOLIB_LR2021_DIO10,
+    RADIOLIB_NC,
 };
 
-static const Module::RfSwitchMode_t lr2021_16e8_rf_switch_table[] = {
-    {LR2021::MODE_STBY, {K230_HAL_GPIO_LOW, K230_HAL_GPIO_LOW}},
-    {LR2021::MODE_TX, {K230_HAL_GPIO_LOW, K230_HAL_GPIO_LOW}},
-    {LR2021::MODE_RX, {K230_HAL_GPIO_LOW, K230_HAL_GPIO_LOW}},
-    {LR2021::MODE_TX_HF, {K230_HAL_GPIO_LOW, K230_HAL_GPIO_HIGH}},
-    {LR2021::MODE_RX_HF, {K230_HAL_GPIO_HIGH, K230_HAL_GPIO_LOW}},
+static const Module::RfSwitchMode_t lr2021_lilygo_rf_switch_table[] = {
+    // mode                  DIO6              DIO7              DIO8               DIO10
+    {LR2021::MODE_STBY,  {K230_HAL_GPIO_LOW,  K230_HAL_GPIO_LOW, K230_HAL_GPIO_LOW,  K230_HAL_GPIO_LOW, 0}},
+    {LR2021::MODE_RX,    {K230_HAL_GPIO_LOW,  K230_HAL_GPIO_LOW, K230_HAL_GPIO_HIGH, K230_HAL_GPIO_LOW, 0}},
+    {LR2021::MODE_TX,    {K230_HAL_GPIO_LOW,  K230_HAL_GPIO_LOW, K230_HAL_GPIO_HIGH, K230_HAL_GPIO_LOW, 0}},
+    {LR2021::MODE_RX_HF, {K230_HAL_GPIO_HIGH, K230_HAL_GPIO_LOW, K230_HAL_GPIO_LOW,  K230_HAL_GPIO_HIGH, 0}},
+    {LR2021::MODE_TX_HF, {K230_HAL_GPIO_LOW,  K230_HAL_GPIO_HIGH, K230_HAL_GPIO_LOW, K230_HAL_GPIO_HIGH, 0}},
     END_OF_MODE_TABLE,
 };
 
@@ -960,14 +962,14 @@ static int should_retry_xtal(int16_t state)
            state == RADIOLIB_ERR_SPI_CMD_FAILED;
 }
 
-static int16_t set_16e8_hf_power(LR2021 &radio, int power)
+static int16_t set_lilygo_hf_power(LR2021 &radio, int power)
 {
     int safe_power = power;
     if(safe_power < -19) {
         safe_power = -19;
     }
-    if(safe_power > 9) {
-        safe_power = 9;
+    if(safe_power > 4) {
+        safe_power = 4;
     }
     int16_t state = radio.setOutputPower((int8_t)safe_power);
     if(state == RADIOLIB_ERR_SPI_CMD_INVALID) {
@@ -1002,10 +1004,10 @@ static int16_t begin_flrc(LR2021 &radio, const bench_config_t &cfg)
         return state;
     }
 
-    radio.setRfSwitchTable(lr2021_16e8_rf_switch_dio_pins,
-                           lr2021_16e8_rf_switch_table);
-    state = set_16e8_hf_power(radio, cfg.power_dbm);
-    printf("setOutputPower safe<=9 requested=%d state=%d %s\n",
+    radio.setRfSwitchTable(lr2021_lilygo_rf_switch_dio_pins,
+                           lr2021_lilygo_rf_switch_table);
+    state = set_lilygo_hf_power(radio, cfg.power_dbm);
+    printf("setOutputPower safe<=4 requested=%d state=%d %s\n",
            cfg.power_dbm, state, error_name(state));
     if(state != RADIOLIB_ERR_NONE) {
         return state;
@@ -3211,7 +3213,7 @@ static void usage(const char *prog)
     printf("  --len BYTES         1..255, default %u\n",
            BENCH_PAYLOAD_LEN_DEFAULT);
     printf("  --spi-hz HZ         Default %u\n", BENCH_SPI_SPEED_DEFAULT);
-    printf("  --power DBM         LR2021 16E8 HF safe range <= 9, default %d\n",
+    printf("  --power DBM         LR2021 LILYGO HF safe range <= 4, default %d\n",
            BENCH_POWER_DEFAULT);
     printf("  --rx-poll-us USEC   RX DIO poll interval, default %u\n",
            BENCH_RX_POLL_US_DEFAULT);

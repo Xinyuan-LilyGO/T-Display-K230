@@ -57,8 +57,8 @@
 #define LORA_SUB1G_FACTORY_PROFILE_COUNT 5
 #define LORA_LR2021_FACTORY_PROFILE_COUNT 7
 #define LORA_DEFAULT_PROFILE_INDEX 2
-#define LORA_LR2021_16E8_HF_POWER_DEFAULT 8
-#define LORA_LR2021_16E8_HF_POWER_MAX 9
+#define LORA_LR2021_LILYGO_HF_POWER_DEFAULT 4
+#define LORA_LR2021_LILYGO_HF_POWER_MAX 4
 #define LORA_LR2021_BOOTSTRAP_FREQ 915.0f
 #define LORA_LR2021_BOOTSTRAP_BW 125.0f
 #define LORA_LR2021_BOOTSTRAP_SF 10
@@ -105,7 +105,7 @@
 #define LORA_FLRC_CAMERA_STOP_FILE "/tmp/k230_flrc_camera_stream.stop"
 #define LORA_FLRC_DEFAULT_FREQ 2400.0f
 #define LORA_FLRC_DEFAULT_BR 2600U
-#define LORA_FLRC_DEFAULT_POWER LORA_LR2021_16E8_HF_POWER_DEFAULT
+#define LORA_FLRC_DEFAULT_POWER LORA_LR2021_LILYGO_HF_POWER_DEFAULT
 #define LORA_FLRC_DEFAULT_SECONDS 15U
 #define LORA_FLRC_RX_POLL_US 80U
 #define LORA_FLRC_VIDEO_SPI_HZ 16000000U
@@ -169,21 +169,23 @@ static const lora_profile_t lora_factory_profiles_lr2021[LORA_LR2021_FACTORY_PRO
     {"Factory 915", 915.0f, 125.0f, 22, 12, 5, 0xCD, 16, 1000, 1, 1},
     {"Factory 920", 920.0f, 125.0f, 22, 12, 5, 0xCD, 16, 1000, 1, 1},
     {"Factory 923", 923.0f, 125.0f, 22, 12, 5, 0xCD, 16, 1000, 1, 1},
-    {"Factory 2400", 2400.0f, 125.0f, LORA_LR2021_16E8_HF_POWER_DEFAULT, 10, 6, 0x12, 15, 1000, 1, 1},
-    {"Factory 2450", 2450.0f, 125.0f, LORA_LR2021_16E8_HF_POWER_DEFAULT, 10, 6, 0x12, 15, 1000, 1, 1},
+    {"Factory 2400", 2400.0f, 125.0f, LORA_LR2021_LILYGO_HF_POWER_DEFAULT, 10, 6, 0x12, 15, 1000, 1, 1},
+    {"Factory 2450", 2450.0f, 125.0f, LORA_LR2021_LILYGO_HF_POWER_DEFAULT, 10, 6, 0x12, 15, 1000, 1, 1},
 };
 
-static const uint32_t lora_lr2021_16e8_rf_switch_dio_pins[Module::RFSWITCH_MAX_PINS] = {
-    RADIOLIB_LR2021_DIO6, RADIOLIB_LR2021_DIO7, RADIOLIB_NC,
-    RADIOLIB_NC, RADIOLIB_NC
+static const uint32_t lora_lilygo_lr2021_rf_switch_dio_pins[Module::RFSWITCH_MAX_PINS] = {
+    RADIOLIB_LR2021_DIO6, RADIOLIB_LR2021_DIO7,
+    RADIOLIB_LR2021_DIO8, RADIOLIB_LR2021_DIO10,
+    RADIOLIB_NC
 };
 
-static const Module::RfSwitchMode_t lora_lr2021_16e8_rf_switch_table[] = {
-    { LR2021::MODE_STBY,  {0, 0, 0, 0, 0} },
-    { LR2021::MODE_TX,    {0, 0, 0, 0, 0} },
-    { LR2021::MODE_RX,    {0, 0, 0, 0, 0} },
-    { LR2021::MODE_RX_HF, {1, 0, 0, 0, 0} },
-    { LR2021::MODE_TX_HF, {0, 1, 0, 0, 0} },
+static const Module::RfSwitchMode_t lora_lilygo_lr2021_rf_switch_table[] = {
+    // mode                  DIO6  DIO7  DIO8  DIO10
+    { LR2021::MODE_STBY,  {0,    0,    0,    0,     0} },
+    { LR2021::MODE_RX,    {0,    0,    1,    0,     0} },
+    { LR2021::MODE_TX,    {0,    0,    1,    0,     0} },
+    { LR2021::MODE_RX_HF, {1,    0,    0,    1,     0} },
+    { LR2021::MODE_TX_HF, {0,    1,    0,    1,     0} },
     END_OF_MODE_TABLE,
 };
 
@@ -1115,7 +1117,7 @@ static void lora_sanitize_profile(lora_profile_t *profile)
     profile->power = (int8_t)lora_clamp_int(profile->power,
                                             profile->freq >= 2000.0f ? -19 : -9,
                                             profile->freq >= 2000.0f ?
-                                            LORA_LR2021_16E8_HF_POWER_MAX : 22);
+                                            LORA_LR2021_LILYGO_HF_POWER_MAX : 22);
     profile->sf = (uint8_t)lora_clamp_int(profile->sf, 5, 12);
     profile->cr = (uint8_t)lora_clamp_int(profile->cr, 5, 8);
     profile->preamble = (uint16_t)lora_clamp_int(profile->preamble, 4, 65535);
@@ -1477,14 +1479,14 @@ static int16_t lora_lr2021_begin_config(const lora_profile_t *profile,
     return lora_lr2021->begin(config);
 }
 
-static void lora_lr2021_apply_16e8_rf_switch(void)
+static void lora_lr2021_apply_lilygo_rf_switch(void)
 {
     if(!lora_lr2021) {
         return;
     }
-    lora_lr2021->setRfSwitchTable(lora_lr2021_16e8_rf_switch_dio_pins,
-                                  lora_lr2021_16e8_rf_switch_table);
-    lora_log("LR2021 16E8 RF switch: sub1G TX/RX DIO6=0 DIO7=0, 2.4G TX DIO6=0 DIO7=1, RX DIO6=1 DIO7=0");
+    lora_lr2021->setRfSwitchTable(lora_lilygo_lr2021_rf_switch_dio_pins,
+                                  lora_lilygo_lr2021_rf_switch_table);
+    lora_log("LR2021 LILYGO RF switch: sub1G RX/TX DIO8=1, 2.4G RX DIO6=1 DIO10=1, TX DIO7=1 DIO10=1");
 }
 
 static int16_t lora_lr2021_set_frequency_logged(const lora_profile_t *profile,
@@ -1503,15 +1505,15 @@ static int16_t lora_lr2021_set_frequency_logged(const lora_profile_t *profile,
     return state;
 }
 
-static int16_t lora_lr2021_set_16e8_hf_power(int8_t power)
+static int16_t lora_lr2021_set_lilygo_hf_power(int8_t power)
 {
     int8_t safe_power = (int8_t)lora_clamp_int(power, -19,
-                                               LORA_LR2021_16E8_HF_POWER_MAX);
+                                               LORA_LR2021_LILYGO_HF_POWER_MAX);
     int16_t state = lora_lr2021->setOutputPower(safe_power);
-    lora_log("LR2021 16E8 HF setOutputPower safe=%d state=%d %s",
+    lora_log("LR2021 LILYGO HF setOutputPower safe=%d state=%d %s",
              safe_power, state, lora_error_name(state));
     if(state == RADIOLIB_ERR_SPI_CMD_INVALID) {
-        lora_log("LR2021 16E8 HF setOutputPower state=%d ignored to match LilyGo Factory; continue with TX/RX", state);
+        lora_log("LR2021 LILYGO HF setOutputPower state=%d ignored to match LilyGo Factory; continue with TX/RX", state);
         return RADIOLIB_ERR_NONE;
     }
     return state;
@@ -1554,7 +1556,7 @@ static int16_t lora_lr2021_apply_profile_params(const lora_profile_t *profile,
     }
 
     if(high_freq) {
-        state = lora_lr2021_set_16e8_hf_power(profile->power);
+        state = lora_lr2021_set_lilygo_hf_power(profile->power);
     } else {
         state = lora_lr2021->setOutputPower(profile->power);
         lora_log("LR2021 setOutputPower pwr=%d band=sub1G state=%d %s",
@@ -1585,7 +1587,7 @@ static int16_t lora_lr2021_apply_profile_params(const lora_profile_t *profile,
     return RADIOLIB_ERR_NONE;
 }
 
-static int16_t lora_lr2021_bootstrap_for_16e8(float tcxo_voltage)
+static int16_t lora_lr2021_bootstrap_for_lilygo(float tcxo_voltage)
 {
     lora_profile_t bootstrap;
 
@@ -1593,12 +1595,12 @@ static int16_t lora_lr2021_bootstrap_for_16e8(float tcxo_voltage)
     snprintf(bootstrap.name, sizeof(bootstrap.name), "LR2021 bootstrap");
     bootstrap.freq = LORA_LR2021_BOOTSTRAP_FREQ;
     bootstrap.bandwidth = LORA_LR2021_BOOTSTRAP_BW;
-    bootstrap.power = LORA_LR2021_16E8_HF_POWER_DEFAULT;
+    bootstrap.power = LORA_LR2021_LILYGO_HF_POWER_DEFAULT;
     bootstrap.sf = LORA_LR2021_BOOTSTRAP_SF;
     bootstrap.cr = LORA_LR2021_BOOTSTRAP_CR;
     bootstrap.sync_word = LORA_LR2021_BOOTSTRAP_SW;
     bootstrap.preamble = LORA_LR2021_BOOTSTRAP_PRE;
-    lora_log("LR2021 16E8 bootstrap sub1G freq=%.1f bw=%.1f sf=%u cr=4/%u sw=0x%02X pwr=%d pre=%u tcxo=%.1f",
+    lora_log("LR2021 LILYGO bootstrap sub1G freq=%.1f bw=%.1f sf=%u cr=4/%u sw=0x%02X pwr=%d pre=%u tcxo=%.1f",
              bootstrap.freq, bootstrap.bandwidth, bootstrap.sf, bootstrap.cr,
              bootstrap.sync_word, bootstrap.power, bootstrap.preamble,
              tcxo_voltage);
@@ -1639,18 +1641,18 @@ static int16_t lora_begin_active_chip(const lora_profile_t *profile)
                  profile->power, profile->preamble,
                  high_freq ? "2.4G" : "sub1G");
         if(high_freq) {
-            state = lora_lr2021_bootstrap_for_16e8(3.0f);
+            state = lora_lr2021_bootstrap_for_lilygo(3.0f);
             lora_log("LR2021 HF bootstrap tcxo=3.0 state=%d %s",
                      state, lora_error_name(state));
             if(lora_lr2021_should_retry_xtal(state)) {
                 lora_log("LR2021 HF bootstrap retry as XTAL tcxo=0 after state=%d %s",
                          state, lora_error_name(state));
-                state = lora_lr2021_bootstrap_for_16e8(0.0f);
+                state = lora_lr2021_bootstrap_for_lilygo(0.0f);
                 lora_log("LR2021 HF bootstrap tcxo=0 state=%d %s",
                          state, lora_error_name(state));
             }
             if(state == RADIOLIB_ERR_NONE) {
-                lora_lr2021_apply_16e8_rf_switch();
+                lora_lr2021_apply_lilygo_rf_switch();
                 state = lora_lr2021_apply_profile_params(profile, high_freq);
             }
         } else {
@@ -1659,7 +1661,7 @@ static int16_t lora_begin_active_chip(const lora_profile_t *profile)
                                        profile->sync_word, profile->power,
                                        profile->preamble, 3.0f);
             if(state == RADIOLIB_ERR_NONE) {
-                lora_lr2021_apply_16e8_rf_switch();
+                lora_lr2021_apply_lilygo_rf_switch();
             }
         }
         if(state == RADIOLIB_ERR_NONE) {
@@ -7499,12 +7501,12 @@ static int16_t lora_flrc_begin_radio(void)
         return first_state;
     }
     if(first_state == RADIOLIB_ERR_SPI_CMD_INVALID) {
-        lora_flrc_log("beginFLRC power stage returned %d; continue with manual FLRC tail config for LR2021 16E8",
+        lora_flrc_log("beginFLRC power stage returned %d; continue with manual FLRC tail config for LR2021 LILYGO",
                       first_state);
     }
 
-    lora_lr2021_apply_16e8_rf_switch();
-    state = lora_lr2021_set_16e8_hf_power(LORA_FLRC_DEFAULT_POWER);
+    lora_lr2021_apply_lilygo_rf_switch();
+    state = lora_lr2021_set_lilygo_hf_power(LORA_FLRC_DEFAULT_POWER);
     lora_flrc_log("FLRC setOutputPower %d state=%d %s",
                   LORA_FLRC_DEFAULT_POWER, state, lora_error_name(state));
     if(state != RADIOLIB_ERR_NONE) {
