@@ -2,6 +2,14 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## v0.2.6 - 2026-10-07
+
+- Added NES mapper 163 support and improved unsupported/invalid ROM handling
+  before launch.
+- Updated LR2021 LILYGO RF switch handling for DIO6/DIO7/DIO8/DIO10 routing.
+- Limited LR2021 LILYGO 2.4 GHz HF profile power to 4 dBm and documented
+  LR2021 module RF-switch differences.
+
 ## v0.2.5 - 2026-09-29
 
 - Added optional DRV2605 haptics support and related settings entries.
