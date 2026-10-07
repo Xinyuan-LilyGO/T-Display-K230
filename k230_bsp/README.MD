@@ -9,13 +9,6 @@
 This directory contains the board support overlay for the LILYGO T-Display K230
 RM69A10 hardware. It is applied on top of the official Kendryte K230 Linux SDK.
 
-Validated upstream SDK:
-
-```text
-https://github.com/kendryte/k230_linux_sdk.git
-dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
-```
-
 ## Release Scope
 
 This BSP is the hardware layer used by the public image. It provides the kernel,

@@ -9,13 +9,6 @@
 这个目录是 LILYGO T-Display K230 RM69A10 硬件的板级支持 overlay，
 用于叠加到 Kendryte 官方 K230 Linux SDK。
 
-已验证的上游 SDK：
-
-```text
-https://github.com/kendryte/k230_linux_sdk.git
-dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
-```
-
 ## 发布范围
 
 本 BSP 是公开镜像使用的硬件支持层，包含 T-Display K230 所需的 kernel、

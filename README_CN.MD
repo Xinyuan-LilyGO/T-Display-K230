@@ -13,13 +13,6 @@
 本仓库用于从 Kendryte 官方 K230 Linux SDK 构建 LilyGo T-Display K230
 的 SD 卡镜像，包含板级支持文件、LVGL 启动器应用和主机侧辅助脚本
 
-已验证的上游 SDK：
-
-```text
-https://github.com/kendryte/k230_linux_sdk.git
-dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
-```
-
 ## 功能概览
 
 版本变更记录请看 [CHANGELOG_CN.MD](CHANGELOG_CN.MD)。

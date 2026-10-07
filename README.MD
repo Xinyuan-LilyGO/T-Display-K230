@@ -15,13 +15,6 @@ This repository packages the board support files, launcher application, and host
 scripts for building a LILYGO T-Display K230 SD-card image from the
 official Kendryte K230 Linux SDK.
 
-Validated upstream SDK:
-
-```text
-https://github.com/kendryte/k230_linux_sdk.git
-dev commit 22d02c6b6783a57a3aca7eb3160e313e772cb710
-```
-
 ## Feature Overview
 
 See [CHANGELOG.MD](CHANGELOG.MD) for release history.
