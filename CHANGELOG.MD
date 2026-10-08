@@ -2,7 +2,7 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
-## Unreleased
+## v0.2.7 - 2026-10-08
 
 - Fixed the RM69A10 display intermittently shifting the whole image a few
   pixels sideways after a warm boot. The DSI D-PHY frequency range is now

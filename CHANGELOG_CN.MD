@@ -2,7 +2,7 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
-## 未发布
+## v0.2.7 - 2026-10-08
 
 - 修复 RM69A10 屏幕在设备温热状态下启动后，整幅画面间歇性横向偏移几个像素的问题。DSI D-PHY 频率范围（hsfreqrange）现在根据 594 Mbps 的实际通道速率计算，不再使用适用于约 450 Mbps 的固定值。
 
