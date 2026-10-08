@@ -2,6 +2,13 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed the RM69A10 display intermittently shifting the whole image a few
+  pixels sideways after a warm boot. The DSI D-PHY frequency range is now
+  derived from the 594 Mbps lane rate instead of a fixed value meant for
+  about 450 Mbps.
+
 ## v0.2.6 - 2026-10-07
 
 - Added NES mapper 163 support and improved unsupported/invalid ROM handling

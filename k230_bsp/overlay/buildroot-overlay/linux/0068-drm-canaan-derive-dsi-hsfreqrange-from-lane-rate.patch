@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jay Heidecker <jay.heidecker@gmail.com>
+Date: Wed, 7 Oct 2026 19:10:00 +0000
+Subject: [PATCH] drm/canaan: Derive DSI hsfreqrange from the lane rate
+
+canaan_dsi_clk_cfg() always programs D-PHY test code 0x44 with 0x96,
+which is hsfreqrange 0x16 plus the override-enable bit. The DesignWare
+D-PHY databook assigns 0x16 to 415-486 Mbps. Since the RM69A10 moved to
+the 49.5 MHz timing, its 2-lane link runs at 594 Mbps, outside that
+band. The RM69A10 datasheet also asks for longer HS entry timings than
+the D-PHY spec.
+
+On this panel the whole image intermittently shifts right a few pixels
+and snaps back. Whether that happens is decided when the display stack
+initializes, and only warm inits (about 48-50 C on a fanless unit) have
+produced it. In an A/B test at those temperatures, 0x96 shifted in 3 of
+3 inits and 0x87 was stable in 3 of 3 (one warm boot, two rebinds).
+
+Look the code up from the lane rate instead (594 Mbps gives 0x87),
+using the table from drivers/gpu/drm/kmb/kmb_dsi.c, and add an
+hsfreq_override parameter to force a raw value for A/B testing.
+---
+--- a/drivers/gpu/drm/canaan/canaan_dsi.c
++++ b/drivers/gpu/drm/canaan/canaan_dsi.c
+@@ -81,6 +81,37 @@
+ #define TXPHY_475_VOC (0x17)
+ #define TXPHY_475_HS_FREQ (0xa3)
+
++/*
++ * DesignWare MIPI D-PHY hsfreqrange codes by nominal lane rate, from the
++ * same databook table as drivers/gpu/drm/kmb/kmb_dsi.c.
++ */
++static const struct {
++	u16 mbps;
++	u8 code;
++} canaan_dphy_hsfreqrange[] = {
++	{   80, 0x00 }, {   90, 0x10 }, {  100, 0x20 }, {  110, 0x30 },
++	{  120, 0x01 }, {  130, 0x11 }, {  140, 0x21 }, {  150, 0x31 },
++	{  160, 0x02 }, {  170, 0x12 }, {  180, 0x22 }, {  190, 0x32 },
++	{  205, 0x03 }, {  220, 0x13 }, {  235, 0x23 }, {  250, 0x33 },
++	{  275, 0x04 }, {  300, 0x14 }, {  325, 0x25 }, {  350, 0x35 },
++	{  400, 0x05 }, {  450, 0x16 }, {  500, 0x26 }, {  550, 0x37 },
++	{  600, 0x07 }, {  650, 0x18 }, {  700, 0x28 }, {  750, 0x39 },
++	{  800, 0x09 }, {  850, 0x19 }, {  900, 0x29 }, { 1000, 0x0a },
++	{ 1050, 0x1a }, { 1100, 0x2a }, { 1150, 0x3b }, { 1200, 0x0b },
++	{ 1250, 0x1b }, { 1300, 0x2b }, { 1350, 0x3c }, { 1400, 0x0c },
++	{ 1450, 0x1c }, { 1500, 0x2c }, { 1550, 0x3d }, { 1600, 0x0d },
++	{ 1650, 0x1d }, { 1700, 0x2e }, { 1750, 0x3e }, { 1800, 0x0e },
++	{ 1850, 0x1e }, { 1900, 0x2f }, { 1950, 0x3f }, { 2000, 0x0f },
++	{ 2050, 0x40 }, { 2100, 0x41 }, { 2150, 0x42 }, { 2200, 0x43 },
++	{ 2250, 0x44 }, { 2300, 0x45 }, { 2350, 0x46 }, { 2400, 0x47 },
++	{ 2450, 0x48 }, { 2500, 0x49 },
++};
++
++static int hsfreq_override = -1;
++module_param(hsfreq_override, int, 0644);
++MODULE_PARM_DESC(hsfreq_override,
++		 "D-PHY hsfreqrange test code value (-1 = derive from lane rate)");
++
+ static inline void dsi_write(struct canaan_dsi *dsi, u32 reg, u32 val)
+ {
+ 	writel(val, dsi->base + reg);
+@@ -318,10 +349,28 @@
+ 	dsi_write(dsi, VID_MODE_CFG, reg);
+ }
+
++static u8 canaan_dsi_hsfreqrange(u32 lane_kbps)
++{
++	u32 lane_mbps = DIV_ROUND_UP(lane_kbps, 1000);
++	int i;
++
++	if (hsfreq_override >= 0)
++		return hsfreq_override & 0xff;
++
++	/* First band whose nominal rate covers the lane rate */
++	for (i = 0; i < ARRAY_SIZE(canaan_dphy_hsfreqrange) - 1; i++)
++		if (canaan_dphy_hsfreqrange[i].mbps >= lane_mbps)
++			break;
++
++	/* bit 7 enables the hsfreqrange override */
++	return 0x80 | canaan_dphy_hsfreqrange[i].code;
++}
++
+ static int canaan_dsi_clk_cfg(struct canaan_dsi *dsi, u32 clk)
+ {
+ 	struct mipi_dsi_device *device = dsi->device;
+ 	u32 val, div, phy_clk_freq, voc_freq, i, m, n = 0, voc;
++	u8 hsfreq;
+ 	u64 cmp, tmp, diff, closest = 100000000;
+ 	void *dis_clk;
+
+@@ -377,6 +426,7 @@
+ 	voc_freq = div64_u64(voc_freq, n);
+ 	voc_freq = div64_u64(voc_freq, (1 << (voc >> 4)));
+ 	dsi->phy_freq = voc_freq;
++	hsfreq = canaan_dsi_hsfreqrange(dsi->phy_freq);
+
+ 	dis_clk = ioremap(0x91100000, 0x1000);
+ 	val = readl(dis_clk + 0x78);
+@@ -385,11 +435,11 @@
+ 	writel(val, dis_clk + 0x78);
+ 	iounmap(dis_clk);
+
+-	k230_dsi_config_2lan_phy(dsi, m - 2, n - 1, voc, 0x96);
++	k230_dsi_config_2lan_phy(dsi, m - 2, n - 1, voc, hsfreq);
+ 	dev_info(dsi->dev,
+-		 "DSI clock cfg: req=%u kHz adjusted=%u kHz div=%u lanes=%u bpp=24 phy_target=%u kHz auto_phy_freq=%u kHz auto_m=%u auto_n=%u auto_voc=0x%x hsfreq=0x96\n",
++		 "DSI clock cfg: req=%u kHz adjusted=%u kHz div=%u lanes=%u bpp=24 phy_target=%u kHz auto_phy_freq=%u kHz auto_m=%u auto_n=%u auto_voc=0x%x hsfreq=0x%02x\n",
+ 		 clk, dsi->clk_freq, div, device->lanes, phy_clk_freq,
+-		 dsi->phy_freq, m - 2, n - 1, voc);
++		 dsi->phy_freq, m - 2, n - 1, voc, hsfreq);
+
+ 	return 0;
+ }
