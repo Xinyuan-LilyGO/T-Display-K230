@@ -1,4 +1,6 @@
 overlay/buildroot-overlay/board/canaan/k230-soc/fragment/linux.fragment
+overlay/buildroot-overlay/board/canaan/k230-soc/fragment/linux.led_btn
+overlay/buildroot-overlay/board/canaan/k230-soc/fragment/busybox.fragment
 overlay/buildroot-overlay/board/canaan/k230-soc/genimage.cfg
 overlay/buildroot-overlay/board/canaan/k230-soc/post-build.sh
 overlay/buildroot-overlay/board/canaan/k230-soc/post-image.sh

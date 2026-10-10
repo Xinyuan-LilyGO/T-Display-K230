@@ -8,6 +8,7 @@
 - 为 T-Display K230 defconfig 补齐上游 GCC 10.4 工具链配置。
 - 补回 RM69A10 旋转补丁链依赖的 GDMA rotation 基础补丁，使干净上游 SDK
   树可以完整应用补丁。
+- 补齐 T-Display K230 defconfig 所需的板级内核和 BusyBox 配置片段。
 - 删除旧构建输出后，基于新的 SDK 重新完成干净构建。
 
 ## v0.2.7 - 2026-10-08

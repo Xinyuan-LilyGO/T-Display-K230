@@ -9,6 +9,8 @@
 - Aligned the T-Display K230 defconfig with the upstream GCC 10.4 toolchain.
 - Restored the GDMA rotation base patch required by the RM69A10 rotation
   patch stack on a clean upstream SDK tree.
+- Included the board kernel and BusyBox configuration fragments required by
+  the T-Display K230 defconfig.
 - Rebuilt the T-Display K230 image from a clean SDK output directory.
 
 ## v0.2.7 - 2026-10-08
