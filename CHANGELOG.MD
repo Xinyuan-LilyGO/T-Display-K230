@@ -6,6 +6,7 @@
 
 - Updated the `k230_linux_sdk` submodule to upstream `main` release
   `v0.6.1`.
+- Aligned the T-Display K230 defconfig with the upstream GCC 10.4 toolchain.
 - Rebuilt the T-Display K230 image from a clean SDK output directory.
 
 ## v0.2.7 - 2026-10-08
