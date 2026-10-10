@@ -2,6 +2,12 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## v0.2.8 - 2026-10-10
+
+- Updated the `k230_linux_sdk` submodule to upstream `main` release
+  `v0.6.1`.
+- Rebuilt the T-Display K230 image from a clean SDK output directory.
+
 ## v0.2.7 - 2026-10-08
 
 - Fixed the RM69A10 display intermittently shifting the whole image a few

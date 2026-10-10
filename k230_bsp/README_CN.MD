@@ -68,12 +68,12 @@ mkdir -p ~/work
 cd ~/work
 ```
 
-克隆上游 SDK，并切换到已验证 commit：
+克隆上游 SDK，并切换到本 BSP 使用的发布 commit：
 
 ```sh
 git clone https://github.com/kendryte/k230_linux_sdk.git
 cd k230_linux_sdk
-git checkout 22d02c6b6783a57a3aca7eb3160e313e772cb710
+git checkout 155359af908a5fb38e870e81ee82c91bceb30800
 cd ..
 ```
 
