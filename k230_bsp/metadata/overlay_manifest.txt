@@ -21,6 +21,7 @@ overlay/buildroot-overlay/boot/uboot/u-boot-2022.10-overlay/board/canaan/common/
 overlay/buildroot-overlay/boot/uboot/u-boot-2022.10-overlay/board/canaan/k230_canmv/board.c
 overlay/buildroot-overlay/boot/uboot/u-boot-2022.10-overlay/configs/k230_canmv_t_display_defconfig
 overlay/buildroot-overlay/configs/k230_canmv_t_display_rm69a10_defconfig
+overlay/buildroot-overlay/linux/0023-add-gdma-vo-rotation.patch
 overlay/buildroot-overlay/linux/0025-drm-canaan-fix-2lan-dsi-phy-with-timeout.patch
 overlay/buildroot-overlay/linux/0026-drm-canaan-vo-add-xrgb8888-format.patch
 overlay/buildroot-overlay/linux/0027-panel-canaan-universal-enable-reset-in-prepare.patch
