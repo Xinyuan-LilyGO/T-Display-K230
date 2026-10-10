@@ -6,9 +6,14 @@
 
 - 将 `k230_linux_sdk` 子模块更新到上游 `main` 发布版本 `v0.6.1`。
 - 为 T-Display K230 defconfig 补齐上游 GCC 10.4 工具链配置。
+- 补回板级 DTS pinmux 定义依赖的 K230 IOMUX pinctrl 基础补丁，使干净上游
+  SDK 树可以正确编译设备树。
+- 新增 GC2093 相机配置依赖的 K230 v4l2 ISP 基础 DTS 节点。
 - 补回 RM69A10 旋转补丁链依赖的 GDMA rotation 基础补丁，使干净上游 SDK
   树可以完整应用补丁。
 - 补齐 T-Display K230 defconfig 所需的板级内核和 BusyBox 配置片段。
+- 按照上游 v0.6.1 VVCAM 接口更新 GC2093、V4L2/DRM 和 MIPI 相机补丁。
+- 补齐干净上游 U-Boot 树所需的 RM69A10 启动 logo 构建入口和显示参数表。
 - 删除旧构建输出后，基于新的 SDK 重新完成干净构建。
 
 ## v0.2.7 - 2026-10-08

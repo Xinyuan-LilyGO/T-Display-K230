@@ -7,10 +7,18 @@
 - Updated the `k230_linux_sdk` submodule to upstream `main` release
   `v0.6.1`.
 - Aligned the T-Display K230 defconfig with the upstream GCC 10.4 toolchain.
+- Restored the K230 IOMUX pinctrl base patch required by the board DTS
+  pinmux definitions on a clean upstream SDK tree.
+- Added the K230 v4l2 ISP base DTS node required by the GC2093 camera
+  configuration.
 - Restored the GDMA rotation base patch required by the RM69A10 rotation
   patch stack on a clean upstream SDK tree.
 - Included the board kernel and BusyBox configuration fragments required by
   the T-Display K230 defconfig.
+- Updated the GC2093, V4L2/DRM, and MIPI camera overlays for the upstream
+  v0.6.1 VVCAM interfaces.
+- Restored the U-Boot RM69A10 logo build hooks and display table required by
+  the clean upstream U-Boot tree.
 - Rebuilt the T-Display K230 image from a clean SDK output directory.
 
 ## v0.2.7 - 2026-10-08

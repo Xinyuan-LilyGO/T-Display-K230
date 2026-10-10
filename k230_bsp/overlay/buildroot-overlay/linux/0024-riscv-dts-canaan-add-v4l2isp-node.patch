@@ -1,0 +1,33 @@
+From 2f4a68dbf33a0c5a80953f3a88879a5f88c91a10 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Sat, 10 Oct 2026 00:00:00 +0000
+Subject: [PATCH] riscv: dts: canaan: add K230 v4l2 ISP node
+
+The T-Display K230 camera DTS references the SDK v4l2 ISP node to pass
+sensor selection to the vvcam stack.  Add the base node to k230.dtsi so
+the board DTBs build from a clean upstream SDK tree.
+---
+ arch/riscv/boot/dts/canaan/k230.dtsi | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/riscv/boot/dts/canaan/k230.dtsi b/arch/riscv/boot/dts/canaan/k230.dtsi
+index 1111111..2222222 100644
+--- a/arch/riscv/boot/dts/canaan/k230.dtsi
++++ b/arch/riscv/boot/dts/canaan/k230.dtsi
+@@ -690,6 +690,13 @@ soc {
+ 			status = "okay";
+ 		};
+ 
++		v4l2isp: v4l2-isp {
++			compatible = "verisilicon,isp-v4l2";
++			id = <0>;
++			reg = <0x0 0x90000000 0x0 0x9000>;
++			status = "okay";
++		};
++
+ 		mipi0: mipi.0 {
+ 			compatible = "verisilicon,mipi";
+ 			id = <0>;
+-- 
+2.34.1
+

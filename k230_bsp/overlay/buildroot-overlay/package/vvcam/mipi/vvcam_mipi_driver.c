@@ -350,6 +350,7 @@ static int vvcam_mipi_probe(struct platform_device *pdev)
     struct vvcam_mipi_dev *mipi_dev;
     struct resource *res;
     char *miscdev_name;
+    struct gpio_desc *reset_gpio;
     int lenp = 0;
     const unsigned int *id_p;
     unsigned int id;
@@ -399,22 +400,18 @@ static int vvcam_mipi_probe(struct platform_device *pdev)
     if (ret)
         return ret;
 
-    mipi_dev->reset_gpio = devm_gpiod_get(&pdev->dev, "reset", GPIOD_OUT_HIGH);
-    if (IS_ERR(mipi_dev->reset_gpio)) {
-		printk("failed to acquire reset gpio\n");
-		// return PTR_ERR(lt9611->reset_gpio);
-	}else {
-        gpiod_direction_output(mipi_dev->reset_gpio, true);//
+    reset_gpio = devm_gpiod_get_optional(&pdev->dev, "reset", GPIOD_OUT_HIGH);
+    if (IS_ERR(reset_gpio)) {
+        dev_warn(&pdev->dev, "failed to acquire sensor reset gpio: %ld\n",
+                 PTR_ERR(reset_gpio));
+    } else if (reset_gpio) {
+        gpiod_direction_output(reset_gpio, true);
         mdelay(100);
-        gpiod_set_value_cansleep(mipi_dev->reset_gpio, false);
+        gpiod_set_value_cansleep(reset_gpio, false);
         mdelay(100);
-        gpiod_set_value_cansleep(mipi_dev->reset_gpio, true);
-        printk("reset gpio init successwwwwwwjx \n");
-
+        gpiod_set_value_cansleep(reset_gpio, true);
+        dev_info(&pdev->dev, "sensor reset gpio toggled\n");
     }
-
-
-    printk("---------------reset --- --------\n");
 
     mutex_init(&mipi_dev->mlock);
 	platform_set_drvdata(pdev, mipi_dev);
