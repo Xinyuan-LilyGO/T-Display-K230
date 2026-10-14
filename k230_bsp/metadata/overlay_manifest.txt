@@ -1,5 +1,5 @@
 overlay/buildroot-overlay/board/canaan/k230-soc/fragment/linux.fragment
-overlay/buildroot-overlay/board/canaan/k230-soc/genimage.cfg
+overlay/buildroot-overlay/board/canaan/k230-soc/genimage_cfg/genimage.cfg
 overlay/buildroot-overlay/board/canaan/k230-soc/post-build.sh
 overlay/buildroot-overlay/board/canaan/k230-soc/post-image.sh
 overlay/buildroot-overlay/board/canaan/k230-soc/rootfs_overlay/etc/default/k230_usb_storage
@@ -71,5 +71,3 @@ overlay/buildroot-overlay/package/rtl8723ds/rtl8723ds.hash
 overlay/buildroot-overlay/package/rtl8723ds/rtl8723ds.mk
 overlay/buildroot-overlay/package/rtl8733bs/rtl8733bs.mk
 overlay/buildroot-overlay/package/vvcam/mipi/vvcam_mipi_driver.c
-overlay/buildroot-overlay/package/vvcam/src/gc2093.c
-overlay/buildroot-overlay/package/vvcam/v4l2-drm/src/lib.c

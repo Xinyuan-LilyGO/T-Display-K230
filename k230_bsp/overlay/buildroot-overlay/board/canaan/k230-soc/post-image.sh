@@ -4,8 +4,9 @@ BUILDROOT_PATH=$(pwd)
 #BINARIES_DIR=/home/wangjianxin/k230_linux_sdk/output/k230_canmv_defconfig/images
 UBOOT_BUILD_DIR=${BUILD_DIR}/uboot-2022.10
 K230_SDK_ROOT=$(dirname $(dirname ${BASE_DIR}))
-GENIMAGE_CFG_SD=$(dirname $(realpath "$0"))/genimage.cfg
-env_dir=$(dirname $(realpath "$0"))
+GENIMAGE_CFG_SD=$(dirname $(realpath "$0"))/genimage_cfg/genimage.cfg
+env_dir=$(dirname $(realpath "$0"))/env
+CONF=$(basename ${BASE_DIR})
 
 
 
@@ -210,19 +211,11 @@ gen_image()
 gen_env_bin()
 {
 	local mkenvimage="${UBOOT_BUILD_DIR}/tools/mkenvimage"
-	local CONFT=${BUILD_DIR%/build*}
-	local CONF=${CONFT##*/output/};
-
 
 	cd  "${BINARIES_DIR}/";
 	local default_env_file=${env_dir}/default.env;
-
-	# if [ ${DTB} == "k230-canmv-01studio.dtb" ]; then
-	# 	default_env_file=${env_dir}/01studio.env;
-	# fi
-	# if [ ${DTB} == "k230-canmv.dtb" ]; then
-	# 	default_env_file=${env_dir}/k230_canmv.env;
-	# fi
+	local nand_default_env_file=${env_dir}/default_nand.env;
+	local nor_default_env_file=${env_dir}/default_nor.env;
 
 	if [ ${CONF} == "k230d_canmv_ilp32_defconfig" ] || [ ${CONF} == "BPI-CanMV-K230D-Zero_ilp32_defconfig" ]; then
 		sed -i 's/^bootcmd=.*$/bootcmd=run bnuttx;run blinuxilp32;/g' ${default_env_file}
@@ -232,6 +225,8 @@ gen_env_bin()
 		sed -i 's/^bootcmd=.*$/bootcmd=run blinux;/g' ${default_env_file}
 	fi
 	${mkenvimage} -s 0x10000 -o uboot/env.env  ${default_env_file}
+	${mkenvimage} -s 0x10000 -o uboot/nand_env.env  ${nand_default_env_file}
+	${mkenvimage} -s 0x10000 -o uboot/nor_env.env  ${nor_default_env_file}
 }
 gen_boot_ext4()
 {

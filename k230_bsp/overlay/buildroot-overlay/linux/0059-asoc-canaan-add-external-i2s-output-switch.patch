@@ -11,19 +11,18 @@ I2S pads:
 - DATA/DIN: GPIO35
 - SHUTDOWN: GPIO34, handled from userspace
 
-The previous DTS pinmux enabled the pads, but the K230 INNO machine driver still
-forced the internal audio codec path. Add an ALSA mixer switch so userspace can
-select the external I2S pad route by setting audio_codec_bypass and the shared
-PDM/I2S IO mux. RM69A10 defaults to the external route so the phone UI can drive
-the MAX98357A after boot, while the UI can still switch the route back to the
-internal codec/headphone output.
+The upstream K230 INNO machine driver already provides the runtime "Codec
+Route" enum and the device-tree route property. Add the boolean mixer alias
+used by the phone UI, and re-apply the selected route when a stream starts.
+RM69A10 defaults to the external route so the phone UI can drive the MAX98357A
+after boot, while the UI can still switch the route back to the internal
+codec/headphone output.
 ---
  arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts |  1 +
- sound/soc/canaan/canaan_k230_inno.c               | 47 +++++++++++++++++++++-
- 2 files changed, 47 insertions(+), 1 deletion(-)
+ sound/soc/canaan/canaan_k230_inno.c               | 29 ++++++++++++++++++++--
+ 2 files changed, 27 insertions(+), 3 deletions(-)
 
 diff --git a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
-index c4a6db0..e3a68d7 100644
 --- a/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
 +++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
 @@ -35,6 +35,7 @@
@@ -35,100 +34,75 @@ index c4a6db0..e3a68d7 100644
  };
  &uart0 { status = "okay"; };
 diff --git a/sound/soc/canaan/canaan_k230_inno.c b/sound/soc/canaan/canaan_k230_inno.c
-index 9af0678..269963c 100644
 --- a/sound/soc/canaan/canaan_k230_inno.c
 +++ b/sound/soc/canaan/canaan_k230_inno.c
-@@ -34,6 +34,47 @@
- 	struct clk *pclk;
- 	struct mutex clk_lock;
- 	int clk_users;
-+	bool external_i2s_output;
-+};
-+
+@@ -71,6 +71,13 @@
+ 	struct snd_soc_card card;
+ };
+ 
 +static void k230_inno_apply_output_route(struct k230_inno_info *priv)
 +{
 +	audio_i2s_in_init();
-+	audio_i2s_enable_audio_codec(!priv->external_i2s_output);
++	audio_i2s_enable_audio_codec(priv->route_internal);
 +	audio_i2s_out_init(true, 32);
 +}
 +
-+static int k230_inno_external_i2s_get(struct snd_kcontrol *kcontrol,
-+				      struct snd_ctl_elem_value *ucontrol)
+ static int k230_inno_hw_params(struct snd_pcm_substream *substream,
+ 			       struct snd_pcm_hw_params *params)
+ {
+@@ -95,6 +102,8 @@
+ 	unsigned int max_ch;
+ 	int ret;
+ 
++	k230_inno_apply_output_route(priv);
++
+ 	/*
+ 	 * The CPU DAI advertises whatever I2S_COMP_PARAM_1 reports, which can
+ 	 * be more than the audio_in block actually feeds it: sdi0 and sdi1 are
+@@ -179,9 +188,33 @@
+ 	return ret;
+ }
+ 
++static int k230_external_i2s_get(struct snd_kcontrol *kcontrol,
++				 struct snd_ctl_elem_value *ucontrol)
 +{
 +	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
 +	struct k230_inno_info *priv = snd_soc_card_get_drvdata(card);
 +
-+	ucontrol->value.integer.value[0] = priv->external_i2s_output;
++	ucontrol->value.integer.value[0] = !priv->route_internal;
 +
 +	return 0;
 +}
 +
-+static int k230_inno_external_i2s_put(struct snd_kcontrol *kcontrol,
-+				      struct snd_ctl_elem_value *ucontrol)
++static int k230_external_i2s_put(struct snd_kcontrol *kcontrol,
++				 struct snd_ctl_elem_value *ucontrol)
 +{
-+	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
-+	struct k230_inno_info *priv = snd_soc_card_get_drvdata(card);
-+	bool enable = !!ucontrol->value.integer.value[0];
++	struct snd_ctl_elem_value route = *ucontrol;
 +
-+	if (priv->external_i2s_output == enable)
-+		return 0;
++	route.value.enumerated.item[0] =
++		ucontrol->value.integer.value[0] ? 1 : 0;
 +
-+	priv->external_i2s_output = enable;
-+	k230_inno_apply_output_route(priv);
-+
-+	return 1;
++	return k230_codec_route_put(kcontrol, &route);
 +}
 +
-+static const struct snd_kcontrol_new k230_inno_controls[] = {
+ static const struct snd_kcontrol_new canaan_k230_inno_controls[] = {
+ 	SOC_ENUM_EXT("Codec Route", k230_codec_route_enum,
+ 		     k230_codec_route_get, k230_codec_route_put),
 +	SOC_SINGLE_BOOL_EXT("External I2S Output Switch", 0,
-+			    k230_inno_external_i2s_get,
-+			    k230_inno_external_i2s_put),
++			    k230_external_i2s_get, k230_external_i2s_put),
  };
  
- static int k230_inno_hw_params(struct snd_pcm_substream *substream,
-@@ -48,6 +89,12 @@
- 
- static int k230_inno_startup(struct snd_pcm_substream *substream)
- {
-+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-+	struct snd_soc_card *card = rtd->card;
-+	struct k230_inno_info *priv = snd_soc_card_get_drvdata(card);
-+
-+	k230_inno_apply_output_route(priv);
-+
- 	return 0;
- }
- 
-@@ -76,6 +123,8 @@
- 	.owner = THIS_MODULE,
- 	.dai_link = &canaan_k230_dailink,
- 	.num_links = 1,
-+	.controls = k230_inno_controls,
-+	.num_controls = ARRAY_SIZE(k230_inno_controls),
- };
- 
- static int canaan_k230_inno_probe(struct platform_device *pdev)
-@@ -97,6 +146,8 @@
- 		return -ENOMEM;
- 
- 	mutex_init(&priv->clk_lock);
-+	priv->external_i2s_output =
-+		of_property_read_bool(np, "canaan,external-i2s-output-default");
- 
- 	card->dev = &pdev->dev;
- 	snd_soc_card_set_drvdata(card, priv);
-@@ -133,9 +184,9 @@
- 		return ret;
- 	}
- 
+ static const struct snd_soc_ops canaan_k230_inno_ops = {
+@@ -360,9 +393,7 @@
+ 	 * Establish the route before the card goes live, so the very first
+ 	 * open already sees the configuration asked for in the device tree.
+ 	 */
 -	audio_i2s_in_init();
--	audio_i2s_enable_audio_codec(true);
+-	audio_i2s_enable_audio_codec(priv->route_internal);
 -	audio_i2s_out_init(true, 32);
 +	k230_inno_apply_output_route(priv);
-+	dev_info(&pdev->dev, "External I2S output %s by default\n",
-+		 priv->external_i2s_output ? "enabled" : "disabled");
  
- 	return ret;
- }
+ 	ret = devm_snd_soc_register_card(&pdev->dev, card);
+ 	if (ret) {
 -- 
 2.25.1
