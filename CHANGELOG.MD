@@ -2,6 +2,15 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed choppy video playback. The Video app now decodes H.264 and HEVC on
+  the K230's hardware video decoder, which also scales each frame to the
+  screen, instead of in software on the CPU. A 720x1320 clip with audio that
+  showed only a third of its frames now shows all of them. Files the hardware
+  decoder can't play fall back to software decoding. Set `video.hw_decode=0`
+  in settings.conf to always decode in software.
+
 ## v0.2.7 - 2026-10-08
 
 - Fixed the RM69A10 display intermittently shifting the whole image a few
