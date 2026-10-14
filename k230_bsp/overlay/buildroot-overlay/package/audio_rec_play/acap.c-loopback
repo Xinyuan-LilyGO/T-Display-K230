@@ -1,0 +1,46 @@
+#include "acap.h"
+#include "capture_pcm.h"
+#include "play_pcm.h"
+#define SAMPLE_RATE 8000
+#define BUFFER_SAMPLES 320
+#define BITS_PER_SAMPLE 16
+#define CHANNELS_NUM 1
+
+static char pcm_buf[BUFFER_SAMPLES*BITS_PER_SAMPLE/8];
+void acap_init()
+{
+    init_capture_pcm(SAMPLE_RATE,CHANNELS_NUM,BUFFER_SAMPLES,BITS_PER_SAMPLE);
+    init_play_pcm(SAMPLE_RATE,CHANNELS_NUM,BUFFER_SAMPLES,BITS_PER_SAMPLE);
+
+}
+
+void acap_deinit()
+{
+    deinit_capture_pcm();
+    deinit_play_pcm();
+}
+
+void acap_start()
+{
+    while(1)
+    {
+        //capture pcm
+        if (0 != capture_pcm(pcm_buf))
+        {
+            usleep(1000*1);
+            continue ;
+        }
+
+        //do pcm
+        usleep(1000*10);
+
+        //paly pcm
+        play_pcm(pcm_buf);
+    }
+
+}
+
+void acap_stop()
+{
+
+}

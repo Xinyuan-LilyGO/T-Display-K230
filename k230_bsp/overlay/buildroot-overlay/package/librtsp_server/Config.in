@@ -1,0 +1,5 @@
+config BR2_PACKAGE_LIB_RTSPSERVER
+    bool "RTSP Server Library"
+    depends on BR2_PACKAGE_LIVE555
+    help
+        This option enables the RTSP Server Library, which provides functionality for streaming media over the RTSP protocol. It depends on the LIVE555 library.

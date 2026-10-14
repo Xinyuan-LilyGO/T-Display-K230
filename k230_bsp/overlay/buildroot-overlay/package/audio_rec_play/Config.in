@@ -1,0 +1,7 @@
+config BR2_PACKAGE_AUDIO_REC_PLAY
+    bool "audio_rec_play"
+    select BR2_PACKAGE_ALSA_UTILS
+    select BR2_PACKAGE_SPEEXDSP
+    select BR2_PACKAGE_WEBRTC_AUDIO_PROCESSING
+    help
+      This is a package for audio recording and playback and enables audio quality enhancement features.
