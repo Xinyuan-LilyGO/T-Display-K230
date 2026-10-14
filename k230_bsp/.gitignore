@@ -3,3 +3,16 @@ images/*
 
 *.log
 *.tmp
+
+# Local copies mirrored from k230_linux_sdk during BSP application.
+# Keep upstream package trees out of the BSP and retain only explicit
+# board-specific overrides or package sources maintained here.
+overlay/buildroot-overlay/package/ai2d_kpu/*
+!overlay/buildroot-overlay/package/ai2d_kpu/
+!overlay/buildroot-overlay/package/ai2d_kpu/ai2d_kpu.mk
+overlay/buildroot-overlay/package/face_detect/*
+!overlay/buildroot-overlay/package/face_detect/
+!overlay/buildroot-overlay/package/face_detect/CMakeLists.txt
+overlay/buildroot-overlay/package/lvgl/
+overlay/buildroot-overlay/package/vvcam/
+overlay/buildroot-overlay/package/audio_rec_play/main.cc---
