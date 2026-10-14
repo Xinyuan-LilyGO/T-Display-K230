@@ -27,6 +27,7 @@ overlay/buildroot-overlay/boot/uboot/u-boot-2022.10-overlay/board/canaan/k230_ca
 overlay/buildroot-overlay/boot/uboot/u-boot-2022.10-overlay/configs/k230_canmv_t_display_defconfig
 overlay/buildroot-overlay/configs/k230_canmv_t_display_rm69a10_defconfig
 overlay/buildroot-overlay/linux/0018-pinctrl-canaan-Add-K230-IOMUX-driver.patch
+overlay/buildroot-overlay/linux/0019-dts-add-nonai2d.patch
 overlay/buildroot-overlay/linux/0023-add-gdma-vo-rotation.patch
 overlay/buildroot-overlay/linux/0024-riscv-dts-canaan-add-v4l2isp-node.patch
 overlay/buildroot-overlay/linux/0025-drm-canaan-fix-2lan-dsi-phy-with-timeout.patch
