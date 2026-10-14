@@ -12144,7 +12144,13 @@ static bool build_mesh_data_frame(const probe_options_t &opts,
     header.flags = (opts.hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
                    ((opts.hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
                     MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
-    if(opts.want_ack && !meshtastic_node_is_broadcast(header.to)) {
+    /*
+     * A broadcast text with want_ack is confirmed by hearing a neighbor
+     * relay it (implicit ACK), as in stock Meshtastic. Other broadcast ports
+     * don't ask for it, so they never retry.
+     */
+    if(opts.want_ack && (!meshtastic_node_is_broadcast(header.to) ||
+                         portnum == MESHTASTIC_TEXT_MESSAGE_APP)) {
         header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
     }
     header.channel = channel_hash;
@@ -12251,7 +12257,9 @@ static bool build_phoneapi_mesh_data_frame(const probe_options_t &opts,
     header.flags = (hop_limit & MESHTASTIC_PACKET_FLAGS_HOP_LIMIT_MASK) |
                    ((hop_limit << MESHTASTIC_PACKET_FLAGS_HOP_START_SHIFT) &
                     MESHTASTIC_PACKET_FLAGS_HOP_START_MASK);
-    if(tx.want_ack && !meshtastic_node_is_broadcast(header.to)) {
+    /* Broadcast texts get an implicit ACK, as in build_mesh_data_frame() */
+    if(tx.want_ack && (!meshtastic_node_is_broadcast(header.to) ||
+                       tx.data.portnum == MESHTASTIC_TEXT_MESSAGE_APP)) {
         header.flags |= MESHTASTIC_PACKET_FLAGS_WANT_ACK_MASK;
     }
     header.channel = channel_hash;
@@ -16220,10 +16228,13 @@ static bool process_mesh_rx(const probe_options_t &opts, PhysicalLayer *radio,
         data_ok = pki_match;
     }
     secure_match = channel_match || pki_match;
+    /*
+     * A relay of our own broadcast confirms it, whatever its want_ack bit;
+     * only broadcasts still waiting in the ACK queue are completed.
+     */
     if(data_ok && duplicate && channel_match &&
        header.from == opts.from_node &&
-       header.to == MESHTASTIC_NODENUM_BROADCAST &&
-       mesh_header_want_ack(header)) {
+       header.to == MESHTASTIC_NODENUM_BROADCAST) {
         (void)mesh_ack_complete_implicit(opts.from_node, header);
     }
     if(data_ok) {
@@ -20057,12 +20068,9 @@ int main(int argc, char **argv)
     phoneapi_load_meshtastic_channel_slots(&opts);
     default_node_name(&opts.node_name);
     default_from_node(&opts);
-    if(opts.mesh_mode) {
-        if(meshtastic_node_is_broadcast(opts.to_node)) {
-            opts.want_ack = false;
-        } else if(!opts.want_ack_set) {
-            opts.want_ack = true;
-        }
+    if(opts.mesh_mode && !opts.want_ack_set) {
+        /* Broadcasts ask for ACK only when --ack is given */
+        opts.want_ack = !meshtastic_node_is_broadcast(opts.to_node);
     }
     if(!apply_meshtastic_profile(&opts)) {
         return 2;

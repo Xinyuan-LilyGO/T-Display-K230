@@ -2,6 +2,18 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed the Meshtastic ACK setting switching itself off for channel
+  messages. With ACK on, a channel message now waits for a neighbor to relay
+  it and shows "Relayed", as in stock Meshtastic, and is re-sent up to 3 times
+  if no relay is heard. Channel messages from the phone app work the same way
+  when the app asks for ACK. Position, telemetry and other broadcasts never
+  ask for ACK.
+- Fixed Meshtastic settings such as ACK, Rebroadcast, hop limit and region
+  reverting to their old values when changed while Meshtastic was running.
+  The daemon now restarts with the new settings.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,

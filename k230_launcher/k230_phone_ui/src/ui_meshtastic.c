@@ -1604,18 +1604,17 @@ static void mesh_normalize_to_node(void)
     if(mesh_normalize_to_node_text(mesh_to_node, normalized,
                                    sizeof(normalized)) != 0) {
         snprintf(mesh_to_node, sizeof(mesh_to_node), "0xffffffff");
-        mesh_ack_enabled = 0;
         return;
     }
     snprintf(mesh_to_node, sizeof(mesh_to_node), "%s", normalized);
 }
 
-static void mesh_normalize_target_ack(void)
+/* ACK stays as set: broadcasts are confirmed by a relay (implicit ACK) */
+static void mesh_normalize_target(void)
 {
     mesh_normalize_to_node();
     if(mesh_to_text_is_broadcast(mesh_to_node)) {
         snprintf(mesh_to_node, sizeof(mesh_to_node), "0xffffffff");
-        mesh_ack_enabled = 0;
     }
 }
 
@@ -1793,14 +1792,14 @@ static void mesh_load_profile_prefs(void)
     mesh_normalize_from_node();
     mesh_normalize_hop();
     mesh_normalize_slot();
-    mesh_normalize_target_ack();
+    mesh_normalize_target();
     mesh_normalize_media_config();
 }
 
 static void mesh_save_profile_prefs(void)
 {
     mesh_normalize_from_node();
-    mesh_normalize_target_ack();
+    mesh_normalize_target();
 
     ui_prefs_set(MESHTASTIC_PREF_REGION, mesh_region);
     ui_prefs_set(MESHTASTIC_PREF_PRESET, mesh_preset);
@@ -1971,9 +1970,6 @@ static int mesh_status_sync_to_node(const char *value)
         return 0;
     }
     snprintf(mesh_to_node, sizeof(mesh_to_node), "%s", normalized);
-    if(mesh_to_text_is_broadcast(mesh_to_node)) {
-        mesh_ack_enabled = 0;
-    }
     return 1;
 }
 
@@ -4495,7 +4491,7 @@ static void mesh_start_event_cb(lv_event_t *event)
     mesh_safe_or_default(node_arg, sizeof(node_arg), mesh_node_name,
                          "k230-t-display");
     mesh_normalize_from_node();
-    mesh_normalize_target_ack();
+    mesh_normalize_target();
     mesh_save_profile_prefs();
     mesh_safe_or_default(from_arg, sizeof(from_arg), mesh_from_node, "0");
     mesh_safe_or_default(to_arg, sizeof(to_arg), mesh_to_node, "0xffffffff");
@@ -4733,6 +4729,27 @@ static void mesh_restart_daemon_if_online(void)
     mesh_start_event_cb(NULL);
 }
 
+/*
+ * The daemon takes most settings as start arguments, and the status sync
+ * copies them back from it. Restart a running daemon after a change, or the
+ * old value comes back on the next status refresh.
+ */
+static void mesh_restart_daemon_for_field(mesh_setting_field_t field)
+{
+    switch(field) {
+    case MESH_FIELD_PHOTO_REPEAT:
+    case MESH_FIELD_PHOTO_REPAIR_ROUNDS:
+    case MESH_FIELD_PHOTO_REPAIR_REPEAT:
+    case MESH_FIELD_PHOTO_REPAIR_WINDOW:
+    case MESH_FIELD_PHOTO_CACHE_TTL:
+        /* mesh_apply_media_runtime_config() applies these live */
+        return;
+    default:
+        mesh_restart_daemon_if_online();
+        return;
+    }
+}
+
 void ui_meshtastic_apply_ble_setting(void)
 {
     if(!ui_ble_meshtastic_bridge_enabled()) {
@@ -4926,7 +4943,7 @@ static int mesh_channel_profile_write_current(void)
     fprintf(fp, "power=%s\n", mesh_tx_power);
     fprintf(fp, "node=%s\n", mesh_node_name);
     mesh_normalize_from_node();
-    mesh_normalize_target_ack();
+    mesh_normalize_target();
     fprintf(fp, "from=%s\n", mesh_from_node);
     fprintf(fp, "to=%s\n", mesh_to_node);
     fprintf(fp, "hop=%s\n", mesh_hop_limit);
@@ -5071,7 +5088,7 @@ static int mesh_channel_profile_apply_file_ex(const char *path,
                              sizeof(mesh_telemetry_environment_interval),
                              value, "300");
     }
-    mesh_normalize_target_ack();
+    mesh_normalize_target();
     mesh_save_profile_prefs();
     mesh_settings_refresh();
     mesh_update_profile_label();
@@ -5858,12 +5875,13 @@ static void mesh_setting_submit_cb(const char *text, void *user_data)
         return;
     }
 
-    mesh_normalize_target_ack();
+    mesh_normalize_target();
     mesh_save_profile_prefs();
     mesh_settings_refresh();
     mesh_update_target_button();
     mesh_append_log("settings saved: %s=%s", mesh_setting_name(field),
                     mesh_setting_value(field, tmp, sizeof(tmp)));
+    mesh_restart_daemon_for_field(field);
 }
 
 static void mesh_choice_close(void)
@@ -6068,7 +6086,7 @@ static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
         break;
     case MESH_FIELD_ACK:
         mesh_ack_enabled = strcmp(value, "0") != 0;
-        mesh_normalize_target_ack();
+        mesh_normalize_target();
         break;
     case MESH_FIELD_REBROADCAST:
         mesh_rebroadcast_enabled = strcmp(value, "0") != 0;
@@ -6137,6 +6155,7 @@ static void mesh_choice_apply(mesh_setting_field_t field, const char *value)
     mesh_settings_refresh();
     mesh_append_log("settings saved: %s=%s", mesh_setting_name(field),
                     mesh_setting_value(field, log_value, sizeof(log_value)));
+    mesh_restart_daemon_for_field(field);
 }
 
 static void mesh_choice_event_cb(lv_event_t *event)
