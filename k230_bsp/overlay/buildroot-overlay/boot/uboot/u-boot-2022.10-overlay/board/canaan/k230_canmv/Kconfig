@@ -1,0 +1,38 @@
+if TARGET_K230_CANMV
+
+config SYS_CPU
+	default "k230"
+
+config SYS_VENDOR
+	default "canaan"
+
+config SYS_BOARD
+	default "k230_canmv"
+
+config SYS_CONFIG_NAME
+	default "k230_evb"
+
+config BOARD_SPECIFIC_OPTIONS # dummy
+	def_bool y
+	select RISCV_THEAD
+
+choice
+	prompt "ddr type and frequency"
+	default CANMV_LPDDR3_2133
+
+config CANMV_LPDDR3_2133
+	bool "K230 CanMV LPDDR3 2133"
+
+config CANMV_V3_LPDDR4_2667
+	bool "CanMV V3 LPDDR4 2667"
+	help
+	  LPDDR4 2667 configuration used by CanMV V3-compatible 1 GiB boards,
+	  including the T-Display K230 RM69A10 board.
+
+config CANMV_V3_LPDDR4_3200
+	bool "CanMV V3 LPDDR4 3200"
+	help
+	  LPDDR4 3200 configuration used by compatible CanMV V3 boards.
+
+endchoice
+endif

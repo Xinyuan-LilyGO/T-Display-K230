@@ -64,6 +64,27 @@ void quick_boot_board_init(void)
 }
 #endif
 
+void ddr_init_2667(void);
+void ddr4_init_3200(void);
+
+int ddr_init_training(void)
+{
+	#if defined(CONFIG_TARGET_K230_FPGA)
+		return 0;
+	#endif
+
+	if ((readl((const volatile void __iomem *)0x980001bcULL) & 0x1) != 0)
+		return 0;
+
+	#if defined(CONFIG_CANMV_V3_LPDDR4_2667)
+		ddr_init_2667();
+	#elif defined(CONFIG_CANMV_V3_LPDDR4_3200)
+		ddr4_init_3200();
+	#endif
+
+	return 0;
+}
+
 sysctl_boot_mode_e sysctl_boot_get_boot_mode(void)
 {
 	return SYSCTL_BOOT_SDIO1;
