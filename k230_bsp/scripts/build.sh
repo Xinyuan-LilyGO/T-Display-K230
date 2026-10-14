@@ -17,5 +17,10 @@ fi
 echo "Build SDK: ${SDK_DIR}"
 echo "Defconfig: ${CONF}"
 
+# Buildroot's host-tar configure script refuses root by default. The
+# documented build environment may be a privileged container, while normal
+# users can still override this variable explicitly.
+export FORCE_UNSAFE_CONFIGURE="${FORCE_UNSAFE_CONFIGURE:-1}"
+
 make -C "${SDK_DIR}" CONF="${CONF}" "${CONF}"
 make -C "${SDK_DIR}" CONF="${CONF}" all

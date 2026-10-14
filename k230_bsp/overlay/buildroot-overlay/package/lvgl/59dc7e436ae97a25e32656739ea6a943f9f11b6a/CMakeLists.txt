@@ -367,6 +367,12 @@ file(GLOB LV_LINUX_SRC src/lib/*.c)
 set(LV_LINUX_INC src/lib)
 
 target_include_directories(lvgl PUBLIC ${PKG_CONFIG_INC})
+if(TARGET lvgl_examples)
+    target_include_directories(lvgl_examples SYSTEM PUBLIC ${PKG_CONFIG_INC})
+endif()
+if(TARGET lvgl_demos)
+    target_include_directories(lvgl_demos SYSTEM PUBLIC ${PKG_CONFIG_INC})
+endif()
 
 # Library type is determined by BUILD_SHARED_LIBS (shared if ON, static if OFF)
 add_library(lvgl_linux ${LV_LINUX_SRC} ${LV_LINUX_BACKEND_SRC})

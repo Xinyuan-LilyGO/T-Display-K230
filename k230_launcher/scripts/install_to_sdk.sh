@@ -14,10 +14,16 @@ RESOURCE_DIR="${K230_RESOURCE_DIR:-$LAUNCHER_DIR/resources}"
 
 PACKAGE_DIR="$SDK_DIR/buildroot-overlay/package/k230_phone_ui"
 ROOTFS_DIR="$SDK_DIR/buildroot-overlay/board/canaan/k230-soc/rootfs_overlay"
-CONFIG_IN="$SDK_DIR/buildroot-overlay/package/Config_canaan.in"
+CONFIG_IN="$SDK_DIR/buildroot-overlay/package/Config.in"
 DEFCONFIG="$SDK_DIR/buildroot-overlay/configs/$CONF"
 STAMP="$SDK_DIR/.overlay_sync"
-OUTPUT_BUILDROOT_PACKAGE_DIR="$SDK_DIR/output/buildroot-2025.02.1/package/k230_phone_ui"
+OUTPUT_BUILDROOT_DIR=""
+if [ -d "$SDK_DIR/output" ]; then
+    OUTPUT_BUILDROOT_DIR="$(
+        find "$SDK_DIR/output" -mindepth 1 -maxdepth 1 \
+            -type d -name 'buildroot-*' -print -quit
+    )"
+fi
 OUTPUT_CONF_DIR="$SDK_DIR/output/$CONF"
 OUTPUT_PACKAGE_BUILD_DIR="$OUTPUT_CONF_DIR/build/k230_phone_ui"
 OUTPUT_TARGET_APP_DIR="$OUTPUT_CONF_DIR/target/root/app/k230_phone_ui"
@@ -77,14 +83,26 @@ write_build_info_override "$PACKAGE_DIR/src/ui_build_info_override.cmake" \
 
 # The SDK overlay sync and Buildroot package rsync can leave stale generated
 # package files behind. Remove generated copies before syncing this launcher.
-rm -rf "$OUTPUT_BUILDROOT_PACKAGE_DIR" "$OUTPUT_PACKAGE_BUILD_DIR" "$OUTPUT_TARGET_APP_DIR"
-
-if ! grep -q 'source "package/k230_phone_ui/Config.in"' "$CONFIG_IN"; then
-    {
-        echo
-        echo 'source "package/k230_phone_ui/Config.in"'
-    } >> "$CONFIG_IN"
+if [ -n "$OUTPUT_BUILDROOT_DIR" ]; then
+    rm -rf "$OUTPUT_BUILDROOT_DIR/package/k230_phone_ui"
 fi
+rm -rf "$OUTPUT_PACKAGE_BUILD_DIR" "$OUTPUT_TARGET_APP_DIR"
+
+# Recent upstream SDKs keep the Canaan packages directly in package/Config.in.
+# Older SDKs exposed a separate Config_canaan.in, which is not necessarily
+# included by the current Buildroot tree. Register the launcher in the main
+# package menu so clean builds cannot silently omit it.
+for package_config in \
+    package/libgpiod2/Config.in \
+    package/camera_rtsp_demo/Config.in \
+    package/librtsp_server/Config.in \
+    package/audio_rec_play/Config.in \
+    package/mvx_player/Config.in \
+    package/k230_phone_ui/Config.in; do
+    if ! grep -q "source \"${package_config}\"" "$CONFIG_IN"; then
+        printf '\nsource "%s"\n' "$package_config" >> "$CONFIG_IN"
+    fi
+done
 
 if grep -q '^# BR2_PACKAGE_K230_PHONE_UI is not set' "$DEFCONFIG"; then
     sed -i 's/^# BR2_PACKAGE_K230_PHONE_UI is not set/BR2_PACKAGE_K230_PHONE_UI=y/' "$DEFCONFIG"
