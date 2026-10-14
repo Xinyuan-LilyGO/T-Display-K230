@@ -11824,7 +11824,11 @@ static void *camera_preview_thread_cb(void *arg)
         unsigned view_h = camera_preview_view_height();
         size_t view_bytes = (size_t)view_w * view_h * 2U;
 
-        memset(&ctx.vbuffer, 0, sizeof(ctx.vbuffer));
+        /*
+         * Preserve the buffer metadata prepared by v4l2_drm_setup().
+         * Clearing it makes the current K230 VVCAM driver reject DQBUF
+         * with EINVAL even though the ISP is producing frames.
+         */
         ctx.vbuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ctx.vbuffer.memory = V4L2_MEMORY_MMAP;
 

@@ -811,7 +811,10 @@ static int capture_frame(const capture_options_t *opts)
     }
 
     for(unsigned i = 0; i <= opts->skip_frames; i++) {
-        memset(&ctx.vbuffer, 0, sizeof(ctx.vbuffer));
+        /*
+         * Keep the buffer metadata initialized by v4l2_drm_setup().
+         * The K230 VVCAM driver uses it while dequeuing MMAP buffers.
+         */
         ctx.vbuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ctx.vbuffer.memory = V4L2_MEMORY_MMAP;
 
@@ -906,7 +909,7 @@ static int capture_stream(const capture_options_t *opts)
           (end_us == 0 || monotonic_us() < end_us)) {
         const uint8_t *frame;
 
-        memset(&ctx.vbuffer, 0, sizeof(ctx.vbuffer));
+        /* Preserve the V4L2 buffer metadata across DQBUF/QBUF cycles. */
         ctx.vbuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ctx.vbuffer.memory = V4L2_MEMORY_MMAP;
 

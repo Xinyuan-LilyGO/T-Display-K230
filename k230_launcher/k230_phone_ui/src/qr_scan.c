@@ -985,7 +985,7 @@ static int scan_camera_once(const qr_scan_options_t *opts)
 
         focus_sweep_tick(opts, now_ms, &next_focus_ms, &focus_index);
 
-        memset(&ctx.vbuffer, 0, sizeof(ctx.vbuffer));
+        /* Keep the initialized V4L2 buffer metadata for DQBUF. */
         ctx.vbuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ctx.vbuffer.memory = V4L2_MEMORY_MMAP;
         if(v4l2_drm_dump(&ctx, 1000) != 0) {
