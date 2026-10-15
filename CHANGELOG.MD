@@ -2,6 +2,18 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed nRF9151 GNSS not getting a first fix while LTE stayed registered
+  without power saving. GNSS now pauses LTE until the first fix or for up to
+  5 minutes, then brings LTE back, and pauses it again after 30 minutes
+  without a fix. Set `nrf9151.gnss.lte_pause=0` in settings.conf to keep LTE
+  on.
+- Fixed the Cellular app showing "Probing" while GNSS was running. LTE status
+  is now refreshed during GNSS sessions.
+- Fixed GNSS autostart at boot giving up when the modem missed the first AT
+  command.
+
 ## v0.2.7 - 2026-10-08
 
 - Fixed the RM69A10 display intermittently shifting the whole image a few
