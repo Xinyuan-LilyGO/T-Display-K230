@@ -4,6 +4,7 @@
 #include "ui_common.h"
 #include "ui_hardware.h"
 #include "ui_i18n.h"
+#include "ui_prefs.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -39,6 +40,10 @@
 #define VIDEO_LATE_DROP_US 180000
 #define VIDEO_MAX_CONSECUTIVE_DROPS 2
 #define VIDEO_SYNC_SLEEP_CHUNK_US 20000
+#define VIDEO_HW_DECODE_PREF "video.hw_decode"
+#define VIDEO_HW_FIRST_FRAME_PACKETS 90
+#define VIDEO_SEND_RETRIES 100
+#define VIDEO_DECODE_RETRY_SW 1
 #define VIDEO_PCM_VOLUME_BIN "/root/app/k230_phone_ui/k230_pcm_volume"
 #define VIDEO_VOLUME_CONFIG_PATH "/root/.k230_phone_audio_volume"
 
@@ -555,29 +560,221 @@ static void video_reap_finished_thread(void)
     }
 }
 
-static int video_decode_one_file(const char *path, int view_w, int view_h)
+typedef struct {
+    const char *path;
+    AVStream *stream;
+    int audio_stream_index;
+    struct SwsContext *sws;
+    int dst_w;
+    int dst_h;
+    int64_t fallback_frame_us;
+    int64_t first_pts_us;
+    int64_t playback_start_us;
+    int audio_started;
+    int frames_seen;
+    int presented;
+    int dropped;
+    int consecutive_drops;
+} video_playback_t;
+
+static int video_hw_decode_enabled(void)
+{
+    char value[8];
+
+    ui_prefs_get(VIDEO_HW_DECODE_PREF, value, sizeof(value), "1");
+    return atoi(value) != 0;
+}
+
+/*
+ * The K230 VPU decodes H.264 and HEVC through V4L2 mem2mem and can downscale
+ * to the view size, leaving swscale only the conversion to RGB565. The single
+ * CPU core decodes a 720x1320 H.264 clip at under half speed in software.
+ */
+static AVCodecContext *video_open_decoder(AVStream *stream, int use_hw,
+                                          int dst_w, int dst_h)
+{
+    AVCodecParameters *par = stream->codecpar;
+    AVCodec *codec = NULL;
+    AVCodecContext *ctx;
+    AVDictionary *opts = NULL;
+
+    if(use_hw) {
+        if(par->codec_id == AV_CODEC_ID_H264) {
+            codec = avcodec_find_decoder_by_name("h264_v4l2m2m");
+        } else if(par->codec_id == AV_CODEC_ID_HEVC) {
+            codec = avcodec_find_decoder_by_name("hevc_v4l2m2m");
+        }
+    } else {
+        codec = avcodec_find_decoder(par->codec_id);
+    }
+    if(!codec) {
+        return NULL;
+    }
+    ctx = avcodec_alloc_context3(codec);
+    if(!ctx) {
+        return NULL;
+    }
+    /* The VPU only scales down */
+    if(use_hw && dst_w < par->width && dst_h < par->height) {
+        av_dict_set_int(&opts, "dsl_width", dst_w, 0);
+        av_dict_set_int(&opts, "dsl_height", dst_h, 0);
+    }
+    if(avcodec_parameters_to_context(ctx, par) < 0 ||
+       avcodec_open2(ctx, codec, &opts) < 0) {
+        avcodec_free_context(&ctx);
+    }
+    av_dict_free(&opts);
+    return ctx;
+}
+
+static int video_present_frame(video_playback_t *play, AVFrame *frame)
+{
+    int back;
+    uint8_t *dst_data[4];
+    int dst_linesize[4];
+    int frame_index = play->frames_seen++;
+    int64_t pts_us = video_frame_pts_us(frame, play->stream, frame_index,
+                                        play->fallback_frame_us);
+    int64_t relative_us;
+    int64_t target_us;
+    int64_t now_us;
+
+    if(play->first_pts_us == AV_NOPTS_VALUE) {
+        play->first_pts_us = pts_us;
+        if(play->audio_stream_index >= 0) {
+            play->audio_started = video_start_audio_for_path(play->path);
+        }
+        play->playback_start_us = ui_monotonic_us() +
+                                  (play->audio_started ? VIDEO_AUDIO_PREROLL_US : 0);
+        video_log("first frame pts=%lld fallback=%lld size=%dx%d",
+                  (long long)play->first_pts_us,
+                  (long long)play->fallback_frame_us, frame->width,
+                  frame->height);
+    }
+    relative_us = pts_us - play->first_pts_us;
+    if(relative_us < 0) {
+        relative_us = (int64_t)frame_index * play->fallback_frame_us;
+    }
+    target_us = play->playback_start_us + relative_us;
+    now_us = ui_monotonic_us();
+    if(play->audio_started && frame_index > 0 &&
+       now_us - target_us > VIDEO_LATE_DROP_US &&
+       play->consecutive_drops < VIDEO_MAX_CONSECUTIVE_DROPS) {
+        play->dropped++;
+        play->consecutive_drops++;
+        return 0;
+    }
+    if(play->audio_started && now_us - target_us > VIDEO_LATE_DROP_US) {
+        target_us = now_us;
+    }
+    play->consecutive_drops = 0;
+
+    /* After VPU downscaling the frame is already at the view size */
+    play->sws = sws_getCachedContext(play->sws, frame->width, frame->height,
+                                     (enum AVPixelFormat)frame->format,
+                                     play->dst_w, play->dst_h,
+                                     AV_PIX_FMT_RGB565LE, SWS_FAST_BILINEAR,
+                                     NULL, NULL, NULL);
+    if(!play->sws) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&video_lock);
+    back = video_back_idx;
+    pthread_mutex_unlock(&video_lock);
+
+    dst_data[0] = video_pixels[back];
+    dst_data[1] = dst_data[2] = dst_data[3] = NULL;
+    dst_linesize[0] = play->dst_w * 2;
+    dst_linesize[1] = dst_linesize[2] = dst_linesize[3] = 0;
+    sws_scale(play->sws, (const uint8_t *const *)frame->data, frame->linesize,
+              0, frame->height, dst_data, dst_linesize);
+
+    video_wait_until_us(target_us);
+    if(video_stop_requested) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&video_lock);
+    video_front_idx = back;
+    video_back_idx = back ? 0 : 1;
+    video_frame_seq++;
+    pthread_mutex_unlock(&video_lock);
+    play->presented++;
+    if(play->presented == 1 || (play->presented % 30) == 0) {
+        video_log("frame shown=%d dropped=%d seq=%u rel=%lld",
+                  play->presented, play->dropped, video_frame_seq,
+                  (long long)relative_us);
+    }
+    return 0;
+}
+
+/* Present every frame the decoder has ready. Returns 0 or a decode error */
+static int video_receive_frames(video_playback_t *play, AVCodecContext *ctx,
+                                AVFrame *frame)
+{
+    while(!video_stop_requested) {
+        int ret = avcodec_receive_frame(ctx, frame);
+
+        if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            return 0;
+        }
+        if(ret < 0) {
+            return ret;
+        }
+        if(video_present_frame(play, frame) != 0) {
+            return AVERROR(EINVAL);
+        }
+    }
+    return 0;
+}
+
+/*
+ * The VPU decodes asynchronously and refuses a packet until frames are taken
+ * out, so keep the packet and retry instead of dropping it. A NULL packet
+ * flushes the frames the decoder still holds.
+ */
+static int video_decode_packet(video_playback_t *play, AVCodecContext *ctx,
+                               AVPacket *pkt, AVFrame *frame)
+{
+    for(int tries = 0; tries < VIDEO_SEND_RETRIES && !video_stop_requested;
+        tries++) {
+        int ret = avcodec_send_packet(ctx, pkt);
+        int rc = video_receive_frames(play, ctx, frame);
+
+        if(ret != AVERROR(EAGAIN)) {
+            return ret < 0 && ret != AVERROR_EOF ? ret : rc;
+        }
+        if(rc < 0) {
+            return rc;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Returns VIDEO_DECODE_RETRY_SW when the VPU can't open or decode the
+ * stream before its first frame.
+ */
+static int video_decode_one_file(const char *path, int view_w, int view_h,
+                                 int use_hw)
 {
     AVFormatContext *fmt = NULL;
     AVCodecContext *ctx = NULL;
-    AVCodec *codec = NULL;
+    AVCodecParameters *par;
     AVFrame *frame = NULL;
     AVPacket *pkt = NULL;
-    struct SwsContext *sws = NULL;
+    video_playback_t play;
     int stream_index;
-    int audio_stream_index;
-    AVStream *video_stream;
-    int dst_w = 0;
-    int dst_h = 0;
+    int packets = 0;
+    int hw_failed = 0;
+    int ret = 0;
     int rc = -1;
-    int presented = 0;
-    int frames_seen = 0;
-    int dropped = 0;
-    int consecutive_drops = 0;
-    int audio_started = 0;
-    int64_t fallback_frame_us;
-    int64_t first_pts_us = AV_NOPTS_VALUE;
-    int64_t playback_start_us = 0;
     char meta[192];
+
+    memset(&play, 0, sizeof(play));
+    play.path = path;
+    play.first_pts_us = AV_NOPTS_VALUE;
 
     if(avformat_open_input(&fmt, path, NULL, NULL) < 0) {
         video_set_status("Open video failed", path);
@@ -587,38 +784,46 @@ static int video_decode_one_file(const char *path, int view_w, int view_h)
         video_set_status("Read stream info failed", path);
         goto out;
     }
-    stream_index = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1,
-                                       &codec, 0);
-    if(stream_index < 0 || !codec) {
+    stream_index = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL,
+                                       0);
+    if(stream_index < 0) {
         video_set_status("No video stream", path);
         goto out;
     }
-    video_stream = fmt->streams[stream_index];
-    audio_stream_index = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1,
-                                             stream_index, NULL, 0);
-    ctx = avcodec_alloc_context3(codec);
-    if(!ctx ||
-       avcodec_parameters_to_context(ctx, fmt->streams[stream_index]->codecpar) < 0 ||
-       avcodec_open2(ctx, codec, NULL) < 0) {
-        video_set_status("Open decoder failed", codec ? codec->name : "decoder");
+    play.stream = fmt->streams[stream_index];
+    par = play.stream->codecpar;
+    play.audio_stream_index = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1,
+                                                  stream_index, NULL, 0);
+    video_fit_size(par->width, par->height, view_w, view_h, &play.dst_w,
+                   &play.dst_h);
+    ctx = video_open_decoder(play.stream, use_hw, play.dst_w, play.dst_h);
+    if(!ctx) {
+        if(use_hw) {
+            video_log("VPU decoder unavailable for %s",
+                      avcodec_get_name(par->codec_id));
+            rc = VIDEO_DECODE_RETRY_SW;
+        } else {
+            video_set_status("Open decoder failed",
+                             avcodec_get_name(par->codec_id));
+        }
         goto out;
     }
 
-    video_fit_size(ctx->width, ctx->height, view_w, view_h, &dst_w, &dst_h);
     if(!video_pixels[0] || !video_pixels[1]) {
         video_set_status("Video frame buffer missing", NULL);
         goto out;
     }
-    snprintf(meta, sizeof(meta), "%s  %dx%d -> %dx%d", codec->name,
-             ctx->width, ctx->height, dst_w, dst_h);
+    snprintf(meta, sizeof(meta), "%s  %dx%d -> %dx%d", ctx->codec->name,
+             par->width, par->height, play.dst_w, play.dst_h);
     video_set_status("Playing", meta);
     video_log("decode codec=%s src=%dx%d dst=%dx%d view=%dx%d audio=%s",
-              codec->name, ctx->width, ctx->height, dst_w, dst_h, view_w,
-              view_h, audio_stream_index >= 0 ? "yes" : "no");
+              ctx->codec->name, par->width, par->height, play.dst_w,
+              play.dst_h, view_w, view_h,
+              play.audio_stream_index >= 0 ? "yes" : "no");
 
     pthread_mutex_lock(&video_lock);
-    video_frame_w = dst_w;
-    video_frame_h = dst_h;
+    video_frame_w = play.dst_w;
+    video_frame_h = play.dst_h;
     video_front_idx = 0;
     video_back_idx = 1;
     pthread_mutex_unlock(&video_lock);
@@ -629,113 +834,50 @@ static int video_decode_one_file(const char *path, int view_w, int view_h)
         video_set_status("Allocate decoder frame failed", NULL);
         goto out;
     }
-    sws = sws_getContext(ctx->width, ctx->height, ctx->pix_fmt, dst_w, dst_h,
-                         AV_PIX_FMT_RGB565LE, SWS_FAST_BILINEAR, NULL, NULL,
-                         NULL);
-    if(!sws) {
-        video_set_status("Scale setup failed", NULL);
-        goto out;
-    }
-    fallback_frame_us = video_frame_duration_us(video_stream, ctx);
-    playback_start_us = ui_monotonic_us();
+    play.fallback_frame_us = video_frame_duration_us(play.stream, ctx);
+    play.playback_start_us = ui_monotonic_us();
 
     while(!video_stop_requested && av_read_frame(fmt, pkt) >= 0) {
-        if(pkt->stream_index == stream_index &&
-           avcodec_send_packet(ctx, pkt) == 0) {
-            while(!video_stop_requested &&
-                  avcodec_receive_frame(ctx, frame) == 0) {
-                int back;
-                uint8_t *dst_data[4];
-                int dst_linesize[4];
-                int frame_index = frames_seen++;
-                int64_t pts_us = video_frame_pts_us(frame, video_stream,
-                                                    frame_index,
-                                                    fallback_frame_us);
-                int64_t relative_us;
-                int64_t target_us;
-                int64_t now_us;
-
-                if(first_pts_us == AV_NOPTS_VALUE) {
-                    first_pts_us = pts_us;
-                    if(audio_stream_index >= 0) {
-                        audio_started = video_start_audio_for_path(path);
-                    }
-                    playback_start_us = ui_monotonic_us() +
-                                        (audio_started ? VIDEO_AUDIO_PREROLL_US : 0);
-                    video_log("first frame pts=%lld fallback=%lld",
-                              (long long)first_pts_us,
-                              (long long)fallback_frame_us);
-                }
-                relative_us = pts_us - first_pts_us;
-                if(relative_us < 0) {
-                    relative_us = (int64_t)frame_index * fallback_frame_us;
-                }
-                target_us = playback_start_us + relative_us;
-                now_us = ui_monotonic_us();
-                if(audio_started && frame_index > 0 &&
-                   now_us - target_us > VIDEO_LATE_DROP_US &&
-                   consecutive_drops < VIDEO_MAX_CONSECUTIVE_DROPS) {
-                    dropped++;
-                    consecutive_drops++;
-                    continue;
-                }
-                if(audio_started && now_us - target_us > VIDEO_LATE_DROP_US) {
-                    target_us = now_us;
-                }
-                consecutive_drops = 0;
-
-                pthread_mutex_lock(&video_lock);
-                back = video_back_idx;
-                pthread_mutex_unlock(&video_lock);
-
-                dst_data[0] = video_pixels[back];
-                dst_data[1] = dst_data[2] = dst_data[3] = NULL;
-                dst_linesize[0] = dst_w * 2;
-                dst_linesize[1] = dst_linesize[2] = dst_linesize[3] = 0;
-                sws_scale(sws, (const uint8_t *const *)frame->data,
-                          frame->linesize, 0, ctx->height, dst_data,
-                          dst_linesize);
-
-                video_wait_until_us(target_us);
-                if(video_stop_requested) {
-                    break;
-                }
-
-                pthread_mutex_lock(&video_lock);
-                video_front_idx = back;
-                video_back_idx = back ? 0 : 1;
-                video_frame_seq++;
-                pthread_mutex_unlock(&video_lock);
-                presented++;
-                if(presented == 1 || (presented % 30) == 0) {
-                    video_log("frame shown=%d dropped=%d seq=%u rel=%lld",
-                              presented, dropped, video_frame_seq,
-                              (long long)relative_us);
-                }
-            }
+        if(pkt->stream_index == stream_index) {
+            ret = video_decode_packet(&play, ctx, pkt, frame);
+            packets++;
         }
         av_packet_unref(pkt);
+        if(use_hw && play.frames_seen == 0 &&
+           (ret < 0 || packets > VIDEO_HW_FIRST_FRAME_PACKETS)) {
+            hw_failed = 1;
+            break;
+        }
+    }
+    if(!hw_failed && !video_stop_requested) {
+        (void)video_decode_packet(&play, ctx, NULL, frame);
+    }
+    if(use_hw && play.frames_seen == 0 && !video_stop_requested) {
+        video_log("VPU decode gave no frames after %d packets (%d)", packets,
+                  ret);
+        rc = VIDEO_DECODE_RETRY_SW;
+        goto out;
     }
 
     rc = 0;
-    if(dropped > 0) {
+    if(play.dropped > 0) {
         snprintf(meta, sizeof(meta), "%d frame%s shown, %d dropped",
-                 presented, presented == 1 ? "" : "s", dropped);
+                 play.presented, play.presented == 1 ? "" : "s", play.dropped);
     } else {
-        snprintf(meta, sizeof(meta), "%d frame%s shown", presented,
-                 presented == 1 ? "" : "s");
+        snprintf(meta, sizeof(meta), "%d frame%s shown", play.presented,
+                 play.presented == 1 ? "" : "s");
     }
-    video_log("decode done status=%s presented=%d dropped=%d",
-              video_stop_requested ? "stopped" : "completed", presented,
-              dropped);
+    video_log("decode done status=%s codec=%s presented=%d dropped=%d",
+              video_stop_requested ? "stopped" : "completed",
+              ctx->codec->name, play.presented, play.dropped);
     video_set_status(video_stop_requested ? "Stopped" : "Completed", meta);
 
 out:
     if(pkt) {
         av_packet_free(&pkt);
     }
-    if(sws) {
-        sws_freeContext(sws);
+    if(play.sws) {
+        sws_freeContext(play.sws);
     }
     if(frame) {
         av_frame_free(&frame);
@@ -753,13 +895,18 @@ static void *video_thread_main(void *arg)
 {
     video_job_t *job = (video_job_t *)arg;
     FILE *log = fopen(VIDEO_LOG_PATH, "a");
+    int rc;
 
     if(log) {
         fprintf(log, "play %s view=%dx%d\n", job->path, job->view_w,
                 job->view_h);
         fclose(log);
     }
-    video_decode_one_file(job->path, job->view_w, job->view_h);
+    rc = video_decode_one_file(job->path, job->view_w, job->view_h,
+                               video_hw_decode_enabled());
+    if(rc == VIDEO_DECODE_RETRY_SW && !video_stop_requested) {
+        video_decode_one_file(job->path, job->view_w, job->view_h, 0);
+    }
     free(job);
     video_stop_requested = 0;
     video_thread_done = 1;
