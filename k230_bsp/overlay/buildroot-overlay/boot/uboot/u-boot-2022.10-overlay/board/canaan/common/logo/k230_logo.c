@@ -323,7 +323,11 @@ int k230_display_logo(void)
         K_DSI_2LAN,
         K_BURST_MODE,
         K_VO_LP_MODE,
-        { 4, 97, 0x19, 0x96 },
+        /*
+         * RM69A10 uses a 594 Mbps two-lane link. Keep the U-Boot logo
+         * initialization aligned with the Linux D-PHY hsfreqrange value.
+         */
+        { 4, 97, 0x19, 0x87 },
         { 39600, 475200, 748, 568,
                   40, 40, 100, 1268,
                   1232, 16, 16, 4 },
