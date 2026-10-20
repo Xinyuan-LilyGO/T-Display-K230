@@ -2,6 +2,18 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## v0.2.8 - 2026-10-20
+
+- 将 K230 Linux SDK 子仓库同步至上游 `dev` 分支提交
+  `fc6cc2151d54cb307be47f81815023f7ffb0eae6`，并适配新版 BSP 镜像布局，保留
+  T-Display 启动分区偏移。
+- 统一 RM69A10 在 U-Boot 和 Linux 中的 DSI D-PHY 时序，均匹配 594Mbps
+  通道速率，使启动 Logo 和 Linux 显示阶段使用一致的屏幕时序。
+- 视频应用新增 K230 VPU H.264/HEVC 硬件解码与缩放，提升播放流畅度并降低
+  CPU 占用。
+- 硬件解码器不支持的视频流会自动回退到软件解码；可在 `settings.conf` 中设置
+  `video.hw_decode=0` 强制使用软件解码。
+
 ## v0.2.7 - 2026-10-08
 
 - 修复 RM69A10 屏幕在设备温热状态下启动后，整幅画面间歇性横向偏移几个像素的问题。DSI D-PHY 频率范围（hsfreqrange）现在根据 594 Mbps 的实际通道速率计算，不再使用适用于约 450 Mbps 的固定值。

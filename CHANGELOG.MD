@@ -2,14 +2,18 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
-## Unreleased
+## v0.2.8 - 2026-10-20
 
-- Fixed choppy video playback. The Video app now decodes H.264 and HEVC on
-  the K230's hardware video decoder, which also scales each frame to the
-  screen, instead of in software on the CPU. A 720x1320 clip with audio that
-  showed only a third of its frames now shows all of them. Files the hardware
-  decoder can't play fall back to software decoding. Set `video.hw_decode=0`
-  in settings.conf to always decode in software.
+- Updated the K230 Linux SDK submodule to upstream `dev` commit
+  `fc6cc2151d54cb307be47f81815023f7ffb0eae6` and adapted the BSP image layout
+  while preserving the T-Display boot partition offsets.
+- Aligned the RM69A10 U-Boot DSI D-PHY timing with the Linux 594 Mbps lane
+  configuration so the boot logo and Linux display use consistent timing.
+- Added K230 VPU hardware decoding and scaling for H.264 and HEVC video to
+  improve playback smoothness and reduce CPU load.
+- Added automatic software-decoder fallback for video streams unsupported by
+  the hardware decoder. Set `video.hw_decode=0` in `settings.conf` to force
+  software decoding.
 
 ## v0.2.7 - 2026-10-08
 
