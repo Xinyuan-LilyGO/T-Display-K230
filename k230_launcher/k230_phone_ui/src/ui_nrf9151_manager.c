@@ -42,6 +42,7 @@
 #define K230_NRF9151_GNSS_BACKGROUND_POLL_US (30ULL * 1000000ULL)
 #define K230_NRF9151_GNSS_REQUEST_MIN_US (30ULL * 1000000ULL)
 #define K230_NRF9151_LTE_BOOTSTRAP_WAIT_US (15ULL * 1000000ULL)
+#define K230_NRF9151_LTE_REGISTRATION_WAIT_US (60ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_REFRESH_US (30ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
 #define K230_NRF9151_MANAGER_LOG "/tmp/k230_nrf9151_test.log"
@@ -2447,24 +2448,41 @@ int k230_nrf9151_status_monitor_active(void)
 
 static void nrf9151_manager_wait_for_lte_bootstrap(void)
 {
-    uint64_t deadline = nrf9151_manager_monotonic_us() +
-                        K230_NRF9151_LTE_BOOTSTRAP_WAIT_US;
+    uint64_t bootstrap_deadline = nrf9151_manager_monotonic_us() +
+                                  K230_NRF9151_LTE_BOOTSTRAP_WAIT_US;
+    uint64_t registration_deadline = bootstrap_deadline +
+                                     K230_NRF9151_LTE_REGISTRATION_WAIT_US;
+    int refresh_requested = 0;
 
     for(;;) {
         int complete;
         int refreshing;
         int stop;
+        int registered = 0;
+        k230_nrf9151_status_t status;
+        uint64_t now_us;
 
         pthread_mutex_lock(&nrf9151_manager_lock);
         complete = nrf9151_status_monitor.bootstrap_complete;
         refreshing = nrf9151_status_monitor.refreshing;
         stop = nrf9151_gnss_monitor.stop;
         pthread_mutex_unlock(&nrf9151_manager_lock);
-        if((complete && !refreshing) || stop ||
-           nrf9151_manager_monotonic_us() >= deadline) {
+        now_us = nrf9151_manager_monotonic_us();
+        if(complete && !refreshing &&
+           k230_nrf9151_read_status(&status, 0) == 0) {
+            registered = status.lte_registered || status.packet_attached ||
+                         status.pdp_active;
+            if(!registered && !refresh_requested) {
+                k230_nrf9151_status_monitor_request_refresh();
+                refresh_requested = 1;
+            }
+        }
+        if((complete && !refreshing && registered) || stop ||
+           now_us >= registration_deadline ||
+           (!complete && now_us >= bootstrap_deadline)) {
             nrf9151_manager_debug_log(
-                "LTE bootstrap wait complete=%d refreshing=%d", complete,
-                refreshing);
+                "LTE bootstrap wait complete=%d refreshing=%d registered=%d",
+                complete, refreshing, registered);
             break;
         }
         usleep(100000);
