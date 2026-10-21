@@ -41,6 +41,7 @@ typedef struct {
     int gnss_running;
     int gnss_has_fix;
     int lte_signal_level;
+    unsigned long lte_status_age_s;
     unsigned int nmea_rx_count;
     unsigned int nmea_valid_count;
     unsigned int nmea_nofix_count;
@@ -60,6 +61,10 @@ typedef struct {
     time_t epoch;
     long age_seconds;
     char modem_state[32];
+    char radio_policy[24];
+    char radio_state[40];
+    char radio_capabilities[96];
+    char gnss_assistance[24];
     char gps_state[32];
     char gnss_phase[32];
     char imei[64];
