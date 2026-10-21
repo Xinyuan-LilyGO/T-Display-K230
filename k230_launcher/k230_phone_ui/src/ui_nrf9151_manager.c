@@ -45,6 +45,7 @@
 #define K230_NRF9151_LTE_REGISTRATION_WAIT_US (60ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_REFRESH_US (30ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
+#define K230_NRF9151_LTE_SEARCH_RETRY_US (60ULL * 1000000ULL)
 #define K230_NRF9151_MANAGER_LOG "/tmp/k230_nrf9151_test.log"
 #define K230_NRF9151_PREF_DIR "/root/.config/k230_phone_ui"
 #define K230_NRF9151_PREF_FILE K230_NRF9151_PREF_DIR "/settings.conf"
@@ -111,6 +112,7 @@ static struct gpiod_chip *nrf9151_gpio_chip;
 static struct gpiod_line_request *nrf9151_en_gpio_request;
 static unsigned int nrf9151_en_gpio_offset;
 static time_t nrf9151_lte_last_refresh_epoch;
+static time_t nrf9151_lte_last_search_request_epoch;
 
 static uint64_t nrf9151_manager_monotonic_us(void)
 {
@@ -2167,6 +2169,35 @@ static int nrf9151_manager_run_lte_check_common(
         }
         local.epoch = time(NULL);
         k230_nrf9151_write_status(&local);
+
+        /* COPS=0 is the explicit automatic operator-selection trigger. Keep
+         * it out of every poll, but retry periodically when CEREG reports
+         * stat=0 so a modem left idle can re-enter network search. */
+        if(strcmp(cmds[i], "AT+CEREG?") == 0 &&
+           local.lte_registration_stat == 0) {
+            time_t now = time(NULL);
+            int request_search =
+                nrf9151_lte_last_search_request_epoch == 0 ||
+                now < nrf9151_lte_last_search_request_epoch ||
+                now - nrf9151_lte_last_search_request_epoch >=
+                (time_t)(K230_NRF9151_LTE_SEARCH_RETRY_US / 1000000ULL);
+
+            if(request_search) {
+                int search_rc = nrf9151_manager_run_cmd_logged(
+                    fd, "AT+COPS=0", K230_NRF9151_CMD_TIMEOUT_US, &local,
+                    log, log_len, cancel_cb, cancel_user);
+
+                nrf9151_lte_last_search_request_epoch = now;
+                if(search_rc == 0) {
+                    snprintf(local.lte_status, sizeof(local.lte_status),
+                             "%s", "LTE search requested");
+                } else {
+                    failures++;
+                }
+                local.epoch = time(NULL);
+                k230_nrf9151_write_status(&local);
+            }
+        }
         usleep(100000);
     }
     if(include_ping) {
