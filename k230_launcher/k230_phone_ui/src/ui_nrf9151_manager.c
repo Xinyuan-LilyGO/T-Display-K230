@@ -2950,7 +2950,8 @@ static int nrf9151_manager_start_gnss_locked(int fd)
     if(system_mode_rc != 0) {
         snprintf(status.last_error, sizeof(status.last_error),
                  "%s", "system mode probe failed");
-    } else if(strcmp(status.last_error, "system mode probe failed") == 0) {
+    } else if(strcmp(status.last_error, "system mode probe failed") == 0 ||
+              strcmp(status.last_error, "AT failed") == 0) {
         snprintf(status.last_error, sizeof(status.last_error), "%s", "-");
     }
     if(strstr(status.lte_status, "No AT response") != NULL ||
