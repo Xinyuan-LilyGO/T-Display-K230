@@ -4403,7 +4403,7 @@ static void mesh_request_gnss_if_enabled(void)
         mesh_append_log("GNSS skipped: nRF9151 location autostart disabled");
         return;
     }
-    (void)k230_nrf9151_start_gnss_monitor_for("meshtastic");
+    (void)k230_nrf9151_request_gnss_fix("meshtastic", 60 * 60, NULL);
 }
 
 static int mesh_nrf52840_acquire_owner(const char *reason)

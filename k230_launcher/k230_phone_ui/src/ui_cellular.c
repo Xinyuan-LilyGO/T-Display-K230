@@ -266,6 +266,7 @@ static pthread_mutex_t cellular_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t cellular_uart_owner_lock = PTHREAD_MUTEX_INITIALIZER;
 static int cellular_worker_active;
 static int cellular_cno_monitor_active;
+static uint64_t cellular_last_modem_refresh_request_us;
 static int cellular_cno_monitor_stop;
 static int cellular_manager_gnss_started;
 static int cellular_page_active;
@@ -1822,6 +1823,15 @@ static void cellular_status_refresh(void)
     char signal[128];
     char operator_name[96];
     char ip_addr[96];
+    char firmware[96];
+    char registration[48];
+    int lte_registered;
+    int packet_attached;
+    int pdp_active;
+    int lte_signal_level;
+    int lte_signal_valid;
+    int registration_stat;
+    unsigned long lte_status_age_s;
     char http_url[256];
     char http_post_spec[512];
     char network[192];
@@ -1862,6 +1872,32 @@ static void cellular_status_refresh(void)
         cellular_apply_manager_status(&manager_status);
     } else {
         k230_nrf9151_status_init(&manager_status);
+    }
+
+    snprintf(firmware, sizeof(firmware), "%s",
+             manager_status.firmware[0] ? manager_status.firmware : link);
+    snprintf(registration, sizeof(registration), "%s",
+             manager_status.lte_registration_reason[0] ?
+             manager_status.lte_registration_reason : "unknown");
+    lte_registered = manager_status.lte_registered;
+    packet_attached = manager_status.packet_attached;
+    pdp_active = manager_status.pdp_active;
+    lte_signal_level = manager_status.lte_signal_level;
+    lte_signal_valid = manager_status.lte_signal_valid;
+    registration_stat = manager_status.lte_registration_stat;
+    lte_status_age_s = manager_status.lte_status_age_s;
+
+    pthread_mutex_lock(&cellular_lock);
+    if(cellular_current_page == CELLULAR_PAGE_MODEM &&
+       lte_status_age_s > 15UL &&
+       (cellular_last_modem_refresh_request_us == 0ULL ||
+        ui_monotonic_us() - cellular_last_modem_refresh_request_us >=
+        15000000ULL)) {
+        cellular_last_modem_refresh_request_us = ui_monotonic_us();
+        pthread_mutex_unlock(&cellular_lock);
+        k230_nrf9151_status_monitor_request_refresh();
+    } else {
+        pthread_mutex_unlock(&cellular_lock);
     }
 
     pthread_mutex_lock(&cellular_lock);
@@ -1961,7 +1997,13 @@ static void cellular_status_refresh(void)
         lv_label_set_text(cellular_menu_mqtt_value, ui_tr(mqtt_status));
     }
     if(cellular_modem_detail_label) {
-        lv_label_set_text(cellular_modem_detail_label, ui_tr("Live modem fields"));
+        char text[224];
+
+        snprintf(text, sizeof(text), "Reg: %s (stat %d)  %s  age %lus",
+                 registration, registration_stat,
+                 lte_registered ? "registered" : "not registered",
+                 lte_status_age_s);
+        lv_label_set_text(cellular_modem_detail_label, ui_tr(text));
     }
     if(cellular_modem_chip_label) {
         lv_label_set_text(cellular_modem_chip_label, "nRF9151");
@@ -1969,8 +2011,9 @@ static void cellular_status_refresh(void)
     if(cellular_modem_signal_label) {
         char text[176];
 
-        snprintf(text, sizeof(text), "%s %d  %s", ui_tr("Level"),
-                 ui_cellular_lte_signal_level(), signal);
+        snprintf(text, sizeof(text), "%s %d%s  %s", ui_tr("Level"),
+                 lte_signal_valid ? lte_signal_level : ui_cellular_lte_signal_level(),
+                 lte_signal_valid ? "" : " (unknown)", signal);
         lv_label_set_text(cellular_modem_signal_label, text);
     }
     if(cellular_modem_sim_label) {
@@ -1980,7 +2023,7 @@ static void cellular_status_refresh(void)
         lv_label_set_text(cellular_modem_imei_label, imei);
     }
     if(cellular_modem_firmware_label) {
-        lv_label_set_text(cellular_modem_firmware_label, ui_tr(link));
+        lv_label_set_text(cellular_modem_firmware_label, ui_tr(firmware));
     }
     if(cellular_modem_operator_label) {
         lv_label_set_text(cellular_modem_operator_label,
@@ -1995,14 +2038,11 @@ static void cellular_status_refresh(void)
     }
     if(cellular_modem_pdp_label) {
         lv_label_set_text(cellular_modem_pdp_label,
-                          strstr(lte, "Online") || strstr(lte, "PDP") ?
-                          ui_tr("Active") : "--");
+                          ui_tr(pdp_active ? "Active" : "Inactive"));
     }
     if(cellular_modem_packet_label) {
         lv_label_set_text(cellular_modem_packet_label,
-                          strstr(lte, "attached") || strstr(lte, "Online") ||
-                          strstr(lte, "Registered") ? ui_tr("Attached") :
-                          "--");
+                          ui_tr(packet_attached ? "Attached" : "Detached"));
     }
     if(cellular_modem_lte_label) {
         lv_label_set_text(cellular_modem_lte_label, ui_tr(lte));
@@ -5138,6 +5178,9 @@ static void cellular_show_page(cellular_page_t page)
         if(cellular_modem_page) {
             lv_obj_clear_flag(cellular_modem_page, LV_OBJ_FLAG_HIDDEN);
         }
+        cellular_last_modem_refresh_request_us = ui_monotonic_us();
+        k230_nrf9151_status_monitor_request_refresh();
+        cellular_sync_manager_status();
         break;
     case CELLULAR_PAGE_GNSS:
         if(cellular_gnss_page) {

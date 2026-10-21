@@ -150,6 +150,11 @@ int k230_nrf9151_acquire_uart(const char *owner, int wait_ms);
 void k230_nrf9151_release_uart(int lock_fd);
 int k230_nrf9151_start_gnss_monitor(void);
 int k230_nrf9151_start_gnss_monitor_for(const char *owner);
+/* Request a GNSS sample without taking ownership of the UART in the caller.
+ * A fresh manager cache is returned immediately; repeated requests while the
+ * cache is unavailable are rate-limited and return EAGAIN. */
+int k230_nrf9151_request_gnss_fix(const char *owner, int max_cache_age_seconds,
+                                  k230_nrf9151_gnss_fix_t *fix);
 int k230_nrf9151_stop_gnss_monitor(void);
 int k230_nrf9151_stop_gnss_monitor_for(const char *owner);
 int k230_nrf9151_stop_gnss_monitor_wait(int wait_ms);

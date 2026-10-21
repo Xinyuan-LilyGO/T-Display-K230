@@ -5830,6 +5830,11 @@ static void nrf9151_gnss_poll(const probe_options_t &opts, uint64_t now)
     }
     mesh_gnss.enabled = true;
     mesh_gnss.probed = true;
+    /* Meshtastic asks the manager for a sample. The manager owns scheduling;
+     * a hot loop receives the cached fix and never opens the modem UART. */
+    (void)k230_nrf9151_request_gnss_fix("meshtastic",
+                                        MESHTASTIC_NRF9151_FIX_CACHE_MAX_AGE_SEC,
+                                        nullptr);
     nrf9151_gnss_close_uart();
 
     if(!k230_nrf9151_uart_present()) {
