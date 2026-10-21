@@ -510,6 +510,9 @@ void k230_nrf9151_status_init(k230_nrf9151_status_t *status)
     snprintf(status->ip, sizeof(status->ip), "%s", "--");
     snprintf(status->apn, sizeof(status->apn), "%s", "--");
     snprintf(status->signal_text, sizeof(status->signal_text), "%s", "--");
+    status->lte_registration_stat = -1;
+    snprintf(status->lte_registration_reason,
+             sizeof(status->lte_registration_reason), "%s", "unknown");
     snprintf(status->lte_status, sizeof(status->lte_status), "%s", "Not tested");
     snprintf(status->gnss_status, sizeof(status->gnss_status), "%s", "Off");
     snprintf(status->gnss_utc_time, sizeof(status->gnss_utc_time), "%s", "--");
@@ -590,6 +593,8 @@ int k230_nrf9151_write_status(const k230_nrf9151_status_t *status)
     fprintf(fp, "gnss_running=%d\n", copy.gnss_running);
     fprintf(fp, "gnss_has_fix=%d\n", copy.gnss_has_fix);
     fprintf(fp, "lte_signal_level=%d\n", copy.lte_signal_level);
+    fprintf(fp, "lte_signal_valid=%d\n", copy.lte_signal_valid);
+    fprintf(fp, "lte_registration_stat=%d\n", copy.lte_registration_stat);
     fprintf(fp, "lte_status_age_s=%lu\n", copy.lte_status_age_s);
     fprintf(fp, "nmea_rx_count=%u\n", copy.nmea_rx_count);
     fprintf(fp, "nmea_valid_count=%u\n", copy.nmea_valid_count);
@@ -632,6 +637,8 @@ int k230_nrf9151_write_status(const k230_nrf9151_status_t *status)
     nrf9151_manager_status_write_key(fp, "ip", copy.ip);
     nrf9151_manager_status_write_key(fp, "apn", copy.apn);
     nrf9151_manager_status_write_key(fp, "signal_text", copy.signal_text);
+    nrf9151_manager_status_write_key(fp, "lte_registration_reason",
+                                     copy.lte_registration_reason);
     nrf9151_manager_status_write_key(fp, "lte_status", copy.lte_status);
     nrf9151_manager_status_write_key(fp, "gnss_status", copy.gnss_status);
     nrf9151_manager_status_write_key(fp, "gnss_utc_time",
@@ -725,6 +732,10 @@ int k230_nrf9151_read_status(k230_nrf9151_status_t *status,
             status->gnss_has_fix = atoi(eq);
         } else if(strcmp(line, "lte_signal_level") == 0) {
             status->lte_signal_level = atoi(eq);
+        } else if(strcmp(line, "lte_signal_valid") == 0) {
+            status->lte_signal_valid = atoi(eq);
+        } else if(strcmp(line, "lte_registration_stat") == 0) {
+            status->lte_registration_stat = atoi(eq);
         } else if(strcmp(line, "lte_status_age_s") == 0) {
             status->lte_status_age_s = strtoul(eq, NULL, 10);
         } else if(strcmp(line, "nmea_rx_count") == 0) {
@@ -814,6 +825,9 @@ int k230_nrf9151_read_status(k230_nrf9151_status_t *status,
         } else if(strcmp(line, "signal_text") == 0) {
             nrf9151_manager_status_set_string(status->signal_text,
                                               sizeof(status->signal_text), eq);
+        } else if(strcmp(line, "lte_registration_reason") == 0) {
+            nrf9151_manager_status_set_string(status->lte_registration_reason,
+                                              sizeof(status->lte_registration_reason), eq);
         } else if(strcmp(line, "lte_status") == 0) {
             nrf9151_manager_status_set_string(status->lte_status,
                                               sizeof(status->lte_status), eq);
@@ -1751,6 +1765,25 @@ static int nrf9151_manager_parse_cereg_stat(const char *line)
     return -1;
 }
 
+static const char *nrf9151_manager_cereg_reason(int stat)
+{
+    switch(stat) {
+    case 0:
+        return "not_searching";
+    case 1:
+        return "registered_home";
+    case 2:
+        return "searching";
+    case 3:
+        return "registration_denied";
+    case 5:
+        return "registered_roaming";
+    case 4:
+    default:
+        return "unknown";
+    }
+}
+
 static int nrf9151_manager_run_cmd_logged(int fd, const char *cmd,
                                           uint64_t timeout_us,
                                           k230_nrf9151_status_t *status,
@@ -1869,10 +1902,28 @@ static void nrf9151_manager_update_lte_from_response(
     if(nrf9151_manager_line_containing(resp, "+CEREG:", line,
                                        sizeof(line)) == 0) {
         int stat = nrf9151_manager_parse_cereg_stat(line);
+        const char *reason = nrf9151_manager_cereg_reason(stat);
 
+        status->lte_registration_stat = stat;
+        snprintf(status->lte_registration_reason,
+                 sizeof(status->lte_registration_reason), "%s", reason);
         status->lte_registered = (stat == 1 || stat == 5) ? 1 : 0;
-        snprintf(status->lte_status, sizeof(status->lte_status), "%s",
-                 status->lte_registered ? "Registered" : line);
+        if(status->lte_registered) {
+            snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+                     stat == 5 ? "Registered (roaming)" : "Registered");
+        } else if(stat == 0) {
+            snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+                     "LTE not searching");
+        } else if(stat == 2) {
+            snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+                     "LTE searching");
+        } else if(stat == 3) {
+            snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+                     "LTE registration denied");
+        } else {
+            snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+                     "LTE registration unknown");
+        }
     }
     if(nrf9151_manager_line_containing(resp, "+CESQ:", line,
                                        sizeof(line)) == 0) {
@@ -1880,9 +1931,8 @@ static void nrf9151_manager_update_lte_from_response(
 
         snprintf(status->signal_text, sizeof(status->signal_text),
                  "%s", line);
-        if(level > 0) {
-            status->lte_signal_level = level;
-        }
+        status->lte_signal_valid = level > 0 ? 1 : 0;
+        status->lte_signal_level = level;
     }
     if(nrf9151_manager_line_containing(resp, "+COPS:", line,
                                        sizeof(line)) == 0) {

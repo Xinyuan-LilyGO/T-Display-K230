@@ -5752,6 +5752,9 @@ static uint32_t status_gps_color(void)
         return 0x25C281;
     }
     if(status.gnss_running) {
+        if(status.last_nmea_ms > 5000UL) {
+            return 0xF5A524;
+        }
         return 0x3DA5FF;
     }
     return 0xF5A524;
@@ -5969,7 +5972,7 @@ static void status_update_battery(void)
                               cache_valid && charge_done);
 }
 
-static void status_set_lte_bars(int level, uint32_t color)
+static void status_set_lte_bars(int level, uint32_t color, int unknown)
 {
     if(level < 0) {
         level = 0;
@@ -5989,6 +5992,7 @@ static void status_set_lte_bars(int level, uint32_t color)
     if(status_lte_x_label && lv_obj_is_valid(status_lte_x_label)) {
         if(level <= 0) {
             lv_obj_clear_flag(status_lte_x_label, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(status_lte_x_label, unknown ? "?" : "x");
             lv_obj_set_style_text_color(status_lte_x_label,
                                         lv_color_hex(color), 0);
         } else {
@@ -6035,6 +6039,7 @@ static void status_bar_update(lv_timer_t *timer)
     int wifi_present;
     int modem_present;
     int lte_level;
+    int lte_signal_unknown;
     k230_nrf9151_status_t modem_status;
 
     (void)timer;
@@ -6055,9 +6060,19 @@ static void status_bar_update(lv_timer_t *timer)
         k230_nrf9151_read_status(&modem_status, 90) == 0 &&
         modem_status.present && modem_status.link_ok;
     lte_level = modem_present ? ui_cellular_lte_signal_level() : 0;
+    lte_signal_unknown = modem_present &&
+                         (!modem_status.lte_signal_valid ||
+                          modem_status.lte_status_age_s > 90UL ||
+                          modem_status.lte_registration_stat < 0 ||
+                          modem_status.lte_registration_stat == 0 ||
+                          modem_status.lte_registration_stat == 2 ||
+                          modem_status.lte_registration_stat == 4 ||
+                          strstr(modem_status.lte_status, "deferred") != NULL);
     status_set_lte_bars(lte_level,
                         lte_level > 0 ? 0x25C281 :
-                        (modem_present ? 0xEF4D5A : 0x8B949E));
+                        (!modem_present ? 0x8B949E :
+                         (lte_signal_unknown ? 0xF5A524 : 0xEF4D5A)),
+                        lte_signal_unknown);
 
     status_set_label_color(status_location_label,
                            status_gps_color());

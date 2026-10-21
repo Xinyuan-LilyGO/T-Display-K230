@@ -41,6 +41,8 @@ typedef struct {
     int gnss_running;
     int gnss_has_fix;
     int lte_signal_level;
+    int lte_signal_valid;
+    int lte_registration_stat;
     unsigned long lte_status_age_s;
     unsigned int nmea_rx_count;
     unsigned int nmea_valid_count;
@@ -74,6 +76,7 @@ typedef struct {
     char ip[96];
     char apn[96];
     char signal_text[96];
+    char lte_registration_reason[32];
     char lte_status[160];
     char gnss_status[160];
     char gnss_utc_time[32];

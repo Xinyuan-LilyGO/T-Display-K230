@@ -2172,10 +2172,8 @@ int ui_cellular_lte_signal_level(void)
         last_valid_level = 0;
         return 0;
     }
-    level = status.lte_signal_level > 0 ? status.lte_signal_level :
-            (status.pdp_active ? 4 :
-             (status.packet_attached ? 3 :
-              (status.lte_registered ? 2 : 0)));
+    level = status.lte_signal_valid && status.lte_signal_level > 0 ?
+            status.lte_signal_level : 0;
     if(level > 0) {
         last_valid_level = level;
     } else {
