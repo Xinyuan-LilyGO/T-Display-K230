@@ -2139,7 +2139,6 @@ static int nrf9151_manager_run_lte_check_common(
              include_ping ? "Checking" : "Refreshing");
     snprintf(local.last_error, sizeof(local.last_error), "%s", "-");
     local.epoch = time(NULL);
-    k230_nrf9151_write_status(&local);
 
     if(quiesce_gnss) {
         nrf9151_manager_quiesce_gnss_output(fd, log, log_len);
@@ -2168,7 +2167,6 @@ static int nrf9151_manager_run_lte_check_common(
             failures++;
         }
         local.epoch = time(NULL);
-        k230_nrf9151_write_status(&local);
 
         /* COPS=0 is the explicit automatic operator-selection trigger. Keep
          * it out of every poll, but retry periodically when CEREG reports
@@ -2195,7 +2193,6 @@ static int nrf9151_manager_run_lte_check_common(
                     failures++;
                 }
                 local.epoch = time(NULL);
-                k230_nrf9151_write_status(&local);
             }
         }
         usleep(100000);
@@ -2250,7 +2247,6 @@ static int nrf9151_manager_run_lte_check_common(
         }
         nrf9151_manager_drain_uart(fd, 150000ULL, 1000000ULL);
         local.epoch = time(NULL);
-        k230_nrf9151_write_status(&local);
     }
 
     if(!local.link_ok) {
