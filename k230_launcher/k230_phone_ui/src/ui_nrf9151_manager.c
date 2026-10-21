@@ -2971,6 +2971,8 @@ static void *nrf9151_manager_gnss_thread(void *arg)
 {
     int lock_fd = -1;
     int fd = -1;
+    int started = 0;
+    int attempt;
 
     (void)arg;
     pthread_mutex_lock(&nrf9151_manager_lock);
@@ -2980,32 +2982,54 @@ static void *nrf9151_manager_gnss_thread(void *arg)
     nrf9151_manager_debug_log("GNSS thread enter owners=0x%x",
                               nrf9151_gnss_monitor.owners);
 
-    if(nrf9151_manager_open_session("nrf9151-gnss", 8000, &lock_fd, &fd,
-                                    NULL, 0) != 0) {
-        nrf9151_manager_debug_log("GNSS session open failed: %s",
-                                  strerror(errno));
-        pthread_mutex_lock(&nrf9151_manager_lock);
-        nrf9151_manager_status_set_error_locked("GNSS UART unavailable");
-        nrf9151_gnss_monitor.active = 0;
-        nrf9151_gnss_monitor.owners = 0;
-        pthread_mutex_unlock(&nrf9151_manager_lock);
-        nrf9151_manager_mark_gnss_off("GNSS UART unavailable");
-        return NULL;
-    }
-    nrf9151_gnss_monitor.fd = fd;
-    nrf9151_gnss_monitor.lock_fd = lock_fd;
-    if(nrf9151_manager_exchange(fd, "AT", NULL, 0,
-                                K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL) != 0 ||
-       nrf9151_manager_start_gnss_locked(fd) != 0) {
-        nrf9151_manager_debug_log("GNSS start failed after session open");
-        nrf9151_manager_close_session(lock_fd, fd);
+    for(attempt = 1; attempt <= 4 && !started; attempt++) {
+        int session_ok = 0;
+
+        lock_fd = -1;
+        fd = -1;
+        if(nrf9151_manager_open_session("nrf9151-gnss", 8000, &lock_fd,
+                                        &fd, NULL, 0) == 0) {
+            nrf9151_gnss_monitor.fd = fd;
+            nrf9151_gnss_monitor.lock_fd = lock_fd;
+            session_ok = nrf9151_manager_exchange(
+                             fd, "AT", NULL, 0,
+                             K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL) == 0 &&
+                         nrf9151_manager_start_gnss_locked(fd) == 0;
+        }
+        if(session_ok) {
+            started = 1;
+            break;
+        }
+        nrf9151_manager_debug_log("GNSS start attempt %d/4 failed: %s",
+                                  attempt, strerror(errno));
+        if(fd >= 0) {
+            char resp[256];
+
+            (void)nrf9151_manager_exchange(fd, "AT#XGNSS=0", resp,
+                                            sizeof(resp),
+                                            K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                            NULL);
+            (void)nrf9151_manager_exchange(fd, "AT#XNMEA=0", resp,
+                                            sizeof(resp),
+                                            K230_NRF9151_CMD_TIMEOUT_US, NULL,
+                                            NULL);
+            nrf9151_manager_close_session(lock_fd, fd);
+        }
         pthread_mutex_lock(&nrf9151_manager_lock);
         nrf9151_gnss_monitor.fd = -1;
         nrf9151_gnss_monitor.lock_fd = -1;
+        pthread_mutex_unlock(&nrf9151_manager_lock);
+        if(attempt < 4) {
+            usleep(5000000);
+        }
+    }
+    if(!started) {
+        pthread_mutex_lock(&nrf9151_manager_lock);
+        nrf9151_manager_status_set_error_locked("GNSS start failed after retries");
         nrf9151_gnss_monitor.active = 0;
         nrf9151_gnss_monitor.owners = 0;
         pthread_mutex_unlock(&nrf9151_manager_lock);
-        nrf9151_manager_mark_gnss_off("GNSS start failed");
+        nrf9151_manager_mark_gnss_off("GNSS start failed after retries");
         return NULL;
     }
     nrf9151_manager_debug_log("GNSS configured owners=0x%x",
