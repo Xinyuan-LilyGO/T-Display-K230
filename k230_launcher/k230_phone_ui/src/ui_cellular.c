@@ -879,10 +879,8 @@ static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
     }
     now_us = ui_monotonic_us();
     location_enabled = k230_nrf9151_location_autostart_enabled();
-
     pthread_mutex_lock(&cellular_lock);
-    cellular_cno_monitor_active = location_enabled &&
-                                  k230_nrf9151_gnss_monitor_active();
+    cellular_cno_monitor_active = k230_nrf9151_gnss_uart_owned();
     snprintf(cellular_link_status, sizeof(cellular_link_status), "%s",
              status->link_ok ?
              (status->firmware[0] && strcmp(status->firmware, "--") != 0 ?
@@ -4301,7 +4299,11 @@ static int cellular_run_manager_action(cellular_action_t action,
 
     log[0] = '\0';
     if(cellular_action_uses_lte_manager(action)) {
-        int stop_rc = k230_nrf9151_stop_gnss_monitor_wait(6000);
+        int stop_rc = 0;
+
+        if(k230_nrf9151_gnss_uart_owned()) {
+            stop_rc = k230_nrf9151_stop_gnss_monitor_wait(6000);
+        }
 
         pthread_mutex_lock(&cellular_lock);
         cellular_cno_monitor_active = 0;
@@ -4339,6 +4341,14 @@ static int cellular_run_manager_action(cellular_action_t action,
             &status, log, sizeof(log), cellular_action_cancel_cb,
             (void *)(uintptr_t)generation);
         cellular_apply_manager_status(&status);
+        pthread_mutex_lock(&cellular_lock);
+        int restore_gnss_page = cellular_current_page == CELLULAR_PAGE_GNSS;
+        pthread_mutex_unlock(&cellular_lock);
+        if(restore_gnss_page) {
+            (void)k230_nrf9151_start_gnss_monitor_for("cellular");
+        } else {
+            (void)k230_nrf9151_apply_location_autostart();
+        }
         if(action == CELLULAR_ACTION_FULL_TEST &&
            cellular_generation_active(generation)) {
             cellular_queue_lte_result(rc, &status, log);
@@ -5101,6 +5111,17 @@ static void cellular_show_page(cellular_page_t page)
         cellular_http_page,
         cellular_mqtt_panel,
     };
+    cellular_page_t previous_page;
+
+    pthread_mutex_lock(&cellular_lock);
+    previous_page = cellular_current_page;
+    pthread_mutex_unlock(&cellular_lock);
+    if(previous_page == CELLULAR_PAGE_GNSS && page != CELLULAR_PAGE_GNSS) {
+        (void)k230_nrf9151_stop_gnss_monitor_for("cellular");
+    } else if(previous_page != CELLULAR_PAGE_GNSS &&
+              page == CELLULAR_PAGE_GNSS) {
+        (void)k230_nrf9151_start_gnss_monitor_for("cellular");
+    }
 
     for(size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
         if(pages[i]) {
@@ -5121,9 +5142,6 @@ static void cellular_show_page(cellular_page_t page)
     case CELLULAR_PAGE_GNSS:
         if(cellular_gnss_page) {
             lv_obj_clear_flag(cellular_gnss_page, LV_OBJ_FLAG_HIDDEN);
-        }
-        if(k230_nrf9151_location_autostart_enabled()) {
-            (void)k230_nrf9151_apply_location_autostart();
         }
         cellular_sync_manager_status();
         break;
@@ -5671,6 +5689,7 @@ void ui_cellular_create(lv_obj_t *scr)
 
 void ui_cellular_cleanup(void)
 {
+    (void)k230_nrf9151_stop_gnss_monitor_for("cellular");
     pthread_mutex_lock(&cellular_lock);
     cellular_page_active = 0;
     cellular_action_generation++;

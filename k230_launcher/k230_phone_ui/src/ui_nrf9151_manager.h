@@ -154,6 +154,7 @@ int k230_nrf9151_stop_gnss_monitor(void);
 int k230_nrf9151_stop_gnss_monitor_for(const char *owner);
 int k230_nrf9151_stop_gnss_monitor_wait(int wait_ms);
 int k230_nrf9151_gnss_monitor_active(void);
+int k230_nrf9151_gnss_uart_owned(void);
 int k230_nrf9151_location_autostart_enabled(void);
 int k230_nrf9151_set_location_autostart_enabled(int enabled);
 int k230_nrf9151_apply_location_autostart(void);
