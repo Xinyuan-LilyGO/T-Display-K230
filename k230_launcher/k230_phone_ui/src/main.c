@@ -6260,6 +6260,10 @@ static int app_item_visible(const app_item_t *item)
        !ui_extension_keyboard_base_available()) {
         return 0;
     }
+    if((item->page == PAGE_LORA || item->page == PAGE_LORA_FLRC ||
+        item->page == PAGE_LORAWAN) && !ui_lora_hardware_available()) {
+        return 0;
+    }
     return 1;
 }
 
@@ -14121,6 +14125,11 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
 
     (void)anim_ms;
 
+    if((page == PAGE_LORA || page == PAGE_LORA_FLRC ||
+        page == PAGE_LORAWAN) && !ui_lora_hardware_available()) {
+        page = PAGE_HOME;
+    }
+
     if(app_item_requires_keyboard_base(page) &&
        !ui_extension_keyboard_base_available()) {
         page = PAGE_HOME;
@@ -14438,6 +14447,7 @@ int main(void)
     ui_time_settings_apply_startup();
     ui_nrf52840_manager_startup();
     ui_hardware_startup();
+    (void)ui_lora_startup_probe();
     ui_haptic_init();
     ui_audio_apply_startup_defaults();
     storage_expand_finish_pending_startup();

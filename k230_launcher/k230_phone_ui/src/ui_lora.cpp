@@ -814,6 +814,7 @@ static int lora_active_profile = LORA_DEFAULT_PROFILE_INDEX;
 static int lora_builtin_profile_count;
 static int lora_profile_count;
 static int lora_profiles_loaded;
+static int lora_hardware_available;
 static int lora_editor_source_index = -1;
 static int lora_initialized;
 static int lora_rx_running;
@@ -1817,6 +1818,40 @@ static int lora_detect_radio_internal(const lora_profile_t *profile,
 static int lora_detect_radio(const lora_profile_t *profile)
 {
     return lora_detect_radio_internal(profile, 1);
+}
+
+int ui_lora_startup_probe(void)
+{
+    lora_profile_t probe;
+    int state;
+
+    if(!lora_profiles_loaded) {
+        lora_load_profiles();
+    }
+    if(lora_profile_count <= 0) {
+        lora_hardware_available = 0;
+        lora_log("Startup probe skipped: no LoRa profiles");
+        return -1;
+    }
+
+    memset(&probe, 0, sizeof(probe));
+    probe = lora_profiles[LORA_DEFAULT_PROFILE_INDEX < lora_profile_count ?
+                          LORA_DEFAULT_PROFILE_INDEX : 0];
+    state = lora_hw_prepare();
+    if(state == 0) {
+        state = lora_detect_radio(&probe);
+    }
+    lora_hardware_available = state == 0;
+    lora_log("Startup probe %s%s", lora_hardware_available ? "detected " :
+             "failed", lora_hardware_available ? lora_active_chip_name() :
+             "");
+    lora_release_radio_hal();
+    return lora_hardware_available ? 0 : -1;
+}
+
+int ui_lora_hardware_available(void)
+{
+    return lora_hardware_available;
 }
 
 static int lora_start_rx(void)
