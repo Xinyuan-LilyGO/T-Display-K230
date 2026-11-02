@@ -630,6 +630,7 @@ static void style_choice_button(lv_obj_t *btn, int selected, uint32_t accent);
 static void button_test_log(const char *fmt, ...);
 static int keyboard_backlight_pref_frequency_hz(void);
 static int keyboard_backlight_pwm_update_duty_only(int duty_percent);
+static int audio_apply_user_output(const char *output);
 static void keyboard_backlight_apply(int duty_percent, int frequency_hz,
                                      int save_pref);
 static int xl9555_set_led(int index, int enabled);
@@ -4701,12 +4702,17 @@ static void keyboard_hotkey_toggle_audio_output(void)
                                         AUDIO_OUTPUT_HEADPHONES;
     const char *value = next_external ? "External I2S" : "Headphones";
     uint32_t accent = next_external ? 0x25C281 : 0x3DA5FF;
+    int rc;
 
-    ui_prefs_set(PREF_AUDIO_OUTPUT, output);
-    ui_audio_output_set_external(next_external);
+    rc = audio_apply_user_output(output);
+    if(rc == 0) {
+        ui_prefs_set(PREF_AUDIO_OUTPUT, output);
+    }
     app_refresh_status_bar();
-    keyboard_hotkey_show_osd_text("Audio output", LV_SYMBOL_AUDIO, value,
-                                  next_external ? 100 : 45, accent);
+    keyboard_hotkey_show_osd_text("Audio output", LV_SYMBOL_AUDIO,
+                                  rc == 0 ? value : "Route unavailable",
+                                  rc == 0 ? (next_external ? 100 : 45) : 0,
+                                  rc == 0 ? accent : 0xEF4D5A);
 }
 
 static int keyboard_hotkey_run_action(int f_index,
@@ -6338,11 +6344,30 @@ static const char *audio_default_output(void)
            AUDIO_OUTPUT_EXTERNAL : AUDIO_OUTPUT_HEADPHONES;
 }
 
-static void audio_apply_output(const char *output)
+static int audio_apply_output(const char *output)
 {
     int external = output && strcmp(output, AUDIO_OUTPUT_EXTERNAL) == 0;
 
-    ui_audio_output_set_external(external ? 1 : 0);
+    return ui_audio_output_set_external(external ? 1 : 0);
+}
+
+static int audio_apply_user_output(const char *output)
+{
+    int rc;
+
+    rc = audio_apply_output(output);
+    if(rc == 0) {
+        return 0;
+    }
+
+    /* The kernel refuses to reroute while a PCM stream is open. Stop the
+     * current player/recorder and retry so a setting change takes effect
+     * immediately instead of requiring a reboot. */
+    ui_audio_stop_for_exclusive_app("Audio output route change");
+    rc = audio_apply_output(output);
+    fprintf(stderr, "[audio-route] user output=%s rc=%d\n",
+            output ? output : "", rc);
+    return rc;
 }
 
 static void fan_apply_policy_once(void)
@@ -7007,13 +7032,19 @@ static void audio_update_page(void)
 static void audio_output_event_cb(lv_event_t *event)
 {
     const char *output = (const char *)lv_event_get_user_data(event);
+    int rc;
 
     if(!output) {
         return;
     }
-    ui_prefs_set(PREF_AUDIO_OUTPUT, output);
-    audio_apply_output(output);
+    rc = audio_apply_user_output(output);
+    if(rc == 0) {
+        ui_prefs_set(PREF_AUDIO_OUTPUT, output);
+    }
     audio_update_page();
+    if(rc != 0 && audio_status_label) {
+        lv_label_set_text(audio_status_label, "Audio route change failed");
+    }
     app_request_fast_refresh();
 }
 
