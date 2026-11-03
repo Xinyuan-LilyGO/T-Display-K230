@@ -4522,6 +4522,9 @@ static void home_prepare_open(int restore_saved_scroll)
 static void home_apply_scroll_restore(lv_obj_t *apps)
 {
     home_apps_scroll = apps;
+    if(apps) {
+        lv_obj_set_scrollbar_mode(apps, LV_SCROLLBAR_MODE_OFF);
+    }
     if(home_restore_scroll_on_create && home_saved_scroll_valid) {
         lv_async_call(home_restore_scroll_async, NULL);
         return;
