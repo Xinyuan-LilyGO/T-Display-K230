@@ -6262,7 +6262,8 @@ static int app_item_visible(const app_item_t *item)
         return 0;
     }
     if((item->page == PAGE_LORA || item->page == PAGE_LORA_FLRC ||
-        item->page == PAGE_LORAWAN) && ui_lora_hardware_available() != 1) {
+        item->page == PAGE_LORAWAN || item->page == PAGE_MESHTASTIC) &&
+       ui_lora_hardware_available() != 1) {
         return 0;
     }
     return 1;
@@ -14127,7 +14128,8 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     (void)anim_ms;
 
     if((page == PAGE_LORA || page == PAGE_LORA_FLRC ||
-        page == PAGE_LORAWAN) && ui_lora_hardware_available() != 1) {
+        page == PAGE_LORAWAN || page == PAGE_MESHTASTIC) &&
+       ui_lora_hardware_available() != 1) {
         page = PAGE_HOME;
     }
 
