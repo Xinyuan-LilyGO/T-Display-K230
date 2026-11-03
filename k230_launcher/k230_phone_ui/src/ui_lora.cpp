@@ -814,7 +814,8 @@ static int lora_active_profile = LORA_DEFAULT_PROFILE_INDEX;
 static int lora_builtin_profile_count;
 static int lora_profile_count;
 static int lora_profiles_loaded;
-static int lora_hardware_available;
+static volatile int lora_hardware_available = -1;
+static volatile int lora_startup_probe_running;
 static int lora_editor_source_index = -1;
 static int lora_initialized;
 static int lora_rx_running;
@@ -1852,6 +1853,33 @@ int ui_lora_startup_probe(void)
 int ui_lora_hardware_available(void)
 {
     return lora_hardware_available;
+}
+
+static void *lora_startup_probe_thread(void *arg)
+{
+    (void)arg;
+    (void)ui_lora_startup_probe();
+    lora_startup_probe_running = 0;
+    return NULL;
+}
+
+int ui_lora_startup_probe_async(void)
+{
+    pthread_t thread;
+
+    if(lora_hardware_available >= 0 || lora_startup_probe_running) {
+        return 0;
+    }
+    lora_startup_probe_running = 1;
+    if(pthread_create(&thread, NULL, lora_startup_probe_thread, NULL) != 0) {
+        lora_startup_probe_running = 0;
+        lora_hardware_available = 0;
+        lora_log("Startup probe thread creation failed");
+        return -1;
+    }
+    pthread_detach(thread);
+    lora_log("Startup probe scheduled in background");
+    return 0;
 }
 
 static int lora_start_rx(void)

@@ -298,6 +298,7 @@ static lv_indev_t *evdev_indev;
 static lv_indev_read_cb_t evdev_original_read_cb;
 static char input_path[64];
 static page_id_t current_page = PAGE_HOME;
+static int lora_home_probe_state = -2;
 static page_id_t page_stack[8];
 static int page_stack_len;
 static lv_obj_t *app_screen;
@@ -6261,7 +6262,7 @@ static int app_item_visible(const app_item_t *item)
         return 0;
     }
     if((item->page == PAGE_LORA || item->page == PAGE_LORA_FLRC ||
-        item->page == PAGE_LORAWAN) && !ui_lora_hardware_available()) {
+        item->page == PAGE_LORAWAN) && ui_lora_hardware_available() != 1) {
         return 0;
     }
     return 1;
@@ -14126,7 +14127,7 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     (void)anim_ms;
 
     if((page == PAGE_LORA || page == PAGE_LORA_FLRC ||
-        page == PAGE_LORAWAN) && !ui_lora_hardware_available()) {
+        page == PAGE_LORAWAN) && ui_lora_hardware_available() != 1) {
         page = PAGE_HOME;
     }
 
@@ -14447,7 +14448,6 @@ int main(void)
     ui_time_settings_apply_startup();
     ui_nrf52840_manager_startup();
     ui_hardware_startup();
-    (void)ui_lora_startup_probe();
     ui_haptic_init();
     ui_audio_apply_startup_defaults();
     storage_expand_finish_pending_startup();
@@ -14515,6 +14515,7 @@ int main(void)
     start_power_key_monitor();
 
     render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
+    (void)ui_lora_startup_probe_async();
     lv_timer_create(update_time_labels, 1000, NULL);
     lv_timer_create(status_bar_update, 3000, NULL);
     ui_wifi_autoconnect_start();
@@ -14541,6 +14542,17 @@ int main(void)
             request_fast_refresh();
         }
         wait_ms = lv_timer_handler();
+        {
+            int lora_probe_state = ui_lora_hardware_available();
+
+            if(lora_probe_state >= 0 &&
+               lora_probe_state != lora_home_probe_state) {
+                lora_home_probe_state = lora_probe_state;
+                if(current_page == PAGE_HOME) {
+                    render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
+                }
+            }
+        }
         handler_us = monotonic_us() - loop_start_us;
         if(handler_us > TOUCH_TRACE_SLOW_US) {
             touch_trace_log("HANDLER_SLOW duration=%.3fms page=%s",
