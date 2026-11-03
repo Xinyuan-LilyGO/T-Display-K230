@@ -43,6 +43,8 @@
 #define K230_NRF9151_GNSS_REQUEST_MIN_US (30ULL * 1000000ULL)
 #define K230_NRF9151_LTE_BOOTSTRAP_WAIT_US (15ULL * 1000000ULL)
 #define K230_NRF9151_LTE_REGISTRATION_WAIT_US (60ULL * 1000000ULL)
+#define K230_NRF9151_DATA_READY_WAIT_US (60ULL * 1000000ULL)
+#define K230_NRF9151_DATA_READY_POLL_US (1000000ULL)
 #define K230_NRF9151_STATUS_REFRESH_US (30ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
 #define K230_NRF9151_LTE_SEARCH_RETRY_US (60ULL * 1000000ULL)
@@ -2035,6 +2037,137 @@ static int nrf9151_manager_run_cmd_logged(int fd, const char *cmd,
         nrf9151_manager_update_lte_from_response(status, cmd, resp, rc);
     }
     return rc;
+}
+
+static int nrf9151_manager_set_full_functionality(
+    int fd, char *log, size_t log_len,
+    k230_nrf9151_cancel_cb_t cancel_cb, void *cancel_user)
+{
+    char resp[512];
+    int rc;
+
+    rc = nrf9151_manager_exchange(fd, "AT+CFUN?", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, cancel_cb,
+                                  cancel_user);
+    nrf9151_manager_trim_text(resp);
+    if(rc == 0 && strstr(resp, "+CFUN: 1") != NULL) {
+        return 0;
+    }
+    if(rc != 0 && rc != -2) {
+        nrf9151_manager_log_append(log, log_len,
+                                   "AT+CFUN? failed while preparing data: %s",
+                                   resp[0] ? resp : "no response");
+    }
+    if(rc == -2) {
+        return rc;
+    }
+    return nrf9151_manager_run_cmd_logged(
+        fd, "AT+CFUN=1", K230_NRF9151_CMD_TIMEOUT_US * 3ULL, NULL,
+        log, log_len, cancel_cb, cancel_user);
+}
+
+static int nrf9151_manager_wait_for_data_ready(
+    int fd, char *log, size_t log_len,
+    k230_nrf9151_cancel_cb_t cancel_cb, void *cancel_user)
+{
+    static const char *const cmds[] = {
+        "AT+CEREG?",
+        "AT+CGATT?",
+        "AT+CGACT?",
+        "AT+CGPADDR",
+    };
+    k230_nrf9151_status_t status;
+    uint64_t deadline;
+    int activation_attempted = 0;
+    int last_stat = -1;
+    int last_attached = 0;
+    int last_pdp = 0;
+    int last_has_ip = 0;
+
+    if(fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if(nrf9151_manager_set_full_functionality(fd, log, log_len,
+                                               cancel_cb, cancel_user) != 0) {
+        nrf9151_manager_log_append(log, log_len,
+                                   "LTE data preparation failed");
+        return -1;
+    }
+
+    deadline = nrf9151_manager_monotonic_us() +
+               K230_NRF9151_DATA_READY_WAIT_US;
+    for(;;) {
+        uint64_t now = nrf9151_manager_monotonic_us();
+        int registered;
+        int attached;
+        int pdp_active;
+        int has_ip;
+
+        if(cancel_cb && cancel_cb(cancel_user)) {
+            errno = ECANCELED;
+            nrf9151_manager_log_append(log, log_len,
+                                       "LTE data wait canceled");
+            return -2;
+        }
+        k230_nrf9151_status_init(&status);
+        for(size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
+            char resp[2048];
+
+            if(nrf9151_manager_exchange(fd, cmds[i], resp, sizeof(resp),
+                                        K230_NRF9151_CMD_TIMEOUT_US,
+                                        cancel_cb, cancel_user) == 0) {
+                nrf9151_manager_trim_text(resp);
+                nrf9151_manager_update_lte_from_response(
+                    &status, cmds[i], resp, 0);
+            }
+        }
+        registered = status.lte_registration_stat == 1 ||
+                     status.lte_registration_stat == 5;
+        attached = status.packet_attached;
+        pdp_active = status.pdp_active;
+        has_ip = status.ip[0] != '\0' && strcmp(status.ip, "--") != 0;
+        last_stat = status.lte_registration_stat;
+        last_attached = attached;
+        last_pdp = pdp_active;
+        last_has_ip = has_ip;
+
+        if(registered && attached && pdp_active && has_ip) {
+            nrf9151_manager_log_append(
+                log, log_len,
+                "LTE data ready: registration=%d attached=%d pdp=%d ip=%s",
+                status.lte_registration_stat, attached, pdp_active,
+                status.ip);
+            return 0;
+        }
+        if(registered && attached && !pdp_active && !activation_attempted) {
+            activation_attempted = 1;
+            nrf9151_manager_log_append(log, log_len,
+                                       "LTE registered but PDP inactive; activating CID 0");
+            (void)nrf9151_manager_run_cmd_logged(
+                fd, "AT+CGACT=1,0", K230_NRF9151_LONG_TIMEOUT_US, &status,
+                log, log_len, cancel_cb, cancel_user);
+        }
+        now = nrf9151_manager_monotonic_us();
+        if(now >= deadline) {
+            nrf9151_manager_log_append(
+                log, log_len,
+                "LTE data wait timeout: registration=%d attached=%d pdp=%d ip=%d",
+                last_stat, last_attached, last_pdp, last_has_ip);
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        for(uint64_t slept = 0; slept < K230_NRF9151_DATA_READY_POLL_US;
+            slept += 100000ULL) {
+            if(cancel_cb && cancel_cb(cancel_user)) {
+                errno = ECANCELED;
+                nrf9151_manager_log_append(log, log_len,
+                                           "LTE data wait canceled");
+                return -2;
+            }
+            usleep(100000);
+        }
+    }
 }
 
 static int nrf9151_manager_run_lte_check_common(
@@ -4038,10 +4171,12 @@ int k230_nrf9151_http_request_ex(const k230_nrf9151_http_request_t *request,
                                          NULL, log, log_len, cancel_cb,
                                          cancel_user);
     nrf9151_manager_quiesce_gnss_output(fd, log, log_len);
-    (void)nrf9151_manager_run_cmd_logged(fd, "AT+CFUN=1",
-                                         K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
-                                         NULL, log, log_len, cancel_cb,
-                                         cancel_user);
+    rc = nrf9151_manager_wait_for_data_ready(fd, log, log_len, cancel_cb,
+                                             cancel_user);
+    if(rc != 0) {
+        nrf9151_manager_close_session(lock_fd, fd);
+        return rc;
+    }
     if(https) {
         snprintf(cmd, sizeof(cmd), "AT#XSSOCKET=1,1,0,%d,2",
                  request->sec_tag);
@@ -4265,10 +4400,13 @@ int k230_nrf9151_mqtt_session_connect_ex(
                                          NULL, log, log_len, cancel_cb,
                                          cancel_user);
     nrf9151_manager_quiesce_gnss_output(fd, log, log_len);
-    (void)nrf9151_manager_run_cmd_logged(fd, "AT+CFUN=1",
-                                         K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
-                                         NULL, log, log_len, cancel_cb,
-                                         cancel_user);
+    rc = nrf9151_manager_wait_for_data_ready(fd, log, log_len, cancel_cb,
+                                             cancel_user);
+    if(rc != 0) {
+        nrf9151_manager_close_session(lock_fd, fd);
+        pthread_mutex_unlock(&nrf9151_mqtt_lock);
+        return rc;
+    }
     snprintf(cmd, sizeof(cmd), "AT#XMQTTCFG=\"%s\",60,1", client_id);
     rc = nrf9151_manager_run_cmd_logged(fd, cmd, K230_NRF9151_CMD_TIMEOUT_US,
                                         NULL, log, log_len, cancel_cb,

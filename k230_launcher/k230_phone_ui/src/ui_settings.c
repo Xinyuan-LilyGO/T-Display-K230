@@ -3,6 +3,7 @@
 #include "ui_hardware.h"
 #include "ui_haptic.h"
 #include "ui_i18n.h"
+#include "ui_lora.h"
 #include "ui_meshtastic.h"
 #include "ui_nrf9151_manager.h"
 
@@ -332,11 +333,13 @@ void ui_startup_settings_create(lv_obj_t *scr)
 
     y = settings_section_header(body, y, "Startup apps",
                                 "Choose services that start automatically");
-    settings_switch_row(body, y, "MESH", "Meshtastic autostart",
-                        "Start Mesh daemon when launcher opens", 0x10B981,
-                        ui_meshtastic_autostart_enabled(),
-                        meshtastic_autostart_switch_event_cb);
-    y = settings_next_row_y(y);
+    if(ui_lora_hardware_available() == 1) {
+        settings_switch_row(body, y, "MESH", "Meshtastic autostart",
+                            "Start Mesh daemon when launcher opens", 0x10B981,
+                            ui_meshtastic_autostart_enabled(),
+                            meshtastic_autostart_switch_event_cb);
+        y = settings_next_row_y(y);
+    }
     settings_switch_row(body, y, "GPS", "nRF9151 location",
                         "Start background GNSS positioning at boot",
                         0x3DA5FF,
@@ -345,7 +348,7 @@ void ui_startup_settings_create(lv_obj_t *scr)
     y = settings_next_row_y(y) + 14;
 
     label = ui_label(body,
-                     "Autostart keeps Mesh online and can keep nRF9151 positioning ready for maps and GNSS pages.",
+                     "Autostart keeps selected services ready for maps and GNSS pages.",
                      &lv_font_montserrat_16, 0x94A3B8);
     lv_obj_set_pos(label, 32, y);
     lv_obj_set_width(label, ui_fit_width(body, 32, 504));

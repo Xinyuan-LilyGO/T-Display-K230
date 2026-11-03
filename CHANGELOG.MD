@@ -2,6 +2,26 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## v0.2.9 - 2026-11-02
+
+- Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,
+  retrying automatic operator search, and scheduling background GNSS polling
+  without holding the GNSS UART continuously.
+- Improved modem status reporting with registration reasons, signal validity,
+  request throttling, cached background results, and stable complete snapshots
+  during LTE refreshes.
+- Improved GNSS startup recovery and cold-start handling after modem power
+  cycles, including LTE-before-GNSS scheduling.
+- Fixed audio output switching while playback is active. The launcher now
+  releases the PCM stream, applies the internal or external route immediately,
+  and persists the preference only after the route change succeeds.
+- Added startup LoRa hardware detection and moved the probe to the background
+  so the launcher can reach the home screen without waiting for the radio probe.
+- LoRa, FLRC, LoRaWAN, and Meshtastic apps, together with the Meshtastic
+  autostart setting, are hidden when no supported LoRa hardware is detected.
+- Fixed a stability issue where the background LoRa probe could update LVGL
+  objects from its worker thread and crash the UI while opening Settings.
+
 ## v0.2.8 - 2026-10-20
 
 - Updated the K230 Linux SDK submodule to upstream `dev` commit

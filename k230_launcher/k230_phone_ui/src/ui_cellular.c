@@ -4978,16 +4978,6 @@ static void cellular_mqtt_clear_event_cb(lv_event_t *event)
     cellular_mqtt_refresh();
 }
 
-static void cellular_mqtt_close_event_cb(lv_event_t *event)
-{
-    (void)event;
-    pthread_mutex_lock(&cellular_lock);
-    cellular_mqtt_page_open = 0;
-    pthread_mutex_unlock(&cellular_lock);
-    cellular_show_page(CELLULAR_PAGE_HOME);
-    app_request_fast_refresh();
-}
-
 static void cellular_cno_monitor_event_cb(lv_event_t *event)
 {
     (void)event;
@@ -5214,12 +5204,6 @@ static void cellular_show_page_event_cb(lv_event_t *event)
     cellular_show_page(page);
 }
 
-static void cellular_page_back_event_cb(lv_event_t *event)
-{
-    (void)event;
-    cellular_show_page(CELLULAR_PAGE_HOME);
-}
-
 int ui_cellular_handle_back(void)
 {
     int handled = 0;
@@ -5286,18 +5270,13 @@ static lv_obj_t *cellular_subpage_title(lv_obj_t *parent, const char *title,
                                         uint32_t color)
 {
     int margin = ui_page_side_margin();
-    int title_w = ui_screen_width() - margin * 2 - 118;
-    lv_obj_t *back;
+    int title_w = ui_screen_width() - margin * 2;
     lv_obj_t *label;
-
-    back = ui_command_button(parent, margin, 14, 92, "Back", 0x94A3B8);
-    lv_obj_add_event_cb(back, cellular_page_back_event_cb, LV_EVENT_CLICKED,
-                        NULL);
 
     label = ui_label(parent, title, &lv_font_montserrat_26, color);
     lv_obj_set_width(label, title_w);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, margin + 112, 20);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, margin, 20);
     return label;
 }
 
@@ -5320,7 +5299,6 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
     int log_y = wide_layout ? content_y : content_y + config_h + gap;
     int btn_gap = 10;
     int btn_w = (config_w - 32 - btn_gap) / 2;
-    lv_obj_t *back;
     lv_obj_t *config_panel;
     lv_obj_t *log_panel;
     lv_obj_t *label;
@@ -5334,15 +5312,11 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
 
     cellular_mqtt_panel = cellular_page_create(parent, !wide_layout);
     lv_obj_add_flag(cellular_mqtt_panel, LV_OBJ_FLAG_HIDDEN);
-    back = ui_command_button(cellular_mqtt_panel, margin, 14, 92, "Back",
-                             0x94A3B8);
-    lv_obj_add_event_cb(back, cellular_mqtt_close_event_cb, LV_EVENT_CLICKED,
-                        NULL);
     label = ui_label(cellular_mqtt_panel, "MQTT Console",
                      &lv_font_montserrat_26, 0xA78BFA);
-    lv_obj_set_width(label, screen_w - margin * 2 - 118);
+    lv_obj_set_width(label, screen_w - margin * 2);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, margin + 112, 20);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, margin, 20);
 
     config_panel = ui_panel(cellular_mqtt_panel, margin, content_y, config_w,
                             config_h);
