@@ -14550,8 +14550,8 @@ int main(void)
             if(lora_probe_state >= 0 &&
                lora_probe_state != lora_home_probe_state) {
                 lora_home_probe_state = lora_probe_state;
-                if(current_page == PAGE_HOME) {
-                    render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
+                if(current_page == PAGE_HOME || current_page == PAGE_APP_STARTUP) {
+                    render_page(current_page, LV_SCREEN_LOAD_ANIM_NONE, 0);
                 }
             }
         }
