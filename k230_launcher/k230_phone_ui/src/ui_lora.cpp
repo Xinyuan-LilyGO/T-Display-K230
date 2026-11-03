@@ -816,6 +816,7 @@ static int lora_profile_count;
 static int lora_profiles_loaded;
 static volatile int lora_hardware_available = -1;
 static volatile int lora_startup_probe_running;
+static volatile int lora_startup_probe_background;
 static int lora_editor_source_index = -1;
 static int lora_initialized;
 static int lora_rx_running;
@@ -908,7 +909,8 @@ static void lora_store_persisted_chip(lora_chip_type_t chip)
 
 static void lora_update_chip_label(void)
 {
-    if(lora_chip_label && lv_obj_is_valid(lora_chip_label)) {
+    if(!lora_startup_probe_background && lora_chip_label &&
+       lv_obj_is_valid(lora_chip_label)) {
         lv_label_set_text(lora_chip_label, lora_active_chip_name());
     }
 }
@@ -972,7 +974,8 @@ static void lora_log(const char *fmt, ...)
         }
     }
 
-    if(lora_log_label && lv_obj_is_valid(lora_log_label)) {
+    if(!lora_startup_probe_background && lora_log_label &&
+       lv_obj_is_valid(lora_log_label)) {
         lv_label_set_text(lora_log_label, all);
     }
 }
@@ -985,7 +988,8 @@ static void lora_set_status(const char *fmt, ...)
     vsnprintf(lora_status_text, sizeof(lora_status_text), fmt, ap);
     va_end(ap);
 
-    if(lora_status_label && lv_obj_is_valid(lora_status_label)) {
+    if(!lora_startup_probe_background && lora_status_label &&
+       lv_obj_is_valid(lora_status_label)) {
         lv_label_set_text(lora_status_label, ui_tr(lora_status_text));
     }
 }
@@ -1858,7 +1862,9 @@ int ui_lora_hardware_available(void)
 static void *lora_startup_probe_thread(void *arg)
 {
     (void)arg;
+    lora_startup_probe_background = 1;
     (void)ui_lora_startup_probe();
+    lora_startup_probe_background = 0;
     lora_startup_probe_running = 0;
     return NULL;
 }
