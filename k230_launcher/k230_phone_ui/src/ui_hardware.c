@@ -202,9 +202,7 @@
 #define BQ27220_REG_OPERATION_STATUS 0x3A
 #define BQ27220_REG_DESIGN_CAPACITY 0x3C
 #define BQ27220_REG_ROM_START 0x3E
-#define BQ27220_REG_MAC_BUFFER_START 0x40
 #define BQ27220_REG_MAC_DATA_SUM 0x60
-#define BQ27220_REG_MAC_DATA_LEN 0x61
 #define BQ27220_SUB_CMD_SEALED 0x0030
 #define BQ27220_SUB_CMD_ENTER_CFG_UPDATE 0x0090
 #define BQ27220_SUB_CMD_EXIT_CFG_UPDATE_REINIT 0x0091
@@ -217,6 +215,7 @@
 #define BQ27220_ACCESS_SEALED 3
 #define BQ27220_CFGUPDATE_ENTER_TIMEOUT_MS 1500
 #define BQ27220_CFGUPDATE_EXIT_TIMEOUT_MS 3000
+#define BQ27220_CONFIG_APPLY_TIMEOUT_MS 2000
 #define BATTERY_CAPACITY_DEFAULT_MAH 6000
 #define BATTERY_CAPACITY_MIN_MAH 500
 #define BATTERY_CAPACITY_MAX_MAH 20000
@@ -635,6 +634,7 @@ static void keyboard_backlight_apply(int duty_percent, int frequency_hz,
                                      int save_pref);
 static int xl9555_set_led(int index, int enabled);
 static uint32_t extension_keyboard_shift_symbol_for_code(int code);
+static void bq27220_sync_saved_capacity(void);
 static int bq27220_set_new_capacity(uint16_t design_mah,
                                     uint16_t full_charge_mah);
 static int battery_shutdown_voltage_mv(void);
@@ -3321,8 +3321,6 @@ static int bq25896_disable_watchdog(const char *reason)
 
 static void hardware_apply_first_boot_defaults(void)
 {
-    int capacity_initialized;
-
     ensure_pref_int_default(PREF_BQ25896_ICHG_MA,
                             BQ25896_FAST_CHG_DEFAULT_MA,
                             0, BQ25896_FAST_CHG_MAX_MA,
@@ -3332,29 +3330,17 @@ static void hardware_apply_first_boot_defaults(void)
                             BQ25896_CHG_VOLT_BASE_MV,
                             BQ25896_CHG_VOLT_MAX_MV,
                             "bq25896.vreg_mv");
-    capacity_initialized =
-        ensure_pref_int_default(PREF_BATTERY_CAPACITY_MAH,
-                                BATTERY_CAPACITY_DEFAULT_MAH,
-                                BATTERY_CAPACITY_MIN_MAH,
-                                BATTERY_CAPACITY_MAX_MAH,
-                                "battery.capacity_mah");
+    ensure_pref_int_default(PREF_BATTERY_CAPACITY_MAH,
+                            BATTERY_CAPACITY_DEFAULT_MAH,
+                            BATTERY_CAPACITY_MIN_MAH,
+                            BATTERY_CAPACITY_MAX_MAH,
+                            "battery.capacity_mah");
     ensure_pref_int_default(PREF_BATTERY_SHUTDOWN_MV,
                             BATTERY_SHUTDOWN_DEFAULT_MV,
                             BATTERY_SHUTDOWN_DISABLED_MV,
                             BATTERY_SHUTDOWN_MAX_MV,
                             "battery.shutdown_mv");
-    if(capacity_initialized) {
-        keyboard_base_state_t base;
-
-        keyboard_base_get_state(&base);
-        if(base.bq27220) {
-            int rc = bq27220_set_new_capacity(
-                (uint16_t)BATTERY_CAPACITY_DEFAULT_MAH,
-                (uint16_t)BATTERY_CAPACITY_DEFAULT_MAH);
-            bq27220_log("startup default capacity sync rc=%d capacity=%dmAh",
-                        rc, BATTERY_CAPACITY_DEFAULT_MAH);
-        }
-    }
+    bq27220_sync_saved_capacity();
 }
 
 static int bq25896_read(bq25896_reading_t *reading)
@@ -3729,6 +3715,13 @@ static int bq27220_wait_config_update(int expected, int timeout_ms)
     return -1;
 }
 
+/*
+ * The gauge ignores the data memory write sequence in the TRM, where the
+ * address, data, checksum and length each go in a separate transfer. It
+ * accepts the address and data as one auto-increment write from 0x3E, then
+ * the checksum and length as one write from 0x60. See TI E2E thread 719878
+ * and the Flipper Zero bq27220 driver.
+ */
 static int bq27220_write_capacity_word(uint16_t rom_addr,
                                        uint16_t capacity_mah)
 {
@@ -3736,17 +3729,14 @@ static int bq27220_write_capacity_word(uint16_t rom_addr,
     uint8_t addr_hi = (uint8_t)((rom_addr >> 8) & 0xFF);
     uint8_t cap_hi = (uint8_t)((capacity_mah >> 8) & 0xFF);
     uint8_t cap_lo = (uint8_t)(capacity_mah & 0xFF);
-    uint8_t addr_buf[3] = {BQ27220_REG_ROM_START, addr_lo, addr_hi};
-    uint8_t data_buf[3] = {BQ27220_REG_MAC_BUFFER_START, cap_hi, cap_lo};
+    uint8_t data_buf[5] = {
+        BQ27220_REG_ROM_START, addr_lo, addr_hi, cap_hi, cap_lo
+    };
+    uint8_t sum_buf[3];
     uint8_t checksum;
     int sum;
     int rc;
 
-    rc = keyboard_i2c_write_block(BQ27220_ADDR, addr_buf, sizeof(addr_buf));
-    if(rc != 0) {
-        return rc;
-    }
-    usleep(10000);
     rc = keyboard_i2c_write_block(BQ27220_ADDR, data_buf, sizeof(data_buf));
     if(rc != 0) {
         return rc;
@@ -3755,19 +3745,38 @@ static int bq27220_write_capacity_word(uint16_t rom_addr,
 
     sum = addr_lo + addr_hi + cap_hi + cap_lo;
     checksum = (uint8_t)(0xFF - (sum & 0xFF));
-    if(keyboard_i2c_write_reg(BQ27220_ADDR, BQ27220_REG_MAC_DATA_SUM,
-                              checksum) != 0) {
-        return -1;
-    }
-    usleep(10000);
-    if(keyboard_i2c_write_reg(BQ27220_ADDR, BQ27220_REG_MAC_DATA_LEN,
-                              0x06) != 0) {
-        return -1;
+    sum_buf[0] = BQ27220_REG_MAC_DATA_SUM;
+    sum_buf[1] = checksum;
+    sum_buf[2] = 0x06; /* 2 address + 2 data + checksum + length */
+    rc = keyboard_i2c_write_block(BQ27220_ADDR, sum_buf, sizeof(sum_buf));
+    if(rc != 0) {
+        return rc;
     }
     usleep(10000);
     bq27220_log("write-capacity rom=0x%04X capacity=%umAh checksum=0x%02X",
                 rom_addr, capacity_mah, checksum);
     return 0;
+}
+
+static int bq27220_wait_design_capacity(uint16_t expected_mah, int timeout_ms,
+                                        uint16_t *seen_mah)
+{
+    const int step_ms = 50;
+    int elapsed = 0;
+    uint16_t design = 0;
+
+    while(elapsed <= timeout_ms) {
+        if(bq27220_read_word(BQ27220_REG_DESIGN_CAPACITY, &design) == 0 &&
+           design == expected_mah) {
+            break;
+        }
+        usleep(step_ms * 1000);
+        elapsed += step_ms;
+    }
+    if(seen_mah) {
+        *seen_mah = design;
+    }
+    return design == expected_mah ? 0 : -1;
 }
 
 static int bq27220_set_new_capacity(uint16_t design_mah,
@@ -3819,6 +3828,18 @@ out_exit_cfg:
        bq27220_wait_config_update(0, BQ27220_CFGUPDATE_EXIT_TIMEOUT_MS) != 0) {
         bq27220_log("capacity-sync exit-config-update warning");
     }
+    if(rc == 0) {
+        uint16_t seen = 0;
+
+        /* A rejected write is silent, so read the value back. */
+        if(bq27220_wait_design_capacity(design_mah,
+                                        BQ27220_CONFIG_APPLY_TIMEOUT_MS,
+                                        &seen) != 0) {
+            bq27220_log("capacity-sync verify failed design=%umAh want=%umAh",
+                        seen, design_mah);
+            rc = -1;
+        }
+    }
 
 out_reseal:
     if(was_sealed) {
@@ -3826,6 +3847,39 @@ out_reseal:
     }
     bq27220_log("capacity-sync done rc=%d", rc);
     return rc;
+}
+
+/*
+ * The gauge keeps its configuration in RAM and falls back to its 3000 mAh
+ * default whenever it loses power. Re-apply the saved capacity at startup
+ * if the gauge disagrees with it.
+ */
+static void bq27220_sync_saved_capacity(void)
+{
+    keyboard_base_state_t base;
+    uint16_t design = 0;
+    int capacity;
+    int rc;
+
+    keyboard_base_get_state(&base);
+    if(!base.bq27220) {
+        return;
+    }
+    capacity = read_pref_int(PREF_BATTERY_CAPACITY_MAH,
+                             BATTERY_CAPACITY_DEFAULT_MAH,
+                             BATTERY_CAPACITY_MIN_MAH,
+                             BATTERY_CAPACITY_MAX_MAH);
+    if(bq27220_read_word(BQ27220_REG_DESIGN_CAPACITY, &design) != 0) {
+        bq27220_log("startup capacity check failed read-design");
+        return;
+    }
+    if(design == (uint16_t)capacity) {
+        bq27220_log("startup capacity ok design=%umAh", design);
+        return;
+    }
+    rc = bq27220_set_new_capacity((uint16_t)capacity, (uint16_t)capacity);
+    bq27220_log("startup capacity sync rc=%d gauge=%umAh saved=%dmAh",
+                rc, design, capacity);
 }
 
 static int bq27220_read(bq27220_reading_t *reading)

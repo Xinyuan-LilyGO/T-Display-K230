@@ -2,6 +2,13 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed battery capacity calibration not reaching the BQ27220 gauge, which
+  kept reporting its 3000 mAh default. The launcher now writes the gauge in
+  the sequence it accepts, reads the value back before reporting success, and
+  re-applies the saved capacity at startup when the gauge has lost it.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,
