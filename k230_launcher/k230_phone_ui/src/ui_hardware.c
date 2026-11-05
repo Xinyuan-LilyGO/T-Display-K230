@@ -225,6 +225,7 @@
 #define BATTERY_SHUTDOWN_MAX_MV 4000
 #define BATTERY_SHUTDOWN_OPTION_COUNT 7
 #define BATTERY_LOW_SHUTDOWN_POLL_US 30000000ULL
+#define BATTERY_STATUS_HOLD_US (5ULL * 1000000ULL)
 #define BATTERY_LOW_SHUTDOWN_CONFIRM_COUNT 3
 #define BATTERY_LOW_SHUTDOWN_LOG "/tmp/k230_low_battery_shutdown.log"
 #define TCA8418_ADDR 0x34
@@ -593,6 +594,7 @@ static lv_timer_t *keyboard_hotkey_osd_timer;
 static lv_obj_t *battery_shutdown_overlay;
 static lv_obj_t *battery_shutdown_btn[BATTERY_SHUTDOWN_OPTION_COUNT];
 static uint64_t battery_low_shutdown_next_check_us;
+static uint64_t battery_status_hold_until_us;
 static int battery_low_shutdown_low_count;
 static int battery_low_shutdown_started;
 static int battery_low_shutdown_pending;
@@ -7958,6 +7960,25 @@ static int battery_parse_capacity(const char *text, int *capacity_mah)
     return 0;
 }
 
+/*
+ * The Battery page refreshes every 1.5 s and rewrites the status line with
+ * the gauge's flow state. Hold a calibration result long enough to read.
+ */
+static int battery_status_held(void)
+{
+    return ui_monotonic_us() < battery_status_hold_until_us;
+}
+
+static void battery_show_result(const char *text, uint32_t color)
+{
+    if(!battery_status_label) {
+        return;
+    }
+    lv_label_set_text(battery_status_label, text);
+    lv_obj_set_style_text_color(battery_status_label, lv_color_hex(color), 0);
+    battery_status_hold_until_us = ui_monotonic_us() + BATTERY_STATUS_HOLD_US;
+}
+
 static void battery_capacity_submit_cb(const char *text, void *user_data)
 {
     keyboard_base_state_t base;
@@ -7970,13 +7991,8 @@ static void battery_capacity_submit_cb(const char *text, void *user_data)
 
     (void)user_data;
     if(battery_parse_capacity(text, &capacity) != 0) {
-        if(battery_status_label) {
-            snprintf(status, sizeof(status), "%s",
-                     ui_tr("Capacity must be 500-20000 mAh"));
-            lv_label_set_text(battery_status_label, status);
-            lv_obj_set_style_text_color(battery_status_label,
-                                        lv_color_hex(0xF5A524), 0);
-        }
+        battery_show_result(ui_tr("Capacity must be 500-20000 mAh"),
+                            0xF5A524);
         return;
     }
     write_pref_int(PREF_BATTERY_CAPACITY_MAH, capacity);
@@ -7988,18 +8004,12 @@ static void battery_capacity_submit_cb(const char *text, void *user_data)
     }
     battery_update_page();
     status_ok = sync_rc == 0 || !has_gauge;
-    if(battery_status_label) {
-        snprintf(status, sizeof(status), "%s",
-                 ui_tr(sync_rc == 0 ? "Capacity saved, gauge updated" :
-                                      has_gauge ?
-                                      "Capacity saved, gauge sync failed" :
-                                      "Capacity saved"));
-        lv_label_set_text(battery_status_label, status);
-        lv_obj_set_style_text_color(battery_status_label,
-                                    lv_color_hex(status_ok ? 0x25C281 :
-                                                            0xF5A524),
-                                    0);
-    }
+    snprintf(status, sizeof(status), "%s",
+             ui_tr(sync_rc == 0 ? "Capacity saved, gauge updated" :
+                                  has_gauge ?
+                                  "Capacity saved, gauge sync failed" :
+                                  "Capacity saved"));
+    battery_show_result(status, status_ok ? 0x25C281 : 0xF5A524);
     app_request_fast_refresh();
 }
 
@@ -8047,7 +8057,7 @@ static void battery_update_page(void)
 
     if(bq27220_read(&reading) == 0) {
         soc = clamp_int(reading.soc_pct, 0, 100);
-        if(battery_status_label) {
+        if(battery_status_label && !battery_status_held()) {
             snprintf(text, sizeof(text), "%s  status=0x%04X",
                      bq27220_flow_state(&reading), reading.battery_status);
             lv_label_set_text(battery_status_label, text);
@@ -8118,7 +8128,7 @@ static void battery_update_page(void)
             lv_label_set_text(battery_status_reg_label, text);
         }
     } else {
-        if(battery_status_label) {
+        if(battery_status_label && !battery_status_held()) {
             lv_label_set_text(battery_status_label, ui_tr("Not detected"));
             lv_obj_set_style_text_color(battery_status_label,
                                         lv_color_hex(0xF5A524), 0);
@@ -9689,6 +9699,7 @@ void ui_hardware_cleanup(void)
         bq25896_voltage_btn[i] = NULL;
     }
     battery_status_label = NULL;
+    battery_status_hold_until_us = 0;
     battery_base_label = NULL;
     battery_soc_label = NULL;
     battery_soc_bar = NULL;
