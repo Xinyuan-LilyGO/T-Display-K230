@@ -1829,6 +1829,7 @@ int ui_lora_startup_probe(void)
 {
     lora_profile_t probe;
     int state;
+    int available;
 
     if(!lora_profiles_loaded) {
         lora_load_profiles();
@@ -1846,17 +1847,24 @@ int ui_lora_startup_probe(void)
     if(state == 0) {
         state = lora_detect_radio(&probe);
     }
-    lora_hardware_available = state == 0;
-    lora_log("Startup probe %s%s", lora_hardware_available ? "detected " :
-             "failed", lora_hardware_available ? lora_active_chip_name() :
-             "");
+    available = state == 0;
+    lora_log("Startup probe %s%s", available ? "detected " : "failed",
+             available ? lora_active_chip_name() : "");
     lora_release_radio_hal();
-    return lora_hardware_available ? 0 : -1;
+    lora_hardware_available = available;
+    return available ? 0 : -1;
 }
 
 int ui_lora_hardware_available(void)
 {
     return lora_hardware_available;
+}
+
+void ui_lora_confirm_hardware_available(const char *source)
+{
+    lora_hardware_available = 1;
+    lora_log("Hardware availability confirmed by %s",
+             source && source[0] ? source : "external owner");
 }
 
 static void *lora_startup_probe_thread(void *arg)

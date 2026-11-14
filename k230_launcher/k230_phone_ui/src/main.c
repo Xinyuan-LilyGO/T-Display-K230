@@ -14520,11 +14520,14 @@ int main(void)
     start_power_key_monitor();
 
     render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
-    (void)ui_lora_startup_probe_async();
+    if(ui_meshtastic_is_running()) {
+        ui_lora_confirm_hardware_available("running Meshtastic daemon");
+    } else {
+        (void)ui_lora_startup_probe_async();
+    }
     lv_timer_create(update_time_labels, 1000, NULL);
     lv_timer_create(status_bar_update, 3000, NULL);
     ui_wifi_autoconnect_start();
-    ui_meshtastic_startup();
 
     while(running) {
         uint64_t loop_start_us = monotonic_us();
@@ -14555,6 +14558,9 @@ int main(void)
                 lora_home_probe_state = lora_probe_state;
                 if(current_page == PAGE_HOME || current_page == PAGE_APP_STARTUP) {
                     render_page(current_page, LV_SCREEN_LOAD_ANIM_NONE, 0);
+                }
+                if(lora_probe_state == 1) {
+                    ui_meshtastic_startup();
                 }
             }
         }

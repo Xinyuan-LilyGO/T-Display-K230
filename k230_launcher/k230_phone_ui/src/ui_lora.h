@@ -12,6 +12,7 @@ void ui_lora_cleanup(void);
 int ui_lora_startup_probe(void);
 int ui_lora_startup_probe_async(void);
 int ui_lora_hardware_available(void);
+void ui_lora_confirm_hardware_available(const char *source);
 void ui_lora_flrc_create(lv_obj_t *scr);
 void ui_lora_flrc_cleanup(void);
 void ui_lorawan_create(lv_obj_t *scr);
