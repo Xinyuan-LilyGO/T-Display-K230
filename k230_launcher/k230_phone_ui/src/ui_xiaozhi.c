@@ -1,5 +1,6 @@
 #include "ui_xiaozhi.h"
 
+#include "ui_audio.h"
 #include "ui_common.h"
 #include "ui_hardware.h"
 #include "ui_i18n.h"
@@ -92,6 +93,7 @@ static int xiaozhi_session_ready;
 static int xiaozhi_kws_should_run;
 static int xiaozhi_kws_route_active;
 static int xiaozhi_ptt_route_active;
+static int xiaozhi_playback_ready_sent;
 static int xiaozhi_kws_available = 1;
 static int xiaozhi_record_phase;
 static int xiaozhi_settings_dirty;
@@ -193,11 +195,11 @@ static void xiaozhi_env_prefix(char *out, size_t len)
              token_q);
 }
 
-static void xiaozhi_apply_audio_output_route(void)
+static int xiaozhi_apply_audio_output_route(void)
 {
     int external = ui_audio_output_is_external() ? 1 : 0;
 
-    ui_audio_output_set_external(external);
+    return ui_audio_output_set_external(external);
 }
 
 static int xiaozhi_process_alive(pid_t pid)
@@ -244,20 +246,31 @@ static int xiaozhi_write_control(const char *cmd)
     return written > 0 ? 0 : -1;
 }
 
-static void xiaozhi_ptt_route_enter_if_needed(void)
+static int xiaozhi_ptt_route_enter_if_needed(void)
 {
     if(!xiaozhi_ptt_route_active) {
-        ui_audio_input_route_enter("Xiaozhi PTT");
+        ui_audio_stop_for_exclusive_app("Xiaozhi audio capture");
+        if(ui_audio_input_route_enter("Xiaozhi PTT") != 0) {
+            return -1;
+        }
         xiaozhi_ptt_route_active = 1;
     }
+    return 0;
 }
 
-static void xiaozhi_ptt_route_leave_if_needed(void)
+static int xiaozhi_ptt_route_leave_if_needed(void)
 {
     if(xiaozhi_ptt_route_active) {
+        int rc;
+
         ui_audio_input_route_leave("Xiaozhi PTT");
-        xiaozhi_ptt_route_active = 0;
+        rc = xiaozhi_apply_audio_output_route();
+        if(rc == 0) {
+            xiaozhi_ptt_route_active = 0;
+        }
+        return rc;
     }
+    return 0;
 }
 
 static void xiaozhi_kws_leave_route_if_needed(int route_active)
@@ -417,7 +430,18 @@ static void xiaozhi_kws_start(void)
     }
 
     xiaozhi_kws_kill_stale_helpers(tracked_pid);
-    ui_audio_input_route_enter("Xiaozhi KWS");
+    ui_audio_stop_for_exclusive_app("Xiaozhi audio capture");
+    if(ui_audio_input_route_enter("Xiaozhi KWS") != 0) {
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_kws_restart_after_us =
+            ui_monotonic_us() + XIAOZHI_KWS_CRASH_BACKOFF_US;
+        xiaozhi_set_status_locked("Audio route failed",
+                                  "Unable to prepare microphone", -1);
+        xiaozhi_append_log_locked("KWS_ERROR input route failed");
+        pthread_mutex_unlock(&xiaozhi_lock);
+        app_request_fast_refresh();
+        return;
+    }
 
     xiaozhi_shell_quote(bin_q, sizeof(bin_q), XIAOZHI_KWS_BIN);
     xiaozhi_shell_quote(model_q, sizeof(model_q), XIAOZHI_KWS_MODEL);
@@ -2355,7 +2379,16 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
     if(!control_cmd || !control_cmd[0]) {
         control_cmd = "PTT_BEGIN";
     }
-    xiaozhi_ptt_route_enter_if_needed();
+    if(xiaozhi_ptt_route_enter_if_needed() != 0) {
+        pthread_mutex_lock(&xiaozhi_lock);
+        xiaozhi_set_status_locked("Audio route failed",
+                                  "Unable to prepare microphone", -1);
+        xiaozhi_append_log_locked("PTT_ERROR input route failed");
+        pthread_mutex_unlock(&xiaozhi_lock);
+        app_request_fast_refresh();
+        xiaozhi_kws_restart_if_idle();
+        return -1;
+    }
     if(xiaozhi_write_control(control_cmd) != 0) {
         xiaozhi_ptt_route_leave_if_needed();
         pthread_mutex_lock(&xiaozhi_lock);
@@ -2369,6 +2402,7 @@ static int xiaozhi_begin_ptt_session(const char *header_text,
 
     pthread_mutex_lock(&xiaozhi_lock);
     xiaozhi_running = 1;
+    xiaozhi_playback_ready_sent = 0;
     xiaozhi_ptt_pending_hold = 0;
     xiaozhi_ptt_recording = manual_hold ? 1 : 0;
     xiaozhi_log_text[0] = '\0';
@@ -2594,6 +2628,7 @@ static void xiaozhi_update(void)
     int start_wake_turn = 0;
     int start_pending_ptt = 0;
     int leave_ptt_route = 0;
+    int prepare_reply_playback = 0;
     int stop_kws_after_session_exit = 0;
     int reconnect_session_now = 0;
     pid_t ptt_pid;
@@ -2637,6 +2672,10 @@ static void xiaozhi_update(void)
             strstr(xiaozhi_log_text, "EVENT wake_no_speech") ||
             strstr(xiaozhi_log_text, "turn done rc="))) {
             leave_ptt_route = 1;
+        }
+        if(xiaozhi_running && !xiaozhi_ptt_recording &&
+           strstr(xiaozhi_log_text, "EVENT request_sent")) {
+            prepare_reply_playback = 1;
         }
         if(xiaozhi_running && !xiaozhi_ptt_recording &&
            strstr(xiaozhi_log_text, "EVENT wake_no_speech")) {
@@ -2745,7 +2784,18 @@ static void xiaozhi_update(void)
         xiaozhi_start_session();
     }
     if(leave_ptt_route) {
-        xiaozhi_ptt_route_leave_if_needed();
+        int route_rc = xiaozhi_ptt_route_leave_if_needed();
+
+        if(route_rc != 0) {
+            pthread_mutex_lock(&xiaozhi_lock);
+            xiaozhi_set_status_locked("Audio route failed",
+                                      "Unable to prepare reply playback", -1);
+            pthread_mutex_unlock(&xiaozhi_lock);
+        } else if(prepare_reply_playback &&
+                  !xiaozhi_playback_ready_sent &&
+                  xiaozhi_write_control("PLAYBACK_READY") == 0) {
+            xiaozhi_playback_ready_sent = 1;
+        }
     }
     xiaozhi_last_log_line(log_text, log_preview, sizeof(log_preview));
 

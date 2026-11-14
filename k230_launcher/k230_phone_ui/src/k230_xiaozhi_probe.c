@@ -1826,6 +1826,35 @@ static int session_control_should_stop(control_reader_t *ctl)
     return 0;
 }
 
+static int session_wait_playback_ready(control_reader_t *ctl)
+{
+    char cmd[64];
+
+    for (int waited_ms = 0; waited_ms < 2000; waited_ms += 200) {
+        int got = control_wait_line(ctl, cmd, sizeof(cmd), 200);
+
+        if (got < 0) {
+            return -1;
+        }
+        if (got == 0) {
+            continue;
+        }
+        if (strcmp(cmd, "PLAYBACK_READY") == 0) {
+            log_line("INFO", "control PLAYBACK_READY");
+            return 0;
+        }
+        if (strcmp(cmd, "QUIT") == 0) {
+            log_line("INFO", "control QUIT");
+            g_stop = 1;
+            return -1;
+        }
+        log_line("WARN", "waiting playback route, ignored control: %s", cmd);
+    }
+
+    log_line("ERR", "playback route ready timeout");
+    return -1;
+}
+
 static int send_listen_state(ws_conn_t *ws, const char *session_id,
                              const char *state)
 {
@@ -2057,6 +2086,9 @@ static int session_ptt_turn(const app_opts_t *opts, ws_conn_t *ws,
     log_line("INFO", "record sent_frames=%d", sent_frames);
     if (rc != 0 || g_stop) {
         return rc ? rc : 1;
+    }
+    if (session_wait_playback_ready(ctl) != 0) {
+        return 1;
     }
 
     playback_open = (open_pcm(&play, SND_PCM_STREAM_PLAYBACK,

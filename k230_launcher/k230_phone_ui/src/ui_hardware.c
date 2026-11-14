@@ -1784,8 +1784,13 @@ int ui_audio_input_route_enter(const char *owner)
                 owner ? owner : "capture",
                 audio_input_route_restore_external ? "external" : "headphones",
                 rc);
+        if(rc != 0) {
+            audio_input_route_restore_valid = 0;
+        }
     }
-    audio_input_route_refcount++;
+    if(rc == 0) {
+        audio_input_route_refcount++;
+    }
     pthread_mutex_unlock(&audio_input_route_lock);
     return rc;
 }
