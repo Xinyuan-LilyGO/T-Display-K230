@@ -50,6 +50,9 @@
 #define LORA_PIN_DIO1 20U
 #define LORA_LR2021_IRQ_DIO_NUM 11U
 #define LORA_PIN_POWER 44U
+#define LORA_DEFAULT_SPI_TIMEOUT_MS 1000U
+#define LORA_STARTUP_SPI_TIMEOUT_MS 150U
+#define LORA_STARTUP_BUSY_SETTLE_MS 50U
 #define LORA_MAX_LOG_LINES 8
 #define LORA_LINE_MAX 160
 #define LORA_MAX_MESSAGES 16
@@ -820,6 +823,7 @@ static volatile int lora_startup_probe_background;
 static pthread_mutex_t lora_startup_probe_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t lora_startup_probe_thread_id;
 static int lora_startup_probe_thread_valid;
+static int lora_startup_probe_active;
 static int lora_editor_source_index = -1;
 static int lora_initialized;
 static int lora_rx_running;
@@ -1714,6 +1718,9 @@ static int lora_create_radio_candidate(lora_chip_type_t chip)
     if(!lora_module) {
         return -1;
     }
+    lora_module->spiConfig.timeout = lora_startup_probe_active ?
+                                     LORA_STARTUP_SPI_TIMEOUT_MS :
+                                     LORA_DEFAULT_SPI_TIMEOUT_MS;
 
     if(chip == LORA_CHIP_SX1262) {
         lora_sx1262 = new SX1262(lora_module);
@@ -1739,6 +1746,22 @@ static int lora_probe_chip(lora_chip_type_t chip, const lora_profile_t *profile,
                            int16_t *state_out)
 {
     int16_t state;
+
+    if(lora_startup_probe_active) {
+        lora_hal->pinMode(LORA_PIN_RST, K230_HAL_GPIO_OUTPUT);
+        lora_hal->digitalWrite(LORA_PIN_RST, K230_HAL_GPIO_LOW);
+        lora_hal->delay(2);
+        lora_hal->digitalWrite(LORA_PIN_RST, K230_HAL_GPIO_HIGH);
+        lora_hal->delay(LORA_STARTUP_BUSY_SETTLE_MS);
+        if(lora_hal->digitalRead(LORA_PIN_BUSY) == K230_HAL_GPIO_HIGH) {
+            if(state_out) {
+                *state_out = RADIOLIB_ERR_SPI_CMD_TIMEOUT;
+            }
+            lora_log("Probe %s skipped: BUSY remains high after reset",
+                     lora_chip_name(chip));
+            return -1;
+        }
+    }
 
     if(lora_create_radio_candidate(chip) != 0) {
         if(state_out) {
@@ -1849,10 +1872,12 @@ int ui_lora_startup_probe(void)
     memset(&probe, 0, sizeof(probe));
     probe = lora_profiles[LORA_DEFAULT_PROFILE_INDEX < lora_profile_count ?
                           LORA_DEFAULT_PROFILE_INDEX : 0];
+    lora_startup_probe_active = 1;
     state = lora_hw_prepare();
     if(state == 0) {
         state = lora_detect_radio(&probe);
     }
+    lora_startup_probe_active = 0;
     available = state == 0;
     lora_log("Startup probe %s%s", available ? "detected " : "failed",
              available ? lora_active_chip_name() : "");

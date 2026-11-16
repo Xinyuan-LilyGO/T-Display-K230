@@ -14541,6 +14541,16 @@ int main(void)
     apply_display_orientation(disp);
     show_rotation_startup_cover(disp);
 
+    if(ui_meshtastic_is_running()) {
+        ui_lora_confirm_hardware_available("running Meshtastic daemon");
+        touch_trace_log("LORA_STARTUP_PROBE skipped=meshtastic-running");
+    } else {
+        touch_trace_log("LORA_STARTUP_PROBE begin=before-ui");
+        (void)ui_lora_startup_probe();
+        touch_trace_log("LORA_STARTUP_PROBE end=available=%d",
+                        ui_lora_hardware_available());
+    }
+
     input_dev = find_input_event();
     if(input_dev) {
         touch_trace_log("INPUT_DEVICE %s", input_dev);
@@ -14560,11 +14570,6 @@ int main(void)
     start_power_key_monitor();
 
     render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
-    if(ui_meshtastic_is_running()) {
-        ui_lora_confirm_hardware_available("running Meshtastic daemon");
-    } else {
-        (void)ui_lora_startup_probe_async();
-    }
     lv_timer_create(update_time_labels, 1000, NULL);
     lv_timer_create(status_bar_update, 3000, NULL);
     ui_wifi_autoconnect_start();
