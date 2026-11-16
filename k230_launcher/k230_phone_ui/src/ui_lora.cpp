@@ -840,6 +840,8 @@ static lora_profile_t lora_editor_profile;
 static char lora_log_lines[LORA_MAX_LOG_LINES][LORA_LINE_MAX];
 static int lora_log_count;
 
+static void lora_wait_startup_probe(void);
+
 typedef enum {
     LORA_OP_IDLE = 0,
     LORA_OP_RX,
@@ -1416,6 +1418,7 @@ static void lora_delete_radio_objects(void)
 
 static void lora_release_radio_hal(void)
 {
+    lora_wait_startup_probe();
     lora_rx_running = 0;
     lora_tx_pending = 0;
     lora_continuous_tx = 0;
@@ -1918,7 +1921,7 @@ static void lora_wait_startup_probe(void)
     lora_startup_probe_thread_valid = 0;
     pthread_mutex_unlock(&lora_startup_probe_lock);
 
-    if(valid) {
+    if(valid && !pthread_equal(thread, pthread_self())) {
         (void)pthread_join(thread, NULL);
         lora_log("Startup probe joined before radio HAL release");
     }
@@ -7395,7 +7398,6 @@ void ui_lora_cleanup(void)
         lora_startup_timer = NULL;
     }
 
-    lora_wait_startup_probe();
     lora_release_radio_hal();
     lora_auto_tx = 0;
     lora_session_mode = LORA_SESSION_LISTEN;
