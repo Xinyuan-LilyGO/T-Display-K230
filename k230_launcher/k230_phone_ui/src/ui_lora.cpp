@@ -817,6 +817,9 @@ static int lora_profiles_loaded;
 static volatile int lora_hardware_available = -1;
 static volatile int lora_startup_probe_running;
 static volatile int lora_startup_probe_background;
+static pthread_mutex_t lora_startup_probe_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t lora_startup_probe_thread_id;
+static int lora_startup_probe_thread_valid;
 static int lora_editor_source_index = -1;
 static int lora_initialized;
 static int lora_rx_running;
@@ -1873,7 +1876,10 @@ static void *lora_startup_probe_thread(void *arg)
     lora_startup_probe_background = 1;
     (void)ui_lora_startup_probe();
     lora_startup_probe_background = 0;
+
+    pthread_mutex_lock(&lora_startup_probe_lock);
     lora_startup_probe_running = 0;
+    pthread_mutex_unlock(&lora_startup_probe_lock);
     return NULL;
 }
 
@@ -1881,7 +1887,9 @@ int ui_lora_startup_probe_async(void)
 {
     pthread_t thread;
 
+    pthread_mutex_lock(&lora_startup_probe_lock);
     if(lora_hardware_available >= 0 || lora_startup_probe_running) {
+        pthread_mutex_unlock(&lora_startup_probe_lock);
         return 0;
     }
     lora_startup_probe_running = 1;
@@ -1889,11 +1897,31 @@ int ui_lora_startup_probe_async(void)
         lora_startup_probe_running = 0;
         lora_hardware_available = 0;
         lora_log("Startup probe thread creation failed");
+        pthread_mutex_unlock(&lora_startup_probe_lock);
         return -1;
     }
-    pthread_detach(thread);
+    lora_startup_probe_thread_id = thread;
+    lora_startup_probe_thread_valid = 1;
+    pthread_mutex_unlock(&lora_startup_probe_lock);
     lora_log("Startup probe scheduled in background");
     return 0;
+}
+
+static void lora_wait_startup_probe(void)
+{
+    pthread_t thread;
+    int valid;
+
+    pthread_mutex_lock(&lora_startup_probe_lock);
+    valid = lora_startup_probe_thread_valid;
+    thread = lora_startup_probe_thread_id;
+    lora_startup_probe_thread_valid = 0;
+    pthread_mutex_unlock(&lora_startup_probe_lock);
+
+    if(valid) {
+        (void)pthread_join(thread, NULL);
+        lora_log("Startup probe joined before radio HAL release");
+    }
 }
 
 static int lora_start_rx(void)
@@ -7367,6 +7395,7 @@ void ui_lora_cleanup(void)
         lora_startup_timer = NULL;
     }
 
+    lora_wait_startup_probe();
     lora_release_radio_hal();
     lora_auto_tx = 0;
     lora_session_mode = LORA_SESSION_LISTEN;
