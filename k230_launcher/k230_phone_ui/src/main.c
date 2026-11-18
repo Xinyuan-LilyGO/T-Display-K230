@@ -632,6 +632,8 @@ static int shutdown_last_fade_log_progress = -1;
 static char status_wifi_state[24] = "on";
 static char status_ble_state[24] = "offline";
 static int status_wifi_visible = 1;
+static pthread_mutex_t status_state_lock = PTHREAD_MUTEX_INITIALIZER;
+static int status_bar_update_pending;
 static pthread_mutex_t status_hw_lock = PTHREAD_MUTEX_INITIALIZER;
 static int status_battery_cache_valid;
 static int status_battery_available_cache;
@@ -5774,6 +5776,7 @@ static void status_set_label_color(lv_obj_t *obj, uint32_t color)
 static uint32_t status_ble_color(void)
 {
     nrf52840_status_t nrf_status;
+    char state[sizeof(status_ble_state)];
 
     if(ui_nrf52840_get_status(&nrf_status) == 0 && nrf_status.known) {
         if(nrf_status.mode == NRF52840_MODE_OFF) {
@@ -5787,10 +5790,13 @@ static uint32_t status_ble_color(void)
         }
         return 0x8B949E;
     }
-    if(strcmp(status_ble_state, "connected") == 0) {
+    pthread_mutex_lock(&status_state_lock);
+    snprintf(state, sizeof(state), "%s", status_ble_state);
+    pthread_mutex_unlock(&status_state_lock);
+    if(strcmp(state, "connected") == 0) {
         return 0x25C281;
     }
-    if(strcmp(status_ble_state, "ready") == 0) {
+    if(strcmp(state, "ready") == 0) {
         return 0x3DA5FF;
     }
     return 0x8B949E;
@@ -5798,14 +5804,19 @@ static uint32_t status_ble_color(void)
 
 static uint32_t status_wifi_color(int wifi_present, int wifi_has_ip)
 {
-    if(strcmp(status_wifi_state, "off") == 0) {
+    char state[sizeof(status_wifi_state)];
+
+    pthread_mutex_lock(&status_state_lock);
+    snprintf(state, sizeof(state), "%s", status_wifi_state);
+    pthread_mutex_unlock(&status_state_lock);
+    if(strcmp(state, "off") == 0) {
         return 0x8B949E;
     }
-    if(wifi_has_ip || strcmp(status_wifi_state, "connected") == 0) {
+    if(wifi_has_ip || strcmp(state, "connected") == 0) {
         return 0x25C281;
     }
-    if(strcmp(status_wifi_state, "scanning") == 0 ||
-       strcmp(status_wifi_state, "connecting") == 0) {
+    if(strcmp(state, "scanning") == 0 ||
+       strcmp(state, "connecting") == 0) {
         return 0x3DA5FF;
     }
     return wifi_present ? 0xF5A524 : 0x8B949E;
@@ -6157,22 +6168,51 @@ static void create_status_bar(lv_obj_t *scr)
 void app_set_wifi_status(const char *state)
 {
     const char *value = state && state[0] ? state : "on";
+    int on_main_thread = ui_main_thread_valid &&
+                         pthread_equal(pthread_self(), ui_main_thread);
 
+    pthread_mutex_lock(&status_state_lock);
     snprintf(status_wifi_state, sizeof(status_wifi_state), "%s", value);
-    status_bar_update(NULL);
+    if(!on_main_thread) {
+        status_bar_update_pending = 1;
+    }
+    pthread_mutex_unlock(&status_state_lock);
+    if(on_main_thread) {
+        status_bar_update(NULL);
+    } else {
+        app_request_fast_refresh();
+    }
 }
 
 void app_set_ble_status(const char *state)
 {
     const char *value = state && state[0] ? state : "offline";
+    int on_main_thread = ui_main_thread_valid &&
+                         pthread_equal(pthread_self(), ui_main_thread);
 
+    pthread_mutex_lock(&status_state_lock);
     snprintf(status_ble_state, sizeof(status_ble_state), "%s", value);
-    status_set_label_color(status_ble_label, status_ble_color());
+    if(!on_main_thread) {
+        status_bar_update_pending = 1;
+    }
+    pthread_mutex_unlock(&status_state_lock);
+    if(on_main_thread) {
+        status_set_label_color(status_ble_label, status_ble_color());
+    } else {
+        app_request_fast_refresh();
+    }
 }
 
 void app_refresh_status_bar(void)
 {
-    status_bar_update(NULL);
+    if(ui_main_thread_valid && pthread_equal(pthread_self(), ui_main_thread)) {
+        status_bar_update(NULL);
+        return;
+    }
+    pthread_mutex_lock(&status_state_lock);
+    status_bar_update_pending = 1;
+    pthread_mutex_unlock(&status_state_lock);
+    app_request_fast_refresh();
 }
 
 static lv_obj_t *icon_tile(lv_obj_t *parent, const app_item_t *item, int x, int y,
@@ -14546,7 +14586,18 @@ int main(void)
         power_key_shutdown_visual_poll();
         display_idle_poll();
         if(fast_refresh_pending) {
+            int update_status = 0;
+
             fast_refresh_pending = 0;
+            pthread_mutex_lock(&status_state_lock);
+            if(status_bar_update_pending) {
+                status_bar_update_pending = 0;
+                update_status = 1;
+            }
+            pthread_mutex_unlock(&status_state_lock);
+            if(update_status) {
+                status_bar_update(NULL);
+            }
             request_fast_refresh();
         }
         wait_ms = lv_timer_handler();

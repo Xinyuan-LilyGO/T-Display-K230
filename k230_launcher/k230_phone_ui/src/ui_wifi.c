@@ -61,6 +61,7 @@ static int wifi_enabled = 1;
 static int wifi_scan_busy;
 static int wifi_connect_busy;
 static int wifi_power_worker_busy;
+static int wifi_enable_deferred;
 static int wifi_selected_encrypted;
 static int wifi_autoconnect_started;
 static int wifi_suppress_click_index = -1;
@@ -1168,6 +1169,7 @@ static void *wifi_scan_thread_cb(void *arg)
 static void *wifi_power_off_thread_cb(void *arg)
 {
     int rc;
+    int enabled;
 
     (void)arg;
     rc = system("wpa_cli -i " NET_WIFI_IFACE " terminate >/dev/null 2>&1 || true; "
@@ -1175,14 +1177,17 @@ static void *wifi_power_off_thread_cb(void *arg)
 
     pthread_mutex_lock(&wifi_lock);
     wifi_power_worker_busy = 0;
-    if(rc == -1 && !wifi_enabled) {
+    enabled = wifi_enabled;
+    if(rc == -1 && !enabled) {
         wifi_set_status_locked("Wi-Fi down command failed");
-    } else if(!wifi_enabled) {
+    } else if(!enabled) {
         wifi_set_status_locked("Wi-Fi off");
+    }
+    if(!enabled) {
+        app_set_wifi_status("off");
     }
     pthread_mutex_unlock(&wifi_lock);
 
-    app_set_wifi_status("off");
     app_request_fast_refresh();
     return NULL;
 }
@@ -1497,6 +1502,7 @@ static void wifi_switch_event_cb(lv_event_t *event)
 {
     lv_obj_t *sw = lv_event_get_target(event);
     int enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    int defer_enable = 0;
 
     pthread_mutex_lock(&wifi_lock);
     wifi_enabled = enabled;
@@ -1506,14 +1512,24 @@ static void wifi_switch_event_cb(lv_event_t *event)
     wifi_selected_encrypted = 0;
     wifi_autoconnect_started = 0;
     wifi_selected_ssid[0] = '\0';
-    wifi_set_status_locked(enabled ? "Wi-Fi on" : "Wi-Fi off");
+    if(enabled && wifi_power_worker_busy) {
+        wifi_enable_deferred = 1;
+        defer_enable = 1;
+        wifi_set_status_locked("Waiting for Wi-Fi shutdown");
+    } else {
+        wifi_enable_deferred = 0;
+        wifi_set_status_locked(enabled ? "Wi-Fi on" : "Wi-Fi off");
+    }
     pthread_mutex_unlock(&wifi_lock);
     wifi_save_enabled(enabled);
 
-    app_set_wifi_status(enabled ? "scanning" : "off");
+    app_set_wifi_status(enabled && !defer_enable ? "scanning" :
+                        (enabled ? "on" : "off"));
     if(enabled) {
-        ui_wifi_autoconnect_start();
-        wifi_start_scan(1);
+        if(!defer_enable) {
+            ui_wifi_autoconnect_start();
+            wifi_start_scan(1);
+        }
     } else {
         wifi_start_power_off();
     }
@@ -1613,8 +1629,24 @@ static void wifi_ap_long_event_cb(lv_event_t *event)
 
 static void wifi_timer_cb(lv_timer_t *timer)
 {
+    int resume_enable = 0;
+
     (void)timer;
-    wifi_start_scan(0);
+    pthread_mutex_lock(&wifi_lock);
+    if(wifi_enable_deferred && wifi_enabled && !wifi_power_worker_busy) {
+        wifi_enable_deferred = 0;
+        wifi_autoconnect_started = 0;
+        wifi_set_status_locked("Wi-Fi on");
+        resume_enable = 1;
+    }
+    pthread_mutex_unlock(&wifi_lock);
+    if(resume_enable) {
+        app_set_wifi_status("scanning");
+        ui_wifi_autoconnect_start();
+        wifi_start_scan(1);
+    } else {
+        wifi_start_scan(0);
+    }
     wifi_update_page();
 }
 
