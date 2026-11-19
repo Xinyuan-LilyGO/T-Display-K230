@@ -216,6 +216,9 @@
 #ifndef K230_ENABLE_DEV_APPS
 #define K230_ENABLE_DEV_APPS 0
 #endif
+#ifndef K230_PAGE_SMOKE_TEST
+#define K230_PAGE_SMOKE_TEST 0
+#endif
 
 #include "ui_common.h"
 #include "ui_icons.h"
@@ -11809,6 +11812,10 @@ static int camera_prepare_capture_pipeline(unsigned device, unsigned width,
     int rc = -ENODEV;
 
     for(int attempt = 0; attempt < 8; attempt++) {
+        if(camera_preview_stop) {
+            touch_trace_log("CAMERA_PREP_CANCELLED attempt=%d", attempt + 1);
+            return -ECANCELED;
+        }
         if(attempt == 0) {
             camera_ensure_isp_media_server(0);
         } else if(attempt == 3) {
@@ -11819,6 +11826,11 @@ static int camera_prepare_capture_pipeline(unsigned device, unsigned width,
         if(rc == 0) {
             rc = camera_prepare_capture_format(device, width, height, pixfmt);
             if(rc == 0) {
+                if(camera_preview_stop) {
+                    touch_trace_log("CAMERA_PREP_CANCELLED attempt=%d",
+                                    attempt + 1);
+                    return -ECANCELED;
+                }
                 return 0;
             }
         }
@@ -11858,7 +11870,15 @@ static void *camera_preview_thread_cb(void *arg)
     if(camera_prepare_capture_pipeline(CAMERA_CAPTURE_DEVICE, CAMERA_PREVIEW_W,
                                        CAMERA_PREVIEW_H,
                                        V4L2_PIX_FMT_NV16) != 0) {
-        camera_set_preview_status("Camera pipeline unavailable", 1, 0);
+        camera_set_preview_status(camera_preview_stop ? "Preview stopped" :
+                                  "Camera pipeline unavailable", 1, 0);
+        free(local_buf);
+        return NULL;
+    }
+
+    if(camera_preview_stop) {
+        touch_trace_log("CAMERA_SETUP_CANCELLED before=v4l2_drm_setup");
+        camera_set_preview_status("Preview stopped", 0, 0);
         free(local_buf);
         return NULL;
     }
@@ -12992,6 +13012,7 @@ static void create_gallery_page(lv_obj_t *scr)
 
 static void cleanup_page_state(void)
 {
+    camera_stop_preview();
     ui_audio_cleanup();
     ui_lorawan_cleanup();
     ui_halow_cleanup();
@@ -13018,7 +13039,6 @@ static void cleanup_page_state(void)
     ui_cellular_cleanup();
     ui_usb_modem_cleanup();
     ui_terminal_cleanup();
-    camera_stop_preview();
     if(camera_rtsp_notice_overlay &&
        lv_obj_is_valid(camera_rtsp_notice_overlay)) {
         lv_obj_delete(camera_rtsp_notice_overlay);
@@ -14455,6 +14475,65 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
     request_fast_refresh();
 }
 
+#if K230_PAGE_SMOKE_TEST
+static size_t page_smoke_test_index;
+static int page_smoke_test_return_home;
+static unsigned int page_smoke_test_cycle = 1;
+static unsigned int page_smoke_test_cycles = 1;
+static uint32_t page_smoke_test_interval_ms = 700;
+
+static void page_smoke_test_timer_cb(lv_timer_t *timer)
+{
+    while(page_smoke_test_index <
+          sizeof(app_items) / sizeof(app_items[0]) &&
+          !app_item_visible(&app_items[page_smoke_test_index])) {
+        touch_trace_log("PAGE_SMOKE_SKIP app=%s page=%s reason=hidden",
+                        app_items[page_smoke_test_index].title,
+                        page_name(app_items[page_smoke_test_index].page));
+        page_smoke_test_index++;
+    }
+
+    if(page_smoke_test_index >=
+       sizeof(app_items) / sizeof(app_items[0])) {
+        touch_trace_log("PAGE_SMOKE_CYCLE_COMPLETE cycle=%u apps=%zu",
+                        page_smoke_test_cycle,
+                        sizeof(app_items) / sizeof(app_items[0]));
+        render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
+        if(page_smoke_test_cycle < page_smoke_test_cycles) {
+            page_smoke_test_cycle++;
+            page_smoke_test_index = 0;
+            page_smoke_test_return_home = 0;
+            return;
+        }
+        touch_trace_log("PAGE_SMOKE_COMPLETE cycles=%u apps=%zu",
+                        page_smoke_test_cycles,
+                        sizeof(app_items) / sizeof(app_items[0]));
+        lv_timer_delete(timer);
+        running = 0;
+        return;
+    }
+
+    if(!page_smoke_test_return_home) {
+        const app_item_t *item = &app_items[page_smoke_test_index];
+
+        touch_trace_log("PAGE_SMOKE_ENTER cycle=%u index=%zu app=%s page=%s",
+                        page_smoke_test_cycle, page_smoke_test_index, item->title,
+                        page_name(item->page));
+        render_page(item->page, LV_SCREEN_LOAD_ANIM_NONE, 0);
+        page_smoke_test_return_home = 1;
+    } else {
+        const app_item_t *item = &app_items[page_smoke_test_index];
+
+        touch_trace_log("PAGE_SMOKE_LEAVE cycle=%u index=%zu app=%s page=%s",
+                        page_smoke_test_cycle, page_smoke_test_index, item->title,
+                        page_name(item->page));
+        render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
+        page_smoke_test_return_home = 0;
+        page_smoke_test_index++;
+    }
+}
+#endif
+
 int main(void)
 {
     lv_display_t *disp;
@@ -14573,6 +14652,33 @@ int main(void)
     lv_timer_create(update_time_labels, 1000, NULL);
     lv_timer_create(status_bar_update, 3000, NULL);
     ui_wifi_autoconnect_start();
+#if K230_PAGE_SMOKE_TEST
+    if(getenv("K230_PAGE_SMOKE_TEST") &&
+       strcmp(getenv("K230_PAGE_SMOKE_TEST"), "0") != 0) {
+        const char *cycles_text = getenv("K230_PAGE_SMOKE_CYCLES");
+        const char *interval_text = getenv("K230_PAGE_SMOKE_INTERVAL_MS");
+        long value;
+
+        if(cycles_text && cycles_text[0]) {
+            value = strtol(cycles_text, NULL, 10);
+            if(value >= 1 && value <= 100) {
+                page_smoke_test_cycles = (unsigned int)value;
+            }
+        }
+        if(interval_text && interval_text[0]) {
+            value = strtol(interval_text, NULL, 10);
+            if(value >= 50 && value <= 5000) {
+                page_smoke_test_interval_ms = (uint32_t)value;
+            }
+        }
+        touch_trace_log("PAGE_SMOKE_START cycles=%u apps=%zu interval_ms=%u",
+                        page_smoke_test_cycles,
+                        sizeof(app_items) / sizeof(app_items[0]),
+                        page_smoke_test_interval_ms);
+        lv_timer_create(page_smoke_test_timer_cb,
+                        page_smoke_test_interval_ms, NULL);
+    }
+#endif
 
     while(running) {
         uint64_t loop_start_us = monotonic_us();

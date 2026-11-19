@@ -26,10 +26,12 @@
 #define QR_SCANNER_PREVIEW_LANDSCAPE_H 288
 #define QR_SCANNER_PREVIEW_PORTRAIT_W 288
 #define QR_SCANNER_PREVIEW_PORTRAIT_H 512
+#define QR_SCANNER_START_DELAY_MS 350
 
 static pthread_mutex_t qr_scanner_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t qr_scanner_thread;
 static int qr_scanner_thread_active;
+static int qr_scanner_thread_valid;
 static int qr_scanner_running;
 static int qr_scanner_ready;
 static int qr_scanner_ok;
@@ -37,6 +39,7 @@ static char qr_scanner_status[192] = "Ready";
 static char qr_scanner_result[1024];
 
 static lv_timer_t *qr_scanner_timer;
+static lv_timer_t *qr_scanner_start_timer;
 static lv_obj_t *qr_scanner_preview_image;
 static lv_obj_t *qr_scanner_preview_placeholder;
 static lv_obj_t *qr_scanner_status_label;
@@ -66,9 +69,27 @@ static void qr_scanner_set_status_locked(const char *status, int ok)
 
 static void qr_scanner_kill_process(void)
 {
-    int rc = system("pkill -f 'k230_qr_scan.*k230_qr_scanner_preview' "
-                    ">/dev/null 2>&1 || true");
+    int rc = system("killall -TERM k230_qr_scan >/dev/null 2>&1 || true");
     (void)rc;
+}
+
+static void qr_scanner_join_worker(int wait)
+{
+    pthread_t thread;
+    int join_thread = 0;
+
+    pthread_mutex_lock(&qr_scanner_lock);
+    if(qr_scanner_thread_valid &&
+       (wait || !qr_scanner_thread_active)) {
+        thread = qr_scanner_thread;
+        qr_scanner_thread_valid = 0;
+        join_thread = 1;
+    }
+    pthread_mutex_unlock(&qr_scanner_lock);
+
+    if(join_thread) {
+        pthread_join(thread, NULL);
+    }
 }
 
 static void qr_scanner_show_toast(const char *text, uint32_t color,
@@ -284,6 +305,8 @@ static void qr_scanner_start(void)
 {
     pthread_t thread;
 
+    qr_scanner_join_worker(0);
+
     if(access(QR_SCANNER_BIN, X_OK) != 0) {
         pthread_mutex_lock(&qr_scanner_lock);
         qr_scanner_set_status_locked("QR scanner binary missing", 0);
@@ -316,8 +339,10 @@ static void qr_scanner_start(void)
     unlink(QR_SCANNER_LOG);
 
     if(pthread_create(&thread, NULL, qr_scanner_worker, NULL) == 0) {
-        pthread_detach(thread);
+        pthread_mutex_lock(&qr_scanner_lock);
         qr_scanner_thread = thread;
+        qr_scanner_thread_valid = 1;
+        pthread_mutex_unlock(&qr_scanner_lock);
     } else {
         pthread_mutex_lock(&qr_scanner_lock);
         qr_scanner_running = 0;
@@ -389,6 +414,15 @@ static void qr_scanner_save_event(lv_event_t *event)
 static void qr_scanner_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+    qr_scanner_update();
+}
+
+static void qr_scanner_start_timer_cb(lv_timer_t *timer)
+{
+    if(qr_scanner_start_timer == timer) {
+        qr_scanner_start_timer = NULL;
+    }
+    qr_scanner_start();
     qr_scanner_update();
 }
 
@@ -585,17 +619,29 @@ void ui_qr_scanner_create(lv_obj_t *scr)
 
     qr_scanner_add_toast(scr, ui_screen_width(), ui_screen_height());
     qr_scanner_timer = lv_timer_create(qr_scanner_timer_cb, 150, NULL);
-    qr_scanner_start();
+    qr_scanner_start_timer = lv_timer_create(qr_scanner_start_timer_cb,
+                                              QR_SCANNER_START_DELAY_MS,
+                                              NULL);
+    if(qr_scanner_start_timer) {
+        lv_timer_set_repeat_count(qr_scanner_start_timer, 1);
+    } else {
+        qr_scanner_start();
+    }
     qr_scanner_update();
 }
 
 void ui_qr_scanner_cleanup(void)
 {
+    if(qr_scanner_start_timer) {
+        lv_timer_delete(qr_scanner_start_timer);
+        qr_scanner_start_timer = NULL;
+    }
     if(qr_scanner_timer) {
         lv_timer_delete(qr_scanner_timer);
         qr_scanner_timer = NULL;
     }
     qr_scanner_stop();
+    qr_scanner_join_worker(1);
     if(qr_scanner_preview_pixels) {
         free(qr_scanner_preview_pixels);
         qr_scanner_preview_pixels = NULL;
