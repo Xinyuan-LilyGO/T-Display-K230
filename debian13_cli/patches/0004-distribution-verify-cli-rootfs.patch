@@ -2,7 +2,7 @@ diff --git a/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.s
 index 4c041830..cfabf39c 100755
 --- a/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
 +++ b/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
-@@ -320,6 +320,38 @@ EOF
+@@ -320,6 +320,40 @@ EOF
          printf 'Debian GNU/Linux 13 T-Display K230 tty1\n\n' \
              > "${distr_rootfs}/etc/issue"
      fi
