@@ -32,9 +32,11 @@ index 4c041830..cfabf39c 100755
 +            exit 1
 +        fi
 +        if ! find "${distr_rootfs}/usr/lib/riscv64-linux-gnu" \
-+            -maxdepth 1 -name 'libkeymap.so*' -print -quit | grep -q .; then
-+            print_red "libkeymap is missing from minimal CLI rootfs"
-+            exit 1
++           -maxdepth 1 -name 'libkeymap.so*' -print -quit | grep -q .; then
++            if [ ! -x "${distr_rootfs}/usr/bin/loadkeys" ]; then
++                print_red "loadkeys and libkeymap are both missing from minimal CLI rootfs"
++                exit 1
++            fi
 +        fi
 +        print_green "Verified minimal CLI rootfs payload"
 +    fi
