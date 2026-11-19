@@ -1,16 +1,6 @@
 --- a/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
 +++ b/arch/riscv/boot/dts/canaan/display-rm69a10-568x1232.dtsi
-@@ -2,6 +2,9 @@
- &vo {
- 	vth_line = <10>;
- };
-+&display {
-+	canaan,skip-fbdev-setup;
-+};
- &dsi {
- 	ports {
- 		port@1 {
-@@ -17,6 +20,7 @@
+@@ -17,6 +17,7 @@
  		panel-width-mm = <65>;
  		panel-height-mm = <145>;
  		panel-dsi-lane = <2>;
@@ -42,7 +32,7 @@
  
  	struct panel_cmd_seq *init_seq_v1;
  };
-@@ -373,30 +374,44 @@
+@@ -373,29 +374,43 @@
  
  	mipi_dsi_set_drvdata(dsi, ctx);
  

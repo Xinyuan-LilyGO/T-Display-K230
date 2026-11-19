@@ -1,0 +1,42 @@
+diff --git a/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh b/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
+index ba4fb819..91d3183d 100755
+--- a/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
++++ b/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
+@@ -187,6 +187,7 @@ distribution_rootfs_replace() {
+ 
+ 
+ 
++    if [ "${K230_CLI_MINIMAL:-0}" != "1" ]; then
+     # Install DEB packages for both debian and ubuntu
+     # For debian: download packages from server first
+     if [ "${distname}" = "debian" ]; then
+@@ -266,6 +267,28 @@ distribution_rootfs_replace() {
+     cp -rf "${target_dir}/etc/umtprd" "${distr_rootfs}/etc/"
+     cp -rf "${target_dir}/usr/sbin/umtprd" "${distr_rootfs}/usr/sbin/"
+     cp -rf "${target_dir}/usr/bin/adbd" "${distr_rootfs}/usr/bin/"
++    else
++        print_blue "Configuring minimal framebuffer console system..."
++        rm -f "${distr_rootfs}/etc/systemd/system/basic.target.wants/vvcam.service"
++        rm -f "${distr_rootfs}/etc/systemd/system/default.target"
++        ln -s /lib/systemd/system/multi-user.target \
++            "${distr_rootfs}/etc/systemd/system/default.target"
++
++        mkdir -p "${distr_rootfs}/etc/systemd/system/getty.target.wants"
++        ln -sf /lib/systemd/system/getty@.service \
++            "${distr_rootfs}/etc/systemd/system/getty.target.wants/getty@tty1.service"
++
++        mkdir -p "${distr_rootfs}/etc/systemd/system/getty@tty1.service.d"
++        cat > "${distr_rootfs}/etc/systemd/system/getty@tty1.service.d/override.conf" <<'EOF'
++[Service]
++TTYVTDisallocate=no
++EOF
++
++        rm -f "${distr_rootfs}/etc/profile.d/qt_env.sh"
++        rm -f "${distr_rootfs}/root/kms_config.json"
++        printf 'Debian GNU/Linux 13 T-Display K230 tty1\n\n' \
++            > "${distr_rootfs}/etc/issue"
++    fi
+ 
+     # Create /app symlink pointing to /root/app
+     cd "${distr_rootfs}"
+

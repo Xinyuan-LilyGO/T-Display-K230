@@ -1,0 +1,13 @@
+[Unit]
+Description=T-Display K230 console keyboard map
+After=systemd-udev-trigger.service
+Before=getty@tty1.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/loadkeys -q -C /dev/tty1 /etc/console-setup/t-display-k230.map
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+diff --git a/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh b/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
+index d3c9bf45..4c041830 100755
+--- a/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
++++ b/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
+@@ -278,6 +278,28 @@ distribution_rootfs_replace() {
+         cp -a "${target_dir}"/usr/lib/libi2c.so* \
+             "${distr_rootfs}/usr/lib/riscv64-linux-gnu/"
+ 
++        install -d "${distr_rootfs}/usr/bin" \
++            "${distr_rootfs}/usr/lib/riscv64-linux-gnu"
++        for tool in loadkeys showkey dumpkeys; do
++            install -m 0755 "${target_dir}/usr/bin/${tool}" \
++                "${distr_rootfs}/usr/bin/${tool}"
++        done
++        for pattern in libkeymap.so\* libkbdfile.so\*; do
++            for library in "${target_dir}"/usr/lib/${pattern}; do
++                [ -e "${library}" ] || continue
++                cp -a "${library}" \
++                    "${distr_rootfs}/usr/lib/riscv64-linux-gnu/"
++            done
++        done
++
++        cp -a \
++            "${K230_SDK_ROOT}/buildroot-overlay/board/canaan/k230-soc/distribution/debian13_cli_overlay/." \
++            "${distr_rootfs}/"
++        install -d \
++            "${distr_rootfs}/etc/systemd/system/multi-user.target.wants"
++        ln -sf ../t-display-k230-keymap.service \
++            "${distr_rootfs}/etc/systemd/system/multi-user.target.wants/t-display-k230-keymap.service"
++
+         rm -f "${distr_rootfs}/etc/systemd/system/basic.target.wants/vvcam.service"
+         rm -f "${distr_rootfs}/etc/systemd/system/default.target"
+         ln -s /lib/systemd/system/multi-user.target \

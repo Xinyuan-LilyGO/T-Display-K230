@@ -1,0 +1,20 @@
+diff --git a/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh b/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
+index 91d3183d..d3c9bf45 100755
+--- a/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
++++ b/buildroot-overlay/board/canaan/k230-soc/distribution/distribution.sh
+@@ -269,6 +269,15 @@ distribution_rootfs_replace() {
+     cp -rf "${target_dir}/usr/bin/adbd" "${distr_rootfs}/usr/bin/"
+     else
+         print_blue "Configuring minimal framebuffer console system..."
++        install -d "${distr_rootfs}/usr/sbin" \
++            "${distr_rootfs}/usr/lib/riscv64-linux-gnu"
++        for tool in i2cdetect i2cdump i2cget i2cset i2ctransfer; do
++            install -m 0755 "${target_dir}/usr/sbin/${tool}" \
++                "${distr_rootfs}/usr/sbin/${tool}"
++        done
++        cp -a "${target_dir}"/usr/lib/libi2c.so* \
++            "${distr_rootfs}/usr/lib/riscv64-linux-gnu/"
++
+         rm -f "${distr_rootfs}/etc/systemd/system/basic.target.wants/vvcam.service"
+         rm -f "${distr_rootfs}/etc/systemd/system/default.target"
+         ln -s /lib/systemd/system/multi-user.target \

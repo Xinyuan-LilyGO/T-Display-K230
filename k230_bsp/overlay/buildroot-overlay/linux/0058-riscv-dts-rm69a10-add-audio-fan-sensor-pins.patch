@@ -125,7 +125,7 @@ index 1f12341..c4a6db0 100644
  	status = "okay";
  	pinctrl-names = "default";
 -	pinctrl-0 = <&cam_i2c4_pins>;
-+	pinctrl-0 = <&cam_i2c4_pins &aht20_i2c4_pins>;
++	pinctrl-0 = <&cam_i2c4_pins>;
  
  	gc2093@37 {
  		compatible = "galaxycore,gc2093";

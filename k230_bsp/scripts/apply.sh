@@ -38,6 +38,8 @@ echo "Prune stale test-only patch overlay"
 rm -f "${SDK_DIR}"/buildroot-overlay/linux/*ov5647*camera-profile*.patch
 rm -f "${SDK_DIR}"/buildroot-overlay/linux/*imx219*camera-profile*.patch
 rsync -a "${BSP_DIR}/overlay/" "${SDK_DIR}/"
+echo "Prune obsolete TCA8418 reset patch"
+rm -f "${SDK_DIR}/buildroot-overlay/linux/0069-input-tca8418-reset-sequence.patch"
 
 echo "[2/4] Prune unsupported upstream first-boot resize files"
 for rel in "${PRUNE_PATHS[@]}"; do

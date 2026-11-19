@@ -22,7 +22,7 @@ index 8a10d4b..f4a2d69 100644
 +++ b/arch/riscv/boot/dts/canaan/k230-canmv-rm69a10.dts
 @@ -244,6 +244,11 @@ &i2c4 {
  	pinctrl-names = "default";
- 	pinctrl-0 = <&cam_i2c4_pins &aht20_i2c4_pins>;
+ 	pinctrl-0 = <&cam_i2c4_pins>;
 
 +	dw9714@0c {
 +		compatible = "dongwoon,dw9714";
