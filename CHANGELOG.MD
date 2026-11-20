@@ -2,6 +2,21 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## v0.3.0 - 2026-11-20
+
+- Fixed audio route handoff so Xiaozhi playback and recording continue to use
+  the selected internal or external output after changing the audio setting.
+- Serialized LoRa hardware detection with Meshtastic startup and completed
+  probe cleanup before publishing hardware availability to the launcher.
+- Detects unavailable LoRa hardware before showing the home screen and keeps
+  LoRa, Meshtastic, LoRaWAN, and related autostart entries hidden on devices
+  without the radio.
+- Fixed Wi-Fi toggle crashes caused by overlapping power, scan, and page
+  cleanup operations.
+- Hardened rapid app entry and exit, including Camera and QR scanner worker
+  shutdown, to prevent white screens and stale media resources after quick
+  navigation.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,
