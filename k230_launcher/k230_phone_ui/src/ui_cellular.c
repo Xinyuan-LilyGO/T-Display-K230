@@ -89,6 +89,7 @@ typedef enum {
     CELLULAR_PAGE_GNSS,
     CELLULAR_PAGE_HTTP,
     CELLULAR_PAGE_MQTT,
+    CELLULAR_PAGE_SETTINGS,
 } cellular_page_t;
 
 typedef struct {
@@ -209,6 +210,7 @@ static lv_obj_t *cellular_root_page;
 static lv_obj_t *cellular_modem_page;
 static lv_obj_t *cellular_gnss_page;
 static lv_obj_t *cellular_http_page;
+static lv_obj_t *cellular_settings_page;
 static lv_obj_t *cellular_link_label;
 static lv_obj_t *cellular_sim_label;
 static lv_obj_t *cellular_lte_label;
@@ -5142,6 +5144,7 @@ static void cellular_show_page(cellular_page_t page)
         cellular_gnss_page,
         cellular_http_page,
         cellular_mqtt_panel,
+        cellular_settings_page,
     };
     cellular_page_t previous_page;
 
@@ -5190,6 +5193,11 @@ static void cellular_show_page(cellular_page_t page)
             lv_obj_clear_flag(cellular_mqtt_panel, LV_OBJ_FLAG_HIDDEN);
         }
         break;
+    case CELLULAR_PAGE_SETTINGS:
+        if(cellular_settings_page) {
+            lv_obj_clear_flag(cellular_settings_page, LV_OBJ_FLAG_HIDDEN);
+        }
+        break;
     }
     pthread_mutex_lock(&cellular_lock);
     cellular_current_page = page;
@@ -5218,6 +5226,12 @@ static void cellular_nrf_cloud_assistance_event_cb(lv_event_t *event)
 
     k230_nrf9151_set_gnss_cloud_assistance_enabled(
         lv_obj_has_state(sw, LV_STATE_CHECKED));
+}
+
+static void cellular_settings_open_event_cb(lv_event_t *event)
+{
+    (void)event;
+    cellular_show_page(CELLULAR_PAGE_SETTINGS);
 }
 
 int ui_cellular_handle_back(void)
@@ -5282,54 +5296,44 @@ static lv_obj_t *cellular_menu_card(lv_obj_t *parent, int x, int y, int w,
     return card;
 }
 
-static void cellular_nrf_cloud_card(lv_obj_t *parent, int x, int y, int w,
-                                    int h)
+static lv_obj_t *cellular_settings_item(lv_obj_t *parent, int x, int y,
+                                         int w, int h, const char *title,
+                                         const char *desc, uint32_t color,
+                                         lv_event_cb_t cb)
 {
     lv_obj_t *card = ui_panel(parent, x, y, w, h);
     lv_obj_t *accent;
     lv_obj_t *label;
-    lv_obj_t *sw;
-    lv_obj_t *button;
 
     lv_obj_set_style_bg_color(card, lv_color_hex(0x151B22), 0);
     lv_obj_set_style_radius(card, 12, 0);
     lv_obj_set_style_border_color(card, lv_color_hex(0x25303A), 0);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
     accent = lv_obj_create(card);
     lv_obj_set_size(accent, 5, h - 28);
-    lv_obj_set_style_bg_color(accent, lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(color), 0);
     lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(accent, 0, 0);
     lv_obj_set_style_radius(accent, 4, 0);
     lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(accent, LV_ALIGN_LEFT_MID, 0, 0);
 
-    label = ui_label(card, "nRF Cloud", &lv_font_montserrat_20, 0xF2F5F8);
+    label = ui_label(card, title, &lv_font_montserrat_20, 0xF2F5F8);
     lv_obj_set_width(label, w - 150);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 16);
 
-    label = ui_label(card, "Provisioning and A-GNSS assistance",
-                     &lv_font_montserrat_14, 0x9AA4AF);
+    label = ui_label(card, desc, &lv_font_montserrat_14, 0x9AA4AF);
     lv_obj_set_width(label, w - 150);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 50);
 
-    sw = lv_switch_create(card);
-    lv_obj_set_size(sw, 64, 34);
-    lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, -20, 20);
-    if(k230_nrf9151_gnss_cloud_assistance_enabled()) {
-        lv_obj_add_state(sw, LV_STATE_CHECKED);
-    }
-    lv_obj_add_event_cb(sw, cellular_nrf_cloud_assistance_event_cb,
-                        LV_EVENT_VALUE_CHANGED, NULL);
-    ui_haptic_bind_touch(sw);
-
-    button = ui_command_button(card, 24, h - 68, w - 48,
-                               "nRF Cloud setup", 0x3DA5FF);
-    lv_obj_add_event_cb(button, cellular_nrf_cloud_setup_event_cb,
-                        LV_EVENT_CLICKED, NULL);
+    label = ui_label(card, LV_SYMBOL_RIGHT, &lv_font_montserrat_20, color);
+    lv_obj_align(label, LV_ALIGN_RIGHT_MID, -20, 0);
+    return card;
 }
 
 static lv_obj_t *cellular_subpage_title(lv_obj_t *parent, const char *title,
@@ -5484,7 +5488,6 @@ void ui_cellular_create(lv_obj_t *scr)
                       content_y + (card_h + gap) * 2;
     int card_y_mqtt = landscape ? content_y + card_h + gap :
                       content_y + (card_h + gap) * 3;
-    int cloud_y = card_y_mqtt + card_h + gap;
     int left_w = wide_layout ? (panel_w * 46) / 100 : panel_w;
     int right_w = wide_layout ? panel_w - left_w - gap : panel_w;
     int right_x = wide_layout ? margin + left_w + gap : margin;
@@ -5529,9 +5532,14 @@ void ui_cellular_create(lv_obj_t *scr)
 
     label = ui_label(cellular_root_page, "nRF9151 Cellular",
                      &lv_font_montserrat_28, 0xF2F5F8);
-    lv_obj_set_width(label, panel_w);
+    lv_obj_set_width(label, panel_w - 80);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, margin, 24);
+
+    panel = ui_command_button(cellular_root_page, panel_w - 64, 14, 48,
+                              LV_SYMBOL_SETTINGS, 0xA78BFA);
+    lv_obj_add_event_cb(panel, cellular_settings_open_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 
     cellular_status_label = ui_label(cellular_root_page, "--",
                                      &lv_font_montserrat_14,
@@ -5563,7 +5571,45 @@ void ui_cellular_create(lv_obj_t *scr)
                        "Broker, subscribe and publish console",
                        0xA78BFA, &cellular_menu_mqtt_value,
                        CELLULAR_PAGE_MQTT);
-    cellular_nrf_cloud_card(cellular_root_page, margin, cloud_y, panel_w, 156);
+
+    cellular_settings_page = cellular_page_create(body, 1);
+    lv_obj_add_flag(cellular_settings_page, LV_OBJ_FLAG_HIDDEN);
+    cellular_subpage_title(cellular_settings_page, "Cellular settings",
+                           0xA78BFA);
+    panel = ui_panel(cellular_settings_page, margin, sub_y, panel_w,
+                     sub_h > 420 ? sub_h : 420);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_pad_all(panel, 16, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    label = ui_label(panel, "Network-related settings",
+                     &lv_font_montserrat_18, 0x94A3B8);
+    lv_obj_set_width(label, panel_w - 32);
+    lv_obj_set_pos(label, 0, 0);
+    cellular_settings_item(panel, 0, 48, panel_w - 32, 116,
+                           "nRF Cloud",
+                           "Token export, provisioning and A-GNSS assistance",
+                           0x25C281, cellular_nrf_cloud_setup_event_cb);
+    label = ui_label(panel, "A-GNSS assistance",
+                     &lv_font_montserrat_18, 0xF2F5F8);
+    lv_obj_set_pos(label, 0, 184);
+    lv_obj_set_width(label, panel_w - 120);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xF2F5F8), 0);
+    label = ui_label(panel, "Use nRF Cloud assistance after provisioning",
+                     &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_pos(label, 0, 216);
+    lv_obj_set_width(label, panel_w - 120);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    {
+        lv_obj_t *sw = lv_switch_create(panel);
+        lv_obj_set_size(sw, 64, 34);
+        lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, 0, 192);
+        if(k230_nrf9151_gnss_cloud_assistance_enabled()) {
+            lv_obj_add_state(sw, LV_STATE_CHECKED);
+        }
+        lv_obj_add_event_cb(sw, cellular_nrf_cloud_assistance_event_cb,
+                            LV_EVENT_VALUE_CHANGED, NULL);
+        ui_haptic_bind_touch(sw);
+    }
 
     cellular_modem_page = cellular_page_create(body, 1);
     lv_obj_add_flag(cellular_modem_page, LV_OBJ_FLAG_HIDDEN);
@@ -5803,6 +5849,7 @@ void ui_cellular_cleanup(void)
     cellular_modem_page = NULL;
     cellular_gnss_page = NULL;
     cellular_http_page = NULL;
+    cellular_settings_page = NULL;
     cellular_link_label = NULL;
     cellular_sim_label = NULL;
     cellular_lte_label = NULL;
