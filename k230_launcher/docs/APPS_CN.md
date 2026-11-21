@@ -34,6 +34,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `/root/meshtastic` | Meshtastic 频道、profile 和缓存文件 |
 | `/root/notification` | 通知音效文件 |
 | `/root/nrf52840/firmware` | nRF52840 DFU 应用升级包 |
+| `/root/nrf9151` | 通过 MTP 导出的 nRF9151 nRF Cloud attestation token |
 | `/root/maps` | Meshtastic 地图页面使用的可选离线地图瓦片 |
 | `/root/picoclaw` | PicoClaw 运行时、配置和工作区 |
 
@@ -72,7 +73,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Keyboard` / 键盘 | 测试 TCA8418 键盘矩阵、中断、键值映射和键盘背光 | 按下硬件按键后，界面上对应按键会点亮可在本页或设置中调节键盘背光 |
 | `Hotkeys` / 热键 | 打开 F1-F11 硬件功能键快捷动作编辑器 | 点击某个功能键，选择需要绑定的动作后返回。默认值：F1 主页，F2 设置，F3/F4 键盘背光减小/增加，F5/F6 音量减小/增加，F7 截图，F8 终端，F9 Meshtastic，F10/F11 屏幕亮度减小/增加。热键设置会持久化保存 |
 | `LED Test` | 控制 XL9555 扩展 IO 上的 LED | 在页面中切换 LED 状态板载 LED 为低电平点亮时，界面会按对应逻辑控制 |
-| `Cellular` / 蜂窝 | 测试 nRF9151 串口链路、SIM 卡、LTE 状态、GNSS、HTTP/HTTPS、MQTT、NMEA 输出和卫星 C/N0 柱状图 | 点击 `LTE` 进行 SIM/网络检查，点击 `GNSS` 监控 NMEA，也可以使用 HTTP/MQTT 测试按钮做基础数据业务测试。`设置` > `启动应用` 提供 nRF Cloud 设置引导和 A-GNSS 开关；引导会读取设备 token 并执行 provisioning，A-GNSS 使用 modem 内置的设备凭据，设备未完成 onboarding 或云连接失败时自动回退到无辅助 GNSS。HTTPS 与 MQTT TLS/mTLS 需要 modem 内已经写入可用的 `sec_tag` 凭据 |
+| `Cellular` / 蜂窝 | 测试 nRF9151 串口链路、SIM 卡、LTE 状态、GNSS、HTTP/HTTPS、MQTT、NMEA 输出和卫星 C/N0 柱状图 | 由于 provisioning 需要蜂窝网络，`蜂窝`页面包含 nRF Cloud 设置引导和 A-GNSS 开关；引导会读取设备 token，保存到 `/root/nrf9151/attestation_token.txt`，可通过 MTP 拷贝后执行 provisioning。A-GNSS 使用 modem 内置的设备凭据，设备未完成 onboarding 或云连接失败时自动回退到无辅助 GNSS。HTTPS 与 MQTT TLS/mTLS 需要 modem 内已经写入可用的 `sec_tag` 凭据 |
 | `USB Modem` | USB modem 检测和连接状态调试页面 | 当前仅用于工程调试和状态观察，还没有完整的用户拨号和数据连接流程 |
 | `Settings` / 设置 | 汇总网络、显示、语言、时间、音频、键盘、传感器和系统设置 | 进入对应分类后修改设置多数用户设置会持久化保存 |
 | `System` / 系统 | 显示内存、CPU、温度、显示、网络等系统信息 | 用于快速查看运行状态 |

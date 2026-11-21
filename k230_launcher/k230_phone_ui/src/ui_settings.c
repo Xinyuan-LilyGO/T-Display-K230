@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static lv_obj_t *settings_notice_overlay;
 static lv_obj_t *settings_body;
@@ -21,6 +23,7 @@ static int settings_restore_scroll_on_create;
 static lv_obj_t *settings_cloud_overlay;
 static lv_obj_t *settings_cloud_status_label;
 static lv_obj_t *settings_cloud_token_label;
+static lv_obj_t *settings_cloud_read_button;
 static lv_obj_t *settings_cloud_provision_button;
 static pthread_mutex_t settings_cloud_lock = PTHREAD_MUTEX_INITIALIZER;
 static int settings_cloud_busy;
@@ -28,10 +31,51 @@ static int settings_cloud_token_ready;
 static char settings_cloud_token[512];
 static char settings_cloud_status[256];
 
+#define SETTINGS_CLOUD_TOKEN_PATH "/root/nrf9151/attestation_token.txt"
+#define SETTINGS_CLOUD_TOKEN_TMP_PATH "/root/nrf9151/attestation_token.txt.tmp"
+
 enum {
     SETTINGS_CLOUD_READ_TOKEN = 1,
     SETTINGS_CLOUD_PROVISION = 2,
 };
+
+static int settings_cloud_save_token(const char *token)
+{
+    FILE *fp;
+    size_t len;
+
+    if(!token || !token[0]) {
+        errno = EINVAL;
+        return -1;
+    }
+    if(mkdir("/root/nrf9151", 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    fp = fopen(SETTINGS_CLOUD_TOKEN_TMP_PATH, "w");
+    if(!fp) {
+        return -1;
+    }
+    len = strlen(token);
+    if(fwrite(token, 1, len, fp) != len || fputc('\n', fp) == EOF ||
+       fflush(fp) != 0 || fsync(fileno(fp)) != 0) {
+        int saved_errno = errno;
+
+        fclose(fp);
+        unlink(SETTINGS_CLOUD_TOKEN_TMP_PATH);
+        errno = saved_errno ? saved_errno : EIO;
+        return -1;
+    }
+    if(fclose(fp) != 0 || rename(SETTINGS_CLOUD_TOKEN_TMP_PATH,
+                                 SETTINGS_CLOUD_TOKEN_PATH) != 0) {
+        int saved_errno = errno;
+
+        unlink(SETTINGS_CLOUD_TOKEN_TMP_PATH);
+        errno = saved_errno ? saved_errno : EIO;
+        return -1;
+    }
+    (void)chmod(SETTINGS_CLOUD_TOKEN_PATH, 0644);
+    return 0;
+}
 
 static void settings_restore_scroll_async(void *user_data)
 {
@@ -154,14 +198,6 @@ static void nrf9151_location_switch_event_cb(lv_event_t *event)
     }
 }
 
-static void nrf9151_cloud_assistance_switch_event_cb(lv_event_t *event)
-{
-    lv_obj_t *sw = lv_event_get_target(event);
-
-    k230_nrf9151_set_gnss_cloud_assistance_enabled(
-        lv_obj_has_state(sw, LV_STATE_CHECKED));
-}
-
 static void settings_cloud_setup_render_async(void *user_data)
 {
     char token[sizeof(settings_cloud_token)];
@@ -185,7 +221,8 @@ static void settings_cloud_setup_render_async(void *user_data)
     }
     if(settings_cloud_token_label && lv_obj_is_valid(settings_cloud_token_label)) {
         lv_label_set_text(settings_cloud_token_label,
-                          token[0] ? token : "Token not read yet");
+                          token[0] ? "Token saved to /root/nrf9151/attestation_token.txt" :
+                                     "Token not saved yet");
     }
     if(settings_cloud_provision_button &&
        lv_obj_is_valid(settings_cloud_provision_button)) {
@@ -193,6 +230,13 @@ static void settings_cloud_setup_render_async(void *user_data)
             lv_obj_add_state(settings_cloud_provision_button, LV_STATE_DISABLED);
         } else {
             lv_obj_clear_state(settings_cloud_provision_button, LV_STATE_DISABLED);
+        }
+    }
+    if(settings_cloud_read_button && lv_obj_is_valid(settings_cloud_read_button)) {
+        if(busy) {
+            lv_obj_add_state(settings_cloud_read_button, LV_STATE_DISABLED);
+        } else {
+            lv_obj_clear_state(settings_cloud_read_button, LV_STATE_DISABLED);
         }
     }
     app_request_fast_refresh();
@@ -203,13 +247,34 @@ static void *settings_cloud_setup_worker(void *arg)
     int mode = (int)(intptr_t)arg;
     char token[sizeof(settings_cloud_token)] = "";
     int rc;
+    int saved_errno = 0;
     int restart_location = k230_nrf9151_location_autostart_enabled();
+    int restart_status = k230_nrf9151_status_monitor_active();
 
+    if(!k230_nrf9151_uart_present()) {
+        pthread_mutex_lock(&settings_cloud_lock);
+        settings_cloud_busy = 0;
+        snprintf(settings_cloud_status, sizeof(settings_cloud_status),
+                 "%s", "nRF9151 not detected. Token export is unavailable.");
+        pthread_mutex_unlock(&settings_cloud_lock);
+        lv_async_call(settings_cloud_setup_render_async, NULL);
+        return NULL;
+    }
+    k230_nrf9151_status_monitor_stop();
+    usleep(300000);
     (void)k230_nrf9151_stop_gnss_monitor_wait(6000);
     if(mode == SETTINGS_CLOUD_READ_TOKEN) {
         rc = k230_nrf9151_cloud_read_attestation_token(token, sizeof(token));
+        saved_errno = errno;
+        if(rc == 0 && settings_cloud_save_token(token) != 0) {
+            rc = -1;
+            saved_errno = errno;
+        }
         if(restart_location) {
             (void)k230_nrf9151_apply_location_autostart();
+        }
+        if(restart_status) {
+            (void)k230_nrf9151_status_monitor_start();
         }
         pthread_mutex_lock(&settings_cloud_lock);
         if(rc == 0) {
@@ -217,17 +282,22 @@ static void *settings_cloud_setup_worker(void *arg)
                      token);
             settings_cloud_token_ready = 1;
             snprintf(settings_cloud_status, sizeof(settings_cloud_status),
-                     "%s", "Token ready. Claim this device in nRF Cloud, then start provisioning.");
+                     "Token saved to /root/nrf9151/attestation_token.txt. Copy it with MTP, claim this device in nRF Cloud, then start provisioning.");
         } else {
             snprintf(settings_cloud_status, sizeof(settings_cloud_status),
-                     "Token read failed: %s", strerror(errno));
+                     "Token read failed (%s). Check the nRF9151 firmware and module connection.",
+                     strerror(saved_errno ? saved_errno : EIO));
         }
         settings_cloud_busy = 0;
         pthread_mutex_unlock(&settings_cloud_lock);
     } else {
         rc = k230_nrf9151_cloud_provision();
+        saved_errno = errno;
         if(restart_location) {
             (void)k230_nrf9151_apply_location_autostart();
+        }
+        if(restart_status) {
+            (void)k230_nrf9151_status_monitor_start();
         }
         pthread_mutex_lock(&settings_cloud_lock);
         if(rc == 0) {
@@ -235,7 +305,8 @@ static void *settings_cloud_setup_worker(void *arg)
                      "%s", "Provisioning complete. You can now enable A-GNSS and start GNSS.");
         } else {
             snprintf(settings_cloud_status, sizeof(settings_cloud_status),
-                     "Provisioning failed: %s", strerror(errno));
+                     "Provisioning failed (%s). Check LTE registration and the nRF Cloud claim.",
+                     strerror(saved_errno ? saved_errno : EIO));
         }
         settings_cloud_busy = 0;
         pthread_mutex_unlock(&settings_cloud_lock);
@@ -291,14 +362,21 @@ static void settings_cloud_setup_close_event_cb(lv_event_t *event)
     settings_cloud_overlay = NULL;
     settings_cloud_status_label = NULL;
     settings_cloud_token_label = NULL;
+    settings_cloud_read_button = NULL;
     settings_cloud_provision_button = NULL;
     app_request_fast_refresh();
 }
 
 static void settings_cloud_setup_open_event_cb(lv_event_t *event)
 {
+    int screen_w = ui_screen_width();
+    int screen_h = ui_screen_height();
+    int landscape = ui_is_landscape();
     int panel_w;
     int panel_h;
+    int margin;
+    int content_w;
+    int body_y;
     lv_obj_t *panel;
     lv_obj_t *label;
     lv_obj_t *button;
@@ -307,11 +385,17 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
     if(settings_cloud_overlay && lv_obj_is_valid(settings_cloud_overlay)) {
         return;
     }
-    panel_w = ui_is_landscape() ? 600 : ui_screen_width() - 24;
-    panel_h = ui_screen_height() - 32;
-    if(panel_h < 400) {
-        panel_h = 400;
+    panel_w = screen_w - (landscape ? 48 : 24);
+    if(landscape && panel_w > 960) {
+        panel_w = 960;
     }
+    panel_h = screen_h - (landscape ? 24 : 32);
+    if(panel_h < (landscape ? 420 : 520)) {
+        panel_h = landscape ? 420 : 520;
+    }
+    margin = landscape ? 28 : 20;
+    content_w = panel_w - margin * 2;
+    body_y = landscape ? 84 : 82;
     settings_cloud_overlay = lv_obj_create(lv_layer_top());
     ui_set_fullscreen(settings_cloud_overlay);
     lv_obj_set_style_bg_color(settings_cloud_overlay, lv_color_hex(0x000000), 0);
@@ -323,57 +407,128 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
     panel = ui_panel(settings_cloud_overlay, 0, 0, panel_w, panel_h);
     lv_obj_center(panel);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
-    lv_obj_set_style_pad_all(panel, 20, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
 
     label = ui_label(panel, "nRF Cloud setup", &lv_font_montserrat_24, 0xF2F5F8);
-    lv_obj_set_width(label, panel_w - 160);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_width(label, content_w - 120);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(label, margin, 16);
 
-    label = ui_label(panel,
-                     "1. Read the device token.  2. Claim it in nRF Cloud Fleet.  3. Start provisioning here.",
-                     &lv_font_montserrat_16, 0xCBD5E1);
-    lv_obj_set_width(label, panel_w - 40);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 48);
-
-    settings_cloud_token_label = ui_label(panel, "Token not read yet",
-                                           &lv_font_montserrat_14, 0xF5A524);
-    lv_obj_set_width(settings_cloud_token_label, panel_w - 40);
-    lv_obj_set_height(settings_cloud_token_label, 88);
-    lv_label_set_long_mode(settings_cloud_token_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(settings_cloud_token_label, LV_ALIGN_TOP_LEFT, 0, 118);
-
-    settings_cloud_status_label = ui_label(panel, "Ready",
-                                           &lv_font_montserrat_16, 0x94A3B8);
-    lv_obj_set_width(settings_cloud_status_label, panel_w - 40);
-    lv_label_set_long_mode(settings_cloud_status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(settings_cloud_status_label, LV_ALIGN_TOP_LEFT, 0, 214);
-
-    button = ui_command_button(panel, 20, panel_h - 132, panel_w - 40,
-                               "Get device token", 0x3DA5FF);
-    lv_obj_add_event_cb(button, settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
-                        (void *)(intptr_t)SETTINGS_CLOUD_READ_TOKEN);
-
-    settings_cloud_provision_button =
-        ui_command_button(panel, 20, panel_h - 72, panel_w - 40,
-                          "Start provisioning", 0x25C281);
-    lv_obj_add_event_cb(settings_cloud_provision_button,
-                        settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
-                        (void *)(intptr_t)SETTINGS_CLOUD_PROVISION);
-
-    button = ui_command_button(panel, panel_w - 132, 12, 100, "Close",
+    button = ui_command_button(panel, panel_w - margin - 96, 12, 96, "Close",
                                0x94A3B8);
     lv_obj_add_event_cb(button, settings_cloud_setup_close_event_cb,
                         LV_EVENT_CLICKED, NULL);
+
+    if(landscape) {
+        int gap = 24;
+        int left_w = (content_w - gap) * 44 / 100;
+        int right_w = content_w - gap - left_w;
+        int right_x = margin + left_w + gap;
+        int card_y = body_y;
+        int card_h = panel_h - body_y - 96;
+        lv_obj_t *card;
+
+        card = ui_panel(panel, margin, card_y, left_w, card_h);
+        lv_obj_set_style_pad_all(card, 0, 0);
+        label = ui_label(card, "How to set up", &lv_font_montserrat_20,
+                         0xF2F5F8);
+        lv_obj_set_width(label, left_w - 32);
+        lv_obj_set_pos(label, 16, 16);
+        label = ui_label(card,
+                         "1. Read the device token.\n2. Claim this device in nRF Cloud Fleet.\n3. Start provisioning here.\n4. Enable A-GNSS after provisioning completes.",
+                         &lv_font_montserrat_16, 0xCBD5E1);
+        lv_obj_set_width(label, left_w - 32);
+        lv_obj_set_height(label, card_h - 76);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(label, 16, 58);
+
+        card = ui_panel(panel, right_x, card_y, right_w, card_h);
+        lv_obj_set_style_pad_all(card, 0, 0);
+        label = ui_label(card, "Device token", &lv_font_montserrat_20,
+                         0xF2F5F8);
+        lv_obj_set_width(label, right_w - 32);
+        lv_obj_set_pos(label, 16, 16);
+        settings_cloud_token_label = ui_label(card, "Token not read yet",
+                                               &lv_font_montserrat_14, 0xF5A524);
+        lv_obj_set_width(settings_cloud_token_label, right_w - 32);
+        lv_obj_set_height(settings_cloud_token_label, 84);
+        lv_label_set_long_mode(settings_cloud_token_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(settings_cloud_token_label, 16, 56);
+        settings_cloud_status_label = ui_label(card, "Ready",
+                                               &lv_font_montserrat_16, 0x94A3B8);
+        lv_obj_set_width(settings_cloud_status_label, right_w - 32);
+        lv_obj_set_height(settings_cloud_status_label, 72);
+        lv_label_set_long_mode(settings_cloud_status_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(settings_cloud_status_label, 16, 148);
+
+        settings_cloud_read_button = ui_command_button(
+            panel, right_x, panel_h - 136, right_w, "Get device token", 0x3DA5FF);
+        lv_obj_add_event_cb(settings_cloud_read_button,
+                            settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)SETTINGS_CLOUD_READ_TOKEN);
+        settings_cloud_provision_button = ui_command_button(
+            panel, right_x, panel_h - 72, right_w, "Start provisioning", 0x25C281);
+        lv_obj_add_event_cb(settings_cloud_provision_button,
+                            settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)SETTINGS_CLOUD_PROVISION);
+    } else {
+        int card_h = 112;
+        lv_obj_t *card = ui_panel(panel, margin, body_y, content_w, card_h);
+        lv_obj_set_style_pad_all(card, 0, 0);
+        label = ui_label(card, "Setup steps", &lv_font_montserrat_20,
+                         0xF2F5F8);
+        lv_obj_set_pos(label, 16, 12);
+        label = ui_label(card,
+                         "Read token, claim in nRF Cloud Fleet, then provision.",
+                         &lv_font_montserrat_16, 0xCBD5E1);
+        lv_obj_set_width(label, content_w - 32);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(label, 16, 52);
+
+        card = ui_panel(panel, margin, body_y + card_h + 16, content_w, 174);
+        lv_obj_set_style_pad_all(card, 0, 0);
+        label = ui_label(card, "Device token", &lv_font_montserrat_20,
+                         0xF2F5F8);
+        lv_obj_set_pos(label, 16, 12);
+        settings_cloud_token_label = ui_label(card, "Token not read yet",
+                                               &lv_font_montserrat_14, 0xF5A524);
+        lv_obj_set_width(settings_cloud_token_label, content_w - 32);
+        lv_obj_set_height(settings_cloud_token_label, 84);
+        lv_label_set_long_mode(settings_cloud_token_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(settings_cloud_token_label, 16, 52);
+        settings_cloud_status_label = ui_label(panel, "Ready",
+                                               &lv_font_montserrat_16, 0x94A3B8);
+        lv_obj_set_width(settings_cloud_status_label, content_w);
+        lv_obj_set_height(settings_cloud_status_label, 64);
+        lv_label_set_long_mode(settings_cloud_status_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(settings_cloud_status_label, margin, body_y + card_h + 206);
+
+        settings_cloud_read_button = ui_command_button(
+            panel, margin, panel_h - 136, content_w, "Get device token", 0x3DA5FF);
+        lv_obj_add_event_cb(settings_cloud_read_button,
+                            settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)SETTINGS_CLOUD_READ_TOKEN);
+        settings_cloud_provision_button = ui_command_button(
+            panel, margin, panel_h - 72, content_w, "Start provisioning", 0x25C281);
+        lv_obj_add_event_cb(settings_cloud_provision_button,
+                            settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)SETTINGS_CLOUD_PROVISION);
+    }
+
     pthread_mutex_lock(&settings_cloud_lock);
     settings_cloud_token_ready = settings_cloud_token[0] != '\0';
     if(!settings_cloud_status[0]) {
         snprintf(settings_cloud_status, sizeof(settings_cloud_status), "%s",
-                 "Read the token, claim the device in nRF Cloud, then provision it here.");
+                 "Read the token. It will be saved to /root/nrf9151/attestation_token.txt for MTP export.");
     }
     pthread_mutex_unlock(&settings_cloud_lock);
     settings_cloud_setup_render_async(NULL);
     app_request_fast_refresh();
+}
+
+void ui_settings_open_nrf_cloud_setup(void)
+{
+    settings_cloud_setup_open_event_cb(NULL);
 }
 
 static int settings_section_header(lv_obj_t *parent, int y, const char *title,
@@ -588,20 +743,6 @@ void ui_startup_settings_create(lv_obj_t *scr)
                         k230_nrf9151_location_autostart_enabled(),
                         nrf9151_location_switch_event_cb);
     y = settings_next_row_y(y);
-    settings_switch_row(body, y, "CLOUD", "nRF Cloud A-GNSS",
-                        "Use provisioned nRF Cloud assistance when available",
-                        0x25C281,
-                        k230_nrf9151_gnss_cloud_assistance_enabled(),
-                        nrf9151_cloud_assistance_switch_event_cb);
-    y = settings_next_row_y(y);
-    {
-        lv_obj_t *setup_button = ui_command_button(
-            body, 24, y, ui_fit_width(body, 24, 520),
-            "nRF Cloud setup", 0x3DA5FF);
-        lv_obj_add_event_cb(setup_button, settings_cloud_setup_open_event_cb,
-                            LV_EVENT_CLICKED, NULL);
-    }
-    y += 76;
     y += 14;
 
     label = ui_label(body,

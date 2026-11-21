@@ -1,8 +1,10 @@
 #include "ui_cellular.h"
 
 #include "ui_i18n.h"
+#include "ui_haptic.h"
 #include "ui_input.h"
 #include "ui_nrf9151_manager.h"
+#include "ui_settings.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -5204,6 +5206,20 @@ static void cellular_show_page_event_cb(lv_event_t *event)
     cellular_show_page(page);
 }
 
+static void cellular_nrf_cloud_setup_event_cb(lv_event_t *event)
+{
+    (void)event;
+    ui_settings_open_nrf_cloud_setup();
+}
+
+static void cellular_nrf_cloud_assistance_event_cb(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target(event);
+
+    k230_nrf9151_set_gnss_cloud_assistance_enabled(
+        lv_obj_has_state(sw, LV_STATE_CHECKED));
+}
+
 int ui_cellular_handle_back(void)
 {
     int handled = 0;
@@ -5264,6 +5280,56 @@ static lv_obj_t *cellular_menu_card(lv_obj_t *parent, int x, int y, int w,
                      h > 132 ? h - 42 : 88);
     }
     return card;
+}
+
+static void cellular_nrf_cloud_card(lv_obj_t *parent, int x, int y, int w,
+                                    int h)
+{
+    lv_obj_t *card = ui_panel(parent, x, y, w, h);
+    lv_obj_t *accent;
+    lv_obj_t *label;
+    lv_obj_t *sw;
+    lv_obj_t *button;
+
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x151B22), 0);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x25303A), 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    accent = lv_obj_create(card);
+    lv_obj_set_size(accent, 5, h - 28);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(0x25C281), 0);
+    lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(accent, 0, 0);
+    lv_obj_set_style_radius(accent, 4, 0);
+    lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(accent, LV_ALIGN_LEFT_MID, 0, 0);
+
+    label = ui_label(card, "nRF Cloud", &lv_font_montserrat_20, 0xF2F5F8);
+    lv_obj_set_width(label, w - 150);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 16);
+
+    label = ui_label(card, "Provisioning and A-GNSS assistance",
+                     &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_width(label, w - 150);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 50);
+
+    sw = lv_switch_create(card);
+    lv_obj_set_size(sw, 64, 34);
+    lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, -20, 20);
+    if(k230_nrf9151_gnss_cloud_assistance_enabled()) {
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(sw, cellular_nrf_cloud_assistance_event_cb,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+    ui_haptic_bind_touch(sw);
+
+    button = ui_command_button(card, 24, h - 68, w - 48,
+                               "nRF Cloud setup", 0x3DA5FF);
+    lv_obj_add_event_cb(button, cellular_nrf_cloud_setup_event_cb,
+                        LV_EVENT_CLICKED, NULL);
 }
 
 static lv_obj_t *cellular_subpage_title(lv_obj_t *parent, const char *title,
@@ -5418,6 +5484,7 @@ void ui_cellular_create(lv_obj_t *scr)
                       content_y + (card_h + gap) * 2;
     int card_y_mqtt = landscape ? content_y + card_h + gap :
                       content_y + (card_h + gap) * 3;
+    int cloud_y = card_y_mqtt + card_h + gap;
     int left_w = wide_layout ? (panel_w * 46) / 100 : panel_w;
     int right_w = wide_layout ? panel_w - left_w - gap : panel_w;
     int right_x = wide_layout ? margin + left_w + gap : margin;
@@ -5496,6 +5563,7 @@ void ui_cellular_create(lv_obj_t *scr)
                        "Broker, subscribe and publish console",
                        0xA78BFA, &cellular_menu_mqtt_value,
                        CELLULAR_PAGE_MQTT);
+    cellular_nrf_cloud_card(cellular_root_page, margin, cloud_y, panel_w, 156);
 
     cellular_modem_page = cellular_page_create(body, 1);
     lv_obj_add_flag(cellular_modem_page, LV_OBJ_FLAG_HIDDEN);

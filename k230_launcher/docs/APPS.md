@@ -34,6 +34,7 @@ The launcher creates these folders in the target root filesystem:
 | `/root/meshtastic` | Meshtastic channel/profile/cache files |
 | `/root/notification` | Notification sound files |
 | `/root/nrf52840/firmware` | nRF52840 DFU application update packages |
+| `/root/nrf9151` | nRF9151 nRF Cloud attestation token exported for MTP |
 | `/root/maps` | Optional offline map tiles for Meshtastic map view |
 | `/root/picoclaw` | PicoClaw runtime, configuration, and workspace |
 
@@ -72,7 +73,7 @@ See [MAPS.md](MAPS.md) for offline map tile download and install instructions.
 | `Keyboard` | Tests the TCA8418 keyboard matrix, keyboard interrupt path, key mapping, and keyboard backlight. | Press hardware keys to light the matching key. Adjust keyboard backlight from the page or Settings. |
 | `Hotkeys` | Opens the F1-F11 hardware-key shortcut editor. | Tap a function key, choose its action, and return. Defaults: F1 Home, F2 Settings, F3/F4 keyboard backlight down/up, F5/F6 volume down/up, F7 Screenshot, F8 Terminal, F9 Meshtastic, F10/F11 brightness down/up. Hotkey settings are persisted. |
 | `LED Test` | Controls XL9555-driven LEDs. | Toggle LEDs from the page. The board LED logic is active-low where noted by the UI. |
-| `Cellular` | Tests the nRF9151 serial modem path, SIM state, LTE status, GNSS, HTTP/HTTPS, MQTT, NMEA output, and satellite C/N0 bars. | Tap `LTE` for the SIM/network check, tap `GNSS` for NMEA monitoring, or use the HTTP/MQTT test buttons for basic modem data tests. `Settings` > `Startup apps` provides the nRF Cloud setup guide and A-GNSS switch; the guide reads the device token and runs provisioning, while A-GNSS uses modem-provisioned credentials and falls back to unassisted GNSS when the device is not onboarded or connected. HTTPS and MQTT TLS/mTLS require credentials already provisioned in the modem `sec_tag`. |
+| `Cellular` | Tests the nRF9151 serial modem path, SIM state, LTE status, GNSS, HTTP/HTTPS, MQTT, NMEA output, and satellite C/N0 bars. | The `Cellular` page contains the nRF Cloud setup guide and A-GNSS switch because provisioning requires the LTE modem. The guide saves the attestation token to `/root/nrf9151/attestation_token.txt` for MTP export and runs provisioning, while A-GNSS uses modem-provisioned credentials and falls back to unassisted GNSS when the device is not onboarded or connected. HTTPS and MQTT TLS/mTLS require credentials already provisioned in the modem `sec_tag`. |
 | `USB Modem` | Debug page for USB modem detection and connection status. | This page is currently for engineering/debug visibility only. It does not provide a complete end-user dialing or data-session workflow yet. |
 | `Settings` | Groups network, display, language, time, audio, keyboard, sensor, and system settings. | Open a category, adjust values, and return. Most user settings are persisted. |
 | `System` | Shows system information such as memory, CPU, thermal, display, and network state. | Open it for a compact runtime status overview. |

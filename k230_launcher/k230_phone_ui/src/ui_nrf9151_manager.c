@@ -3978,7 +3978,7 @@ int k230_nrf9151_cloud_read_attestation_token(char *token, size_t token_len)
         return -1;
     }
     token[0] = '\0';
-    if(nrf9151_manager_open_session("nrf9151-cloud-token", 5000,
+    if(nrf9151_manager_open_session("nrf9151-cloud-token", 30000,
                                     &lock_fd, &fd, NULL, 0) != 0) {
         return -1;
     }
@@ -4023,7 +4023,7 @@ int k230_nrf9151_cloud_provision(void)
     uint64_t deadline;
     int rc;
 
-    if(nrf9151_manager_open_session("nrf9151-cloud-provision", 8000,
+    if(nrf9151_manager_open_session("nrf9151-cloud-provision", 30000,
                                     &lock_fd, &fd, NULL, 0) != 0) {
         return -1;
     }
