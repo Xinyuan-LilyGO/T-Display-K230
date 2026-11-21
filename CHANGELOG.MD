@@ -2,6 +2,15 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## v0.3.1 - 2026-11-21
+
+- Added nRF Cloud setup and A-GNSS provisioning controls to the cellular
+  settings flow, with clearer action status and improved LTE, MQTT, and nRF
+  Cloud card layouts.
+- Fixed microphone capture after selecting external audio output. Mic FFT and
+  Xiaozhi recording now stop conflicting playback streams and preserve nested
+  input-route ownership.
+
 ## v0.3.0 - 2026-11-20
 
 - Fixed audio route handoff so Xiaozhi playback and recording continue to use
