@@ -404,12 +404,19 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
     lv_obj_set_style_bg_opa(settings_cloud_overlay, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(settings_cloud_overlay, 0, 0);
     lv_obj_set_style_pad_all(settings_cloud_overlay, 0, 0);
-    lv_obj_clear_flag(settings_cloud_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(settings_cloud_overlay, LV_OBJ_FLAG_SCROLLABLE |
+                      LV_OBJ_FLAG_SCROLL_CHAIN | LV_OBJ_FLAG_SCROLL_ELASTIC |
+                      LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_set_scroll_dir(settings_cloud_overlay, LV_DIR_NONE);
 
     panel = ui_panel(settings_cloud_overlay, 0, 0, screen_w, screen_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
     lv_obj_set_style_radius(panel, 0, 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE |
+                      LV_OBJ_FLAG_SCROLL_CHAIN | LV_OBJ_FLAG_SCROLL_ELASTIC |
+                      LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_set_scroll_dir(panel, LV_DIR_NONE);
 
     button = ui_command_button(panel, margin, 12, 92, "Back", 0x94A3B8);
     lv_obj_add_event_cb(button, settings_cloud_setup_close_event_cb,

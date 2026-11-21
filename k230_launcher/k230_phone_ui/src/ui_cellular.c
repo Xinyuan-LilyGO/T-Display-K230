@@ -5127,7 +5127,7 @@ static lv_obj_t *cellular_page_create(lv_obj_t *parent, int scrollable)
     if(scrollable) {
         lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scroll_dir(page, LV_DIR_VER);
-        lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_AUTO);
+        lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_OFF);
     } else {
         lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
     }
@@ -5380,7 +5380,7 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
     lv_obj_set_style_pad_all(config_panel, 16, 0);
     lv_obj_add_flag(config_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(config_panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(config_panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(config_panel, LV_SCROLLBAR_MODE_OFF);
 
     cellular_mqtt_status_label = ui_label(config_panel, "Disconnected",
                                           &lv_font_montserrat_18, 0x94A3B8);
@@ -5437,7 +5437,7 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
     lv_obj_set_style_pad_all(log_panel, 16, 0);
     lv_obj_add_flag(log_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(log_panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(log_panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(log_panel, LV_SCROLLBAR_MODE_OFF);
 
     label = ui_label(log_panel, "Messages", &lv_font_montserrat_20,
                      0xF2F5F8);
@@ -5462,21 +5462,19 @@ void ui_cellular_create(lv_obj_t *scr)
     int panel_w = ui_page_panel_width();
     int wide_layout = landscape && panel_w >= 700;
     int gap = landscape ? 20 : 24;
-    int grid_gap = landscape ? 16 : 24;
     int content_y = 84;
     int content_h = body_h - content_y - 18;
-    int card_w = landscape ? (panel_w - grid_gap * 2) / 3 : panel_w;
-    int card_h = landscape ? 132 : 156;
+    int card_w = landscape ? (panel_w - gap) / 2 : panel_w;
+    int card_h = landscape ? 148 : 156;
     int card_x0 = margin;
-    int card_x1 = landscape ? margin + card_w + grid_gap : margin;
-    int card_x2 = landscape ? margin + (card_w + grid_gap) * 2 : margin;
+    int card_x1 = landscape ? margin + card_w + gap : margin;
     int card_y_modem = content_y;
     int card_y_gnss = landscape ? content_y : content_y + card_h + gap;
-    int card_y_http = landscape ? content_y + card_h + grid_gap :
+    int card_y_http = landscape ? content_y + card_h + gap :
                       content_y + (card_h + gap) * 2;
-    int card_y_mqtt = landscape ? content_y + card_h + grid_gap :
+    int card_y_mqtt = landscape ? content_y + card_h + gap :
                       content_y + (card_h + gap) * 3;
-    int card_y_cloud = landscape ? content_y :
+    int card_y_cloud = landscape ? content_y + (card_h + gap) * 2 :
                        content_y + (card_h + gap) * 4;
     int left_w = wide_layout ? (panel_w * 46) / 100 : panel_w;
     int right_w = wide_layout ? panel_w - left_w - gap : panel_w;
@@ -5556,8 +5554,7 @@ void ui_cellular_create(lv_obj_t *scr)
                        "Broker, subscribe and publish console",
                        0xA78BFA, &cellular_menu_mqtt_value,
                        CELLULAR_PAGE_MQTT);
-    cellular_nrf_cloud_card(cellular_root_page,
-                            landscape ? card_x2 : card_x0, card_y_cloud,
+    cellular_nrf_cloud_card(cellular_root_page, card_x0, card_y_cloud,
                             card_w, card_h);
 
     cellular_modem_page = cellular_page_create(body, 1);
@@ -5570,7 +5567,7 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101820), 0);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_OFF);
     label = ui_label(panel, "Live modem fields", &lv_font_montserrat_20,
                      0xF2F5F8);
     lv_obj_set_width(label, panel_w - 220);
@@ -5612,7 +5609,7 @@ void ui_cellular_create(lv_obj_t *scr)
                      gnss_left_h);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x121821), 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_OFF);
     label = ui_label(panel, "GNSS", &lv_font_montserrat_26, 0xF97316);
     lv_obj_set_width(label, left_w - 32);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
@@ -5655,7 +5652,7 @@ void ui_cellular_create(lv_obj_t *scr)
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x0E1720), 0);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_OFF);
     label = ui_label(panel, "Signal radar", &lv_font_montserrat_24,
                      0xF2F5F8);
     lv_obj_set_width(label, (wide_layout ? right_w : panel_w) - 32);
