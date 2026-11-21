@@ -513,6 +513,9 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
         int right_x = margin + left_w + gap;
         int card_y = body_y + status_h + 18;
         int card_h = content_h - card_y - 20;
+        int action_y = content_h - 88;
+        int left_button_w = left_w - 32 < 220 ? left_w - 32 : 220;
+        int right_button_w = right_w - 32 < 220 ? right_w - 32 : 220;
 
         card = ui_panel(panel, margin, card_y, left_w, card_h);
         settings_cloud_style_card(card, card_h, 0x3DA5FF);
@@ -545,13 +548,15 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
         lv_obj_set_pos(label, 24, 58);
 
         settings_cloud_read_button = ui_command_button(
-            panel, margin + 16, content_h - 76, left_w - 32,
+            panel, margin + (left_w - left_button_w) / 2, action_y,
+            left_button_w,
             "Read token", 0x3DA5FF);
         lv_obj_add_event_cb(settings_cloud_read_button,
                             settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
                             (void *)(intptr_t)SETTINGS_CLOUD_READ_TOKEN);
         settings_cloud_provision_button = ui_command_button(
-            panel, right_x + 16, content_h - 76, right_w - 32,
+            panel, right_x + (right_w - right_button_w) / 2, action_y,
+            right_button_w,
             "Start provisioning", 0x25C281);
         lv_obj_add_event_cb(settings_cloud_provision_button,
                             settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
@@ -559,6 +564,8 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
     } else {
         int card_y = body_y + status_h + 14;
         int card_h = 144;
+        int button_w = content_w > 320 ? 260 : content_w - 32;
+        int button_x = margin + (content_w - button_w) / 2;
 
         card = ui_panel(panel, margin, card_y, content_w, card_h);
         settings_cloud_style_card(card, card_h, 0x3DA5FF);
@@ -577,7 +584,7 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
         lv_obj_set_pos(settings_cloud_token_label, 24, 82);
 
         settings_cloud_read_button = ui_command_button(
-            panel, margin, card_y + card_h + 12, content_w,
+            panel, button_x, card_y + card_h + 12, button_w,
             "Read device token", 0x3DA5FF);
         lv_obj_add_event_cb(settings_cloud_read_button,
                             settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
@@ -593,7 +600,7 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
         lv_obj_set_width(label, content_w - 54);
         lv_obj_set_pos(label, 24, 50);
         settings_cloud_provision_button = ui_command_button(
-            panel, margin, card_y + 78, content_w, "Start provisioning",
+            panel, button_x, card_y + 78, button_w, "Start provisioning",
             0x25C281);
         lv_obj_add_event_cb(settings_cloud_provision_button,
                             settings_cloud_setup_event_cb, LV_EVENT_CLICKED,
