@@ -5353,7 +5353,7 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
     int log_h = wide_layout ? content_h : 360;
     int log_x = wide_layout ? margin + config_w + gap : margin;
     int log_y = wide_layout ? content_y : content_y + config_h + gap;
-    int btn_gap = 10;
+    int btn_gap = wide_layout ? 20 : 12;
     int btn_w = (config_w - 32 - btn_gap) / 2;
     lv_obj_t *config_panel;
     lv_obj_t *log_panel;

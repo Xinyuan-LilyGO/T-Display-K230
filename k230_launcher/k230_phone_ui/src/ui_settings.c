@@ -387,7 +387,6 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
     int status_h;
     lv_obj_t *panel;
     lv_obj_t *label;
-    lv_obj_t *button;
     lv_obj_t *card;
 
     (void)event;
@@ -418,19 +417,15 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
                       LV_OBJ_FLAG_SCROLL_MOMENTUM);
     lv_obj_set_scroll_dir(panel, LV_DIR_NONE);
 
-    button = ui_command_button(panel, margin, 12, 92, "Back", 0x94A3B8);
-    lv_obj_add_event_cb(button, settings_cloud_setup_close_event_cb,
-                        LV_EVENT_CLICKED, NULL);
-
     label = ui_label(panel, "nRF Cloud", &lv_font_montserrat_26, 0xF2F5F8);
-    lv_obj_set_width(label, content_w - 108);
+    lv_obj_set_width(label, content_w);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(label, margin + 108, 12);
+    lv_obj_set_pos(label, margin, 12);
     label = ui_label(panel, "Pair once, then A-GNSS is automatic",
                      &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_width(label, content_w - 108);
+    lv_obj_set_width(label, content_w);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(label, margin + 108, 44);
+    lv_obj_set_pos(label, margin, 44);
 
     card = ui_panel(panel, margin, body_y, content_w, status_h);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x17251F), 0);
