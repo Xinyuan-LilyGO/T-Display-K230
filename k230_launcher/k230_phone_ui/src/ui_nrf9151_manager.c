@@ -1925,6 +1925,32 @@ static int nrf9151_manager_gnss_cloud_connect(int fd)
     return strncmp(urc, "#XNRFCLOUD: 1", 13) == 0 ? 0 : -1;
 }
 
+static int nrf9151_manager_gnss_cloud_configured(int fd)
+{
+    char resp[512];
+    char line[256];
+    char device_id[128] = "";
+    int ready;
+    int send_location;
+    int sec_tag;
+
+    if(fd < 0 || nrf9151_manager_exchange(fd, "AT#XNRFCLOUD?", resp,
+                                           sizeof(resp),
+                                           K230_NRF9151_CMD_TIMEOUT_US,
+                                           NULL, NULL) != 0 ||
+       nrf9151_manager_line_containing(resp, "#XNRFCLOUD:", line,
+                                       sizeof(line)) != 0) {
+        return 0;
+    }
+    if(sscanf(line, "#XNRFCLOUD: %d,%d,%d,\"%127[^\"]\"", &ready,
+              &send_location, &sec_tag, device_id) != 4) {
+        return 0;
+    }
+    (void)ready;
+    (void)send_location;
+    return sec_tag > 0 && device_id[0] != '\0';
+}
+
 static void nrf9151_manager_quiesce_gnss_output(int fd, char *log,
                                                 size_t log_len)
 {
@@ -3363,7 +3389,7 @@ static int nrf9151_manager_start_gnss_locked(int fd, int background)
                                   K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
                                   NULL, NULL);
     nrf9151_manager_debug_log("GNSS cmd AT+CFUN=1 rc=%d resp=%s", rc, resp);
-    assist_requested = k230_nrf9151_gnss_cloud_assistance_enabled();
+    assist_requested = nrf9151_manager_gnss_cloud_configured(fd);
     if(assist_requested && nrf9151_manager_gnss_cloud_connect(fd) != 0) {
         /* A missing claim/provisioning or LTE registration must not prevent
          * ordinary GNSS from starting. */

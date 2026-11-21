@@ -302,7 +302,7 @@ static void *settings_cloud_setup_worker(void *arg)
         pthread_mutex_lock(&settings_cloud_lock);
         if(rc == 0) {
             snprintf(settings_cloud_status, sizeof(settings_cloud_status),
-                     "%s", "Provisioning complete. You can now enable A-GNSS and start GNSS.");
+                     "%s", "Provisioning complete. A-GNSS is enabled automatically when GNSS starts.");
         } else {
             snprintf(settings_cloud_status, sizeof(settings_cloud_status),
                      "Provisioning failed (%s). Check LTE registration and the nRF Cloud claim.",
@@ -435,7 +435,7 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
         lv_obj_set_width(label, left_w - 32);
         lv_obj_set_pos(label, 16, 16);
         label = ui_label(card,
-                         "1. Read the device token.\n2. Claim this device in nRF Cloud Fleet.\n3. Start provisioning here.\n4. Enable A-GNSS after provisioning completes.",
+                         "1. Read the device token.\n2. Claim this device in nRF Cloud Fleet.\n3. Start provisioning here.\n4. A-GNSS is enabled automatically after successful provisioning.",
                          &lv_font_montserrat_16, 0xCBD5E1);
         lv_obj_set_width(label, left_w - 32);
         lv_obj_set_height(label, card_h - 76);
@@ -479,7 +479,7 @@ static void settings_cloud_setup_open_event_cb(lv_event_t *event)
                          0xF2F5F8);
         lv_obj_set_pos(label, 16, 12);
         label = ui_label(card,
-                         "Read token, claim in nRF Cloud Fleet, then provision.",
+                         "Read token, claim in nRF Cloud Fleet, then provision. A-GNSS starts automatically when paired.",
                          &lv_font_montserrat_16, 0xCBD5E1);
         lv_obj_set_width(label, content_w - 32);
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
