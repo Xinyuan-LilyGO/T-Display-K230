@@ -264,6 +264,12 @@ static int xiaozhi_ptt_route_leave_if_needed(void)
         int rc;
 
         ui_audio_input_route_leave("Xiaozhi PTT");
+        if(ui_audio_input_route_is_active()) {
+            /* KWS still owns the input route. Do not switch the codec back
+             * to the selected output while its capture stream is active. */
+            xiaozhi_ptt_route_active = 0;
+            return 0;
+        }
         rc = xiaozhi_apply_audio_output_route();
         if(rc == 0) {
             xiaozhi_ptt_route_active = 0;

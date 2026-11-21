@@ -1649,18 +1649,25 @@ static void recorder_make_path(char *path, size_t len)
              tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
 }
 
-static void recorder_ensure_input_route(const char *owner)
+static int recorder_ensure_input_route(const char *owner)
 {
     if(recorder_input_route_active) {
-        return;
+        return 0;
     }
 
-    ui_audio_input_route_enter(owner ? owner : "Recorder");
+    if(ui_audio_input_route_enter(owner ? owner : "Recorder") != 0) {
+        recorder_input_route_active = 0;
+        recorder_playback_route_suspended = 0;
+        audio_debug_log("REC_INPUT_ROUTE_FAILED owner=\"%s\"",
+                        owner ? owner : "Recorder");
+        return -1;
+    }
     recorder_input_route_active = 1;
     recorder_playback_route_suspended = 0;
     audio_debug_log("REC_INPUT_ROUTE_ENTER owner=\"%s\" output_now=%s",
                     owner ? owner : "Recorder",
                     ui_audio_output_is_external() ? "external" : "headphones");
+    return 0;
 }
 
 static void recorder_suspend_input_route_for_playback(void)
@@ -1701,7 +1708,10 @@ static void recorder_start(void)
     }
 
     audio_terminate_process();
-    recorder_ensure_input_route("Recorder start");
+    if(recorder_ensure_input_route("Recorder start") != 0) {
+        audio_set_status("Input route failed");
+        return;
+    }
     recorder_make_path(path, sizeof(path));
     if(audio_shell_quote(path, quoted, sizeof(quoted)) != 0) {
         audio_set_status("Path error");
@@ -3489,7 +3499,9 @@ void ui_recorder_create(lv_obj_t *scr)
     center_x = control_x + control_w / 2;
 
     active_audio_page = PAGE_RECORDER;
-    recorder_ensure_input_route("Recorder");
+    if(recorder_ensure_input_route("Recorder") != 0) {
+        audio_set_status("Input route failed");
+    }
     audio_load_volume_once();
     recorder_scan_recordings();
     if(player_pid <= 0 && recorder_pid <= 0) {

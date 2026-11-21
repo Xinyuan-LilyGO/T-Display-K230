@@ -54,6 +54,7 @@ int ui_audio_output_set_external(int external);
 int ui_audio_output_is_external(void);
 int ui_audio_input_route_enter(const char *owner);
 void ui_audio_input_route_leave(const char *owner);
+int ui_audio_input_route_is_active(void);
 int ui_amp_set_enabled(int enabled);
 int ui_amp_is_enabled(void);
 int ui_hardware_get_cpu_temp_c(double *temp_c);

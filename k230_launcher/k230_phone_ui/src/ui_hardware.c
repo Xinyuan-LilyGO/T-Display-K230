@@ -1821,6 +1821,16 @@ void ui_audio_input_route_leave(const char *owner)
     }
 }
 
+int ui_audio_input_route_is_active(void)
+{
+    int active;
+
+    pthread_mutex_lock(&audio_input_route_lock);
+    active = audio_input_route_refcount > 0;
+    pthread_mutex_unlock(&audio_input_route_lock);
+    return active;
+}
+
 static void amp_gpio_release(void)
 {
     if(amp_gpio_request) {

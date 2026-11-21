@@ -1,5 +1,6 @@
 #include "ui_mic_spectrum.h"
 
+#include "ui_audio.h"
 #include "ui_hardware.h"
 #include "ui_i18n.h"
 #include "ui_prefs.h"
@@ -623,6 +624,7 @@ void ui_mic_spectrum_create(lv_obj_t *scr)
     int info_w = landscape ? content_w - plot_w - 24 : 520;
     int info_h = landscape ? plot_h : body_h - info_y - 24;
     int gain_y;
+    int input_route_ready = 1;
 
     if(plot_h < 260) {
         plot_h = 260;
@@ -637,8 +639,13 @@ void ui_mic_spectrum_create(lv_obj_t *scr)
     mic_fft_load_gain_x10();
 
     if(!mic_fft_input_route_active) {
-        ui_audio_input_route_enter("Mic FFT");
-        mic_fft_input_route_active = 1;
+        ui_audio_stop_for_exclusive_app("Mic FFT audio capture");
+        if(ui_audio_input_route_enter("Mic FFT") != 0) {
+            mic_fft_set_status("Input route failed");
+            input_route_ready = 0;
+        } else {
+            mic_fft_input_route_active = 1;
+        }
     }
 
     ui_create_header(scr, "Mic FFT");
@@ -736,7 +743,11 @@ void ui_mic_spectrum_create(lv_obj_t *scr)
     mic_fft_update_gain_label();
 
     mic_fft_timer = lv_timer_create(mic_fft_timer_cb, 50, NULL);
-    mic_fft_start();
+    if(input_route_ready) {
+        mic_fft_start();
+    } else {
+        mic_fft_set_status("Input route failed");
+    }
     mic_fft_timer_cb(NULL);
 }
 
