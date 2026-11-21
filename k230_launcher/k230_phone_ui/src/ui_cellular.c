@@ -5299,7 +5299,8 @@ static lv_obj_t *cellular_menu_card(lv_obj_t *parent, int x, int y, int w,
 static lv_obj_t *cellular_settings_item(lv_obj_t *parent, int x, int y,
                                          int w, int h, const char *title,
                                          const char *desc, uint32_t color,
-                                         lv_event_cb_t cb)
+                                         lv_event_cb_t cb, int switch_mode,
+                                         int switch_checked)
 {
     lv_obj_t *card = ui_panel(parent, x, y, w, h);
     lv_obj_t *accent;
@@ -5308,8 +5309,10 @@ static lv_obj_t *cellular_settings_item(lv_obj_t *parent, int x, int y,
     lv_obj_set_style_bg_color(card, lv_color_hex(0x151B22), 0);
     lv_obj_set_style_radius(card, 12, 0);
     lv_obj_set_style_border_color(card, lv_color_hex(0x25303A), 0);
-    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(card, cb, LV_EVENT_CLICKED, NULL);
+    if(!switch_mode && cb) {
+        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(card, cb, LV_EVENT_CLICKED, NULL);
+    }
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
     accent = lv_obj_create(card);
@@ -5331,8 +5334,22 @@ static lv_obj_t *cellular_settings_item(lv_obj_t *parent, int x, int y,
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, 50);
 
-    label = ui_label(card, LV_SYMBOL_RIGHT, &lv_font_montserrat_20, color);
-    lv_obj_align(label, LV_ALIGN_RIGHT_MID, -20, 0);
+    if(switch_mode) {
+        lv_obj_t *sw = lv_switch_create(card);
+        lv_obj_set_size(sw, 64, 34);
+        lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, -20, 20);
+        if(switch_checked) {
+            lv_obj_add_state(sw, LV_STATE_CHECKED);
+        }
+        if(cb) {
+            lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
+        }
+        ui_haptic_bind_touch(sw);
+    } else {
+        label = ui_label(card, LV_SYMBOL_RIGHT, &lv_font_montserrat_20,
+                         color);
+        lv_obj_align(label, LV_ALIGN_RIGHT_MID, -20, 0);
+    }
     return card;
 }
 
@@ -5588,28 +5605,14 @@ void ui_cellular_create(lv_obj_t *scr)
     cellular_settings_item(panel, 0, 48, panel_w - 32, 116,
                            "nRF Cloud",
                            "Token export, provisioning and A-GNSS assistance",
-                           0x25C281, cellular_nrf_cloud_setup_event_cb);
-    label = ui_label(panel, "A-GNSS assistance",
-                     &lv_font_montserrat_18, 0xF2F5F8);
-    lv_obj_set_pos(label, 0, 184);
-    lv_obj_set_width(label, panel_w - 120);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xF2F5F8), 0);
-    label = ui_label(panel, "Use nRF Cloud assistance after provisioning",
-                     &lv_font_montserrat_14, 0x9AA4AF);
-    lv_obj_set_pos(label, 0, 216);
-    lv_obj_set_width(label, panel_w - 120);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    {
-        lv_obj_t *sw = lv_switch_create(panel);
-        lv_obj_set_size(sw, 64, 34);
-        lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, 0, 192);
-        if(k230_nrf9151_gnss_cloud_assistance_enabled()) {
-            lv_obj_add_state(sw, LV_STATE_CHECKED);
-        }
-        lv_obj_add_event_cb(sw, cellular_nrf_cloud_assistance_event_cb,
-                            LV_EVENT_VALUE_CHANGED, NULL);
-        ui_haptic_bind_touch(sw);
-    }
+                           0x25C281, cellular_nrf_cloud_setup_event_cb,
+                           0, 0);
+    cellular_settings_item(panel, 0, 180, panel_w - 32, 116,
+                           "A-GNSS assistance",
+                           "Use nRF Cloud assistance after provisioning",
+                           0xF5A524, cellular_nrf_cloud_assistance_event_cb,
+                           1,
+                           k230_nrf9151_gnss_cloud_assistance_enabled());
 
     cellular_modem_page = cellular_page_create(body, 1);
     lv_obj_add_flag(cellular_modem_page, LV_OBJ_FLAG_HIDDEN);
