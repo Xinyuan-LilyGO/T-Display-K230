@@ -134,6 +134,14 @@ static void nrf9151_location_switch_event_cb(lv_event_t *event)
     }
 }
 
+static void nrf9151_cloud_assistance_switch_event_cb(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target(event);
+
+    k230_nrf9151_set_gnss_cloud_assistance_enabled(
+        lv_obj_has_state(sw, LV_STATE_CHECKED));
+}
+
 static int settings_section_header(lv_obj_t *parent, int y, const char *title,
                                    const char *subtitle)
 {
@@ -345,6 +353,12 @@ void ui_startup_settings_create(lv_obj_t *scr)
                         0x3DA5FF,
                         k230_nrf9151_location_autostart_enabled(),
                         nrf9151_location_switch_event_cb);
+    y = settings_next_row_y(y);
+    settings_switch_row(body, y, "CLOUD", "nRF Cloud A-GNSS",
+                        "Use provisioned nRF Cloud assistance when available",
+                        0x25C281,
+                        k230_nrf9151_gnss_cloud_assistance_enabled(),
+                        nrf9151_cloud_assistance_switch_event_cb);
     y = settings_next_row_y(y) + 14;
 
     label = ui_label(body,

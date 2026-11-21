@@ -48,6 +48,7 @@
 #define K230_NRF9151_STATUS_REFRESH_US (30ULL * 1000000ULL)
 #define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
 #define K230_NRF9151_LTE_SEARCH_RETRY_US (60ULL * 1000000ULL)
+#define K230_NRF9151_CLOUD_CONNECT_TIMEOUT_US (30ULL * 1000000ULL)
 #define K230_NRF9151_MANAGER_LOG "/tmp/k230_nrf9151_test.log"
 #define K230_NRF9151_PREF_DIR "/root/.config/k230_phone_ui"
 #define K230_NRF9151_PREF_FILE K230_NRF9151_PREF_DIR "/settings.conf"
@@ -1816,7 +1817,92 @@ static int nrf9151_manager_run_cmd_logged(int fd, const char *cmd,
                                           char *log, size_t log_len,
                                           k230_nrf9151_cancel_cb_t cancel_cb,
                                           void *cancel_user);
-static int nrf9151_manager_gnss_cloud_assistance_enabled(void);
+
+static int nrf9151_manager_wait_for_line(int fd, const char *prefix,
+                                         char *out, size_t out_len,
+                                         uint64_t timeout_us)
+{
+    uint64_t start;
+    size_t used = 0;
+    char line[256];
+
+    if(fd < 0 || !prefix || !out || out_len == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    out[0] = '\0';
+    start = nrf9151_manager_monotonic_us();
+    while(nrf9151_manager_monotonic_us() - start < timeout_us) {
+        fd_set rfds;
+        struct timeval tv;
+        char buf[256];
+        ssize_t rd;
+
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 150000;
+        if(select(fd + 1, &rfds, NULL, NULL, &tv) <= 0 ||
+           !FD_ISSET(fd, &rfds)) {
+            continue;
+        }
+        rd = read(fd, buf, sizeof(buf));
+        if(rd <= 0) {
+            continue;
+        }
+        for(ssize_t i = 0; i < rd; i++) {
+            if(buf[i] != '\r' && buf[i] != '\n') {
+                if(used + 1U < sizeof(line)) {
+                    line[used++] = buf[i];
+                }
+                continue;
+            }
+            line[used] = '\0';
+            used = 0;
+            if(strncmp(line, prefix, strlen(prefix)) == 0) {
+                snprintf(out, out_len, "%s", line);
+                return 0;
+            }
+        }
+    }
+    errno = ETIMEDOUT;
+    return -1;
+}
+
+/* A-GNSS is authenticated by modem-provisioned device credentials. The host
+ * only needs to bring up the modem's nRF Cloud client; no user password is
+ * stored or sent by the launcher. */
+static int nrf9151_manager_gnss_cloud_connect(int fd)
+{
+    char resp[512];
+    char urc[128];
+    const char *p;
+    int rc;
+
+    rc = nrf9151_manager_exchange(fd, "AT#XNRFCLOUD?", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+    if(rc == 0 && strstr(resp, "#XNRFCLOUD: 1,")) {
+        return 0;
+    }
+    rc = nrf9151_manager_exchange(fd, "AT#XNRFCLOUD=1", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+    if(rc != 0) {
+        nrf9151_manager_debug_log("nRF Cloud connect command failed rc=%d resp=%s",
+                                  rc, resp);
+        return -1;
+    }
+    p = strstr(resp, "#XNRFCLOUD:");
+    if(p) {
+        snprintf(urc, sizeof(urc), "%.*s", (int)strcspn(p, "\r\n"), p);
+    } else if(nrf9151_manager_wait_for_line(
+                  fd, "#XNRFCLOUD:", urc, sizeof(urc),
+                  K230_NRF9151_CLOUD_CONNECT_TIMEOUT_US) != 0) {
+        nrf9151_manager_debug_log("nRF Cloud connect timed out");
+        return -1;
+    }
+    nrf9151_manager_debug_log("nRF Cloud connect result: %s", urc);
+    return strncmp(urc, "#XNRFCLOUD: 1", 13) == 0 ? 0 : -1;
+}
 
 static void nrf9151_manager_quiesce_gnss_output(int fd, char *log,
                                                 size_t log_len)
@@ -3182,6 +3268,7 @@ static int nrf9151_manager_start_gnss_locked(int fd, int background)
     int active;
     int system_mode_rc = 0;
     int assist_requested;
+    int cloud_connect_failed = 0;
     k230_nrf9151_status_t status;
 
     if(k230_nrf9151_read_status(&status, 0) != 0) {
@@ -3255,13 +3342,20 @@ static int nrf9151_manager_start_gnss_locked(int fd, int background)
                                   K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
                                   NULL, NULL);
     nrf9151_manager_debug_log("GNSS cmd AT+CFUN=1 rc=%d resp=%s", rc, resp);
+    assist_requested = k230_nrf9151_gnss_cloud_assistance_enabled();
+    if(assist_requested && nrf9151_manager_gnss_cloud_connect(fd) != 0) {
+        /* A missing claim/provisioning or LTE registration must not prevent
+         * ordinary GNSS from starting. */
+        assist_requested = 0;
+        cloud_connect_failed = 1;
+    }
     rc = nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
                                   K230_NRF9151_CMD_TIMEOUT_US, NULL,
                                   NULL);
     nrf9151_manager_debug_log("GNSS cmd AT#XNMEA=1 rc=%d resp=%s", rc, resp);
-    assist_requested = nrf9151_manager_gnss_cloud_assistance_enabled();
     snprintf(status.gnss_assistance, sizeof(status.gnss_assistance), "%s",
-             assist_requested ? "requested" : "disabled");
+             cloud_connect_failed ? "fallback" :
+             (assist_requested ? "requested" : "disabled"));
     if(background) {
         snprintf(gnss_cmd, sizeof(gnss_cmd), "AT#XGNSS=1,%d,60,0",
                  assist_requested ? 1 : 0);
@@ -3832,7 +3926,7 @@ int k230_nrf9151_location_autostart_enabled(void)
     return atoi(value) != 0;
 }
 
-static int nrf9151_manager_gnss_cloud_assistance_enabled(void)
+int k230_nrf9151_gnss_cloud_assistance_enabled(void)
 {
     char value[16];
 
@@ -3841,6 +3935,12 @@ static int nrf9151_manager_gnss_cloud_assistance_enabled(void)
         return 0;
     }
     return atoi(value) != 0;
+}
+
+int k230_nrf9151_set_gnss_cloud_assistance_enabled(int enabled)
+{
+    return nrf9151_manager_pref_set(K230_NRF9151_PREF_GNSS_CLOUD_ASSISTANCE,
+                                    enabled ? "1" : "0");
 }
 
 int k230_nrf9151_set_location_autostart_enabled(int enabled)
