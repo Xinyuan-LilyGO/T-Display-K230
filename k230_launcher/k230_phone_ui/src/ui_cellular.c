@@ -5353,7 +5353,9 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
     int log_h = wide_layout ? content_h : 360;
     int log_x = wide_layout ? margin + config_w + gap : margin;
     int log_y = wide_layout ? content_y : content_y + config_h + gap;
-    int btn_gap = wide_layout ? 20 : 12;
+    int btn_gap = wide_layout ? 24 : 12;
+    int btn_row_gap = wide_layout ? 14 : 10;
+    int btn_step = 60 + btn_row_gap;
     int btn_w = (config_w - 32 - btn_gap) / 2;
     lv_obj_t *config_panel;
     lv_obj_t *log_panel;
@@ -5410,26 +5412,34 @@ static void cellular_mqtt_page_create(lv_obj_t *parent)
                     cellular_mqtt_config_event_cb, NULL);
     cellular_button(config_panel, btn_w + btn_gap, 138, btn_w, "Topic",
                     0x38BDF8, cellular_mqtt_topic_event_cb, NULL);
-    cellular_button(config_panel, 0, 196, btn_w, "Payload", 0x60A5FA,
+    cellular_button(config_panel, 0, 138 + btn_step, btn_w, "Payload",
+                    0x60A5FA,
                     cellular_mqtt_payload_event_cb, NULL);
-    cellular_button(config_panel, btn_w + btn_gap, 196, btn_w, "QoS/Retain",
+    cellular_button(config_panel, btn_w + btn_gap, 138 + btn_step,
+                    btn_w, "QoS/Retain",
                     0xF5A524, cellular_mqtt_qos_retain_event_cb, NULL);
-    cellular_button(config_panel, 0, 254, btn_w, "Connect", 0x25C281,
+    cellular_button(config_panel, 0, 138 + btn_step * 2, btn_w, "Connect",
+                    0x25C281,
                     cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_MQTT_CONNECT);
-    cellular_button(config_panel, btn_w + btn_gap, 254, btn_w, "Disconnect",
+    cellular_button(config_panel, btn_w + btn_gap, 138 + btn_step * 2,
+                    btn_w, "Disconnect",
                     0xEF4444, cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_MQTT_DISCONNECT);
-    cellular_button(config_panel, 0, 312, btn_w, "Subscribe", 0x22C55E,
+    cellular_button(config_panel, 0, 138 + btn_step * 3, btn_w, "Subscribe",
+                    0x22C55E,
                     cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_MQTT_SUBSCRIBE);
-    cellular_button(config_panel, btn_w + btn_gap, 312, btn_w, "Publish",
+    cellular_button(config_panel, btn_w + btn_gap, 138 + btn_step * 3,
+                    btn_w, "Publish",
                     0x3B82F6, cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_MQTT_PUBLISH);
-    cellular_button(config_panel, 0, 370, btn_w, "Unsubscribe", 0xF97316,
+    cellular_button(config_panel, 0, 138 + btn_step * 4, btn_w,
+                    "Unsubscribe", 0xF97316,
                     cellular_action_event_cb,
                     (void *)(intptr_t)CELLULAR_ACTION_MQTT_UNSUBSCRIBE);
-    cellular_button(config_panel, btn_w + btn_gap, 370, btn_w,
+    cellular_button(config_panel, btn_w + btn_gap, 138 + btn_step * 4,
+                    btn_w,
                     "Clear", 0x94A3B8, cellular_mqtt_clear_event_cb, NULL);
 
     log_panel = ui_panel(cellular_mqtt_panel, log_x, log_y, log_w, log_h);
