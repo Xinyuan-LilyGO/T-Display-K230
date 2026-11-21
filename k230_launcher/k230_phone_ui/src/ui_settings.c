@@ -198,6 +198,47 @@ static void nrf9151_location_switch_event_cb(lv_event_t *event)
     }
 }
 
+static const char *settings_cloud_status_display(const char *status)
+{
+    static char translated[sizeof(settings_cloud_status)];
+    const char *error_start;
+    const char *error_end;
+    const char *prefix;
+    size_t prefix_len;
+    size_t error_len;
+
+    if(!status || !status[0]) {
+        return "";
+    }
+    prefix = "Token read failed (";
+    prefix_len = strlen(prefix);
+    if(strncmp(status, prefix, prefix_len) == 0) {
+        error_start = status + prefix_len;
+        error_end = strstr(error_start, "). ");
+        if(error_end) {
+            error_len = (size_t)(error_end - error_start);
+            snprintf(translated, sizeof(translated), "%s (%.*s). %s",
+                     ui_tr("Token read failed"), (int)error_len, error_start,
+                     ui_tr("Check the nRF9151 firmware and module connection."));
+            return translated;
+        }
+    }
+    prefix = "Provisioning failed (";
+    prefix_len = strlen(prefix);
+    if(strncmp(status, prefix, prefix_len) == 0) {
+        error_start = status + prefix_len;
+        error_end = strstr(error_start, "). ");
+        if(error_end) {
+            error_len = (size_t)(error_end - error_start);
+            snprintf(translated, sizeof(translated), "%s (%.*s). %s",
+                     ui_tr("Provisioning failed"), (int)error_len, error_start,
+                     ui_tr("Check LTE registration and the nRF Cloud claim."));
+            return translated;
+        }
+    }
+    return ui_tr(status);
+}
+
 static void settings_cloud_setup_render_async(void *user_data)
 {
     char token[sizeof(settings_cloud_token)];
@@ -217,12 +258,14 @@ static void settings_cloud_setup_render_async(void *user_data)
         return;
     }
     if(settings_cloud_status_label && lv_obj_is_valid(settings_cloud_status_label)) {
-        lv_label_set_text(settings_cloud_status_label, status);
+        lv_label_set_text(settings_cloud_status_label,
+                          settings_cloud_status_display(status));
     }
     if(settings_cloud_token_label && lv_obj_is_valid(settings_cloud_token_label)) {
         lv_label_set_text(settings_cloud_token_label,
-                          token[0] ? "Token saved to /root/nrf9151/attestation_token.txt" :
-                                     "Token not saved yet");
+                          ui_tr(token[0] ?
+                                "Token saved to /root/nrf9151/attestation_token.txt" :
+                                "Token not saved yet"));
     }
     if(settings_cloud_provision_button &&
        lv_obj_is_valid(settings_cloud_provision_button)) {
