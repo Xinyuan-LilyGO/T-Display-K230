@@ -13,6 +13,7 @@ void ui_settings_capture_scroll(void);
 void ui_settings_clear_saved_scroll(void);
 void ui_settings_prepare_open(int restore_saved_scroll);
 void ui_settings_open_nrf_cloud_setup(void);
+int ui_settings_nrf_cloud_handle_back(void);
 
 #ifdef __cplusplus
 }
