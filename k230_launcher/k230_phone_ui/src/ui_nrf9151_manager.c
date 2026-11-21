@@ -49,6 +49,7 @@
 #define K230_NRF9151_STATUS_RETRY_US (8ULL * 1000000ULL)
 #define K230_NRF9151_LTE_SEARCH_RETRY_US (60ULL * 1000000ULL)
 #define K230_NRF9151_CLOUD_CONNECT_TIMEOUT_US (30ULL * 1000000ULL)
+#define K230_NRF9151_PROVISION_TIMEOUT_US (130ULL * 1000000ULL)
 #define K230_NRF9151_MANAGER_LOG "/tmp/k230_nrf9151_test.log"
 #define K230_NRF9151_PREF_DIR "/root/.config/k230_phone_ui"
 #define K230_NRF9151_PREF_FILE K230_NRF9151_PREF_DIR "/settings.conf"
@@ -1867,6 +1868,26 @@ static int nrf9151_manager_wait_for_line(int fd, const char *prefix,
     }
     errno = ETIMEDOUT;
     return -1;
+}
+
+static int nrf9151_manager_provision_status_from_text(const char *text,
+                                                      int *status)
+{
+    const char *p;
+
+    if(!text || !status) {
+        return -1;
+    }
+    p = strstr(text, "#XNRFPROV:");
+    if(!p) {
+        return -1;
+    }
+    p = strchr(p, ':');
+    if(!p) {
+        return -1;
+    }
+    *status = atoi(p + 1);
+    return 0;
 }
 
 /* A-GNSS is authenticated by modem-provisioned device credentials. The host
@@ -3941,6 +3962,126 @@ int k230_nrf9151_set_gnss_cloud_assistance_enabled(int enabled)
 {
     return nrf9151_manager_pref_set(K230_NRF9151_PREF_GNSS_CLOUD_ASSISTANCE,
                                     enabled ? "1" : "0");
+}
+
+int k230_nrf9151_cloud_read_attestation_token(char *token, size_t token_len)
+{
+    int lock_fd = -1;
+    int fd = -1;
+    char resp[1024];
+    char line[512];
+    char *value;
+    int rc;
+
+    if(!token || token_len == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    token[0] = '\0';
+    if(nrf9151_manager_open_session("nrf9151-cloud-token", 5000,
+                                    &lock_fd, &fd, NULL, 0) != 0) {
+        return -1;
+    }
+    rc = nrf9151_manager_exchange(fd, "AT%ATTESTTOKEN", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+    if(rc == 0 &&
+       nrf9151_manager_line_containing(resp, "%ATTESTTOKEN:", line,
+                                       sizeof(line)) == 0) {
+        value = strchr(line, ':');
+        if(value) {
+            value++;
+            nrf9151_manager_trim_text(value);
+            if(value[0] == '"') {
+                size_t len = strlen(value);
+                if(len > 1U && value[len - 1U] == '"') {
+                    value[len - 1U] = '\0';
+                    value++;
+                }
+            }
+            snprintf(token, token_len, "%s", value);
+            rc = token[0] ? 0 : -1;
+        } else {
+            rc = -1;
+        }
+    } else {
+        rc = -1;
+    }
+    nrf9151_manager_close_session(lock_fd, fd);
+    if(rc != 0) {
+        errno = EPROTO;
+    }
+    return rc;
+}
+
+int k230_nrf9151_cloud_provision(void)
+{
+    int lock_fd = -1;
+    int fd = -1;
+    int status = -100;
+    char resp[1024];
+    char line[128];
+    uint64_t deadline;
+    int rc;
+
+    if(nrf9151_manager_open_session("nrf9151-cloud-provision", 8000,
+                                    &lock_fd, &fd, NULL, 0) != 0) {
+        return -1;
+    }
+    rc = nrf9151_manager_exchange(fd, "AT#XNRFPROV", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+    if(rc != 0) {
+        nrf9151_manager_close_session(lock_fd, fd);
+        return -1;
+    }
+    (void)nrf9151_manager_provision_status_from_text(resp, &status);
+    deadline = nrf9151_manager_monotonic_us() +
+               K230_NRF9151_PROVISION_TIMEOUT_US;
+    while(status != 0 && nrf9151_manager_monotonic_us() < deadline) {
+        if(status == -100) {
+            if(nrf9151_manager_wait_for_line(fd, "#XNRFPROV:", line,
+                                             sizeof(line),
+                                             K230_NRF9151_CMD_TIMEOUT_US) != 0) {
+                rc = -1;
+                break;
+            }
+            (void)nrf9151_manager_provision_status_from_text(line, &status);
+        }
+        if(status == 0) {
+            rc = 0;
+            break;
+        }
+        if(status < 0) {
+            errno = status == -2 ? EACCES : EPROTO;
+            rc = -1;
+            break;
+        }
+        if(status == 1) {
+            rc = nrf9151_manager_exchange(fd, "AT+CFUN=4", resp,
+                                          sizeof(resp),
+                                          K230_NRF9151_LONG_TIMEOUT_US * 3ULL,
+                                          NULL, NULL);
+        } else if(status == 2) {
+            rc = nrf9151_manager_exchange(fd, "AT+CFUN=1", resp,
+                                          sizeof(resp),
+                                          K230_NRF9151_LONG_TIMEOUT_US * 3ULL,
+                                          NULL, NULL);
+        } else {
+            rc = -1;
+            break;
+        }
+        if(rc != 0) {
+            break;
+        }
+        if(nrf9151_manager_provision_status_from_text(resp, &status) != 0) {
+            status = -100;
+        }
+    }
+    if(nrf9151_manager_monotonic_us() >= deadline && status != 0) {
+        errno = ETIMEDOUT;
+        rc = -1;
+    }
+    nrf9151_manager_close_session(lock_fd, fd);
+    return rc;
 }
 
 int k230_nrf9151_set_location_autostart_enabled(int enabled)

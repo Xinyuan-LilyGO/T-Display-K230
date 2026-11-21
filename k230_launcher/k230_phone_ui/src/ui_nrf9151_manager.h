@@ -164,6 +164,8 @@ int k230_nrf9151_location_autostart_enabled(void);
 int k230_nrf9151_set_location_autostart_enabled(int enabled);
 int k230_nrf9151_gnss_cloud_assistance_enabled(void);
 int k230_nrf9151_set_gnss_cloud_assistance_enabled(int enabled);
+int k230_nrf9151_cloud_read_attestation_token(char *token, size_t token_len);
+int k230_nrf9151_cloud_provision(void);
 int k230_nrf9151_apply_location_autostart(void);
 int k230_nrf9151_status_monitor_start(void);
 void k230_nrf9151_status_monitor_stop(void);
