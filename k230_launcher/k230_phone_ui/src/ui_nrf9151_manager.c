@@ -533,6 +533,8 @@ void k230_nrf9151_status_init(k230_nrf9151_status_t *status)
     snprintf(status->gnss_phase, sizeof(status->gnss_phase), "%s", "off");
     snprintf(status->imei, sizeof(status->imei), "%s", "--");
     snprintf(status->firmware, sizeof(status->firmware), "%s", "--");
+    snprintf(status->application_version, sizeof(status->application_version),
+             "%s", "--");
     snprintf(status->sim_status, sizeof(status->sim_status), "%s", "--");
     snprintf(status->operator_name, sizeof(status->operator_name), "%s", "--");
     snprintf(status->ip, sizeof(status->ip), "%s", "--");
@@ -660,6 +662,8 @@ int k230_nrf9151_write_status(const k230_nrf9151_status_t *status)
     nrf9151_manager_status_write_key(fp, "gnss_phase", copy.gnss_phase);
     nrf9151_manager_status_write_key(fp, "imei", copy.imei);
     nrf9151_manager_status_write_key(fp, "firmware", copy.firmware);
+    nrf9151_manager_status_write_key(fp, "application_version",
+                                     copy.application_version);
     nrf9151_manager_status_write_key(fp, "sim_status", copy.sim_status);
     nrf9151_manager_status_write_key(fp, "operator", copy.operator_name);
     nrf9151_manager_status_write_key(fp, "ip", copy.ip);
@@ -838,6 +842,10 @@ int k230_nrf9151_read_status(k230_nrf9151_status_t *status,
         } else if(strcmp(line, "firmware") == 0) {
             nrf9151_manager_status_set_string(status->firmware,
                                               sizeof(status->firmware), eq);
+        } else if(strcmp(line, "application_version") == 0) {
+            nrf9151_manager_status_set_string(
+                status->application_version,
+                sizeof(status->application_version), eq);
         } else if(strcmp(line, "sim_status") == 0) {
             nrf9151_manager_status_set_string(status->sim_status,
                                               sizeof(status->sim_status), eq);
@@ -2036,6 +2044,21 @@ static void nrf9151_manager_update_lte_from_response(
        nrf9151_manager_line_containing(resp, "mfw_", line, sizeof(line)) == 0) {
         snprintf(status->firmware, sizeof(status->firmware), "%s", line);
     }
+    if(strcmp(cmd, "AT#XSMVER") == 0 && rc == 0 &&
+       nrf9151_manager_line_containing(resp, "#XSMVER:", line,
+                                       sizeof(line)) == 0) {
+        const char *start = strchr(line, '"');
+
+        if(start) {
+            const char *end = strchr(++start, '"');
+
+            if(end && end > start) {
+                snprintf(status->application_version,
+                         sizeof(status->application_version), "%.*s",
+                         (int)(end - start), start);
+            }
+        }
+    }
     if(nrf9151_manager_line_containing(resp, "%XSIM:", line,
                                        sizeof(line)) == 0) {
         if(strstr(line, "%XSIM: 1")) {
@@ -2314,6 +2337,7 @@ static int nrf9151_manager_run_lte_check_common(
         "AT+CMEE=1",
         "AT+CGSN",
         "AT+CGMR",
+        "AT#XSMVER",
         "AT+CFUN=1",
         "AT%XSIM=1",
         "AT%XSIM?",

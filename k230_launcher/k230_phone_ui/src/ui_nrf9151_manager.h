@@ -71,6 +71,7 @@ typedef struct {
     char gnss_phase[32];
     char imei[64];
     char firmware[64];
+    char application_version[64];
     char sim_status[48];
     char operator_name[96];
     char ip[96];

@@ -221,6 +221,7 @@ static lv_obj_t *cellular_modem_signal_label;
 static lv_obj_t *cellular_modem_sim_label;
 static lv_obj_t *cellular_modem_imei_label;
 static lv_obj_t *cellular_modem_firmware_label;
+static lv_obj_t *cellular_modem_application_label;
 static lv_obj_t *cellular_modem_operator_label;
 static lv_obj_t *cellular_modem_ip_label;
 static lv_obj_t *cellular_modem_apn_label;
@@ -2026,6 +2027,11 @@ static void cellular_status_refresh(void)
     }
     if(cellular_modem_firmware_label) {
         lv_label_set_text(cellular_modem_firmware_label, ui_tr(firmware));
+    }
+    if(cellular_modem_application_label) {
+        lv_label_set_text(cellular_modem_application_label,
+                          manager_status.application_version[0] ?
+                          manager_status.application_version : "--");
     }
     if(cellular_modem_operator_label) {
         lv_label_set_text(cellular_modem_operator_label,
@@ -5602,13 +5608,15 @@ void ui_cellular_create(lv_obj_t *scr)
         MODEM_CARD(2, "SIM card", 0xA3E635, &cellular_modem_sim_label);
         MODEM_CARD(3, "IMEI", 0x38BDF8, &cellular_modem_imei_label);
         MODEM_CARD(4, "Firmware", 0x818CF8, &cellular_modem_firmware_label);
-        MODEM_CARD(5, "Operator", 0x34D399, &cellular_modem_operator_label);
-        MODEM_CARD(6, "IP address", 0x2DD4BF, &cellular_modem_ip_label);
-        MODEM_CARD(7, "APN", 0xF5A524, &cellular_modem_apn_label);
-        MODEM_CARD(8, "PDP context", 0xF97316, &cellular_modem_pdp_label);
-        MODEM_CARD(9, "Packet service", 0xEF4444, &cellular_modem_packet_label);
-        MODEM_CARD(10, "LTE status", 0x25C281, &cellular_modem_lte_label);
-        MODEM_CARD(11, "UART", 0x94A3B8, &cellular_modem_uart_label);
+        MODEM_CARD(5, "Application version", 0xA78BFA,
+                   &cellular_modem_application_label);
+        MODEM_CARD(6, "Operator", 0x34D399, &cellular_modem_operator_label);
+        MODEM_CARD(7, "IP address", 0x2DD4BF, &cellular_modem_ip_label);
+        MODEM_CARD(8, "APN", 0xF5A524, &cellular_modem_apn_label);
+        MODEM_CARD(9, "PDP context", 0xF97316, &cellular_modem_pdp_label);
+        MODEM_CARD(10, "Packet service", 0xEF4444, &cellular_modem_packet_label);
+        MODEM_CARD(11, "LTE status", 0x25C281, &cellular_modem_lte_label);
+        MODEM_CARD(12, "UART", 0x94A3B8, &cellular_modem_uart_label);
 #undef MODEM_CARD
     }
 
@@ -5817,6 +5825,7 @@ void ui_cellular_cleanup(void)
     cellular_modem_sim_label = NULL;
     cellular_modem_imei_label = NULL;
     cellular_modem_firmware_label = NULL;
+    cellular_modem_application_label = NULL;
     cellular_modem_operator_label = NULL;
     cellular_modem_ip_label = NULL;
     cellular_modem_apn_label = NULL;

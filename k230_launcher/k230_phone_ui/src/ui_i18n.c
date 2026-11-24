@@ -755,6 +755,7 @@ static const ui_translation_t ui_translations[] = {
     { "Chip", "芯片", "チップ" },
     { "Signal", "信号", "信号" },
     { "Firmware", "固件", "ファームウェア" },
+    { "Application version", "应用版本", "アプリバージョン" },
     { "Operator", "运营商", "オペレーター" },
     { "IP address", "IP 地址", "IP アドレス" },
     { "APN", "APN", "APN" },
