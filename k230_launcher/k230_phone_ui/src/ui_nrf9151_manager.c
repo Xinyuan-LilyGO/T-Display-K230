@@ -38,7 +38,7 @@
 #define K230_NRF9151_LONG_TIMEOUT_US 12000000ULL
 #define K230_NRF9151_HTTP_TIMEOUT_US 60000000ULL
 #define K230_NRF9151_MQTT_TIMEOUT_US 30000000ULL
-#define K230_NRF9151_GNSS_NMEA_RESTART_US (15ULL * 1000000ULL)
+#define K230_NRF9151_GNSS_NMEA_RESTART_US (60ULL * 1000000ULL)
 #define K230_NRF9151_GNSS_BACKGROUND_POLL_US (30ULL * 1000000ULL)
 #define K230_NRF9151_GNSS_REQUEST_MIN_US (30ULL * 1000000ULL)
 #define K230_NRF9151_LTE_BOOTSTRAP_WAIT_US (15ULL * 1000000ULL)
@@ -3583,11 +3583,13 @@ static int nrf9151_manager_resume_gnss_foreground(int fd)
     rc = nrf9151_manager_exchange(fd, "AT#XGNSS?", resp, sizeof(resp),
                                   K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
     active = rc == 0 ? nrf9151_manager_response_gnss_active(resp) : -1;
-    if(active > 0) {
-        rc = nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
-                                      K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
-        return rc;
-    }
+    nrf9151_manager_debug_log(
+        "GNSS foreground takeover active=%d; switching to continuous mode",
+        active);
+
+    /* Background GNSS uses a periodic fix interval. Restart it through the
+     * normal foreground path so entering the GNSS page always enables
+     * continuous search and resets stale NMEA recovery state. */
     return nrf9151_manager_start_gnss_locked(fd, 0);
 }
 
@@ -3762,13 +3764,23 @@ static void *nrf9151_manager_gnss_thread(void *arg)
         }
         now_us = nrf9151_manager_monotonic_us();
         if(nrf9151_gnss_monitor.configured &&
-           nrf9151_gnss_monitor.session_start_us > 0ULL &&
-           nrf9151_gnss_monitor.last_nmea_us == 0ULL &&
-           now_us - nrf9151_gnss_monitor.session_start_us >
-           K230_NRF9151_GNSS_NMEA_RESTART_US &&
-           (nrf9151_gnss_monitor.last_restart_us == 0ULL ||
-            now_us - nrf9151_gnss_monitor.last_restart_us >
-            K230_NRF9151_GNSS_NMEA_RESTART_US)) {
+           nrf9151_gnss_monitor.session_start_us > 0ULL) {
+            uint64_t last_activity_us =
+                nrf9151_gnss_monitor.last_nmea_us >
+                nrf9151_gnss_monitor.session_start_us ?
+                nrf9151_gnss_monitor.last_nmea_us :
+                nrf9151_gnss_monitor.session_start_us;
+
+            if(now_us - last_activity_us <=
+               K230_NRF9151_GNSS_NMEA_RESTART_US ||
+               (nrf9151_gnss_monitor.last_restart_us != 0ULL &&
+                now_us - nrf9151_gnss_monitor.last_restart_us <=
+                K230_NRF9151_GNSS_NMEA_RESTART_US)) {
+                continue;
+            }
+            nrf9151_manager_debug_log(
+                "GNSS NMEA stale for %llums; restarting foreground search",
+                (unsigned long long)((now_us - last_activity_us) / 1000ULL));
             char resp[512];
 
             nrf9151_gnss_monitor.last_restart_us = now_us;
