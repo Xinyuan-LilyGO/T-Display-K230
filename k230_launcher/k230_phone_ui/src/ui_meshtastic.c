@@ -9186,7 +9186,7 @@ static void mesh_map_load_prefs(void)
     char fallback[8];
     int zoom;
 
-    ui_prefs_get(MESHTASTIC_PREF_MAP_FAKE_GPS, value, sizeof(value), "1");
+    ui_prefs_get(MESHTASTIC_PREF_MAP_FAKE_GPS, value, sizeof(value), "0");
     mesh_map_fake_gps_enabled = atoi(value) != 0;
     snprintf(fallback, sizeof(fallback), "%d", MESHTASTIC_MAP_DEFAULT_ZOOM);
     ui_prefs_get(MESHTASTIC_PREF_MAP_ZOOM, value, sizeof(value), fallback);
