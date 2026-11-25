@@ -876,13 +876,10 @@ static void cellular_set_ip(const char *ip)
 static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
 {
     uint64_t now_us;
-    int location_enabled;
-
     if(!status) {
         return;
     }
     now_us = ui_monotonic_us();
-    location_enabled = k230_nrf9151_location_autostart_enabled();
     pthread_mutex_lock(&cellular_lock);
     cellular_cno_monitor_active = k230_nrf9151_gnss_uart_owned();
     snprintf(cellular_link_status, sizeof(cellular_link_status), "%s",
@@ -931,18 +928,6 @@ static void cellular_apply_manager_status(const k230_nrf9151_status_t *status)
         dst->cn0 = src->cn0;
         dst->last_seen_us = now_us;
         dst->valid = 1;
-    }
-    if(!location_enabled) {
-        snprintf(cellular_gnss_status, sizeof(cellular_gnss_status), "%s",
-                 "GPS off");
-        snprintf(cellular_gps_status, sizeof(cellular_gps_status), "%s",
-                 "Enable nRF9151 location in Startup apps");
-        snprintf(cellular_sat_status, sizeof(cellular_sat_status), "%s",
-                 "NMEA rx=0 valid=0 nofix=0 sats=0 last=0ms");
-        memset(cellular_sats, 0, sizeof(cellular_sats));
-        cellular_gnss_fix_valid = 0;
-        pthread_mutex_unlock(&cellular_lock);
-        return;
     }
     if(status->gnss_has_fix) {
         snprintf(cellular_gps_status, sizeof(cellular_gps_status),
@@ -1011,10 +996,10 @@ void ui_cellular_startup(void)
     if(k230_nrf9151_status_monitor_start() == 0) {
         cellular_log_append("nRF9151 status manager started");
         k230_nrf9151_status_monitor_request_refresh();
-        if(k230_nrf9151_apply_location_autostart() == 0) {
-            cellular_log_append("nRF9151 location autostart applied");
-        } else if(k230_nrf9151_location_autostart_enabled()) {
-            cellular_log_append("nRF9151 location autostart waiting for modem");
+        if(k230_nrf9151_apply_background_location() == 0) {
+            cellular_log_append("nRF9151 background location applied");
+        } else {
+            cellular_log_append("nRF9151 background location waiting for modem");
         }
         cellular_sync_manager_status();
     } else {
@@ -4395,7 +4380,7 @@ static int cellular_run_manager_action(cellular_action_t action,
         if(restore_gnss_page) {
             (void)k230_nrf9151_start_gnss_monitor_for("cellular");
         } else {
-            (void)k230_nrf9151_apply_location_autostart();
+            (void)k230_nrf9151_apply_background_location();
         }
         if(action == CELLULAR_ACTION_FULL_TEST &&
            cellular_generation_active(generation)) {

@@ -5751,9 +5751,6 @@ static uint32_t status_gps_color(void)
 {
     k230_nrf9151_status_t status;
 
-    if(!k230_nrf9151_location_autostart_enabled()) {
-        return 0x8B949E;
-    }
     if(k230_nrf9151_read_status(&status, 90) != 0 ||
        !status.present || !status.link_ok) {
         return 0x8B949E;

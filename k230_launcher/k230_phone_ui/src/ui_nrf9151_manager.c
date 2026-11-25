@@ -57,7 +57,6 @@
 #define K230_NRF9151_MANAGER_LOG "/tmp/k230_nrf9151_test.log"
 #define K230_NRF9151_PREF_DIR "/root/.config/k230_phone_ui"
 #define K230_NRF9151_PREF_FILE K230_NRF9151_PREF_DIR "/settings.conf"
-#define K230_NRF9151_PREF_LOCATION_AUTOSTART "nrf9151.location.autostart"
 #define K230_NRF9151_PREF_GNSS_CLOUD_ASSISTANCE "nrf9151.gnss.cloud_assistance"
 #define K230_NRF9151_GNSS_OWNER_LEGACY (1U << 0)
 #define K230_NRF9151_GNSS_OWNER_CELLULAR (1U << 1)
@@ -143,6 +142,15 @@ static int nrf9151_manager_gnss_foreground_requested_locked(void)
             (K230_NRF9151_GNSS_OWNER_LEGACY |
              K230_NRF9151_GNSS_OWNER_CELLULAR |
              K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP)) != 0U;
+}
+
+static int nrf9151_manager_gnss_priority_held_locked(void)
+{
+    /* Opening the Meshtastic map is an explicit positioning request. Keep
+     * LTE paused until the map releases its owner so cold starts are not
+     * forced back into an RF coexistence mode that cannot obtain a fix. */
+    return (nrf9151_gnss_monitor.owners &
+            K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP) != 0U;
 }
 
 static int nrf9151_manager_gnss_uart_owned_locked(void)
@@ -3986,13 +3994,15 @@ static void *nrf9151_manager_gnss_thread(void *arg)
         now_us = nrf9151_manager_monotonic_us();
         {
             int lte_paused;
+            int priority_held;
             uint64_t priority_start_us;
 
             pthread_mutex_lock(&nrf9151_manager_lock);
             lte_paused = nrf9151_gnss_monitor.lte_paused;
+            priority_held = nrf9151_manager_gnss_priority_held_locked();
             priority_start_us = nrf9151_gnss_monitor.priority_start_us;
             pthread_mutex_unlock(&nrf9151_manager_lock);
-            if(lte_paused) {
+            if(lte_paused && !priority_held) {
                 k230_nrf9151_status_t status;
                 int has_fix = 0;
                 int timed_out = priority_start_us > 0ULL &&
@@ -4262,17 +4272,6 @@ int k230_nrf9151_gnss_uart_owned(void)
     return owned;
 }
 
-int k230_nrf9151_location_autostart_enabled(void)
-{
-    char value[16];
-
-    if(nrf9151_manager_pref_get(K230_NRF9151_PREF_LOCATION_AUTOSTART, value,
-                                sizeof(value), "1") != 0) {
-        return 1;
-    }
-    return atoi(value) != 0;
-}
-
 int k230_nrf9151_gnss_cloud_assistance_enabled(void)
 {
     char value[16];
@@ -4410,29 +4409,16 @@ int k230_nrf9151_cloud_provision(void)
     return rc;
 }
 
-int k230_nrf9151_set_location_autostart_enabled(int enabled)
+int k230_nrf9151_apply_background_location(void)
 {
-    return nrf9151_manager_pref_set(K230_NRF9151_PREF_LOCATION_AUTOSTART,
-                                    enabled ? "1" : "0");
-}
-
-int k230_nrf9151_apply_location_autostart(void)
-{
-    int enabled = k230_nrf9151_location_autostart_enabled();
-
     (void)k230_nrf9151_status_monitor_start();
-    if(!enabled) {
-        (void)k230_nrf9151_stop_gnss_monitor_for(K230_NRF9151_LOCATION_OWNER);
-        (void)k230_nrf9151_stop_gnss_monitor_for("meshtastic");
-        nrf9151_manager_debug_log("location autostart disabled");
-        return 0;
-    }
     if(!k230_nrf9151_uart_present()) {
-        nrf9151_manager_debug_log("location autostart skipped: uart missing");
+        nrf9151_manager_debug_log(
+            "background location skipped: uart missing");
         errno = ENODEV;
         return -1;
     }
-    nrf9151_manager_debug_log("location autostart enabled");
+    nrf9151_manager_debug_log("background location enabled");
     return k230_nrf9151_start_gnss_monitor_for(K230_NRF9151_LOCATION_OWNER);
 }
 

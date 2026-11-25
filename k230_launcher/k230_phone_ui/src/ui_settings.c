@@ -186,19 +186,6 @@ static void meshtastic_autostart_switch_event_cb(lv_event_t *event)
                                                          LV_STATE_CHECKED));
 }
 
-static void nrf9151_location_switch_event_cb(lv_event_t *event)
-{
-    lv_obj_t *sw = lv_event_get_target(event);
-    int enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
-
-    k230_nrf9151_set_location_autostart_enabled(enabled);
-    if(k230_nrf9151_apply_location_autostart() != 0 && enabled) {
-        settings_show_notice(ui_tr("nRF9151 location"),
-                             ui_tr("nRF9151 GNSS not detected"),
-                             ui_tr("Check the nRF9151 module before enabling background positioning."));
-    }
-}
-
 static const char *settings_cloud_status_display(const char *status)
 {
     static char translated[sizeof(settings_cloud_status)];
@@ -292,7 +279,7 @@ static void *settings_cloud_setup_worker(void *arg)
     char token[sizeof(settings_cloud_token)] = "";
     int rc;
     int saved_errno = 0;
-    int restart_location = k230_nrf9151_location_autostart_enabled();
+    int restart_location = k230_nrf9151_gnss_monitor_active();
     int restart_status = k230_nrf9151_status_monitor_active();
 
     if(!k230_nrf9151_uart_present()) {
@@ -315,7 +302,7 @@ static void *settings_cloud_setup_worker(void *arg)
             saved_errno = errno;
         }
         if(restart_location) {
-            (void)k230_nrf9151_apply_location_autostart();
+            (void)k230_nrf9151_apply_background_location();
         }
         if(restart_status) {
             (void)k230_nrf9151_status_monitor_start();
@@ -338,7 +325,7 @@ static void *settings_cloud_setup_worker(void *arg)
         rc = k230_nrf9151_cloud_provision();
         saved_errno = errno;
         if(restart_location) {
-            (void)k230_nrf9151_apply_location_autostart();
+            (void)k230_nrf9151_apply_background_location();
         }
         if(restart_status) {
             (void)k230_nrf9151_status_monitor_start();
@@ -829,12 +816,6 @@ void ui_startup_settings_create(lv_obj_t *scr)
                             meshtastic_autostart_switch_event_cb);
         y = settings_next_row_y(y);
     }
-    settings_switch_row(body, y, "GPS", "nRF9151 location",
-                        "Start background GNSS positioning at boot",
-                        0x3DA5FF,
-                        k230_nrf9151_location_autostart_enabled(),
-                        nrf9151_location_switch_event_cb);
-    y = settings_next_row_y(y);
     y += 14;
 
     label = ui_label(body,

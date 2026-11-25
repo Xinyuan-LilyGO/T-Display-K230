@@ -279,6 +279,7 @@ static int mesh_map_fake_gps_enabled = 1;
 static int mesh_map_zoom = MESHTASTIC_MAP_DEFAULT_ZOOM;
 static int mesh_map_gnss_foreground_owned;
 static int mesh_map_center_valid = 0;
+static int mesh_map_has_current_position;
 static double mesh_map_center_lat;
 static double mesh_map_center_lon;
 static int mesh_map_drag_active = 0;
@@ -382,7 +383,6 @@ typedef enum {
     MESH_MAP_POS_GNSS_SEARCHING,
     MESH_MAP_POS_GNSS_ERROR,
     MESH_MAP_POS_COORD_UNAVAILABLE,
-    MESH_MAP_POS_LOCATION_DISABLED,
 } mesh_map_position_state_t;
 static lv_obj_t *mesh_channel_status_label;
 static lv_obj_t *mesh_channel_qr_canvas;
@@ -4398,10 +4398,6 @@ static void mesh_background_monitor_stop(void)
 static void mesh_request_gnss_if_enabled(void)
 {
     if(!mesh_position_enabled) {
-        return;
-    }
-    if(!k230_nrf9151_location_autostart_enabled()) {
-        mesh_append_log("GNSS skipped: nRF9151 location autostart disabled");
         return;
     }
     (void)k230_nrf9151_request_gnss_fix("meshtastic", 60 * 60, NULL);
@@ -9173,6 +9169,7 @@ static void mesh_map_close(void)
     }
     mesh_map_overlay = NULL;
     mesh_map_has_position = 0;
+    mesh_map_has_current_position = 0;
     if(mesh_map_gnss_foreground_owned) {
         (void)k230_nrf9151_stop_gnss_monitor_for("meshtastic-map");
         mesh_map_gnss_foreground_owned = 0;
@@ -9181,8 +9178,7 @@ static void mesh_map_close(void)
 
 static void mesh_map_update_gnss_owner(void)
 {
-    int should_own = !mesh_map_fake_gps_enabled &&
-                     k230_nrf9151_location_autostart_enabled();
+    int should_own = !mesh_map_fake_gps_enabled;
 
     if(should_own && !mesh_map_gnss_foreground_owned) {
         if(k230_nrf9151_start_gnss_monitor_for("meshtastic-map") == 0) {
@@ -9359,16 +9355,6 @@ static int mesh_map_status_position(const char *status, double *lat,
     }
     if(state) {
         *state = MESH_MAP_POS_GNSS_SEARCHING;
-    }
-    if(!k230_nrf9151_location_autostart_enabled()) {
-        if(reason && reason_len > 0U) {
-            snprintf(reason, reason_len, "%s",
-                     ui_tr("Enable nRF9151 location in Startup apps"));
-        }
-        if(state) {
-            *state = MESH_MAP_POS_LOCATION_DISABLED;
-        }
-        return 0;
     }
     if(!status || !mesh_status_is_online(status)) {
         if(reason && reason_len > 0U) {
@@ -12391,8 +12377,6 @@ static const char *mesh_map_position_hint(mesh_map_position_state_t state)
         return ui_tr("Satellites are visible; keep antenna still.");
     case MESH_MAP_POS_GNSS_ERROR:
         return ui_tr("Open Cellular app to check GNSS.");
-    case MESH_MAP_POS_LOCATION_DISABLED:
-        return ui_tr("Open Settings > Startup apps to enable location.");
     case MESH_MAP_POS_COORD_UNAVAILABLE:
     case MESH_MAP_POS_GNSS_SEARCHING:
         return ui_tr("Open sky improves GNSS fix.");
@@ -12585,6 +12569,7 @@ static void mesh_map_rebuild(void)
         has_position = 1;
     }
     mesh_map_has_position = has_position;
+    mesh_map_has_current_position = position_state == MESH_MAP_POS_READY;
     mesh_ui_trace("map rebuild has_position=%d state=%d reason=%s",
                   has_position, (int)position_state, reason);
 
@@ -12694,13 +12679,13 @@ static void mesh_map_timer_cb(lv_timer_t *timer)
         }
         return;
     }
-    if(mesh_map_has_position) {
+    if(mesh_map_has_current_position) {
         lv_timer_delete(mesh_map_timer);
         mesh_map_timer = NULL;
         return;
     }
     mesh_map_rebuild();
-    if(mesh_map_has_position && mesh_map_timer) {
+    if(mesh_map_has_current_position && mesh_map_timer) {
         lv_timer_delete(mesh_map_timer);
         mesh_map_timer = NULL;
     }
@@ -12724,7 +12709,7 @@ static void mesh_map_event_cb(lv_event_t *event)
         lv_obj_move_foreground(mesh_map_overlay);
     }
     mesh_map_rebuild();
-    if(!mesh_map_has_position && !mesh_map_timer) {
+    if(!mesh_map_has_current_position && !mesh_map_timer) {
         mesh_map_timer = lv_timer_create(mesh_map_timer_cb, 2000, NULL);
     }
 }
