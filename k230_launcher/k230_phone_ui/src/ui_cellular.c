@@ -4776,6 +4776,233 @@ static void cellular_timer_cb(lv_timer_t *timer)
     cellular_log_refresh();
 }
 
+#if K230_PAGE_SMOKE_TEST
+typedef enum {
+    CELLULAR_FLOW_TEST_IDLE = 0,
+    CELLULAR_FLOW_TEST_MODEM_START,
+    CELLULAR_FLOW_TEST_MODEM_WAIT,
+    CELLULAR_FLOW_TEST_GNSS_START,
+    CELLULAR_FLOW_TEST_GNSS_WAIT,
+    CELLULAR_FLOW_TEST_HTTP_START,
+    CELLULAR_FLOW_TEST_HTTP_WAIT,
+    CELLULAR_FLOW_TEST_MQTT_SHOW,
+    CELLULAR_FLOW_TEST_MODEM_VERIFY_START,
+    CELLULAR_FLOW_TEST_MODEM_VERIFY_WAIT,
+    CELLULAR_FLOW_TEST_DONE,
+    CELLULAR_FLOW_TEST_FAILED,
+} cellular_flow_test_state_t;
+
+static cellular_flow_test_state_t cellular_flow_test_state;
+static uint64_t cellular_flow_test_deadline_us;
+static uint64_t cellular_flow_test_stage_us;
+static unsigned int cellular_flow_test_gnss_timeout_s = 240U;
+
+static void cellular_flow_test_log(const char *fmt, ...)
+{
+    va_list ap;
+
+    fprintf(stderr, "[cellular-flow-test] ");
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+
+static void cellular_flow_test_fail(const char *reason)
+{
+    cellular_flow_test_log("FAIL stage=%d reason=%s",
+                           (int)cellular_flow_test_state,
+                           reason && reason[0] ? reason : "unknown");
+    cellular_flow_test_state = CELLULAR_FLOW_TEST_FAILED;
+}
+
+static int cellular_flow_test_worker_active(void)
+{
+    int active;
+
+    pthread_mutex_lock(&cellular_lock);
+    active = cellular_worker_active;
+    pthread_mutex_unlock(&cellular_lock);
+    return active;
+}
+
+static int cellular_flow_test_validate_lte(const char *stage)
+{
+    k230_nrf9151_status_t status;
+
+    if(k230_nrf9151_read_status(&status, 0) != 0) {
+        cellular_flow_test_fail("status cache unavailable");
+        return -1;
+    }
+    cellular_flow_test_log(
+        "%s SIM=%d registered=%d attached=%d PDP=%d operator=%s IP=%s app=%s",
+        stage, status.sim_ready, status.lte_registered,
+        status.packet_attached, status.pdp_active,
+        status.operator_name[0] ? status.operator_name : "-",
+        status.ip[0] ? status.ip : "-",
+        status.application_version[0] ? status.application_version : "-");
+    if(!status.sim_ready || !status.lte_registered ||
+       !status.packet_attached || !status.pdp_active) {
+        cellular_flow_test_fail("LTE registration or PDP is not ready");
+        return -1;
+    }
+    if(!status.application_version[0] ||
+       strcmp(status.application_version, "--") == 0) {
+        cellular_flow_test_fail("nRF9151 application version is missing");
+        return -1;
+    }
+    return 0;
+}
+
+void ui_cellular_flow_test_start(void)
+{
+    const char *timeout_text = getenv("K230_CELLULAR_GNSS_TIMEOUT_S");
+    long timeout_value;
+
+    if(timeout_text && timeout_text[0]) {
+        timeout_value = strtol(timeout_text, NULL, 10);
+        if(timeout_value >= 30 && timeout_value <= 900) {
+            cellular_flow_test_gnss_timeout_s = (unsigned int)timeout_value;
+        }
+    }
+    cellular_flow_test_state = CELLULAR_FLOW_TEST_MODEM_START;
+    cellular_flow_test_deadline_us = 0;
+    cellular_flow_test_stage_us = ui_monotonic_us();
+    cellular_flow_test_log("START GNSS_timeout_s=%u",
+                           cellular_flow_test_gnss_timeout_s);
+}
+
+int ui_cellular_flow_test_poll(void)
+{
+    uint64_t now = ui_monotonic_us();
+
+    switch(cellular_flow_test_state) {
+    case CELLULAR_FLOW_TEST_MODEM_START:
+        cellular_flow_test_log("PAGE Modem information");
+        cellular_show_page(CELLULAR_PAGE_MODEM);
+        cellular_start_action(CELLULAR_ACTION_LTE_STATUS);
+        cellular_flow_test_deadline_us = now + 150000000ULL;
+        cellular_flow_test_state = CELLULAR_FLOW_TEST_MODEM_WAIT;
+        break;
+    case CELLULAR_FLOW_TEST_MODEM_WAIT:
+        if(!cellular_flow_test_worker_active()) {
+            if(cellular_flow_test_validate_lte("MODEM_INITIAL") != 0) {
+                break;
+            }
+            cellular_flow_test_state = CELLULAR_FLOW_TEST_GNSS_START;
+        } else if(now >= cellular_flow_test_deadline_us) {
+            cellular_flow_test_fail("initial modem check timeout");
+        }
+        break;
+    case CELLULAR_FLOW_TEST_GNSS_START:
+        cellular_flow_test_log("PAGE GNSS");
+        cellular_show_page(CELLULAR_PAGE_GNSS);
+        cellular_flow_test_stage_us = now;
+        cellular_flow_test_deadline_us =
+            now + (uint64_t)cellular_flow_test_gnss_timeout_s * 1000000ULL;
+        cellular_flow_test_state = CELLULAR_FLOW_TEST_GNSS_WAIT;
+        break;
+    case CELLULAR_FLOW_TEST_GNSS_WAIT:
+        {
+            k230_nrf9151_status_t status;
+
+            if(k230_nrf9151_read_status(&status, 0) == 0 &&
+               status.gnss_running && status.gnss_has_fix &&
+               status.nmea_valid_count > 0U) {
+                cellular_flow_test_log(
+                    "GNSS PASS elapsed_ms=%llu satellites=%u valid_nmea=%u "
+                    "lat=%.7f lon=%.7f",
+                    (unsigned long long)((now - cellular_flow_test_stage_us) /
+                                         1000ULL),
+                    status.satellites, status.nmea_valid_count,
+                    status.latitude, status.longitude);
+                cellular_flow_test_log("PAGE Cellular home; restore LTE");
+                cellular_show_page(CELLULAR_PAGE_HOME);
+                cellular_flow_test_stage_us = now;
+                cellular_flow_test_state = CELLULAR_FLOW_TEST_HTTP_START;
+            } else if(now >= cellular_flow_test_deadline_us) {
+                cellular_flow_test_fail("GNSS fix timeout");
+            }
+        }
+        break;
+    case CELLULAR_FLOW_TEST_HTTP_START:
+        if(now - cellular_flow_test_stage_us < 2000000ULL) {
+            break;
+        }
+        cellular_flow_test_log("PAGE HTTP; run GET %s", cellular_http_url);
+        cellular_show_page(CELLULAR_PAGE_HTTP);
+        pthread_mutex_lock(&cellular_lock);
+        cellular_result_ok = 0;
+        cellular_result_pending = 0;
+        cellular_result_title[0] = '\0';
+        pthread_mutex_unlock(&cellular_lock);
+        cellular_start_action(CELLULAR_ACTION_HTTP_GET);
+        cellular_flow_test_deadline_us = now + 210000000ULL;
+        cellular_flow_test_state = CELLULAR_FLOW_TEST_HTTP_WAIT;
+        break;
+    case CELLULAR_FLOW_TEST_HTTP_WAIT:
+        if(!cellular_flow_test_worker_active()) {
+            int ok;
+            char title[sizeof(cellular_result_title)];
+
+            pthread_mutex_lock(&cellular_lock);
+            ok = cellular_result_ok;
+            snprintf(title, sizeof(title), "%s", cellular_result_title);
+            pthread_mutex_unlock(&cellular_lock);
+            if(!ok) {
+                cellular_flow_test_fail(title[0] ? title : "HTTP GET failed");
+                break;
+            }
+            cellular_flow_test_log("HTTP PASS result=%s", title);
+            if(cellular_result_panel) {
+                lv_obj_delete(cellular_result_panel);
+                cellular_result_panel = NULL;
+            }
+            cellular_flow_test_log("PAGE MQTT display");
+            cellular_show_page(CELLULAR_PAGE_MQTT);
+            cellular_flow_test_stage_us = now;
+            cellular_flow_test_state = CELLULAR_FLOW_TEST_MQTT_SHOW;
+        } else if(now >= cellular_flow_test_deadline_us) {
+            cellular_flow_test_fail("HTTP GET timeout");
+        }
+        break;
+    case CELLULAR_FLOW_TEST_MQTT_SHOW:
+        if(now - cellular_flow_test_stage_us >= 1500000ULL) {
+            cellular_flow_test_state =
+                CELLULAR_FLOW_TEST_MODEM_VERIFY_START;
+        }
+        break;
+    case CELLULAR_FLOW_TEST_MODEM_VERIFY_START:
+        cellular_flow_test_log("PAGE Modem information; verify LTE after GNSS");
+        cellular_show_page(CELLULAR_PAGE_MODEM);
+        cellular_start_action(CELLULAR_ACTION_LTE_STATUS);
+        cellular_flow_test_deadline_us = now + 150000000ULL;
+        cellular_flow_test_state = CELLULAR_FLOW_TEST_MODEM_VERIFY_WAIT;
+        break;
+    case CELLULAR_FLOW_TEST_MODEM_VERIFY_WAIT:
+        if(!cellular_flow_test_worker_active()) {
+            if(cellular_flow_test_validate_lte("MODEM_FINAL") != 0) {
+                break;
+            }
+            cellular_show_page(CELLULAR_PAGE_HOME);
+            cellular_flow_test_log("PASS all Cellular pages and services");
+            cellular_flow_test_state = CELLULAR_FLOW_TEST_DONE;
+        } else if(now >= cellular_flow_test_deadline_us) {
+            cellular_flow_test_fail("final modem check timeout");
+        }
+        break;
+    case CELLULAR_FLOW_TEST_DONE:
+        return 1;
+    case CELLULAR_FLOW_TEST_FAILED:
+        return -1;
+    case CELLULAR_FLOW_TEST_IDLE:
+    default:
+        break;
+    }
+    return 0;
+}
+#endif
+
 static void cellular_action_event_cb(lv_event_t *event)
 {
     cellular_action_t action =

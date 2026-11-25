@@ -294,6 +294,7 @@ typedef struct {
 } camera_face_box_t;
 
 static volatile int running = 1;
+static int app_exit_code;
 static volatile int fast_refresh_pending;
 static pthread_t ui_main_thread;
 static int ui_main_thread_valid;
@@ -14482,6 +14483,21 @@ static unsigned int page_smoke_test_cycle = 1;
 static unsigned int page_smoke_test_cycles = 1;
 static uint32_t page_smoke_test_interval_ms = 700;
 
+static void cellular_flow_test_timer_cb(lv_timer_t *timer)
+{
+    int result = ui_cellular_flow_test_poll();
+
+    if(result == 0) {
+        return;
+    }
+    touch_trace_log("CELLULAR_FLOW_TEST_%s",
+                    result > 0 ? "PASS" : "FAIL");
+    lv_timer_delete(timer);
+    render_page(PAGE_HOME, LV_SCREEN_LOAD_ANIM_NONE, 0);
+    app_exit_code = result > 0 ? 0 : 1;
+    running = 0;
+}
+
 static void page_smoke_test_timer_cb(lv_timer_t *timer)
 {
     while(page_smoke_test_index <
@@ -14653,7 +14669,13 @@ int main(void)
     lv_timer_create(status_bar_update, 3000, NULL);
     ui_wifi_autoconnect_start();
 #if K230_PAGE_SMOKE_TEST
-    if(getenv("K230_PAGE_SMOKE_TEST") &&
+    if(getenv("K230_CELLULAR_FLOW_TEST") &&
+       strcmp(getenv("K230_CELLULAR_FLOW_TEST"), "0") != 0) {
+        touch_trace_log("CELLULAR_FLOW_TEST_START");
+        render_page(PAGE_CELLULAR, LV_SCREEN_LOAD_ANIM_NONE, 0);
+        ui_cellular_flow_test_start();
+        lv_timer_create(cellular_flow_test_timer_cb, 250, NULL);
+    } else if(getenv("K230_PAGE_SMOKE_TEST") &&
        strcmp(getenv("K230_PAGE_SMOKE_TEST"), "0") != 0) {
         const char *cycles_text = getenv("K230_PAGE_SMOKE_CYCLES");
         const char *interval_text = getenv("K230_PAGE_SMOKE_INTERVAL_MS");
@@ -14752,5 +14774,5 @@ int main(void)
     ui_nrf52840_manager_shutdown();
     ui_hardware_reboot_diag_dump("app-stop-after-hardware-shutdown");
     touch_trace_log("APP_STOP");
-    return 0;
+    return app_exit_code;
 }
