@@ -63,6 +63,7 @@
 #define K230_NRF9151_GNSS_OWNER_CELLULAR (1U << 1)
 #define K230_NRF9151_GNSS_OWNER_MESHTASTIC (1U << 2)
 #define K230_NRF9151_GNSS_OWNER_LOCATION (1U << 3)
+#define K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP (1U << 4)
 
 typedef struct {
     int fd;
@@ -136,11 +137,12 @@ static uint64_t nrf9151_manager_monotonic_us(void)
 
 static int nrf9151_manager_gnss_foreground_requested_locked(void)
 {
-    /* Only an explicit GNSS UI/legacy request may hold the UART. Meshtastic
-     * and the location service are background requests serviced by samples. */
+    /* Only an explicit GNSS UI request may hold the UART. Meshtastic
+     * background reporting and the location service are serviced by samples. */
     return (nrf9151_gnss_monitor.owners &
             (K230_NRF9151_GNSS_OWNER_LEGACY |
-             K230_NRF9151_GNSS_OWNER_CELLULAR)) != 0U;
+             K230_NRF9151_GNSS_OWNER_CELLULAR |
+             K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP)) != 0U;
 }
 
 static int nrf9151_manager_gnss_uart_owned_locked(void)
@@ -181,6 +183,10 @@ static unsigned int nrf9151_manager_gnss_owner_bit(const char *owner)
     if(strcmp(owner, "meshtastic") == 0 || strcmp(owner, "mesh") == 0) {
         return K230_NRF9151_GNSS_OWNER_MESHTASTIC;
     }
+    if(strcmp(owner, "meshtastic-map") == 0 ||
+       strcmp(owner, "mesh-map") == 0) {
+        return K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP;
+    }
     if(strcmp(owner, K230_NRF9151_LOCATION_OWNER) == 0 ||
        strcmp(owner, "location") == 0 || strcmp(owner, "system") == 0) {
         return K230_NRF9151_GNSS_OWNER_LOCATION;
@@ -197,6 +203,8 @@ static const char *nrf9151_manager_gnss_owner_name(unsigned int bit)
         return "meshtastic";
     case K230_NRF9151_GNSS_OWNER_LOCATION:
         return "location";
+    case K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP:
+        return "meshtastic-map";
     default:
         return "legacy";
     }
@@ -4070,7 +4078,8 @@ int k230_nrf9151_start_gnss_monitor_for(const char *owner)
     int already_owned;
     int foreground_owner =
         (owner_bit & (K230_NRF9151_GNSS_OWNER_LEGACY |
-                      K230_NRF9151_GNSS_OWNER_CELLULAR)) != 0U;
+                      K230_NRF9151_GNSS_OWNER_CELLULAR |
+                      K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP)) != 0U;
 
     (void)k230_nrf9151_status_monitor_start();
     pthread_mutex_lock(&nrf9151_manager_lock);

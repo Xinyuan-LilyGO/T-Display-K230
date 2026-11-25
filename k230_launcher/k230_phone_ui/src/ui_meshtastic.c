@@ -277,6 +277,7 @@ static int mesh_voice_available = 0;
 static int mesh_photo_available = 0;
 static int mesh_map_fake_gps_enabled = 1;
 static int mesh_map_zoom = MESHTASTIC_MAP_DEFAULT_ZOOM;
+static int mesh_map_gnss_foreground_owned;
 static int mesh_map_center_valid = 0;
 static double mesh_map_center_lat;
 static double mesh_map_center_lon;
@@ -9172,6 +9173,27 @@ static void mesh_map_close(void)
     }
     mesh_map_overlay = NULL;
     mesh_map_has_position = 0;
+    if(mesh_map_gnss_foreground_owned) {
+        (void)k230_nrf9151_stop_gnss_monitor_for("meshtastic-map");
+        mesh_map_gnss_foreground_owned = 0;
+    }
+}
+
+static void mesh_map_update_gnss_owner(void)
+{
+    int should_own = !mesh_map_fake_gps_enabled &&
+                     k230_nrf9151_location_autostart_enabled();
+
+    if(should_own && !mesh_map_gnss_foreground_owned) {
+        if(k230_nrf9151_start_gnss_monitor_for("meshtastic-map") == 0) {
+            mesh_map_gnss_foreground_owned = 1;
+            mesh_ui_trace("map GNSS foreground owner acquired");
+        }
+    } else if(!should_own && mesh_map_gnss_foreground_owned) {
+        (void)k230_nrf9151_stop_gnss_monitor_for("meshtastic-map");
+        mesh_map_gnss_foreground_owned = 0;
+        mesh_ui_trace("map GNSS foreground owner released");
+    }
 }
 
 static void mesh_map_close_event_cb(lv_event_t *event)
@@ -10119,6 +10141,7 @@ static void mesh_map_fake_button_event_cb(lv_event_t *event)
 {
     (void)event;
     mesh_map_fake_gps_enabled = mesh_map_fake_gps_enabled ? 0 : 1;
+    mesh_map_update_gnss_owner();
     mesh_map_recenter();
     mesh_map_save_prefs();
     mesh_map_rebuild();
@@ -12687,6 +12710,8 @@ static void mesh_map_event_cb(lv_event_t *event)
 {
     (void)event;
     ui_input_hide_inline_active();
+    mesh_map_load_prefs();
+    mesh_map_update_gnss_owner();
     if(!mesh_map_overlay || !lv_obj_is_valid(mesh_map_overlay)) {
         mesh_map_overlay = lv_obj_create(lv_screen_active());
         ui_set_fullscreen(mesh_map_overlay);
