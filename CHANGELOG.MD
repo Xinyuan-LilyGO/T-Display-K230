@@ -2,6 +2,20 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## v0.3.2 - 2026-11-25
+
+- Added nRF9151 application firmware version reporting and improved live GNSS
+  satellite updates in the cellular information views.
+- Restored LTE automatically after foreground GNSS sessions so HTTP and MQTT
+  remain usable after switching between positioning and cellular data.
+- Changed Meshtastic Map to keep GNSS in priority mode while the map is open,
+  pausing LTE until the map closes instead of returning to coexistence after a
+  fixed timeout.
+- Improved Meshtastic Map cold-start behavior by disabling Debug GPS by default
+  and continuing to refresh cached coordinates until a new live GNSS fix arrives.
+- Removed the obsolete nRF9151 background-location startup switch; background
+  sampling is now managed automatically by the shared modem manager.
+
 ## v0.3.1 - 2026-11-21
 
 - Added nRF Cloud setup and A-GNSS provisioning controls to the cellular
