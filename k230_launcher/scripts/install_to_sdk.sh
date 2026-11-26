@@ -78,6 +78,7 @@ write_build_info_override "$PACKAGE_DIR/src/ui_build_info_override.cmake" \
 # The SDK overlay sync and Buildroot package rsync can leave stale generated
 # package files behind. Remove generated copies before syncing this launcher.
 rm -rf "$OUTPUT_BUILDROOT_PACKAGE_DIR" "$OUTPUT_PACKAGE_BUILD_DIR" "$OUTPUT_TARGET_APP_DIR"
+rm -rf "$OUTPUT_CONF_DIR/target/root/megadrive" "$OUTPUT_CONF_DIR/target/root/snes"
 
 if ! grep -q 'source "package/k230_phone_ui/Config.in"' "$CONFIG_IN"; then
     {
@@ -95,7 +96,10 @@ fi
 install -D -m 0755 "$LAUNCHER_DIR/rootfs_overlay/etc/init.d/S99zz_k230_phone_ui" \
     "$ROOTFS_DIR/etc/init.d/S99zz_k230_phone_ui"
 
-mkdir -p "$ROOTFS_DIR/root/music" "$ROOTFS_DIR/root/nes" "$ROOTFS_DIR/root/videos" \
+rm -rf "$ROOTFS_DIR/root/megadrive" "$ROOTFS_DIR/root/snes"
+mkdir -p "$ROOTFS_DIR/root/music" "$ROOTFS_DIR/root/nes" \
+    "$ROOTFS_DIR/root/gameboy" \
+    "$ROOTFS_DIR/root/videos" \
     "$ROOTFS_DIR/root/photos" "$ROOTFS_DIR/root/screenshots" "$ROOTFS_DIR/root/qrcode" \
     "$ROOTFS_DIR/root/recordings" "$ROOTFS_DIR/root/lorawan" \
     "$ROOTFS_DIR/root/meshtastic" "$ROOTFS_DIR/root/notification" \

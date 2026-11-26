@@ -27,8 +27,8 @@
   MTP、Wi-Fi、以太网、显示、音频、通知、触觉反馈、电池、充电器、传感器、键盘和系统设置
 - Beta 应用：Meshtastic、LoRaWAN、小智语音助手、PicoClaw、
   nRF9151 蜂窝/GNSS 数据工具、nRF52840 UART DFU
-- 用户自备资源：默认镜像不内置 NES ROM 和离线地图瓦片，用户可通过 SD 卡或
-  MTP 自行复制
+- 用户自备资源：默认镜像不内置 NES、Game Boy、Game Boy Color ROM 和离线地图瓦片，用户可
+  通过 SD 卡或 MTP 自行复制
 
 ## 目录结构
 
@@ -237,4 +237,4 @@ Launcher：
 - 小智需要网络连接和兼容小智协议的服务。唤醒词监听只会在打开小智应用并占用
   麦克风时启用。
 - PicoClaw 需要网络连接和 OpenAI 兼容模型 API key。
-- 离线地图瓦片、NES ROM 和用户媒体文件需要用户自行复制到 SD 卡中
+- 离线地图瓦片、NES、Game Boy、Game Boy Color ROM 和用户媒体文件需要用户自行复制到 SD 卡中

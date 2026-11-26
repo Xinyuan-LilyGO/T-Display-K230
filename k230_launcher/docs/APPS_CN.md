@@ -26,6 +26,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `/root/music` | 本地音乐播放器 |
 | `/root/videos` | 视频播放器 |
 | `/root/nes` | NES ROM 浏览 |
+| `/root/gameboy` | Game Boy / Game Boy Color ROM 浏览及 `.sav` 存档 |
 | `/root/photos` | 相机拍照和图库 |
 | `/root/screenshots` | 截图文件 |
 | `/root/qrcode` | 二维码扫描结果 |
@@ -56,6 +57,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Meshtastic` | Beta 应用，控制独立 `k230_meshtastic_probe` daemon，提供 Meshtastic 风格 LoRa mesh 文字、仅限 LR2021 的 K230 设备间语音/图片传输、节点缓存、地图、频道配置档和 profile 设置。SX1262 版本仅支持基础文字 mesh 消息 | 进入应用后 daemon 自动启动。通过设置图标配置 region、preset、channel、PSK、TX power、node/from/to/hop/ACK。在消息输入框直接输入并发送；LR2021 版本可按住语音按钮录制语音，节点页面可查看节点缓存。通过 `Channel` 可以保存/加载 K230 频道配置档、保存官方 Meshtastic 频道 URL，也可以手动输入 URL 导入频道。摄像头二维码扫描仍属于实验功能，推荐使用 URL 导入。收到新消息时会播放 `设置` > `通知` 中选择的音效。离线地图瓦片从 `/root/maps` 读取，详见 [MAPS_CN.md](MAPS_CN.md) |
 | `LoRaWAN` | 管理 LoRaWAN profile，并通过 LoRa 模块运行 OTAA 入网和发送测试 | 加载已有 profile，或新建/编辑 profile应用会检查密钥长度配置保存后才能运行，可按需开启模拟温度数据上传 |
 | `NES` | 从 `/root/nes` 加载 `.nes` ROM，并支持触摸按键和硬件键盘控制 | 镜像默认不内置 NES ROM请自行将 ROM 文件放入 `/root/nes`，再从列表选择 ROM键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 为 Start，`Space` 或 `Shift` 为 Select，`U/I/O` 为 A，`H/J/K` 为 B，`Esc` 停止游戏或返回 ROM 列表 |
+| `Game Boy` | 从 `/root/gameboy` 加载 `.gb` 和 `.gbc` ROM，并通过 SameBoy 核心运行 | 镜像默认不内置 ROM。电池存档和 RTC 数据以同名 `.sav` 文件保存在 ROM 旁边。键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 或 `Space` 为 Start，`U/I/O` 为 A/B/Select，`Esc` 停止游戏或返回 ROM 列表 |
 | `AI` | 打开随镜像提供的 K230 AI 示例界面 | 当模型资源存在时，可以运行支持的本地 AI 示例，并在屏幕上查看结果 |
 | `Xiaozhi` / 小智 | 面向兼容小智协议 WebSocket 服务的语音助手客户端，支持官方 6 位验证码绑定、唤醒词入口、按住说话、硬件 MIC 键、聊天气泡记录、全屏机器人表情模式和会话自动恢复 | 首次使用时在 xiaozhi.me 控制台点击添加设备，然后在 K230 小智页面发送第一条语音消息，服务端会在设备上返回 6 位绑定验证码，将验证码输入网页即可。绑定成功后会自动保存服务器地址和令牌。可以说出唤醒词 `xiaozhi`、按住 `PTT`，或按下硬件 MIC 键开始说话。点击 `Face` 进入全屏机器人表情，点击 `New chat` 清空当前对话。小智只会在应用打开期间占用麦克风 |
 | `PicoClaw` | PicoClaw 轻量 Agent 聊天入口，支持 OpenAI 兼容模型 profile、保存 API 密钥、发送文本问题，并支持微信扫码登录 | 先连接网络，进入 PicoClaw 设置页选择模型 profile 并填写 API 密钥，或者通过 SSH 命令快速写入 profile，然后回到聊天界面直接输入发送。需要微信接入时，在设置页点击 `微信登录`，用手机微信扫描屏幕二维码完成登录 |

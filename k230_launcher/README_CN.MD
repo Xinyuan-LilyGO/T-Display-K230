@@ -17,7 +17,7 @@ nRF52840 和 nRF9151。
 主要应用分组：
 
 - 相机、相册、截图、视频、音乐、网络电台、录音、麦克风 FFT、I2S 测试、
-  终端、NES、MTP 和屏幕测试
+  终端、NES、Game Boy、MTP 和屏幕测试
 - Wi-Fi、以太网、蓝牙、显示、音频、通知音效、触觉反馈、语言、时间、
   传感器、充电器、电池、键盘、F 键热键和系统信息设置
 - LoRa profile 测试、LoRaWAN profile 管理、nRF52840 DFU、nRF9151
@@ -99,7 +99,7 @@ PicoClaw 的模型 profile 可以在设备上通过 SSH 快速写入，避免在
 - `buildroot-overlay/package/k230_phone_ui`
 - 在 `k230_canmv_t_display_rm69a10_defconfig` 中启用 `BR2_PACKAGE_K230_PHONE_UI=y`
 - `S99zz_k230_phone_ui` 自启动服务
-- 默认媒体目录：`/root/music`、`/root/nes`、`/root/videos`、`/root/photos`、`/root/screenshots`、`/root/recordings`、`/root/lorawan`、`/root/meshtastic`、`/root/notification`、`/root/nrf52840/firmware`
+- 默认媒体目录：`/root/music`、`/root/nes`、`/root/gameboy`、`/root/videos`、`/root/photos`、`/root/screenshots`、`/root/recordings`、`/root/lorawan`、`/root/meshtastic`、`/root/notification`、`/root/nrf52840/firmware`
 - 可选打包媒体：将 `resources/videos` 同步到镜像内 `/root/videos`
 - 可选打包媒体：将 `resources/music` 同步到镜像内 `/root/music`
 - 可选打包通知音效：将 `resources/notification` 同步到镜像内 `/root/notification`
@@ -148,6 +148,7 @@ Launcher 会使用设备上的这些目录：
 /root/screenshots          PNG 截图
 /root/recordings           录音文件
 /root/nes                  用户自行提供的 NES ROM
+/root/gameboy              用户自行提供的 GB/GBC ROM 和存档
 /root/lorawan              LoRaWAN profile JSON 文件
 /root/meshtastic           Meshtastic 频道、profile 和缓存文件
 /root/notification         通知音效文件
@@ -155,7 +156,7 @@ Launcher 会使用设备上的这些目录：
 /root/maps                 用户自行复制的离线地图瓦片
 ```
 
-默认镜像不内置 NES ROM 和离线地图瓦片。地图瓦片目录结构和下载方式请看
+默认镜像不内置 NES、Game Boy ROM 和离线地图瓦片。地图瓦片目录结构和下载方式请看
 [docs/MAPS_CN.md](docs/MAPS_CN.md)。
 
 ## 注意

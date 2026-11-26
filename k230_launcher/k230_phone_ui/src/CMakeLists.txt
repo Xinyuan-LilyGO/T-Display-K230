@@ -68,6 +68,7 @@ option(K230_INSTALL_DEBUG_PROBES "Install low-level display/debug probe utilitie
 
 set(RADIOLIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/RadioLib/src)
 set(NOFRENDO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nofrendo/src)
+set(SAMEBOY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sameboy)
 set(LIBTMT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libtmt)
 set(QRCODEGEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen)
 set(QUIRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quirc)
@@ -117,6 +118,26 @@ file(GLOB NOFRENDO_SOURCES
     ${NOFRENDO_DIR}/mappers/*.c
     ${NOFRENDO_DIR}/nes/*.c
     ${NOFRENDO_DIR}/sndhrdw/*.c
+)
+set(SAMEBOY_SOURCES
+    ${SAMEBOY_DIR}/Core/gb.c
+    ${SAMEBOY_DIR}/Core/sgb.c
+    ${SAMEBOY_DIR}/Core/apu.c
+    ${SAMEBOY_DIR}/Core/memory.c
+    ${SAMEBOY_DIR}/Core/mbc.c
+    ${SAMEBOY_DIR}/Core/timing.c
+    ${SAMEBOY_DIR}/Core/display.c
+    ${SAMEBOY_DIR}/Core/camera.c
+    ${SAMEBOY_DIR}/Core/sm83_cpu.c
+    ${SAMEBOY_DIR}/Core/joypad.c
+    ${SAMEBOY_DIR}/Core/save_state.c
+    ${SAMEBOY_DIR}/Core/random.c
+    ${SAMEBOY_DIR}/Core/rumble.c
+    ${SAMEBOY_DIR}/dmg_boot.c
+    ${SAMEBOY_DIR}/cgb_boot.c
+)
+set_source_files_properties(${SAMEBOY_SOURCES} PROPERTIES
+    COMPILE_DEFINITIONS "GB_INTERNAL;_GNU_SOURCE;GB_VERSION=\"1.0.5\""
 )
 set(RADIOLIB_REQUIRED_SOURCES
     ${RADIOLIB_DIR}/Hal.cpp
@@ -193,9 +214,11 @@ set(K230_PHONE_UI_SOURCES
     ui_qr_scanner.c
     ui_lora.cpp
     ui_nes.cpp
+    ui_gameboy.cpp
     ${LIBTMT_DIR}/tmt.c
     ${QRCODEGEN_DIR}/qrcodegen.c
     ${NOFRENDO_SOURCES}
+    ${SAMEBOY_SOURCES}
     ${RADIOLIB_REQUIRED_SOURCES}
 )
 
@@ -353,6 +376,10 @@ target_compile_definitions(k230_phone_ui PRIVATE
     K230_PAGE_SMOKE_TEST=0
     K230_ENABLE_DEV_APPS=$<BOOL:${K230_ENABLE_DEV_APPS}>
     K230_CAMERA_FACE_KPU=${K230_PHONE_UI_FACE_DETECT_ENABLED}
+    RETRO_GO=1
+    GB_DISABLE_REWIND=1
+    GB_DISABLE_DEBUGGER=1
+    GB_DISABLE_CHEATS=1
 )
 
 target_compile_definitions(k230_phone_ui_fullswitch_test PRIVATE
@@ -362,6 +389,10 @@ target_compile_definitions(k230_phone_ui_fullswitch_test PRIVATE
     K230_PAGE_SMOKE_TEST=1
     K230_ENABLE_DEV_APPS=$<BOOL:${K230_ENABLE_DEV_APPS}>
     K230_CAMERA_FACE_KPU=${K230_PHONE_UI_FACE_DETECT_ENABLED}
+    RETRO_GO=1
+    GB_DISABLE_REWIND=1
+    GB_DISABLE_DEBUGGER=1
+    GB_DISABLE_CHEATS=1
 )
 
 foreach(ui_target k230_phone_ui k230_phone_ui_fullswitch_test)

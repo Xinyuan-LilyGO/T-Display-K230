@@ -19,7 +19,7 @@ nRF9151.
 Main app groups:
 
 - Camera, gallery, screenshot, video, music, network radio, recorder, mic FFT,
-  I2S test, terminal, NES, MTP, and display test.
+  I2S test, terminal, NES, Game Boy, MTP, and display test.
 - Network and system settings for Wi-Fi, Ethernet, Bluetooth, display, audio,
   notification sounds, haptics, language, time, sensors, charger, battery,
   keyboard, F-key hotkeys, and system information.
@@ -106,7 +106,7 @@ The script installs:
 - `buildroot-overlay/package/k230_phone_ui`
 - `BR2_PACKAGE_K230_PHONE_UI=y` in `k230_canmv_t_display_rm69a10_defconfig`
 - `S99zz_k230_phone_ui` autostart service
-- default media folders: `/root/music`, `/root/nes`, `/root/videos`, `/root/photos`, `/root/screenshots`, `/root/recordings`, `/root/lorawan`, `/root/meshtastic`, `/root/notification`, `/root/nrf52840/firmware`
+- default media folders: `/root/music`, `/root/nes`, `/root/gameboy`, `/root/videos`, `/root/photos`, `/root/screenshots`, `/root/recordings`, `/root/lorawan`, `/root/meshtastic`, `/root/notification`, `/root/nrf52840/firmware`
 - optional bundled media from `resources/videos` into `/root/videos`
 - optional bundled media from `resources/music` into `/root/music`
 - optional bundled notification sounds from `resources/notification` into `/root/notification`
@@ -155,6 +155,7 @@ The launcher expects these folders on the device:
 /root/screenshots          PNG screenshots
 /root/recordings           Recorder output
 /root/nes                  User-provided NES ROM files
+/root/gameboy              User-provided GB/GBC ROM files and save data
 /root/lorawan              LoRaWAN profile JSON files
 /root/meshtastic           Meshtastic channel/profile/cache files
 /root/notification         Notification sound files
@@ -162,7 +163,7 @@ The launcher expects these folders on the device:
 /root/maps                 Optional offline map tiles copied by the user
 ```
 
-NES ROMs and offline map tiles are not bundled by default. See
+NES and Game Boy ROMs and offline map tiles are not bundled by default. See
 [docs/MAPS.md](docs/MAPS.md) for the expected map tile directory layout and
 download options.
 

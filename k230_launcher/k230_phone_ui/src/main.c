@@ -244,6 +244,7 @@
 #include "ui_meshtastic.h"
 #include "ui_mic_spectrum.h"
 #include "ui_nes.h"
+#include "ui_gameboy.h"
 #include "ui_nrf52840_dfu.h"
 #include "ui_picoclaw.h"
 #include "ui_qr_scanner.h"
@@ -682,6 +683,7 @@ static const app_item_t app_items[] = {
 #endif
     {"LoRaWAN", "WAN", 0x14B8A6, PAGE_LORAWAN},
     {"NES", "NES", 0xF97316, PAGE_NES},
+    {"Game Boy", "GB", 0x8CBF3F, PAGE_GAMEBOY},
     {"AI", LV_SYMBOL_BARS, 0xFF6B6B, PAGE_AI},
     {"Xiaozhi", "AI", 0x60A5FA, PAGE_XIAOZHI},
     {"PicoClaw", "PC", 0x38BDF8, PAGE_PICOCLAW},
@@ -809,6 +811,8 @@ static const char *page_name(page_id_t page)
         return "LoRaWAN";
     case PAGE_NES:
         return "NES";
+    case PAGE_GAMEBOY:
+        return "Game Boy";
     case PAGE_SYSTEM:
         return "System";
     case PAGE_STORAGE_EXPAND:
@@ -4662,6 +4666,9 @@ static void nav_back(void)
         return;
     }
     if(current_page == PAGE_NES && ui_nes_handle_back()) {
+        return;
+    }
+    if(current_page == PAGE_GAMEBOY && ui_gameboy_handle_back()) {
         return;
     }
     if(current_page == PAGE_VIDEO && ui_video_player_handle_back()) {
@@ -13019,6 +13026,7 @@ static void cleanup_page_state(void)
     ui_meshtastic_cleanup();
     ui_qr_scanner_cleanup();
     ui_nes_cleanup();
+    ui_gameboy_cleanup();
     ui_mic_spectrum_cleanup();
     ui_hardware_cleanup();
     ui_i2s_test_cleanup();
@@ -14319,6 +14327,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_NES:
         ui_nes_create(scr);
+        break;
+    case PAGE_GAMEBOY:
+        ui_gameboy_create(scr);
         break;
     case PAGE_SYSTEM:
         create_system_page(scr);

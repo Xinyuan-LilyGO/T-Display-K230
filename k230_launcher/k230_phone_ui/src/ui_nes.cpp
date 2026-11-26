@@ -1507,6 +1507,7 @@ static void nes_create_game(lv_obj_t *parent)
     lv_obj_add_flag(nes_game_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_scrollbar_mode(nes_game_panel, LV_SCROLLBAR_MODE_OFF);
     if(landscape) {
+        lv_obj_set_style_pad_all(nes_game_panel, 0, 0);
         lv_obj_clear_flag(nes_game_panel, LV_OBJ_FLAG_SCROLLABLE);
     }
 
@@ -1546,7 +1547,9 @@ static void nes_create_game(lv_obj_t *parent)
                        (side_w - ab * 2 - 18) / 2;
         int action_y = frame_y + frame_h / 2 - ab / 2;
         int sys_w = (side_w - 14) / 2;
-        int sys_y = body_h - 58;
+        int sys_h = 46;
+        int sys_bottom_inset = body_h < 420 ? 24 : 44;
+        int sys_y = body_h - sys_bottom_inset - sys_h;
 
         if(dpad_x < margin) {
             dpad_x = margin;
@@ -1560,8 +1563,8 @@ static void nes_create_game(lv_obj_t *parent)
         if(sys_y < dpad_y + pad * 2 + 12) {
             sys_y = dpad_y + pad * 2 + 12;
         }
-        if(sys_y + 46 > body_h - 8) {
-            sys_y = body_h - 54;
+        if(sys_y + sys_h > body_h - 8) {
+            sys_y = body_h - sys_h - 8;
         }
 
         nes_add_control(nes_game_panel, dpad_x + pad, dpad_y - pad, pad, pad,
@@ -1576,10 +1579,10 @@ static void nes_create_game(lv_obj_t *parent)
                         "B", 0x2563EB, 7);
         nes_add_control(nes_game_panel, action_x + ab + 18, action_y - ab / 4,
                         ab, ab, "A", 0xEF4D5A, 6);
-        nes_add_control(nes_game_panel, margin, sys_y, sys_w, 46,
+        nes_add_control(nes_game_panel, margin, sys_y, sys_w, sys_h,
                         "Select", 0x374151, 4);
         nes_add_control(nes_game_panel, margin + sys_w + 14, sys_y,
-                        sys_w, 46, "Start", 0x374151, 5);
+                        sys_w, sys_h, "Start", 0x374151, 5);
     } else {
         nes_add_control(nes_game_panel, 54, 690, 82, 82, "Up", 0x1F2937, 0);
         nes_add_control(nes_game_panel, 54, 874, 82, 82, "Down", 0x1F2937, 1);

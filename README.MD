@@ -31,8 +31,8 @@ Feature status:
   haptic, battery, charger, sensor, keyboard, and system settings.
 - Beta apps: Meshtastic, LoRaWAN, Xiaozhi voice assistant, PicoClaw,
   nRF9151 cellular/GNSS data tools, and nRF52840 UART DFU.
-- User-provided content: NES ROM files and offline map tiles are not bundled in
-  the default image.
+- User-provided content: NES, Game Boy, and Game Boy Color ROM files and offline map tiles are
+  not bundled in the default image.
 
 ## Repository Layout
 
@@ -246,5 +246,5 @@ Generated image files under `k230_bsp/images/` are local build artifacts.
 - Xiaozhi requires network access and a compatible Xiaozhi service. Wake-word
   listening is active only while the Xiaozhi app is open and owns the microphone.
 - PicoClaw requires network access and an OpenAI-compatible model API key.
-- Offline map tiles, NES ROMs, and user media files should be copied to the SD
-  card by the user.
+- Offline map tiles, NES, Game Boy, and Game Boy Color ROMs, and user media files should be
+  copied to the SD card by the user.
