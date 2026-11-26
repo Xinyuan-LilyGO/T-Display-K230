@@ -68,7 +68,11 @@ option(K230_INSTALL_DEBUG_PROBES "Install low-level display/debug probe utilitie
 
 set(RADIOLIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/RadioLib/src)
 set(NOFRENDO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nofrendo/src)
+set(GWENESIS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/gwenesis)
 set(SAMEBOY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sameboy)
+set(SNES9X_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/snes9x)
+set(CHIPS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/chips)
+set(MUSASHI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/musashi)
 set(LIBTMT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libtmt)
 set(QRCODEGEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen)
 set(QUIRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quirc)
@@ -119,6 +123,14 @@ file(GLOB NOFRENDO_SOURCES
     ${NOFRENDO_DIR}/nes/*.c
     ${NOFRENDO_DIR}/sndhrdw/*.c
 )
+file(GLOB GWENESIS_SOURCES
+    ${GWENESIS_DIR}/src/bus/*.c
+    ${GWENESIS_DIR}/src/cpus/*.c
+    ${GWENESIS_DIR}/src/io/*.c
+    ${GWENESIS_DIR}/src/savestate/*.c
+    ${GWENESIS_DIR}/src/sound/*.c
+    ${GWENESIS_DIR}/src/vdp/*.c
+)
 set(SAMEBOY_SOURCES
     ${SAMEBOY_DIR}/Core/gb.c
     ${SAMEBOY_DIR}/Core/sgb.c
@@ -138,6 +150,16 @@ set(SAMEBOY_SOURCES
 )
 set_source_files_properties(${SAMEBOY_SOURCES} PROPERTIES
     COMPILE_DEFINITIONS "GB_INTERNAL;_GNU_SOURCE;GB_VERSION=\"1.0.5\""
+)
+file(GLOB SNES9X_SOURCES ${SNES9X_DIR}/src/*.c)
+set_source_files_properties(${SNES9X_SOURCES} PROPERTIES
+    COMPILE_DEFINITIONS "RIGHTSHIFT_IS_SAR;NO_ZERO_LUT;K230_SNES9X_PORT"
+    COMPILE_OPTIONS "-include;stdint.h;-include;stddef.h;-include;stdio.h;-Wno-unused-function;-Wno-unused-variable;-Wno-implicit-fallthrough"
+)
+set(MUSASHI_SOURCES
+    ${MUSASHI_DIR}/m68kcpu.c
+    ${MUSASHI_DIR}/m68kops.c
+    ${MUSASHI_DIR}/softfloat/softfloat.c
 )
 set(RADIOLIB_REQUIRED_SOURCES
     ${RADIOLIB_DIR}/Hal.cpp
@@ -214,11 +236,16 @@ set(K230_PHONE_UI_SOURCES
     ui_qr_scanner.c
     ui_lora.cpp
     ui_nes.cpp
+    ui_megadrive.cpp
     ui_gameboy.cpp
+    ui_snes.cpp
     ${LIBTMT_DIR}/tmt.c
     ${QRCODEGEN_DIR}/qrcodegen.c
     ${NOFRENDO_SOURCES}
+    ${GWENESIS_SOURCES}
     ${SAMEBOY_SOURCES}
+    ${SNES9X_SOURCES}
+    ${MUSASHI_SOURCES}
     ${RADIOLIB_REQUIRED_SOURCES}
 )
 
@@ -281,6 +308,15 @@ target_include_directories(${ui_target} PRIVATE
     ${CMAKE_SYSROOT}/usr/include/libevdev-1.0
     ${RADIOLIB_DIR}
     ${NOFRENDO_DIR}
+    ${GWENESIS_DIR}
+    ${GWENESIS_DIR}/src/bus
+    ${GWENESIS_DIR}/src/cpus
+    ${GWENESIS_DIR}/src/io
+    ${GWENESIS_DIR}/src/savestate
+    ${GWENESIS_DIR}/src/sound
+    ${GWENESIS_DIR}/src/vdp
+    ${CHIPS_DIR}
+    ${MUSASHI_DIR}
     ${LIBTMT_DIR}
     ${QRCODEGEN_DIR}
     ${CMAKE_SYSROOT}/usr/include/opencv4
@@ -377,6 +413,7 @@ target_compile_definitions(k230_phone_ui PRIVATE
     K230_ENABLE_DEV_APPS=$<BOOL:${K230_ENABLE_DEV_APPS}>
     K230_CAMERA_FACE_KPU=${K230_PHONE_UI_FACE_DETECT_ENABLED}
     RETRO_GO=1
+    K230_SNES9X_PORT=1
     GB_DISABLE_REWIND=1
     GB_DISABLE_DEBUGGER=1
     GB_DISABLE_CHEATS=1
@@ -390,6 +427,7 @@ target_compile_definitions(k230_phone_ui_fullswitch_test PRIVATE
     K230_ENABLE_DEV_APPS=$<BOOL:${K230_ENABLE_DEV_APPS}>
     K230_CAMERA_FACE_KPU=${K230_PHONE_UI_FACE_DETECT_ENABLED}
     RETRO_GO=1
+    K230_SNES9X_PORT=1
     GB_DISABLE_REWIND=1
     GB_DISABLE_DEBUGGER=1
     GB_DISABLE_CHEATS=1

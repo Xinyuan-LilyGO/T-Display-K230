@@ -114,7 +114,9 @@ typedef enum {
     PAGE_NRF52840_DFU,
     PAGE_STORAGE_EXPAND,
     PAGE_QR_SCANNER,
+    PAGE_MEGADRIVE,
     PAGE_GAMEBOY,
+    PAGE_SNES,
 } page_id_t;
 
 void app_nav_to_page(page_id_t page);
