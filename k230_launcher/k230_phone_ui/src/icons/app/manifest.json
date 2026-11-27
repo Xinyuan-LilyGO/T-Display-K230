@@ -126,6 +126,12 @@
     "runtime": "adsb.png"
   },
   {
+    "file": "gameboy.svg",
+    "mdi": "nintendo-game-boy",
+    "color": "#8CBF3F",
+    "runtime": "gameboy.png"
+  },
+  {
     "file": "ai.svg",
     "mdi": "brain",
     "color": "#FF6B6B",

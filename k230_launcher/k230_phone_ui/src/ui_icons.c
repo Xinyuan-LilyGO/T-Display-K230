@@ -46,6 +46,8 @@ static const char *ui_icon_name_for_page(page_id_t page)
         return "adsb";
     case PAGE_NES:
         return "nes";
+    case PAGE_GAMEBOY:
+        return "gameboy";
     case PAGE_SYSTEM:
         return "system";
     case PAGE_STORAGE_EXPAND:
@@ -170,6 +172,8 @@ const char *ui_icon_path_for_page(page_id_t page)
         return UI_ICON_FILE("adsb");
     case PAGE_NES:
         return UI_ICON_FILE("nes");
+    case PAGE_GAMEBOY:
+        return UI_ICON_FILE("gameboy");
     case PAGE_SYSTEM:
         return UI_ICON_FILE("system");
     case PAGE_STORAGE_EXPAND:

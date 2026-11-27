@@ -31,6 +31,7 @@ embedded RGB565A8 `lv_image_dsc_t` data generated from these PNG files at the UI
 | `lorawan.svg` | `lorawan.png` | `access-point-network` | `#14B8A6` |
 | `adsb.svg` | `adsb.png` | `radar` | `#F59E0B` |
 | `nes.svg` | `nes.png` | `nintendo-game-boy` | `#F97316` |
+| `gameboy.svg` | `gameboy.png` | `nintendo-game-boy` | `#8CBF3F` |
 | `ai.svg` | `ai.png` | `brain` | `#FF6B6B` |
 | `rtsp.svg` | `rtsp.png` | `cctv` | `#22C55E` |
 | `wifi.svg` | `wifi.png` | `wifi` | `#25C281` |
