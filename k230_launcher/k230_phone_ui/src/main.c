@@ -676,6 +676,7 @@ static const app_item_t app_items[] = {
     {"Record", LV_SYMBOL_STOP, 0xEF4D5A, PAGE_RECORDER},
     {"Mic FFT", LV_SYMBOL_BARS, 0x22D3EE, PAGE_MIC_FFT},
     {"LoRa", LV_SYMBOL_UPLOAD, 0x7C3AED, PAGE_LORA},
+    {"ADS-B", "1090", 0xF59E0B, PAGE_ADSB},
     {"Meshtastic", "MESH", 0x10B981, PAGE_MESHTASTIC},
 #if K230_ENABLE_DEV_APPS
     {"LoRa FLRC", "FLRC", 0xA855F7, PAGE_LORA_FLRC},
@@ -801,6 +802,8 @@ static const char *page_name(page_id_t page)
         return "Mic FFT";
     case PAGE_LORA:
         return "LoRa";
+    case PAGE_ADSB:
+        return "ADS-B";
     case PAGE_MESHTASTIC:
         return "Meshtastic";
     case PAGE_LORA_FLRC:
@@ -903,6 +906,7 @@ static const char *page_name(page_id_t page)
 static int page_uses_lora_radio(page_id_t page)
 {
     return page == PAGE_LORA ||
+           page == PAGE_ADSB ||
            page == PAGE_LORA_FLRC ||
            page == PAGE_LORAWAN;
 }
@@ -6315,6 +6319,9 @@ static int app_item_visible(const app_item_t *item)
     if((item->page == PAGE_LORA || item->page == PAGE_LORA_FLRC ||
         item->page == PAGE_LORAWAN || item->page == PAGE_MESHTASTIC) &&
        ui_lora_hardware_available() != 1) {
+        return 0;
+    }
+    if(item->page == PAGE_ADSB && !ui_lora_lr2021_available()) {
         return 0;
     }
     return 1;
@@ -13020,6 +13027,7 @@ static void cleanup_page_state(void)
     camera_stop_preview();
     ui_audio_cleanup();
     ui_lorawan_cleanup();
+    ui_adsb_cleanup();
     ui_halow_cleanup();
     ui_lora_flrc_cleanup();
     ui_lora_cleanup();
@@ -14196,9 +14204,12 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
 
     (void)anim_ms;
 
-    if((page == PAGE_LORA || page == PAGE_LORA_FLRC ||
+    if((page == PAGE_LORA || page == PAGE_ADSB || page == PAGE_LORA_FLRC ||
         page == PAGE_LORAWAN || page == PAGE_MESHTASTIC) &&
        ui_lora_hardware_available() != 1) {
+        page = PAGE_HOME;
+    }
+    if(page == PAGE_ADSB && !ui_lora_lr2021_available()) {
         page = PAGE_HOME;
     }
 
@@ -14312,6 +14323,9 @@ static void render_page(page_id_t page, lv_screen_load_anim_t anim_type,
         break;
     case PAGE_LORA:
         ui_lora_create(scr);
+        break;
+    case PAGE_ADSB:
+        ui_adsb_create(scr);
         break;
     case PAGE_MESHTASTIC:
         ui_meshtastic_create(scr);

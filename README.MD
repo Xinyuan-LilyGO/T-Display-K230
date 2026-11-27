@@ -22,7 +22,7 @@ See [CHANGELOG.MD](CHANGELOG.MD) for release history.
 The public image includes a phone-style LVGL launcher, responsive
 portrait/landscape layouts, camera and media apps, settings pages, optional
 keyboard-base hardware support, nRF52840/nRF9151 management, LoRa/LoRaWAN
-tools, and Meshtastic beta support.
+tools, an LR2021-only 1090 MHz ADS-B receiver demo, and Meshtastic beta support.
 
 Feature status:
 
@@ -30,7 +30,7 @@ Feature status:
   video player, terminal, MTP, Wi-Fi, Ethernet, display, audio, notification,
   haptic, battery, charger, sensor, keyboard, and system settings.
 - Beta apps: Meshtastic, LoRaWAN, Xiaozhi voice assistant, PicoClaw,
-  nRF9151 cellular/GNSS data tools, and nRF52840 UART DFU.
+  ADS-B receiver demo, nRF9151 cellular/GNSS data tools, and nRF52840 UART DFU.
 - User-provided content: NES, Game Boy, and Game Boy Color ROM files and offline map tiles are
   not bundled in the default image.
 
@@ -238,6 +238,12 @@ Generated image files under `k230_bsp/images/` are local build artifacts.
   and channel sharing are available. Voice/photo transfer is only available
   between K230 boards fitted with LR2021 modules; SX1262 boards support basic
   text mesh messages only.
+- The ADS-B demo is shown only when an LR2021 is detected. It passively receives
+  1090ES broadcasts and never provides ADS-B Out. The bundled 868/915 MHz
+  antenna can also receive 1090 MHz aircraft broadcasts; a dedicated antenna
+  tuned for 1090 MHz can improve sensitivity and range. This feature is
+  receive-only and never transmits any 1090 MHz interference signal. Range also
+  depends on the RF environment, obstructions, and aircraft altitude.
 - HDMI support is kept as a diagnostic feature. AMOLED remains the default
   display path.
 - Optional hardware features are shown only when the related module is detected.

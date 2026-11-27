@@ -66,6 +66,7 @@ typedef enum {
     PAGE_RECORDER,
     PAGE_MIC_FFT,
     PAGE_LORA,
+    PAGE_ADSB,
     PAGE_MESHTASTIC,
     PAGE_LORA_FLRC,
     PAGE_HALOW,

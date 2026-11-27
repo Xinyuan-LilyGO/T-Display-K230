@@ -1,5 +1,6 @@
 #include "ui_lora.h"
 
+#include "adsb_decoder.h"
 #include "ui_i18n.h"
 #include "ui_hardware.h"
 #include "ui_input.h"
@@ -37,6 +38,9 @@
 #include "protocols/LoRaWAN/LoRaWAN.h"
 
 #define LORA_LOG_PATH "/tmp/k230_phone_lora.log"
+#define ADSB_LOG_PATH "/tmp/k230_adsb.log"
+#define ADSB_LOG_BACKUP_PATH "/tmp/k230_adsb.log.1"
+#define ADSB_LOG_MAX_BYTES (2U * 1024U * 1024U)
 #define LORA_SPI_DEV "/dev/spidev0.0"
 #define LORA_PROFILE_STORE_PATH "/root/app/k230_phone_ui/lora_profiles.conf"
 #define LORA_CHIP_PREF_KEY "lora.radio.chip"
@@ -837,6 +841,8 @@ static int lora_tx_count;
 static int lora_rx_count;
 static int lora_message_count;
 static lora_chip_type_t lora_chip_type = LORA_CHIP_NONE;
+/* Keep the successful probe result after the temporary radio is released. */
+static lora_chip_type_t lora_detected_chip_type = LORA_CHIP_NONE;
 static uint64_t lora_last_auto_tx_us;
 static char lora_status_text[160] = "Not initialized";
 static char lora_payload_text[96] = "hello from k230";
@@ -1784,6 +1790,7 @@ static int lora_probe_chip(lora_chip_type_t chip, const lora_profile_t *profile,
     }
 
     lora_log("Detected %s", lora_chip_name(chip));
+    lora_detected_chip_type = chip;
     lora_store_persisted_chip(chip);
     return 0;
 }
@@ -1860,6 +1867,8 @@ int ui_lora_startup_probe(void)
     int state;
     int available;
 
+    lora_detected_chip_type = LORA_CHIP_NONE;
+
     if(!lora_profiles_loaded) {
         lora_load_profiles();
     }
@@ -1889,6 +1898,12 @@ int ui_lora_startup_probe(void)
 int ui_lora_hardware_available(void)
 {
     return lora_hardware_available;
+}
+
+int ui_lora_lr2021_available(void)
+{
+    return lora_hardware_available == 1 &&
+           lora_detected_chip_type == LORA_CHIP_LR2021;
 }
 
 void ui_lora_confirm_hardware_available(const char *source)
@@ -9057,4 +9072,1122 @@ void ui_lora_flrc_cleanup(void)
     memset(lora_flrc_camera_preset_btn, 0,
            sizeof(lora_flrc_camera_preset_btn));
     memset(lora_flrc_camera_flip_btn, 0, sizeof(lora_flrc_camera_flip_btn));
+}
+
+#define ADSB_TARGET_MAX 12
+#define ADSB_CPR_PAIR_MAX_AGE_US 10000000ULL
+#define ADSB_UI_REFRESH_MS 250
+#define ADSB_GNSS_REFRESH_US 5000000ULL
+#define ADSB_RADAR_RANGE_KM 100.0
+#define ADSB_TRACK_POINT_MAX 8
+
+typedef struct {
+    int used;
+    uint32_t icao;
+    char callsign[9];
+    int altitude_valid;
+    int altitude_ft;
+    int velocity_valid;
+    float speed_knots;
+    float track_degrees;
+    int vertical_rate_valid;
+    int vertical_rate_fpm;
+    adsb_frame_t cpr_even;
+    adsb_frame_t cpr_odd;
+    uint64_t cpr_even_us;
+    uint64_t cpr_odd_us;
+    int position_valid;
+    double latitude;
+    double longitude;
+    float rssi;
+    uint8_t downlink_format;
+    uint8_t type_code;
+    char raw_hex[29];
+    uint64_t last_seen_us;
+    struct {
+        double latitude;
+        double longitude;
+        uint64_t seen_us;
+    } track[ADSB_TRACK_POINT_MAX];
+    size_t track_count;
+} adsb_target_t;
+
+static adsb_target_t adsb_targets[ADSB_TARGET_MAX];
+static lv_timer_t *adsb_timer;
+static lv_obj_t *adsb_status_label;
+static lv_obj_t *adsb_stats_label;
+static lv_obj_t *adsb_gnss_label;
+static lv_obj_t *adsb_waiting_label;
+static lv_obj_t *adsb_radar_panel;
+static lv_obj_t *adsb_radar_hint;
+static lv_obj_t *adsb_radar_dots[ADSB_TARGET_MAX];
+static lv_obj_t *adsb_radar_labels[ADSB_TARGET_MAX];
+static lv_obj_t *adsb_radar_trails[ADSB_TARGET_MAX][ADSB_TRACK_POINT_MAX];
+static lv_obj_t *adsb_toggle_button;
+static lv_obj_t *adsb_clear_button;
+static lv_obj_t *adsb_toggle_label;
+static lv_obj_t *adsb_target_cards[ADSB_TARGET_MAX];
+static lv_obj_t *adsb_target_labels[ADSB_TARGET_MAX];
+static lv_obj_t *adsb_delete_buttons[ADSB_TARGET_MAX];
+static int adsb_card_swiped[ADSB_TARGET_MAX];
+static int adsb_swipe_start_x[ADSB_TARGET_MAX];
+static int adsb_swipe_start_y[ADSB_TARGET_MAX];
+static int adsb_active;
+static int adsb_receiving;
+static unsigned int adsb_packets;
+static unsigned int adsb_valid_frames;
+static unsigned int adsb_crc_errors;
+static unsigned int adsb_radio_errors;
+static float adsb_noise_floor;
+static int adsb_observer_fix_valid;
+static double adsb_observer_latitude;
+static double adsb_observer_longitude;
+static unsigned int adsb_observer_satellites;
+static uint64_t adsb_last_gnss_read_us;
+static int adsb_gnss_foreground_owned;
+static char adsb_status[160] = "Stopped";
+
+static int adsb_target_compare(const void *left, const void *right);
+static void adsb_update_ui(void);
+
+static void adsb_update_gnss_summary(void)
+{
+    k230_nrf9151_status_t status;
+    char text[256];
+    char position[96];
+    const char *lock;
+    unsigned long ttff_seconds;
+
+    if(!adsb_gnss_label || !lv_obj_is_valid(adsb_gnss_label)) {
+        return;
+    }
+    memset(&status, 0, sizeof(status));
+    if(k230_nrf9151_read_status(&status, 0) != 0 || !status.present) {
+        lv_label_set_text(adsb_gnss_label, "GNSS --  |  nRF9151 unavailable");
+        lv_obj_set_style_text_color(adsb_gnss_label, lv_color_hex(0x94A3B8), 0);
+        return;
+    }
+    lock = status.gnss_has_fix ? "GNSS LOCKED" :
+           (status.gnss_running ? "GNSS SEARCH" : "GNSS OFF");
+    if(status.gnss_has_fix) {
+        snprintf(position, sizeof(position), "%.5f, %.5f",
+                 status.latitude, status.longitude);
+    } else {
+        snprintf(position, sizeof(position), "--, --");
+    }
+    ttff_seconds = status.ttff_ms / 1000UL;
+    snprintf(text, sizeof(text), "%s S%u  |  %s  |  UTC %s  TTFF %lus",
+             lock, status.satellites, position,
+             status.gnss_utc_time[0] ? status.gnss_utc_time : "--",
+             ttff_seconds);
+    lv_label_set_text(adsb_gnss_label, text);
+    lv_obj_set_style_text_color(adsb_gnss_label,
+                                lv_color_hex(status.gnss_has_fix ?
+                                             0x25C281 : 0xF5A524), 0);
+}
+
+static uint32_t adsb_card_color(size_t index)
+{
+    static const uint32_t colors[] = {
+        0x176B87, 0x26734D, 0xA16207, 0x6941A5,
+        0xB33A3A, 0x16736F,
+    };
+
+    return colors[index % (sizeof(colors) / sizeof(colors[0]))];
+}
+
+static void adsb_set_card_swiped(size_t index, int swiped)
+{
+    if(index >= ADSB_TARGET_MAX) {
+        return;
+    }
+    adsb_card_swiped[index] = swiped ? 1 : 0;
+    if(adsb_delete_buttons[index] &&
+       lv_obj_is_valid(adsb_delete_buttons[index])) {
+        if(swiped) {
+            lv_obj_clear_flag(adsb_delete_buttons[index], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(adsb_delete_buttons[index], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void adsb_delete_event_cb(lv_event_t *event)
+{
+    size_t index = (size_t)(intptr_t)lv_event_get_user_data(event);
+
+    if(index >= ADSB_TARGET_MAX) {
+        return;
+    }
+    memset(&adsb_targets[index], 0, sizeof(adsb_targets[index]));
+    qsort(adsb_targets, ADSB_TARGET_MAX, sizeof(adsb_targets[0]),
+          adsb_target_compare);
+    memset(adsb_card_swiped, 0, sizeof(adsb_card_swiped));
+    adsb_update_ui();
+}
+
+static void adsb_card_swipe_event_cb(lv_event_t *event)
+{
+    size_t index = (size_t)(intptr_t)lv_event_get_user_data(event);
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_indev_t *indev = lv_indev_active();
+    lv_point_t point;
+    int dx;
+    int dy;
+
+    if(index >= ADSB_TARGET_MAX || !indev) {
+        return;
+    }
+    lv_indev_get_point(indev, &point);
+    if(code == LV_EVENT_PRESSED) {
+        adsb_swipe_start_x[index] = point.x;
+        adsb_swipe_start_y[index] = point.y;
+    } else if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        dx = point.x - adsb_swipe_start_x[index];
+        dy = point.y - adsb_swipe_start_y[index];
+        if(abs(dx) >= 70 && abs(dy) < 90) {
+            adsb_set_card_swiped(index, dx > 0);
+        }
+    }
+}
+
+static void adsb_log(const char *fmt, ...)
+{
+    FILE *fp;
+    struct stat st;
+    char line[512];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    if(stat(ADSB_LOG_PATH, &st) == 0 &&
+       (uint64_t)st.st_size >= ADSB_LOG_MAX_BYTES) {
+        (void)rename(ADSB_LOG_PATH, ADSB_LOG_BACKUP_PATH);
+    }
+    fp = fopen(ADSB_LOG_PATH, "a");
+    if(!fp) {
+        return;
+    }
+    fprintf(fp, "wall=%lld mono=%llu %s\n",
+            (long long)time(NULL),
+            (unsigned long long)ui_monotonic_us(), line);
+    fflush(fp);
+    fclose(fp);
+}
+
+static int adsb_target_compare(const void *left, const void *right)
+{
+    const adsb_target_t *a = (const adsb_target_t *)left;
+    const adsb_target_t *b = (const adsb_target_t *)right;
+
+    if(a->used != b->used) {
+        return b->used - a->used;
+    }
+    if(a->last_seen_us < b->last_seen_us) {
+        return 1;
+    }
+    if(a->last_seen_us > b->last_seen_us) {
+        return -1;
+    }
+    return 0;
+}
+
+static adsb_target_t *adsb_find_target(uint32_t icao)
+{
+    adsb_target_t *oldest = &adsb_targets[0];
+
+    for(size_t i = 0; i < ADSB_TARGET_MAX; i++) {
+        if(adsb_targets[i].used && adsb_targets[i].icao == icao) {
+            return &adsb_targets[i];
+        }
+        if(!adsb_targets[i].used) {
+            return &adsb_targets[i];
+        }
+        if(adsb_targets[i].last_seen_us < oldest->last_seen_us) {
+            oldest = &adsb_targets[i];
+        }
+    }
+    return oldest;
+}
+
+static void adsb_update_target(const adsb_frame_t *frame, float rssi)
+{
+    adsb_target_t *target;
+
+    if(!frame) {
+        return;
+    }
+    target = adsb_find_target(frame->icao);
+    if(!target->used || target->icao != frame->icao) {
+        memset(target, 0, sizeof(*target));
+        target->used = 1;
+        target->icao = frame->icao;
+    }
+
+    target->downlink_format = frame->downlink_format;
+    target->type_code = frame->type_code;
+    target->rssi = rssi;
+    target->last_seen_us = ui_monotonic_us();
+    adsb_format_hex(frame->raw, frame->raw_len, target->raw_hex,
+                    sizeof(target->raw_hex));
+    if(frame->message_type == ADSB_MESSAGE_IDENTIFICATION &&
+       frame->callsign[0]) {
+        snprintf(target->callsign, sizeof(target->callsign), "%s",
+                 frame->callsign);
+    }
+    if(frame->altitude_valid) {
+        target->altitude_valid = 1;
+        target->altitude_ft = frame->altitude_ft;
+    }
+    if(frame->message_type == ADSB_MESSAGE_AIRBORNE_POSITION) {
+        uint64_t now = target->last_seen_us;
+        if(frame->cpr_odd) {
+            target->cpr_odd = *frame;
+            target->cpr_odd_us = now;
+        } else {
+            target->cpr_even = *frame;
+            target->cpr_even_us = now;
+        }
+        if(target->cpr_even_us && target->cpr_odd_us) {
+            uint64_t pair_age = target->cpr_even_us > target->cpr_odd_us ?
+                                target->cpr_even_us - target->cpr_odd_us :
+                                target->cpr_odd_us - target->cpr_even_us;
+            int use_odd = target->cpr_odd_us > target->cpr_even_us;
+            if(pair_age <= ADSB_CPR_PAIR_MAX_AGE_US &&
+               adsb_decode_global_cpr(&target->cpr_even, &target->cpr_odd,
+                                      use_odd, &target->latitude,
+                                      &target->longitude) == 0) {
+                target->position_valid = 1;
+                if(target->track_count == 0U ||
+                   target->track[target->track_count - 1U].latitude !=
+                       target->latitude ||
+                   target->track[target->track_count - 1U].longitude !=
+                       target->longitude) {
+                    if(target->track_count < ADSB_TRACK_POINT_MAX) {
+                        target->track[target->track_count].latitude =
+                            target->latitude;
+                        target->track[target->track_count].longitude =
+                            target->longitude;
+                        target->track[target->track_count].seen_us = now;
+                        target->track_count++;
+                    } else {
+                        memmove(&target->track[0], &target->track[1],
+                                sizeof(target->track[0]) *
+                                    (ADSB_TRACK_POINT_MAX - 1U));
+                        target->track[ADSB_TRACK_POINT_MAX - 1U].latitude =
+                            target->latitude;
+                        target->track[ADSB_TRACK_POINT_MAX - 1U].longitude =
+                            target->longitude;
+                        target->track[ADSB_TRACK_POINT_MAX - 1U].seen_us = now;
+                    }
+                }
+            }
+        }
+    }
+    if(frame->velocity_valid) {
+        target->velocity_valid = 1;
+        target->speed_knots = frame->speed_knots;
+        target->track_degrees = frame->track_degrees;
+    }
+    if(frame->vertical_rate_valid) {
+        target->vertical_rate_valid = 1;
+        target->vertical_rate_fpm = frame->vertical_rate_fpm;
+    }
+
+    qsort(adsb_targets, ADSB_TARGET_MAX, sizeof(adsb_targets[0]),
+          adsb_target_compare);
+    memset(adsb_card_swiped, 0, sizeof(adsb_card_swiped));
+}
+
+static void adsb_update_observer_fix(void)
+{
+    k230_nrf9151_gnss_fix_t fix;
+    uint64_t now = ui_monotonic_us();
+    int state;
+
+    if(now - adsb_last_gnss_read_us < ADSB_GNSS_REFRESH_US) {
+        return;
+    }
+    adsb_last_gnss_read_us = now;
+    if(!adsb_gnss_foreground_owned &&
+       k230_nrf9151_start_gnss_monitor_for("adsb") == 0) {
+        adsb_gnss_foreground_owned = 1;
+    }
+    memset(&fix, 0, sizeof(fix));
+    state = k230_nrf9151_request_gnss_fix("adsb", 300, &fix);
+    if(state != 0 || !fix.valid) {
+        state = k230_nrf9151_read_gnss_fix(&fix, 300);
+    }
+    if(state == 0 && fix.valid) {
+        adsb_observer_fix_valid = 1;
+        adsb_observer_latitude = fix.latitude;
+        adsb_observer_longitude = fix.longitude;
+        adsb_observer_satellites = (unsigned int)(fix.satellites > 0 ?
+                                                   fix.satellites : 0);
+    } else {
+        adsb_observer_fix_valid = 0;
+        adsb_observer_satellites = 0;
+    }
+    adsb_update_gnss_summary();
+}
+
+static int adsb_relative_position(double latitude, double longitude,
+                                 double *range_km, double *bearing_deg)
+{
+    const double pi = 3.14159265358979323846;
+    double lat_rad;
+    double east_km;
+    double north_km;
+    double bearing;
+
+    if(!adsb_observer_fix_valid || !range_km || !bearing_deg) {
+        return 0;
+    }
+    lat_rad = adsb_observer_latitude * pi / 180.0;
+    east_km = (longitude - adsb_observer_longitude) *
+              111.320 * cos(lat_rad);
+    north_km = (latitude - adsb_observer_latitude) * 110.574;
+    *range_km = sqrt(east_km * east_km + north_km * north_km);
+    bearing = atan2(east_km, north_km) * 180.0 / pi;
+    if(bearing < 0.0) {
+        bearing += 360.0;
+    }
+    *bearing_deg = bearing;
+    return 1;
+}
+
+static void adsb_clear_targets(void)
+{
+    memset(adsb_targets, 0, sizeof(adsb_targets));
+    memset(adsb_card_swiped, 0, sizeof(adsb_card_swiped));
+    adsb_update_ui();
+}
+
+static void adsb_set_radar_object(lv_obj_t *object, int x, int y,
+                                   int visible, lv_opa_t opacity)
+{
+    if(!object || !lv_obj_is_valid(object)) {
+        return;
+    }
+    if(visible) {
+        lv_obj_set_pos(object, x, y);
+        lv_obj_set_style_opa(object, opacity, 0);
+        lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void adsb_update_radar(void)
+{
+    int panel_w;
+    int panel_h;
+    int center_x;
+    int center_y;
+    int radius;
+    int visible = 0;
+
+    if(!adsb_radar_panel || !lv_obj_is_valid(adsb_radar_panel)) {
+        return;
+    }
+    panel_w = lv_obj_get_width(adsb_radar_panel);
+    panel_h = lv_obj_get_height(adsb_radar_panel);
+    center_x = panel_w / 2;
+    center_y = (panel_h - 18) / 2;
+    radius = (panel_h - 46) / 2;
+    if(radius > panel_w / 2 - 42) {
+        radius = panel_w / 2 - 42;
+    }
+    if(radius < 30) {
+        radius = 30;
+    }
+
+    for(size_t i = 0; i < ADSB_TARGET_MAX; i++) {
+        adsb_target_t *target = &adsb_targets[i];
+        double range_km;
+        double bearing_deg;
+        int x;
+        int y;
+        lv_opa_t opacity;
+        char label_text[24];
+
+        if(!target->used || !target->position_valid ||
+           !adsb_relative_position(target->latitude, target->longitude,
+                                   &range_km, &bearing_deg)) {
+            adsb_set_radar_object(adsb_radar_dots[i], 0, 0, 0,
+                                   LV_OPA_TRANSP);
+            adsb_set_radar_object(adsb_radar_labels[i], 0, 0, 0,
+                                   LV_OPA_TRANSP);
+            for(size_t j = 0; j < ADSB_TRACK_POINT_MAX; j++) {
+                adsb_set_radar_object(adsb_radar_trails[i][j], 0, 0, 0,
+                                       LV_OPA_TRANSP);
+            }
+            continue;
+        }
+        visible++;
+        snprintf(label_text, sizeof(label_text), "%s",
+                 target->callsign[0] ? target->callsign : "--");
+        if(adsb_radar_labels[i] && lv_obj_is_valid(adsb_radar_labels[i])) {
+            lv_label_set_text(adsb_radar_labels[i], label_text);
+        }
+        x = center_x + (int)lround(sin(bearing_deg * 3.14159265358979323846 /
+                                       180.0) *
+                                   (range_km / ADSB_RADAR_RANGE_KM) * radius);
+        y = center_y - (int)lround(cos(bearing_deg *
+                                       3.14159265358979323846 / 180.0) *
+                                   (range_km / ADSB_RADAR_RANGE_KM) * radius);
+        if(x < center_x - radius) x = center_x - radius;
+        if(x > center_x + radius) x = center_x + radius;
+        if(y < center_y - radius) y = center_y - radius;
+        if(y > center_y + radius) y = center_y + radius;
+        opacity = (ui_monotonic_us() - target->last_seen_us > 120000000ULL) ?
+                  LV_OPA_50 : LV_OPA_COVER;
+        adsb_set_radar_object(adsb_radar_dots[i], x - 5, y - 5, 1, opacity);
+        adsb_set_radar_object(adsb_radar_labels[i], x + 8, y - 10, 1,
+                              opacity);
+
+        for(size_t j = 0; j < ADSB_TRACK_POINT_MAX; j++) {
+            double trail_range;
+            double trail_bearing;
+            int trail_x;
+            int trail_y;
+            lv_opa_t trail_opacity;
+            if(j >= target->track_count ||
+               !adsb_relative_position(target->track[j].latitude,
+                                       target->track[j].longitude,
+                                       &trail_range, &trail_bearing)) {
+                adsb_set_radar_object(adsb_radar_trails[i][j], 0, 0, 0,
+                                       LV_OPA_TRANSP);
+                continue;
+            }
+            trail_x = center_x + (int)lround(sin(trail_bearing *
+                                                 3.14159265358979323846 / 180.0) *
+                                             (trail_range / ADSB_RADAR_RANGE_KM) *
+                                             radius);
+            trail_y = center_y - (int)lround(cos(trail_bearing *
+                                                 3.14159265358979323846 / 180.0) *
+                                             (trail_range / ADSB_RADAR_RANGE_KM) *
+                                             radius);
+            if(trail_x < center_x - radius) trail_x = center_x - radius;
+            if(trail_x > center_x + radius) trail_x = center_x + radius;
+            if(trail_y < center_y - radius) trail_y = center_y - radius;
+            if(trail_y > center_y + radius) trail_y = center_y + radius;
+            trail_opacity = (lv_opa_t)(40 + (j + 1U) * 18U);
+            if(trail_opacity > LV_OPA_80) trail_opacity = LV_OPA_80;
+            adsb_set_radar_object(adsb_radar_trails[i][j], trail_x - 2,
+                                  trail_y - 2, 1, trail_opacity);
+        }
+    }
+    if(adsb_radar_hint && lv_obj_is_valid(adsb_radar_hint)) {
+        char hint[96];
+        if(!adsb_observer_fix_valid) {
+            snprintf(hint, sizeof(hint), "%s | waiting for fix",
+                     adsb_gnss_foreground_owned ?
+                     "GNSS foreground requested" : "GNSS unavailable");
+        } else {
+            snprintf(hint, sizeof(hint), "Range %ukm | GNSS %u sats | %d plotted",
+                     (unsigned int)ADSB_RADAR_RANGE_KM,
+                     adsb_observer_satellites, visible);
+        }
+        lv_label_set_text(adsb_radar_hint, hint);
+    }
+}
+
+static void adsb_stop_receiver(void)
+{
+    if(!adsb_receiving && !lora_lr2021) {
+        return;
+    }
+    adsb_receiving = 0;
+    if(lora_lr2021) {
+        lora_lr2021->clearIrqAction();
+        (void)lora_lr2021->standby();
+    }
+    lora_take_radio_events();
+    lora_release_radio_hal();
+    snprintf(adsb_status, sizeof(adsb_status), "Stopped");
+}
+
+static int adsb_begin_ook(float tcxo_voltage)
+{
+    ConfigOOK_t config;
+    int16_t state;
+
+    if(lora_create_radio_candidate(LORA_CHIP_LR2021) != 0 || !lora_lr2021) {
+        return RADIOLIB_ERR_CHIP_NOT_FOUND;
+    }
+    lora_lr2021->irqDioNum = LORA_LR2021_IRQ_DIO_NUM;
+    lora_lr2021->tcxoVoltage = tcxo_voltage;
+    config.frequency = 1090.0f;
+    config.bitRate = 2000.0f;
+    config.receiverBandwidth = 3076.0f;
+    config.power = 0;
+    config.preambleLength = 16;
+    state = lora_lr2021->beginOOK(config);
+    lora_log("ADS-B beginOOK 1090MHz 2Mbps bw=3076kHz tcxo=%.1f state=%d %s",
+             tcxo_voltage, state, lora_error_name(state));
+    return state;
+}
+
+static int adsb_start_receiver(void)
+{
+    int16_t state;
+    float threshold;
+
+    if(adsb_receiving) {
+        return 0;
+    }
+    if(!ui_lora_lr2021_available()) {
+        snprintf(adsb_status, sizeof(adsb_status), "LR2021 is required");
+        return -1;
+    }
+    if(lora_hw_prepare() != 0) {
+        snprintf(adsb_status, sizeof(adsb_status), "SPI/GPIO setup failed");
+        return -1;
+    }
+
+    state = adsb_begin_ook(3.0f);
+    if(lora_lr2021_should_retry_xtal(state)) {
+        state = adsb_begin_ook(0.0f);
+    }
+    if(state != RADIOLIB_ERR_NONE) {
+        snprintf(adsb_status, sizeof(adsb_status), "LR2021 OOK init error %d",
+                 state);
+        lora_release_radio_hal();
+        return -1;
+    }
+
+    lora_lr2021_apply_lilygo_rf_switch();
+    state = lora_lr2021->setPreambleLength(16);
+    if(state == RADIOLIB_ERR_NONE) {
+        state = lora_lr2021->setSyncWord(NULL, 0);
+    }
+    if(state == RADIOLIB_ERR_NONE) {
+        state = lora_lr2021->setEncoding(RADIOLIB_ENCODING_MANCHESTER_INV);
+    }
+    if(state == RADIOLIB_ERR_NONE) {
+        state = lora_lr2021->setRxBoostedGainMode(7);
+    }
+    if(state == RADIOLIB_ERR_NONE) {
+        state = lora_lr2021->setCRC(3, 0, 0x1FFF409UL, false);
+    }
+    if(state == RADIOLIB_ERR_NONE) {
+        state = lora_lr2021->ookDetector();
+    }
+    if(state == RADIOLIB_ERR_NONE) {
+        state = lora_lr2021->fixedPacketLengthMode(11);
+    }
+    if(state == RADIOLIB_ERR_NONE) {
+        state = lora_lr2021->setGain(13);
+    }
+    if(state != RADIOLIB_ERR_NONE) {
+        snprintf(adsb_status, sizeof(adsb_status), "ADS-B config error %d",
+                 state);
+        lora_log("ADS-B configuration failed state=%d %s", state,
+                 lora_error_name(state));
+        lora_release_radio_hal();
+        return -1;
+    }
+
+    adsb_noise_floor = lora_lr2021->getRSSI(false);
+    threshold = adsb_noise_floor + 10.0f;
+    state = lora_lr2021->setOokDetectionThreshold((int16_t)lroundf(threshold));
+    if(state == RADIOLIB_ERR_NONE) {
+        lora_take_radio_events();
+        lora_lr2021->setIrqAction(lora_radio_event_isr);
+        state = lora_lr2021->startReceive();
+    }
+    if(state != RADIOLIB_ERR_NONE) {
+        snprintf(adsb_status, sizeof(adsb_status), "ADS-B RX error %d", state);
+        lora_log("ADS-B startReceive failed state=%d %s", state,
+                 lora_error_name(state));
+        lora_release_radio_hal();
+        return -1;
+    }
+
+    adsb_receiving = 1;
+    snprintf(adsb_status, sizeof(adsb_status),
+             "Listening for 1090ES broadcasts");
+    adsb_log("START freq_mhz=1090.0 bitrate=2000 bw_khz=3076 "
+             "noise_dbm=%.1f threshold_dbm=%.1f", adsb_noise_floor,
+             threshold);
+    lora_log("ADS-B receiver started noise=%.1fdBm threshold=%.1fdBm",
+             adsb_noise_floor, threshold);
+    return 0;
+}
+
+static void adsb_receive_one(void)
+{
+    uint8_t frame[14] = {0};
+    char raw_hex[29];
+    adsb_frame_t decoded;
+    int16_t state;
+    float rssi;
+    uint32_t parity;
+    int16_t standby_state;
+
+    if(!adsb_receiving || !lora_lr2021) {
+        return;
+    }
+    adsb_packets++;
+    state = lora_lr2021->readData(frame, 11);
+    rssi = lora_lr2021->getRSSI(true);
+    adsb_format_hex(frame, 11, raw_hex, sizeof(raw_hex));
+    if(state == RADIOLIB_ERR_CRC_MISMATCH) {
+        adsb_crc_errors++;
+        adsb_log("RX packet=%u result=crc_error rssi_dbm=%.1f raw11=%s",
+                 adsb_packets, rssi, raw_hex);
+    } else if(state == RADIOLIB_ERR_NONE) {
+        parity = adsb_modes_crc(frame, sizeof(frame));
+        frame[11] = (uint8_t)(parity >> 16U);
+        frame[12] = (uint8_t)(parity >> 8U);
+        frame[13] = (uint8_t)parity;
+        adsb_format_hex(frame, sizeof(frame), raw_hex, sizeof(raw_hex));
+        if(adsb_decode_frame(frame, sizeof(frame), &decoded) == 0) {
+            adsb_valid_frames++;
+            adsb_update_target(&decoded, rssi);
+            adsb_log("RX packet=%u result=valid rssi_dbm=%.1f raw=%s "
+                     "df=%u tc=%u icao=%06X callsign=%s alt_ft=%s%d "
+                     "speed_kt=%s%.1f track_deg=%s%.1f vs_fpm=%s%d",
+                     adsb_packets, rssi, raw_hex, decoded.downlink_format,
+                     decoded.type_code, decoded.icao,
+                     decoded.callsign[0] ? decoded.callsign : "-",
+                     decoded.altitude_valid ? "" : "invalid/",
+                     decoded.altitude_valid ? decoded.altitude_ft : 0,
+                     decoded.velocity_valid ? "" : "invalid/",
+                     decoded.velocity_valid ? decoded.speed_knots : 0.0f,
+                     decoded.velocity_valid ? "" : "invalid/",
+                     decoded.velocity_valid ? decoded.track_degrees : 0.0f,
+                     decoded.vertical_rate_valid ? "" : "invalid/",
+                     decoded.vertical_rate_valid ? decoded.vertical_rate_fpm : 0);
+        } else {
+            adsb_log("RX packet=%u result=decode_reject rssi_dbm=%.1f raw=%s",
+                     adsb_packets, rssi, raw_hex);
+        }
+    } else {
+        adsb_radio_errors++;
+        snprintf(adsb_status, sizeof(adsb_status), "Receive error %d", state);
+        adsb_log("RX packet=%u result=radio_error state=%d rssi_dbm=%.1f raw11=%s",
+                 adsb_packets, state, rssi, raw_hex);
+    }
+
+    if(adsb_receiving && lora_lr2021) {
+        /* LR2021 can reject SET_RX immediately after FIFO access; return to
+         * standby first and retry once to make the receive loop recoverable. */
+        standby_state = lora_lr2021->standby();
+        if(standby_state != RADIOLIB_ERR_NONE) {
+            adsb_log("RX_STANDBY_ERROR state=%d", standby_state);
+        }
+        lora_hal->delay(1);
+        state = lora_lr2021->startReceive();
+        if(state == RADIOLIB_ERR_SPI_CMD_INVALID) {
+            adsb_log("RX_RESTART_RETRY state=%d", state);
+            (void)lora_lr2021->standby();
+            lora_hal->delay(3);
+            state = lora_lr2021->startReceive();
+        }
+        if(state != RADIOLIB_ERR_NONE) {
+            adsb_radio_errors++;
+            adsb_receiving = 0;
+            snprintf(adsb_status, sizeof(adsb_status), "RX restart error %d %s",
+                     state, lora_error_name(state));
+            adsb_log("RX_RESTART_ERROR state=%d name=%s", state,
+                     lora_error_name(state));
+        }
+    }
+}
+
+static void adsb_update_ui(void)
+{
+    char text[256];
+    uint64_t now = ui_monotonic_us();
+    int active_targets = 0;
+
+    adsb_update_observer_fix();
+    if(adsb_status_label && lv_obj_is_valid(adsb_status_label)) {
+        lv_label_set_text(adsb_status_label, ui_tr(adsb_status));
+        lv_obj_set_style_text_color(adsb_status_label,
+                                    lv_color_hex(adsb_receiving ? 0x25C281 :
+                                                 0xF5A524), 0);
+    }
+    if(adsb_stats_label && lv_obj_is_valid(adsb_stats_label)) {
+        snprintf(text, sizeof(text),
+                 "1090 MHz OOK 2 Mbps  |  P %u  V %u  CRC %u  ERR %u  N %.0f dBm",
+                 adsb_packets, adsb_valid_frames, adsb_crc_errors,
+                 adsb_radio_errors, adsb_noise_floor);
+        lv_label_set_text(adsb_stats_label, text);
+    }
+    if(adsb_toggle_label && lv_obj_is_valid(adsb_toggle_label)) {
+        lv_label_set_text(adsb_toggle_label, adsb_receiving ? LV_SYMBOL_STOP :
+                          LV_SYMBOL_PLAY);
+    }
+
+    for(size_t i = 0; i < ADSB_TARGET_MAX; i++) {
+        adsb_target_t *target = &adsb_targets[i];
+        lv_obj_t *card = adsb_target_cards[i];
+        lv_obj_t *label = adsb_target_labels[i];
+        uint64_t age_sec;
+        char altitude[32] = "ALT --";
+        char velocity[64] = "SPD --   TRK --";
+        char vertical[32] = "";
+        char position[64] = "POS waiting for CPR pair";
+        char relative[64] = "RNG --   BRG --";
+        double range_km;
+        double bearing_deg;
+
+        if(!card || !lv_obj_is_valid(card) || !label ||
+           !lv_obj_is_valid(label)) {
+            continue;
+        }
+        /* Keep stale targets visible so the age remains useful; deletion is
+         * explicit through the card's trash button. */
+        if(!target->used) {
+            lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+            adsb_set_card_swiped(i, 0);
+            continue;
+        }
+        active_targets++;
+        age_sec = (now - target->last_seen_us) / 1000000ULL;
+        if(target->altitude_valid) {
+            snprintf(altitude, sizeof(altitude), "ALT %d ft",
+                     target->altitude_ft);
+        }
+        if(target->velocity_valid) {
+            snprintf(velocity, sizeof(velocity), "SPD %.0f kt   TRK %.0f deg",
+                     target->speed_knots, target->track_degrees);
+        }
+        if(target->vertical_rate_valid) {
+            snprintf(vertical, sizeof(vertical), "   V/S %+d fpm",
+                     target->vertical_rate_fpm);
+        }
+        if(target->position_valid) {
+            snprintf(position, sizeof(position), "POS %.5f, %.5f",
+                     target->latitude, target->longitude);
+            if(adsb_relative_position(target->latitude, target->longitude,
+                                      &range_km, &bearing_deg)) {
+                snprintf(relative, sizeof(relative), "RNG %.1f km   BRG %.0f deg",
+                         range_km, bearing_deg);
+            }
+        }
+        snprintf(text, sizeof(text),
+                 "%06X   %s   Last capture %llus ago\n"
+                 "%s   %s%s\n%s\n%s\nDF%u TC%u   %.1f dBm\n%s",
+                 target->icao, target->callsign[0] ? target->callsign : "--------",
+                 (unsigned long long)age_sec,
+                 altitude, velocity, vertical, position, relative,
+                 target->downlink_format, target->type_code, target->rssi,
+                 target->raw_hex);
+        lv_label_set_text(label, text);
+        lv_obj_set_style_opa(card,
+                             age_sec > 120U ? LV_OPA_50 : LV_OPA_COVER, 0);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_HIDDEN);
+        if(adsb_card_swiped[i]) {
+            adsb_set_card_swiped(i, 1);
+        }
+    }
+    if(adsb_waiting_label && lv_obj_is_valid(adsb_waiting_label)) {
+        if(active_targets == 0) {
+            lv_obj_clear_flag(adsb_waiting_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(adsb_waiting_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    adsb_update_radar();
+}
+
+static void adsb_timer_cb(lv_timer_t *timer)
+{
+    unsigned int events;
+    (void)timer;
+
+    events = lora_take_radio_events();
+    while(events-- > 0U && adsb_receiving) {
+        adsb_receive_one();
+    }
+    adsb_update_ui();
+}
+
+static void adsb_toggle_event_cb(lv_event_t *event)
+{
+    (void)event;
+    if(adsb_receiving) {
+        adsb_stop_receiver();
+    } else {
+        (void)adsb_start_receiver();
+    }
+    adsb_update_ui();
+}
+
+static void adsb_clear_event_cb(lv_event_t *event)
+{
+    (void)event;
+    adsb_clear_targets();
+}
+
+void ui_adsb_create(lv_obj_t *scr)
+{
+    lv_obj_t *body;
+    lv_obj_t *summary;
+    int body_x = ui_page_side_margin();
+    int body_w = ui_screen_width() - body_x * 2;
+    int landscape = ui_is_landscape();
+    int gap = 16;
+    int radar_w = landscape ? (body_w * 52) / 100 : body_w;
+    int cards_x = landscape ? body_x + radar_w + gap : body_x;
+    int cards_w = landscape ? body_w - radar_w - gap : body_w;
+    int columns = 1;
+    int card_w = cards_w;
+    int card_h = 158;
+    int radar_y = landscape ? 114 : 138;
+    int radar_h = landscape ? card_h * 3 + gap * 2 : 250;
+    int row_y = landscape ? radar_y : radar_y + radar_h + 18;
+    int radar_diameter;
+
+    adsb_active = 1;
+    adsb_gnss_foreground_owned =
+        k230_nrf9151_start_gnss_monitor_for("adsb") == 0;
+    memset(adsb_radar_dots, 0, sizeof(adsb_radar_dots));
+    memset(adsb_radar_labels, 0, sizeof(adsb_radar_labels));
+    memset(adsb_radar_trails, 0, sizeof(adsb_radar_trails));
+    memset(adsb_target_cards, 0, sizeof(adsb_target_cards));
+    memset(adsb_target_labels, 0, sizeof(adsb_target_labels));
+    memset(adsb_delete_buttons, 0, sizeof(adsb_delete_buttons));
+    memset(adsb_card_swiped, 0, sizeof(adsb_card_swiped));
+    ui_create_header(scr, "ADS-B");
+    body = ui_page_body(scr, 144);
+    lv_obj_set_style_bg_color(body, lv_color_hex(0x101418), 0);
+
+    summary = ui_panel(body, body_x, 12, body_w, landscape ? 88 : 112);
+    lv_obj_set_style_bg_color(summary, lv_color_hex(0x151B22), 0);
+    lv_obj_set_style_border_color(summary, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_pad_all(summary, 14, 0);
+
+    adsb_status_label = ui_label(summary, "Starting...",
+                                 &lv_font_montserrat_18, 0x25C281);
+    lv_obj_set_pos(adsb_status_label, 0, landscape ? -2 : 0);
+    lv_obj_set_width(adsb_status_label, body_w - 112);
+    lv_label_set_long_mode(adsb_status_label, LV_LABEL_LONG_DOT);
+
+    adsb_stats_label = ui_label(summary, "--", &lv_font_montserrat_14,
+                                0xC9D3DF);
+    lv_obj_set_pos(adsb_stats_label, 0, landscape ? 27 : 34);
+    lv_obj_set_width(adsb_stats_label, body_w - 112);
+    lv_label_set_long_mode(adsb_stats_label, LV_LABEL_LONG_DOT);
+
+    adsb_gnss_label = ui_label(summary, "GNSS SEARCH  |  --, --  |  UTC --  TTFF --",
+                               &lv_font_montserrat_14, 0xF5A524);
+    lv_obj_set_pos(adsb_gnss_label, 0, landscape ? 54 : 66);
+    lv_obj_set_width(adsb_gnss_label, body_w - 112);
+    lv_label_set_long_mode(adsb_gnss_label, LV_LABEL_LONG_DOT);
+
+    adsb_toggle_button = lv_button_create(summary);
+    lv_obj_set_size(adsb_toggle_button, 48, 48);
+    lv_obj_align(adsb_toggle_button, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_set_style_radius(adsb_toggle_button, 8, 0);
+    lv_obj_set_style_bg_color(adsb_toggle_button, lv_color_hex(0xF59E0B), 0);
+    lv_obj_add_event_cb(adsb_toggle_button, adsb_toggle_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    adsb_toggle_label = ui_label(adsb_toggle_button, LV_SYMBOL_STOP,
+                                 &lv_font_montserrat_24, 0x101418);
+    lv_obj_center(adsb_toggle_label);
+
+    adsb_clear_button = lv_button_create(summary);
+    lv_obj_set_size(adsb_clear_button, 48, 48);
+    lv_obj_align(adsb_clear_button, LV_ALIGN_TOP_RIGHT, -58, 0);
+    lv_obj_set_style_radius(adsb_clear_button, 8, 0);
+    lv_obj_set_style_bg_color(adsb_clear_button, lv_color_hex(0x334155), 0);
+    lv_obj_add_event_cb(adsb_clear_button, adsb_clear_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    {
+        lv_obj_t *clear_label = ui_label(adsb_clear_button, LV_SYMBOL_REFRESH,
+                                         &lv_font_montserrat_22, 0xFFFFFF);
+        lv_obj_center(clear_label);
+    }
+
+    adsb_radar_panel = ui_panel(body, body_x, radar_y, radar_w, radar_h);
+    lv_obj_set_style_bg_color(adsb_radar_panel, lv_color_hex(0x0D1B24), 0);
+    lv_obj_set_style_border_color(adsb_radar_panel, lv_color_hex(0x1F5368), 0);
+    lv_obj_set_style_border_width(adsb_radar_panel, 1, 0);
+    lv_obj_clear_flag(adsb_radar_panel, LV_OBJ_FLAG_SCROLLABLE);
+    radar_diameter = radar_h - 58;
+    if(radar_diameter > radar_w - 120) {
+        radar_diameter = radar_w - 120;
+    }
+    if(radar_diameter < 120) {
+        radar_diameter = 120;
+    }
+    for(int ring = 0; ring < 3; ring++) {
+        int size = radar_diameter * (ring + 1) / 3;
+        lv_obj_t *circle = lv_obj_create(adsb_radar_panel);
+        lv_obj_set_size(circle, size, size);
+        lv_obj_set_style_bg_opa(circle, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_color(circle, lv_color_hex(0x236174), 0);
+        lv_obj_set_style_border_width(circle, 1, 0);
+        lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
+        lv_obj_align(circle, LV_ALIGN_CENTER, 0, -8);
+        lv_obj_clear_flag(circle, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    {
+        lv_obj_t *center = lv_obj_create(adsb_radar_panel);
+        lv_obj_set_size(center, 12, 12);
+        lv_obj_set_style_bg_color(center, lv_color_hex(0xF59E0B), 0);
+        lv_obj_set_style_bg_opa(center, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(center, 0, 0);
+        lv_obj_set_style_radius(center, LV_RADIUS_CIRCLE, 0);
+        lv_obj_align(center, LV_ALIGN_CENTER, 0, -8);
+        lv_obj_clear_flag(center, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    {
+        lv_obj_t *north = ui_label(adsb_radar_panel, "N",
+                                   &lv_font_montserrat_14, 0x8BD5E5);
+        lv_obj_align(north, LV_ALIGN_TOP_MID, 0, 8);
+        lv_obj_t *south = ui_label(adsb_radar_panel, "S",
+                                   &lv_font_montserrat_14, 0x8BD5E5);
+        lv_obj_align(south, LV_ALIGN_BOTTOM_MID, 0, -26);
+        lv_obj_t *west = ui_label(adsb_radar_panel, "W",
+                                  &lv_font_montserrat_14, 0x8BD5E5);
+        lv_obj_align(west, LV_ALIGN_LEFT_MID, 12, -8);
+        lv_obj_t *east = ui_label(adsb_radar_panel, "E",
+                                  &lv_font_montserrat_14, 0x8BD5E5);
+        lv_obj_align(east, LV_ALIGN_RIGHT_MID, -12, -8);
+    }
+    adsb_radar_hint = ui_label(adsb_radar_panel, "GNSS unavailable | list mode",
+                               &lv_font_montserrat_14, 0x9AA4AF);
+    lv_obj_set_width(adsb_radar_hint, radar_w - 24);
+    lv_obj_set_style_text_align(adsb_radar_hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(adsb_radar_hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    for(size_t i = 0; i < ADSB_TARGET_MAX; i++) {
+        uint32_t color = adsb_card_color(i);
+        adsb_radar_dots[i] = lv_obj_create(adsb_radar_panel);
+        lv_obj_set_size(adsb_radar_dots[i], 10, 10);
+        lv_obj_set_style_bg_color(adsb_radar_dots[i], lv_color_hex(color), 0);
+        lv_obj_set_style_border_width(adsb_radar_dots[i], 1, 0);
+        lv_obj_set_style_border_color(adsb_radar_dots[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_radius(adsb_radar_dots[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_add_flag(adsb_radar_dots[i], LV_OBJ_FLAG_HIDDEN);
+        adsb_radar_labels[i] = ui_label(adsb_radar_panel, "",
+                                        &lv_font_montserrat_12, 0xD9F4FF);
+        lv_obj_set_width(adsb_radar_labels[i], 84);
+        lv_label_set_long_mode(adsb_radar_labels[i], LV_LABEL_LONG_DOT);
+        lv_obj_add_flag(adsb_radar_labels[i], LV_OBJ_FLAG_HIDDEN);
+        for(size_t j = 0; j < ADSB_TRACK_POINT_MAX; j++) {
+            adsb_radar_trails[i][j] = lv_obj_create(adsb_radar_panel);
+            lv_obj_set_size(adsb_radar_trails[i][j], 4, 4);
+            lv_obj_set_style_bg_color(adsb_radar_trails[i][j],
+                                      lv_color_hex(color), 0);
+            lv_obj_set_style_border_width(adsb_radar_trails[i][j], 0, 0);
+            lv_obj_set_style_radius(adsb_radar_trails[i][j], LV_RADIUS_CIRCLE, 0);
+            lv_obj_add_flag(adsb_radar_trails[i][j], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    adsb_waiting_label = ui_label(body, "Waiting for ADS-B broadcasts",
+                                  &lv_font_montserrat_18, 0x9AA4AF);
+    lv_obj_set_width(adsb_waiting_label, cards_w);
+    lv_obj_set_style_text_align(adsb_waiting_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(adsb_waiting_label, cards_x, row_y + 32);
+
+    for(size_t i = 0; i < ADSB_TARGET_MAX; i++) {
+        int column = (int)i % columns;
+        int row = (int)i / columns;
+        int x = cards_x + column * (card_w + gap);
+        int y = row_y + row * (card_h + gap);
+        uint32_t color = adsb_card_color(i);
+        lv_obj_t *card = ui_panel(body, x, y, card_w, card_h);
+        lv_obj_t *accent;
+        lv_obj_t *delete_button;
+
+        lv_obj_set_style_bg_color(card, lv_color_hex(color), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_30, 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(color), 0);
+        lv_obj_set_style_border_width(card, 2, 0);
+        lv_obj_set_style_pad_all(card, 14, 0);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(card, adsb_card_swipe_event_cb,
+                            LV_EVENT_PRESSED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(card, adsb_card_swipe_event_cb,
+                            LV_EVENT_RELEASED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(card, adsb_card_swipe_event_cb,
+                            LV_EVENT_PRESS_LOST, (void *)(intptr_t)i);
+
+        accent = lv_obj_create(card);
+        lv_obj_set_size(accent, 5, card_h - 28);
+        lv_obj_set_style_bg_color(accent, lv_color_hex(color), 0);
+        lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(accent, 0, 0);
+        lv_obj_set_style_radius(accent, 3, 0);
+        lv_obj_align(accent, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+
+        adsb_target_labels[i] = ui_label(card, "", &lv_font_montserrat_16,
+                                         0xE5E7EB);
+        lv_obj_set_width(adsb_target_labels[i], card_w - 82);
+        lv_label_set_long_mode(adsb_target_labels[i], LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(adsb_target_labels[i], 12, 8);
+
+        delete_button = lv_button_create(card);
+        lv_obj_set_size(delete_button, 48, 48);
+        lv_obj_align(delete_button, LV_ALIGN_TOP_RIGHT, -8, 8);
+        lv_obj_set_style_radius(delete_button, 8, 0);
+        lv_obj_set_style_bg_color(delete_button, lv_color_hex(0xD64550), 0);
+        lv_obj_add_event_cb(delete_button, adsb_delete_event_cb,
+                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        {
+            lv_obj_t *delete_label = ui_label(delete_button, LV_SYMBOL_TRASH,
+                                              &lv_font_montserrat_22, 0xFFFFFF);
+            lv_obj_center(delete_label);
+        }
+        adsb_target_cards[i] = card;
+        adsb_delete_buttons[i] = delete_button;
+        adsb_set_card_swiped(i, 0);
+        lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+    }
+    ui_make_scrollable(body, 30);
+
+    if(!adsb_timer) {
+        adsb_timer = lv_timer_create(adsb_timer_cb, ADSB_UI_REFRESH_MS, NULL);
+    }
+    if(adsb_start_receiver() != 0) {
+        adsb_update_ui();
+    }
+}
+
+void ui_adsb_cleanup(void)
+{
+    if(!adsb_active) {
+        return;
+    }
+    if(adsb_timer) {
+        lv_timer_delete(adsb_timer);
+        adsb_timer = NULL;
+    }
+    adsb_stop_receiver();
+    if(adsb_gnss_foreground_owned) {
+        (void)k230_nrf9151_stop_gnss_monitor_for("adsb");
+        adsb_gnss_foreground_owned = 0;
+    }
+    adsb_log("STOP packets=%u valid=%u crc_errors=%u radio_errors=%u",
+             adsb_packets, adsb_valid_frames, adsb_crc_errors,
+             adsb_radio_errors);
+    adsb_active = 0;
+    adsb_status_label = NULL;
+    adsb_stats_label = NULL;
+    adsb_gnss_label = NULL;
+    adsb_waiting_label = NULL;
+    adsb_toggle_button = NULL;
+    adsb_clear_button = NULL;
+    adsb_toggle_label = NULL;
+    adsb_radar_panel = NULL;
+    adsb_radar_hint = NULL;
+    memset(adsb_radar_dots, 0, sizeof(adsb_radar_dots));
+    memset(adsb_radar_labels, 0, sizeof(adsb_radar_labels));
+    memset(adsb_radar_trails, 0, sizeof(adsb_radar_trails));
+    memset(adsb_target_cards, 0, sizeof(adsb_target_cards));
+    memset(adsb_target_labels, 0, sizeof(adsb_target_labels));
+    memset(adsb_delete_buttons, 0, sizeof(adsb_delete_buttons));
+    memset(adsb_card_swiped, 0, sizeof(adsb_card_swiped));
 }

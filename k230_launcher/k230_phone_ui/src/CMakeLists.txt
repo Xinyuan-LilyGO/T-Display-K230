@@ -212,6 +212,7 @@ set(K230_PHONE_UI_SOURCES
     ui_xiaozhi.c
     ui_picoclaw.c
     ui_qr_scanner.c
+    adsb_decoder.cpp
     ui_lora.cpp
     ui_nes.cpp
     ui_gameboy.cpp

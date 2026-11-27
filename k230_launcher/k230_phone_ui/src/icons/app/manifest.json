@@ -120,6 +120,12 @@
     "runtime": "nes.png"
   },
   {
+    "file": "adsb.svg",
+    "mdi": "radar",
+    "color": "#F59E0B",
+    "runtime": "adsb.png"
+  },
+  {
     "file": "ai.svg",
     "mdi": "brain",
     "color": "#FF6B6B",

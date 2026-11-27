@@ -29,6 +29,7 @@ embedded RGB565A8 `lv_image_dsc_t` data generated from these PNG files at the UI
 | `lora_flrc.svg` | `lora_flrc.png` | `broadcast` | `#A855F7` |
 | `halow.svg` | `halow.png` | `router-wireless` | `#25C281` |
 | `lorawan.svg` | `lorawan.png` | `access-point-network` | `#14B8A6` |
+| `adsb.svg` | `adsb.png` | `radar` | `#F59E0B` |
 | `nes.svg` | `nes.png` | `nintendo-game-boy` | `#F97316` |
 | `ai.svg` | `ai.png` | `brain` | `#FF6B6B` |
 | `rtsp.svg` | `rtsp.png` | `cctv` | `#22C55E` |

@@ -38,6 +38,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `/root/nrf9151` | 通过 MTP 导出的 nRF9151 nRF Cloud attestation token |
 | `/root/maps` | Meshtastic 地图页面使用的可选离线地图瓦片 |
 | `/root/picoclaw` | PicoClaw 运行时、配置和工作区 |
+| `/tmp/k230_adsb.log`、`/tmp/k230_adsb.log.1` | ADS-B 接收调试日志，记录原始帧、RSSI、CRC/解码结果和错误；单文件达到 2 MiB 后轮转 |
 
 需要从电脑管理这些文件时，可以打开 `MTP` 应用，将文件目录通过 USB 暴露给电脑
 离线地图瓦片下载和安装方式请看 [MAPS_CN.md](MAPS_CN.md)
@@ -54,6 +55,7 @@ launcher 会在目标 rootfs 中创建以下目录：
 | `Record` / 录音 | 使用板载麦克风录音，列出录音文件，支持播放和删除 | 点击录音按钮开始或停止录音进入录音列表后可以播放或删除 `/root/recordings` 中的录音 |
 | `Mic FFT` / 麦克风频谱 | 实时显示麦克风频谱和输入电平信息 | 用于快速检查麦克风是否工作，也可以调整显示增益方便观察弱信号 |
 | `LoRa` | 控制 SX1262 或 LR2021，支持基于 profile 的射频测试、监听、自动发送、连续载波发射等模式 | 选择或编辑 profile 后选择工作模式连续载波发射只建议工程射频测试使用，不建议普通用户日常使用，并且必须确认已经连接合适天线 |
+| `ADS-B` | 检测到 LR2021 时被动接收并解码 1090 MHz ADS-B Extended Squitter，显示 ICAO 地址、呼号、高度、速度、航迹、RSSI、原始帧和最近捕获时间；有 nRF9151 GNSS 定位时增加 100 km 雷达视图、相对距离、方位和短时轨迹 | 默认附带的 868/915MHz 天线也可以接收 1090MHz 航空器广播；如果需要更好的灵敏度和接收距离，可以更换专门调谐到 1090MHz 的天线。进入页面后自动监听；每张航空器卡片首行显示最近一次有效帧是多久以前捕获的。连接 nRF9151 并取得 GNSS fix 后，雷达面板以设备为中心显示有 CPR 坐标的飞机；没有 GNSS 时仍可使用列表模式。右上角按钮可停止或重新开始，刷新按钮清空本次目标和轨迹。调试日志写入 `/tmp/k230_adsb.log`，可通过 SSH 导出。此功能仅用于接收，不会发送 ADS-B，也不会向外发射任何 1090MHz 干扰信号 |
 | `Meshtastic` | Beta 应用，控制独立 `k230_meshtastic_probe` daemon，提供 Meshtastic 风格 LoRa mesh 文字、仅限 LR2021 的 K230 设备间语音/图片传输、节点缓存、地图、频道配置档和 profile 设置。SX1262 版本仅支持基础文字 mesh 消息 | 进入应用后 daemon 自动启动。通过设置图标配置 region、preset、channel、PSK、TX power、node/from/to/hop/ACK。在消息输入框直接输入并发送；LR2021 版本可按住语音按钮录制语音，节点页面可查看节点缓存。通过 `Channel` 可以保存/加载 K230 频道配置档、保存官方 Meshtastic 频道 URL，也可以手动输入 URL 导入频道。摄像头二维码扫描仍属于实验功能，推荐使用 URL 导入。收到新消息时会播放 `设置` > `通知` 中选择的音效。离线地图瓦片从 `/root/maps` 读取，详见 [MAPS_CN.md](MAPS_CN.md) |
 | `LoRaWAN` | 管理 LoRaWAN profile，并通过 LoRa 模块运行 OTAA 入网和发送测试 | 加载已有 profile，或新建/编辑 profile应用会检查密钥长度配置保存后才能运行，可按需开启模拟温度数据上传 |
 | `NES` | 从 `/root/nes` 加载 `.nes` ROM，并支持触摸按键和硬件键盘控制 | 镜像默认不内置 NES ROM请自行将 ROM 文件放入 `/root/nes`，再从列表选择 ROM键盘控制：方向键或 `W/A/S/D` 为方向，`Enter` 为 Start，`Space` 或 `Shift` 为 Select，`U/I/O` 为 A，`H/J/K` 为 B，`Esc` 停止游戏或返回 ROM 列表 |

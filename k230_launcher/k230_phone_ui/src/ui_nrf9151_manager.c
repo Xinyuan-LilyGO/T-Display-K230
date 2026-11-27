@@ -63,6 +63,7 @@
 #define K230_NRF9151_GNSS_OWNER_MESHTASTIC (1U << 2)
 #define K230_NRF9151_GNSS_OWNER_LOCATION (1U << 3)
 #define K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP (1U << 4)
+#define K230_NRF9151_GNSS_OWNER_ADSB (1U << 5)
 
 typedef struct {
     int fd;
@@ -141,7 +142,8 @@ static int nrf9151_manager_gnss_foreground_requested_locked(void)
     return (nrf9151_gnss_monitor.owners &
             (K230_NRF9151_GNSS_OWNER_LEGACY |
              K230_NRF9151_GNSS_OWNER_CELLULAR |
-             K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP)) != 0U;
+             K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP |
+             K230_NRF9151_GNSS_OWNER_ADSB)) != 0U;
 }
 
 static int nrf9151_manager_gnss_priority_held_locked(void)
@@ -150,7 +152,8 @@ static int nrf9151_manager_gnss_priority_held_locked(void)
      * LTE paused until the map releases its owner so cold starts are not
      * forced back into an RF coexistence mode that cannot obtain a fix. */
     return (nrf9151_gnss_monitor.owners &
-            K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP) != 0U;
+            (K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP |
+             K230_NRF9151_GNSS_OWNER_ADSB)) != 0U;
 }
 
 static int nrf9151_manager_gnss_uart_owned_locked(void)
@@ -195,6 +198,9 @@ static unsigned int nrf9151_manager_gnss_owner_bit(const char *owner)
        strcmp(owner, "mesh-map") == 0) {
         return K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP;
     }
+    if(strcmp(owner, "adsb") == 0 || strcmp(owner, "radar") == 0) {
+        return K230_NRF9151_GNSS_OWNER_ADSB;
+    }
     if(strcmp(owner, K230_NRF9151_LOCATION_OWNER) == 0 ||
        strcmp(owner, "location") == 0 || strcmp(owner, "system") == 0) {
         return K230_NRF9151_GNSS_OWNER_LOCATION;
@@ -213,6 +219,8 @@ static const char *nrf9151_manager_gnss_owner_name(unsigned int bit)
         return "location";
     case K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP:
         return "meshtastic-map";
+    case K230_NRF9151_GNSS_OWNER_ADSB:
+        return "adsb";
     default:
         return "legacy";
     }
@@ -4089,7 +4097,8 @@ int k230_nrf9151_start_gnss_monitor_for(const char *owner)
     int foreground_owner =
         (owner_bit & (K230_NRF9151_GNSS_OWNER_LEGACY |
                       K230_NRF9151_GNSS_OWNER_CELLULAR |
-                      K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP)) != 0U;
+                      K230_NRF9151_GNSS_OWNER_MESHTASTIC_MAP |
+                      K230_NRF9151_GNSS_OWNER_ADSB)) != 0U;
 
     (void)k230_nrf9151_status_monitor_start();
     pthread_mutex_lock(&nrf9151_manager_lock);

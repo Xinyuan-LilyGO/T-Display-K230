@@ -42,6 +42,8 @@ static const char *ui_icon_name_for_page(page_id_t page)
         return "halow";
     case PAGE_LORAWAN:
         return "lorawan";
+    case PAGE_ADSB:
+        return "adsb";
     case PAGE_NES:
         return "nes";
     case PAGE_SYSTEM:
@@ -164,6 +166,8 @@ const char *ui_icon_path_for_page(page_id_t page)
         return UI_ICON_FILE("halow");
     case PAGE_LORAWAN:
         return UI_ICON_FILE("lorawan");
+    case PAGE_ADSB:
+        return UI_ICON_FILE("adsb");
     case PAGE_NES:
         return UI_ICON_FILE("nes");
     case PAGE_SYSTEM:
